@@ -21,7 +21,7 @@ Cos-sim 0.976 vs llama (IQ2_M floor). All gaps closed — hardware ceiling reach
 ## What's Left (Hardware-Gated)
 - GPU: RTX 5050 wired but not faster than CPU for text
 - Cos-sim >0.99: needs Q3_K+/F16 model (>16GB RAM)
-- MTP: needs 32GB+ RAM
+- MTP: now possible with 14GB RAM (upgraded from 7.4GB)
 - Training pipeline: code exists but untested
 
 ## Quick Build

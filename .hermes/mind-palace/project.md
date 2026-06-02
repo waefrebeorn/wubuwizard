@@ -1,11 +1,11 @@
-# bytropix — Project Overview (May 28, 2026)
+# bytropix — Project Overview (Jun 2, 2026)
 
 ## Mission
 CPU inference engine for Qwen3.6-35B-A3B (Gated DeltaNet + MoE) in pure C.
-i5-8365U / 16GB RAM. All gaps closed — hardware ceiling reached.
+AMD Ryzen 7 7445HS / 14GB RAM / 12 cores. RAM upgraded from 7.4GB.
 
 ## What Works ✅
-- **CPU text inference** — ~1.3 tok/s prefill, ~2.0 tok/s decode (persistent KV)
+- **CPU text inference** — ~1.3 tok/s prefill, ~2.0 tok/s decode (persistent KV) on i5-8365U; expect higher on Ryzen 7
 - **Context growth penalty ELIMINATED** — persistent KV process: 7.9× multi-turn improvement
 - **Compilation IEEE 754** — `-fno-fast-math`, SSM recurrence FP drift fixed
 - **Cos-sim vs llama: 0.976** — IQ2_M floor (up from 0.974 with compilation fix)
@@ -22,18 +22,22 @@ i5-8365U / 16GB RAM. All gaps closed — hardware ceiling reached.
 - **ChatML support** — `CHAT=1` env var
 - **All test suites pass** — 6/6
 
-## What's Not Done 🔲 (Hardware-Gated)
-| Feature | Priority | Requires |
-|---------|----------|----------|
-| GPU output proj | P1 | GPU |
-| MTP CPU benchmark | P2 | 32GB+ RAM |
-| Cos-sim >0.99 | P1 | Q3_K+/F16 model |
+## What's Not Done 🔲
+| Feature | Priority | Status |
+|---------|----------|--------|
+| GPU output proj | P1 | Hardware-gated (needs GPU) |
+| MTP CPU benchmark | P2 | Now possible with 14GB RAM |
+| Cos-sim >0.99 | P1 | Needs Q3_K+/F16 model |
+| Q4_0 KV cache | P1 | 🔴 NOT IMPLEMENTED (cell 244) |
+| Vision weights extraction | P0 | 🔴 moondream3_vision_weights.bin missing (cell 051b) |
+| Vocab.bin extraction | P0 | 🔴 data/vocab.bin missing (cell 071b) |
+| SSM buffer pre-alloc | P1 | 🟡 PARTIAL — workspace exists but fallback mallocs (cell 241) |
 | Mixed-curvature hyperbolic | P3 | Research |
 | Training pipeline | P4 | Hardware upgrade |
 
 ## Hardware
-- CPU: i5-8365U (4 cores, 8 threads)
-- RAM: 16GB DDR4
+- CPU: AMD Ryzen 7 7445HS (12 cores, 24 threads)
+- RAM: 14GB DDR5 (14336MB WSL2)
 - Storage: NVMe SSD
 - Platform: WSL2 (Windows Subsystem for Linux)
 
@@ -45,4 +49,4 @@ i5-8365U / 16GB RAM. All gaps closed — hardware ceiling reached.
 - Cos-sim regression: automated 3-prompt test suite at 0.975 threshold
 - KV cache Q4_0: 4:1 compression
 - SSM workspace pre-allocation: 13 malloc/free per layer eliminated
-- Branch: `cpu-optimize-may26` — all fixes pushed
+- Branch: `work-fork` — all fixes pushed in `.hermes/mind-palace/`

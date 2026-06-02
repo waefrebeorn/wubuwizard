@@ -1,8 +1,8 @@
-# Prestige Prompt — May 28, 2026
+# Prestige Prompt — Jun 2, 2026
 
 ## Project: bytropix — CPU Inference Engine
 
-**Qwen3.6-35B-A3B-UD-IQ2_M CPU inference. i5-8365U / 16GB.**
+**Qwen3.6-35B-A3B-UD-IQ2_M CPU inference. AMD Ryzen 7 7445HS / 14GB RAM / 12 cores.**
 **All gaps closed. Hardware ceiling reached.**
 
 ## Current State
@@ -22,19 +22,19 @@
 
 ## Remaining (Hardware-Gated)
 1. GPU output proj — needs GPU
-2. MTP CPU benchmark — needs 32GB+ RAM
+2. MTP CPU benchmark — now possible with 14GB RAM (was 7.4GB)
 3. Cos-sim >0.99 — needs Q3_K+/F16 model
 4. Mixed-curvature hyperbolic — research
 
 ## Key Env Vars
 ```
 MODEL=~/models/qwen3.6-35b-a3b-UD-IQ2_M.gguf  # model path
-OMP_NUM_THREADS=4                                # CPU threads
-CHAT=1                                            # ChatML mode
-DUMP_LOGITS=/tmp/logits.bin                       # logit dump
+OMP_NUM_THREADS=8                               # 12 physical cores
+CHAT=1                                          # ChatML mode
+DUMP_LOGITS=/tmp/logits.bin                     # logit dump
 ```
 
 ## Build
 ```bash
-cd ~/bytropix && make gen_text_cpu -j4
+cd ~/bytropix-work-fork && make gen_text_cpu -j$(nproc)
 ```

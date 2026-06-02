@@ -1,9 +1,11 @@
-# Overnight Map — May 28, 2026
+# Overnight Map — Jun 2, 2026
 
-**Active repo:** ~/bytropix/
-**Current branch:** cpu-optimize-may26
+**Active repo:** ~/bytropix-work-fork/
+**Current branch:** work-fork
 **Model:** ~/models/qwen3.6-35b-a3b-UD-IQ2_M.gguf (10.7GB)
-**All remote:** github.com/waefrebeorn/bytropix.git
+**Origin remote:** git@github.com:waefrebeorn/bytropix.git
+**Actual default remote:** `origin` — sometimes fails without helper auth.
+**Push path fallback:** `git push origin work-fork:work-fork`
 
 ## Session Summary (May 28)
 
@@ -18,7 +20,7 @@
 
 ### Remaining (Hardware-Gated)
 1. GPU output proj — needs GPU (CPU faster for text)
-2. MTP CPU benchmark — needs 32GB+ RAM
+2. MTP CPU benchmark — now possible with 14GB RAM
 3. Cos-sim >0.99 — needs Q3_K+/F16 model (>16GB)
 4. Mixed-curvature hyperbolic — research, not blocker
 

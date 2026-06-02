@@ -1,4 +1,4 @@
-# bytropix Goal Mantra — May 28, 2026
+# bytropix Goal Mantra — Jun 2, 2026
 
 ## THE GOAL
 **All gaps closed. Hardware ceiling reached.** Current state:
@@ -34,6 +34,7 @@ every output feeds back into input documents.
 - `.hermes/mind-palace/plan.md` — plan
 - `.hermes/mind-palace/workflow-parity.md` — parity debug workflow
 - `vault/context-growth-penalty.md` — penalty analysis + compilation flags fix
+- **work-fork:** `/home/wubu/bytropix-work-fork` (branch `work-fork`, commit `816aea8`)
 
 ## VAULT & MEMORY DIRECTION
 discover → write vault/[topic].md + memory target:memory content:"vault vault/[topic].md — one-line what it covers"

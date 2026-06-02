@@ -1,4 +1,4 @@
-# Walkway — All Gaps Closed (May 28)
+# Walkway — All Gaps Closed (May 28) / New Gaps Found (Jun 2)
 
 ## THE PROBLEMS (ALL RESOLVED)
 
@@ -28,6 +28,19 @@ All steps below DONE:
 | 5 | Compilation flags: `-ffast-math` → `-fno-fast-math` | ✅ IEEE 754 restored |
 | 6 | Cos-sim regression test at 0.975 threshold | ✅ All 3 pass |
 | 7 | Updated state, walkway, plan, vault | ✅ pushed to cpu-optimize-may26 |
+
+## Devil's Advocate Re-Audit (Jun 2, 2026)
+*RAM upgraded 7.4GB→14GB. Build fix: wwggml_type rename completed.*
+
+**New gaps found:**
+| Cell | Gap | Status |
+|------|-----|--------|
+| 051b | moondream3_vision_weights.bin not extracted from safetensors | 🔴 |
+| 071b | data/vocab.bin missing | 🔴 |
+| 244 | Q4_0 KV cache NOT implemented (claimed ✅ but no code) | 🔴 |
+| 241 | SSM buffer pre-alloc PARTIAL (workspace exists, fallback mallocs) | 🟡 |
+| 309 | wwggml_type rename incomplete → fixed and committed d808cfa | ✅ Fixed |
+| - | 384 tools (battleship said 200+) | 🟢 Updated count |
 
 ## REFERENCE
 - `vault/context-growth-penalty.md` — full analysis + compilation flags fix

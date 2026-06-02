@@ -46,4 +46,4 @@
 | 5.6 | Option E: Chunked output proj | ❌ 0% cache hit rate |
 | 5.7 | Verify 3-turn conversation | ✅ Done — 7.9× overall |
 
-**ALL PHASES COMPLETE.** Remaining items are hardware-gated (GPU, 32GB+ RAM, Q3_K+ model).
+**ALL PHASES COMPLETE.** Remaining items are hardware-gated (GPU, Q3_K+ model). MTP benchmark now possible with 14GB RAM.

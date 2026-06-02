@@ -29,7 +29,7 @@
 - **Cos-sim regression: 3/3 pass at 0.975 threshold**
 - **Between-builds cos-sim: 0.99975580** — top-5 argmax identical
 - **All 6 test suite tests pass**
-- **All actionable code gaps closed.** Remaining: hardware-gated (GPU, 32GB+ RAM, Q3_K+ model)
+- **All actionable code gaps closed.** Remaining: hardware-gated (GPU, Q3_K+ model); MTP now possible with 14GB RAM
 
 ## Key Paths
 

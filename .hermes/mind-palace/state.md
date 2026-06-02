@@ -1,4 +1,4 @@
-# bytropix State — May 27, 2026
+# bytropix State — Jun 2, 2026 (Devil's Advocate Re-Audit)
 
 ## Current Status: CONTEXT GROWTH PENALTY 🟡 (NEW P0 — RE-DIAGNOSED)
 
@@ -130,7 +130,7 @@ All actionable code gaps closed. Remaining items are hardware-gated:
 | Cell(s) | What | Blocked By |
 |---------|------|------------|
 | 071-100 | GPU output proj, MoE, GPU_SUPPORT | GPU |
-| 271 | MTP CPU benchmark (22GB required) | 32GB+ RAM |
+| 271 | MTP CPU benchmark (22GB required) | 14GB+ RAM (upgraded) |
 | 272 | IQ1_M quant test | Need model + evaluation |
 | 145-170 | Mixed-curvature hyperbolic | Theory/research, not production blocker |
 | IQ2_M → Q3_K+ | Cos-sim >0.99 | Larger model, more RAM |

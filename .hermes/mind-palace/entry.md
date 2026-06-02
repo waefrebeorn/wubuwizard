@@ -1,13 +1,13 @@
-# bytropix — Entry Point (May 28, 2026)
+# bytropix — Entry Point (Jun 2, 2026)
 
 **Inference WORKS.** Context growth penalty ELIMINATED. Compilation IEEE 754.
 See `.hermes/mind-palace/state.md` for status.
 
 ## Hardware
-- CPU: Intel i5-8365U (4 cores, 8 threads)
-- RAM: 16GB DDR4
+- CPU: AMD Ryzen 7 7445HS (12 cores, 24 threads)
+- RAM: 14GB DDR5 (14336MB WSL2)
 - Platform: WSL2
-- GPU: None (code has GPU_SUPPORT for RTX 5050 but CPU-only mode is faster for text)
+- GPU: None available yet; fusing CPU + GPU paths remains the goal (`bytropix-gpu-acceleration`).
 
 ## Build
 ```bash
