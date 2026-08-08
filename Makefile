@@ -1726,8 +1726,8 @@ gen_text: tools/gen_text.c $(CPU_OBJ) src/wubu_tokenizer.o src/wubu_tokenizer_hf
 
 # CPU-only gen_text (recompiles wubu_model + wubu_moe without GPU_SUPPORT)
 gen_text_cpu: CFLAGS_FILTERED = $(filter-out -I$(CUDA_INC),$(CFLAGS))
-gen_text_cpu: src/wubu_model_cpu.o src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o,$(CORE_OBJ)) src/wubu_tokenizer.o
-	$(CC) $(CFLAGS_FILTERED) -o $@ tools/gen_text.c src/wubu_model_cpu.o src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o,$(CORE_OBJ)) src/wubu_tokenizer.o $(LDFLAGS)
+gen_text_cpu: src/wubu_model_cpu.o src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) src/wubu_tokenizer.o src/wubu_tokenizer_hf.o
+	$(CC) $(CFLAGS_FILTERED) -o $@ tools/gen_text.c src/wubu_model_cpu.o src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(LDFLAGS)
 	@echo "gen_text_cpu built (CPU-only, no GPU support)"
 
 src/wubu_model_cpu.o: src/wubu_model.c include/wubu_model.h include/wubu_ssm.h include/wubu_moe.h include/gguf_reader.h
