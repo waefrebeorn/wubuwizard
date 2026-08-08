@@ -24,11 +24,12 @@ void lfm2_gqa(const float *q_proj, const float *k_proj, const float *v_proj,
                float *kv_cache_layer, int kv_max_t, int start_pos,
                float *attn_out) {
     int kv_dim = nkv * hd;
+    int q_dim = nq * hd;   /* NOTE: q_dim may differ from d (MiniCPM5: 2048 vs 1536) */
     int Ttot = start_pos + T;
-    float *q = (float *)malloc((size_t)T * d * sizeof(float));
+    float *q = (float *)malloc((size_t)T * q_dim * sizeof(float));
     float *k = (float *)malloc((size_t)T * kv_dim * sizeof(float));
     float *v = (float *)malloc((size_t)T * kv_dim * sizeof(float));
-    lfm2_matmul_f32(x, q_proj, T, d, d, q);
+    lfm2_matmul_f32(x, q_proj, T, d, q_dim, q);
     lfm2_matmul_f32(x, k_proj, T, d, kv_dim, k);
     lfm2_matmul_f32(x, v_proj, T, d, kv_dim, v);
 
@@ -39,31 +40,36 @@ void lfm2_gqa(const float *q_proj, const float *k_proj, const float *v_proj,
                v, (size_t)T * kv_dim * sizeof(float));
     }
 
-    /* q/k layernorm per head */
-    for (int t = 0; t < T; t++) {
-        for (int hh = 0; hh < nq; hh++)
-            lfm2_rmsnorm(q + (size_t)t * d + hh * hd, q_ln, hd, 1e-5f);
-        for (int hh = 0; hh < nkv; hh++)
-            lfm2_rmsnorm(k + (size_t)t * kv_dim + hh * hd, k_ln, hd, 1e-5f);
+    /* q/k layernorm per head — OPTIONAL (MiniCPM5-class models have no
+     * per-head norms; q_ln/k_ln NULL = skip, identity). */
+    if (q_ln || k_ln) {
+        for (int t = 0; t < T; t++) {
+            for (int hh = 0; hh < nq; hh++)
+                if (q_ln) lfm2_rmsnorm(q + (size_t)t * q_dim + hh * hd, q_ln, hd, 1e-5f);
+            for (int hh = 0; hh < nkv; hh++)
+                if (k_ln) lfm2_rmsnorm(k + (size_t)t * kv_dim + hh * hd, k_ln, hd, 1e-5f);
+        }
     }
 
     /* RoPE on q,k at absolute positions [start_pos, start_pos+T) */
     for (int t = 0; t < T; t++) {
         int pos = start_pos + t;
-        for (int hh = 0; hh < nq; hh++) rope(q + (size_t)t * d + hh * hd, hd, pos, rope_theta);
+        for (int hh = 0; hh < nq; hh++) rope(q + (size_t)t * q_dim + hh * hd, hd, pos, rope_theta);
         for (int hh = 0; hh < nkv; hh++) rope(k + (size_t)t * kv_dim + hh * hd, hd, pos, rope_theta);
     }
 
-    float *out = (float *)malloc((size_t)T * d * sizeof(float));
-    memset(out, 0, (size_t)T * d * sizeof(float));
+    /* attention output is q_dim-wide per token (nq*hd), then o_proj
+     * maps q_dim -> d. LFM2.5 had q_dim==d; MiniCPM5 q_dim=2048 > d=1536. */
+    float *out = (float *)malloc((size_t)T * q_dim * sizeof(float));
+    memset(out, 0, (size_t)T * q_dim * sizeof(float));
     const float scale = 1.0f / sqrtf((float)hd);
     int q_per_kv = nq / nkv;
 
     for (int t = 0; t < T; t++) {
         for (int hh = 0; hh < nq; hh++) {
             int kvh = hh / q_per_kv;
-            const float *Q = q + (size_t)t * d + hh * hd;
-            float *O = out + (size_t)t * d + hh * hd;
+            const float *Q = q + (size_t)t * q_dim + hh * hd;
+            float *O = out + (size_t)t * q_dim + hh * hd;
             float maxs = -1e30f;
             float *scores = (float *)malloc(Ttot * sizeof(float));
             for (int tp = 0; tp < Ttot; tp++) {
@@ -90,6 +96,6 @@ void lfm2_gqa(const float *q_proj, const float *k_proj, const float *v_proj,
         }
     }
 
-    lfm2_matmul_f32(out, o_proj, T, d, d, attn_out);
+    lfm2_matmul_f32(out, o_proj, T, q_dim, d, attn_out);
     free(q); free(k); free(v); free(out);
 }

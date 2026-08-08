@@ -193,26 +193,52 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
 #undef GETI
         free(buf);
     } else if (g_gguf) {
-        /* ---- GGUF without config.json: use the lfm2.* KV metadata
+        /* ---- GGUF without config.json: use the KV metadata
          * (authoritative: block_count, head_count, head_count_kv,
-         * rope.freq_base, shortconv.l_cache) with tensor-shape
-         * fallbacks. ---- */
+         * rope.freq_base, shortconv.l_cache, attention.key_length)
+         * with tensor-shape fallbacks. Both the lfm2.* dialect
+         * (LFM2.5) and the generic llama.* dialect (MiniCPM5 etc.)
+         * are read; the first hit wins. ---- */
         m->d_model = 0; m->n_layers = 0; m->ff_dim = 0; m->n_q_heads = 0;
         m->n_kv_heads = 0; m->vocab_size = 0; m->conv_dim = 0;
-        int head_dim_inf = 0;
-        gguf_kv_get_i32(g_gguf, "lfm2.block_count", &m->n_layers);
-        gguf_kv_get_i32(g_gguf, "lfm2.embedding_length", &m->d_model);
-        gguf_kv_get_i32(g_gguf, "lfm2.feed_forward_length", &m->ff_dim);
-        gguf_kv_get_i32(g_gguf, "lfm2.attention.head_count", &m->n_q_heads);
-        gguf_kv_get_i32(g_gguf, "lfm2.vocab_size", &m->vocab_size);
-        gguf_kv_get_f32(g_gguf, "lfm2.rope.freq_base", &m->rope_theta);
+        /* head_dim_inf is the function-scope var (line ~163); do NOT
+         * redeclare here — the shadow would be lost at block exit and
+         * m->head_dim would fall back to d_model/n_q_heads (96 vs 128). */
+        /* prefix-aware KV read: try lfm2.* then llama.* for each key */
+#define KVI(field, suffix_lfm, suffix_llm) do { \
+            int _v = 0; \
+            gguf_kv_get_i32(g_gguf, "lfm2." suffix_lfm, &_v); \
+            if (!_v) gguf_kv_get_i32(g_gguf, "llama." suffix_llm, &_v); \
+            m->field = _v; } while (0)
+#define KVF(field, suffix_lfm, suffix_llm) do { \
+            float _v = 0.0f; \
+            gguf_kv_get_f32(g_gguf, "lfm2." suffix_lfm, &_v); \
+            if (_v <= 0.0f) gguf_kv_get_f32(g_gguf, "llama." suffix_llm, &_v); \
+            m->field = _v; } while (0)
+        KVI(n_layers, "block_count", "block_count");
+        KVI(d_model, "embedding_length", "embedding_length");
+        KVI(ff_dim, "feed_forward_length", "feed_forward_length");
+        KVI(n_q_heads, "attention.head_count", "attention.head_count");
+        KVI(vocab_size, "vocab_size", "vocab_size");
+        KVF(rope_theta, "rope.freq_base", "rope.freq_base");
+        /* rms eps: KV layer_norm_rms_epsilon (MiniCPM5: 1e-6; LFM2.5: 1e-5). */
+        gguf_kv_get_f32(g_gguf, "llama.attention.layer_norm_rms_epsilon", &m->rms_eps);
+        if (m->rms_eps <= 0.0f)
+            gguf_kv_get_f32(g_gguf, "lfm2.attention.layer_norm_rms_epsilon", &m->rms_eps);
         int lcache = 0;
         gguf_kv_get_i32(g_gguf, "lfm2.shortconv.l_cache", &lcache);
+        if (lcache <= 1) gguf_kv_get_i32(g_gguf, "llama.shortconv.l_cache", &lcache);
         if (lcache > 1) m->conv_k = lcache;
+        /* head_dim from attention.key_length KV (MiniCPM5: 128; the
+         * d_model/n_q_heads fallback gives 96 — wrong). */
+        gguf_kv_get_i32(g_gguf, "llama.attention.key_length", &head_dim_inf);
+        if (head_dim_inf <= 0) gguf_kv_get_i32(g_gguf, "lfm2.attention.key_length", &head_dim_inf);
         /* head_count_kv: per-layer array (0 = conv layer) — authoritative
-         * for BOTH n_kv_heads and the conv/attn split. */
+         * for BOTH n_kv_heads and the conv/attn split. Scalar head_count_kv
+         * (MiniCPM5: 2) means uniform GQA, all layers attention. */
         int kv_arr[64];
         int kv_n = gguf_kv_get_i32_arr(g_gguf, "lfm2.attention.head_count_kv", kv_arr, 64);
+        if (kv_n <= 0) kv_n = gguf_kv_get_i32_arr(g_gguf, "llama.attention.head_count_kv", kv_arr, 64);
         if (kv_n >= m->n_layers && m->n_layers > 0) {
             int max_kv = 0;
             for (int l = 0; l < m->n_layers; l++)
@@ -221,7 +247,14 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
             m->is_conv_from_kv = 1;
             for (int l = 0; l < m->n_layers; l++)
                 m->is_conv_kv[l] = (kv_arr[l] <= 0);
+        } else {
+            int scalar_kv = 0;
+            gguf_kv_get_i32(g_gguf, "llama.attention.head_count_kv", &scalar_kv);
+            if (scalar_kv <= 0) gguf_kv_get_i32(g_gguf, "lfm2.attention.head_count_kv", &scalar_kv);
+            if (scalar_kv > 0) m->n_kv_heads = scalar_kv;  /* uniform GQA */
         }
+#undef KVI
+#undef KVF
         for (int64_t i = 0; i < g_gguf->n_tensors; i++) {
             const gguf_tensor_info *t = &g_gguf->tensors[i];
             const char *n = t->name;
@@ -236,6 +269,9 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
                     head_dim_inf = (int)t->dims[0];
                 } else if (strstr(n, "attn_q.weight")) {
                     if (!m->d_model) m->d_model = (int)t->dims[0];
+                    /* n_q_heads fallback: q_dim / head_dim (if both known) */
+                    if (!m->n_q_heads && head_dim_inf > 0 && t->n_dims > 1)
+                        m->n_q_heads = (int)(t->dims[1] / head_dim_inf);
                 } else if (strstr(n, "attn_k.weight")) {
                     if (!m->n_kv_heads) m->n_kv_heads = (int)t->dims[1];
                 } else if (strstr(n, "shortconv.in_proj.weight")) {
@@ -269,6 +305,7 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
     /* rope_theta: KV freq_base (1e7 for LFM2.5) wins; config.json
      * rope_parameters.rope_theta overrides; 10000 is the LAST resort. */
     if (m->rope_theta <= 0.0f) m->rope_theta = 10000.0f;
+    if (m->rms_eps <= 0.0f) m->rms_eps = 1e-5f;   /* LFM2.5 default */
     {
         FILE *fp = fopen(cfg, "rb");
         if (fp) {
@@ -336,7 +373,9 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
          * that OOMs the 5.8GB box: ~10GB). Norms stay F32. */
 #define LOADQ(var, qvar, qtype, fmt) do { snprintf(nm, sizeof(nm), fmt, l); \
             gguf_tensor_info *ti = g_gguf ? find_tensor_info(nm) : NULL; \
-            if (ti) { L->qvar = (const uint8_t *)g_gguf_blob + ti->data_offset; L->qtype = ti->ggml_type; } \
+            if (ti) { L->qvar = (const uint8_t *)g_gguf_blob + ti->data_offset; L->qtype = ti->ggml_type; \
+                      int64_t _ne = 1; for (int _di = 0; _di < ti->n_dims; _di++) _ne *= ti->dims[_di]; \
+                      L->qvar##_ne = _ne; } \
             else { L->var = load_bf16_f32(nm); \
                    if (!L->var) fprintf(stderr, "lfm2: missing %s\n", nm); } } while (0)
 #define LOAD(var, fmt) do { snprintf(nm, sizeof(nm), fmt, l); \
@@ -374,6 +413,21 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
             int64_t raw = gguf_raw_size(te->ggml_type, n_elems);
             m->embed_bytes_per_row = (int)(raw / te->dims[1]); /* exact bytes per vocab row */
             if (m->embed_bytes_per_row <= 0) m->embed_bytes_per_row = m->d_model * 4;
+        }
+        /* SEPARATE untied lm_head (output.weight) — wins over tied embed.
+         * MiniCPM5 has it; LFM2.5 does not (tied path stays). */
+        gguf_tensor_info *to = find_tensor_info("model.lm_head.weight");
+        if (!to) to = find_tensor_info("output.weight");
+        if (to && g_gguf_blob && to != te) {
+            m->q_lm_head = g_gguf_blob + to->data_offset;
+            m->q_lm_head_type = to->ggml_type;
+            int64_t n_elems = 1;
+            for (int di = 0; di < to->n_dims; di++) n_elems *= to->dims[di];
+            int64_t raw = gguf_raw_size(to->ggml_type, n_elems);
+            m->lm_head_bytes_per_row = (int)(raw / to->dims[1]);
+            if (m->lm_head_bytes_per_row <= 0) m->lm_head_bytes_per_row = m->d_model * 4;
+            fprintf(stderr, "[lfm2] untied lm_head: %s type=%d bytes/row=%d\n",
+                    to->name, to->ggml_type, m->lm_head_bytes_per_row);
         }
     }
     if (!m->q_embed) m->embed = load_bf16_f32("model.embed_tokens.weight");
