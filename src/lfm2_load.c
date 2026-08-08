@@ -193,19 +193,41 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
 #undef GETI
         free(buf);
     } else if (g_gguf) {
-        /* ---- GGUF without config.json: infer from tensor shapes ----
-         * token_embd.weight: dims = [d_model, vocab] (GGUF dims[0] is
-         * innermost/rows). blk.N.* count = n_layers. attn_q rows =
-         * n_q_heads * head_dim. ffn_gate rows = ff_dim. */
+        /* ---- GGUF without config.json: use the lfm2.* KV metadata
+         * (authoritative: block_count, head_count, head_count_kv,
+         * rope.freq_base, shortconv.l_cache) with tensor-shape
+         * fallbacks. ---- */
         m->d_model = 0; m->n_layers = 0; m->ff_dim = 0; m->n_q_heads = 0;
         m->n_kv_heads = 0; m->vocab_size = 0; m->conv_dim = 0;
         int head_dim_inf = 0;
+        gguf_kv_get_i32(g_gguf, "lfm2.block_count", &m->n_layers);
+        gguf_kv_get_i32(g_gguf, "lfm2.embedding_length", &m->d_model);
+        gguf_kv_get_i32(g_gguf, "lfm2.feed_forward_length", &m->ff_dim);
+        gguf_kv_get_i32(g_gguf, "lfm2.attention.head_count", &m->n_q_heads);
+        gguf_kv_get_i32(g_gguf, "lfm2.vocab_size", &m->vocab_size);
+        gguf_kv_get_f32(g_gguf, "lfm2.rope.freq_base", &m->rope_theta);
+        int lcache = 0;
+        gguf_kv_get_i32(g_gguf, "lfm2.shortconv.l_cache", &lcache);
+        if (lcache > 1) m->conv_k = lcache;
+        /* head_count_kv: per-layer array (0 = conv layer) — authoritative
+         * for BOTH n_kv_heads and the conv/attn split. */
+        int kv_arr[64];
+        int kv_n = gguf_kv_get_i32_arr(g_gguf, "lfm2.attention.head_count_kv", kv_arr, 64);
+        if (kv_n >= m->n_layers && m->n_layers > 0) {
+            int max_kv = 0;
+            for (int l = 0; l < m->n_layers; l++)
+                if (kv_arr[l] > max_kv) max_kv = kv_arr[l];
+            m->n_kv_heads = max_kv;
+            m->is_conv_from_kv = 1;
+            for (int l = 0; l < m->n_layers; l++)
+                m->is_conv_kv[l] = (kv_arr[l] <= 0);
+        }
         for (int64_t i = 0; i < g_gguf->n_tensors; i++) {
             const gguf_tensor_info *t = &g_gguf->tensors[i];
             const char *n = t->name;
             if (!strcmp(n, "token_embd.weight")) {
-                m->d_model = (int)t->dims[0];
-                m->vocab_size = (int)(t->n_dims > 1 ? t->dims[1] : t->dims[0]);
+                if (!m->d_model) m->d_model = (int)t->dims[0];
+                if (!m->vocab_size) m->vocab_size = (int)(t->n_dims > 1 ? t->dims[1] : t->dims[0]);
             } else if (strncmp(n, "blk.", 4) == 0) {
                 int layer = atoi(n + 4);
                 if (layer + 1 > m->n_layers) m->n_layers = layer + 1;
@@ -215,7 +237,7 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
                 } else if (strstr(n, "attn_q.weight")) {
                     if (!m->d_model) m->d_model = (int)t->dims[0];
                 } else if (strstr(n, "attn_k.weight")) {
-                    m->n_kv_heads = (int)t->dims[1];
+                    if (!m->n_kv_heads) m->n_kv_heads = (int)t->dims[1];
                 } else if (strstr(n, "shortconv.in_proj.weight")) {
                     /* GGUF dims: [d_model, 3*conv_dim] — conv_dim = dims[1]/3 */
                     int d1 = (int)(t->n_dims > 1 ? t->dims[1] : 0);
@@ -225,12 +247,12 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
                     int d1 = (int)(t->n_dims > 1 ? t->dims[1] : 0);
                     if (!m->conv_dim) m->conv_dim = d1;
                 } else if (strstr(n, "ffn_gate.weight") || strstr(n, "ffn_up.weight")) {
-                    m->ff_dim = (int)t->dims[1];
+                    if (!m->ff_dim) m->ff_dim = (int)t->dims[1];
                 }
             }
         }
-        fprintf(stderr, "[lfm2] config.json absent; inferred d=%d layers=%d ff=%d q=%d kv=%d vocab=%d hd=%d\n",
-                m->d_model, m->n_layers, m->ff_dim, m->n_q_heads, m->n_kv_heads, m->vocab_size, head_dim_inf);
+        fprintf(stderr, "[lfm2] config.json absent; inferred d=%d layers=%d ff=%d q=%d kv=%d vocab=%d hd=%d rope=%.3g\n",
+                m->d_model, m->n_layers, m->ff_dim, m->n_q_heads, m->n_kv_heads, m->vocab_size, head_dim_inf, m->rope_theta);
     }
     if (!have_config && !g_gguf) {
         fprintf(stderr, "lfm2: no config.json\n");
@@ -244,7 +266,9 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
     if (m->n_kv_heads > 0 && m->head_dim > 0 && m->n_kv_heads > m->d_model / m->head_dim)
         m->n_kv_heads = m->n_kv_heads / m->head_dim;
     if (m->n_kv_heads <= 0) m->n_kv_heads = 8;   /* LFM2.5 default */
-    m->rope_theta = 10000.0f;
+    /* rope_theta: KV freq_base (1e7 for LFM2.5) wins; config.json
+     * rope_parameters.rope_theta overrides; 10000 is the LAST resort. */
+    if (m->rope_theta <= 0.0f) m->rope_theta = 10000.0f;
     {
         FILE *fp = fopen(cfg, "rb");
         if (fp) {
@@ -285,6 +309,10 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
             }
             free(cb);
             if (li != m->n_layers) fprintf(stderr, "lfm2: warn layer_types count %d != %d\n", li, m->n_layers);
+        } else if (g_gguf && m->is_conv_from_kv) {
+            /* authoritative: head_count_kv per-layer (0 = conv) */
+            for (int l = 0; l < m->n_layers && l < 128; l++)
+                m->is_conv[l] = m->is_conv_kv[l];
         } else if (g_gguf) {
             /* infer conv layers: a layer with conv tensors has
              * blk.N.conv.weight or blk.N.shortconv.conv.weight —
@@ -301,7 +329,7 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
     /* ---- per-layer weights ---- */
     for (int l = 0; l < m->n_layers; l++) {
         lfm2_layer_t *L = &m->layers[l];
-        L->conv_k = 3;
+        L->conv_k = (m->conv_k > 1) ? m->conv_k : 3;
         char nm[160];
         /* GGUF: big matrices stay QUANTIZED in the blob (lazy materialize
          * per layer in forward — never dequantize all 30 layers to F32,

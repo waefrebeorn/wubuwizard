@@ -22,6 +22,10 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
 
     for (int l = 0; l < m->n_layers; l++) {
         lfm2_layer_t *L = &m->layers[l];
+        if (getenv("LFM2_NLAYERS")) {
+            int nl = atoi(getenv("LFM2_NLAYERS"));
+            if (l >= nl) break;
+        }
 
         /* Lazy materialize: dequantize THIS layer's quantized GGUF weights
          * to F32, run, then release — peak RAM = one layer, not the model. */
@@ -60,11 +64,48 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
             float ss = 0.0f; for (int q = 0; q < d; q++) ss += hp[q] * hp[q];
             fprintf(stderr, "L%d h_norm=%.4f\n", l, sqrtf(ss / d));
         }
+        if (getenv("LFM2_LAYER_DUMP") && (l < 3 || l == 29)) {
+            const float *hp = h + (size_t)(T - 1) * d;
+            fprintf(stderr, "L%d:", l);
+            for (int q = 0; q < 8; q++) fprintf(stderr, " %.7g", hp[q]);
+            fprintf(stderr, "\n");
+        }
         lfm2_layer_release(L);   /* free this layer's F32 — next layer rematerializes */
     }
 
     /* embedding_norm applied ONCE, after all layers (HF Lfm2Model) + tied lm_head */
+    if (getenv("LFM2_HIDDEN")) {
+        const float *hp = h + (size_t)(T - 1) * d;
+        fprintf(stderr, "[hidden pre-norm] ");
+        for (int q = 0; q < 8 && q < d; q++) fprintf(stderr, "%.7g ", hp[q]);
+        double hs = 0;
+        for (int q = 0; q < d; q++) hs += (double)hp[q] * hp[q];
+        fprintf(stderr, "| rms=%.6f\n", sqrt(hs / d));
+    }
     lfm2_rmsnorm(h + (size_t)(T - 1) * d, m->embed_norm, d, 1e-5f);
+    if (getenv("LFM2_HIDDEN")) {
+        const float *hp = h + (size_t)(T - 1) * d;
+        fprintf(stderr, "[hidden post-norm] ");
+        for (int q = 0; q < 8 && q < d; q++) fprintf(stderr, "%.7g ", hp[q]);
+        fprintf(stderr, "\n");
+    }
+    if (getenv("LFM2_HIDDEN_ALL")) {
+        /* apply the final norm to every position (llama.cpp result_norm
+         * covers the whole sequence) and dump per-position stats */
+        float *hn = (float *)malloc((size_t)T * d * sizeof(float));
+        for (int t = 0; t < T; t++) {
+            memcpy(hn + (size_t)t * d, h + (size_t)t * d, (size_t)d * sizeof(float));
+            lfm2_rmsnorm(hn + (size_t)t * d, m->embed_norm, d, 1e-5f);
+        }
+        for (int p = 0; p < T; p++) {
+            const float *hp = hn + (size_t)p * d;
+            double ss = 0;
+            for (int q = 0; q < d; q++) ss += (double)hp[q] * hp[q];
+            fprintf(stderr, "pos%d rms=%.5f f4=[%.5g %.5g %.5g %.5g]\n", p,
+                    sqrt(ss / d), hp[0], hp[1], hp[2], hp[3]);
+        }
+        free(hn);
+    }
     if (m->embed) {
         lfm2_matmul_f32(h + (size_t)(T - 1) * d, m->embed, 1, d, m->vocab_size, logits);
     } else if (m->q_embed) {

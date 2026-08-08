@@ -43,6 +43,7 @@ static const wubu_gguf_tmpl_t g_role_templates[WUBU_T_COUNT][12] = {
       { "", "" } },
     /* WUBU_T_POST_ATTN_NORM */
     { { QWEN,   "post_attention_norm.weight" },
+      { QWEN,   "attn_norm.weight" },
       { GEMMA,  "post_attention_norm.weight" },
       { HFBARE, "post_attention_layernorm.weight" },
       { HFBARE, "post_attention_norm.weight" },

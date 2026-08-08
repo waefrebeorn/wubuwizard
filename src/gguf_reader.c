@@ -587,10 +587,12 @@ float gguf_f16_to_f32(uint16_t h) {
 
     if (exp == 0) {
         if (mant == 0) return sign ? -0.0f : 0.0f;
-        /* Subnormal: value = mant * 2^-24. Normalize into fp32 (llama.cpp
-           reference): exponent field starts at 112 (127-15), shift the
-           mantissa left until bit 10 is set, decrementing per shift. */
-        uint32_t e = 112;
+        /* Subnormal: value = mant * 2^-24. Normalize until bit 10 is the
+           implicit leading 1. value = (1 + frac/1024) * 2^(e-127) with
+           e = 113 - n (NOT 112 — 112 halves every subnormal; verified
+           against llama.cpp's ggml_compute_fp16_to_fp32 magic-bias path
+           for 0x00ae -> 1.037120819e-05 and 0x0200 -> 3.0518e-05). */
+        uint32_t e = 113;
         uint32_t m = mant;
         while ((m & 0x400) == 0) { m <<= 1; e--; }
         fp32.u = (sign << 31) | (e << 23) | ((m & 0x3FF) << 13);
@@ -626,10 +628,13 @@ gguf_ctx* gguf_open(const char *path) {
     fprintf(stderr, "GGUF v%u, %ld tensors, %ld KV pairs\n", 
             ctx->version, ctx->n_tensors, ctx->n_kv);
     
-    // Skip KV pairs
+    // Skip KV pairs (capture small values for gguf_kv_get_*)
     for (int64_t i = 0; i < ctx->n_kv; i++) {
         uint64_t key_len = read_u64(f);
-        fseek(f, key_len, SEEK_CUR);
+        char keybuf[64] = {0};
+        size_t kcap = key_len < 63 ? key_len : 63;
+        if (fread(keybuf, 1, kcap, f) != kcap) { fclose(f); free(ctx); return NULL; }
+        fseek(f, key_len - kcap, SEEK_CUR);
         
         int32_t typ = read_i32(f);
         
@@ -639,7 +644,16 @@ gguf_ctx* gguf_open(const char *path) {
                 fseek(f, vlen, SEEK_CUR);
                 break;
             }
-            case 4: case 5: case 6: fseek(f, 4, SEEK_CUR); break; // u32/i32/f32
+            case 4: case 5: case 6: { // u32/i32/f32
+                if (ctx->n_kv_store < 32 && keybuf[0]) {
+                    struct gguf_kv_ent *e = &ctx->kv_store[ctx->n_kv_store++];
+                    snprintf(e->key, sizeof(e->key), "%s", keybuf);
+                    e->type = typ; e->len = 4;
+                    uint8_t b[4]; if (fread(b, 1, 4, f) != 4) { fclose(f); free(ctx); return NULL; }
+                    memcpy(e->data, b, 4);
+                } else fseek(f, 4, SEEK_CUR);
+                break;
+            }
             case 7: fseek(f, 1, SEEK_CUR); break; // bool
             case 10: case 11: fseek(f, 8, SEEK_CUR); break; // u64/i64
             case 12: fseek(f, 8, SEEK_CUR); break; // f64
@@ -658,7 +672,18 @@ gguf_ctx* gguf_open(const char *path) {
                     if (arr_type == 0 || arr_type == 1 || arr_type == 7) elem_size = 1;
                     else if (arr_type == 2 || arr_type == 3) elem_size = 2;
                     else if (arr_type == 10 || arr_type == 11 || arr_type == 12) elem_size = 8;
-                    fseek(f, arr_len * elem_size, SEEK_CUR);
+                    /* capture small int arrays (e.g. head_count_kv) */
+                    if (keybuf[0] && ctx->n_kv_store < 32 && arr_type == 5 &&
+                        arr_len <= 64 && elem_size == 4) {
+                        struct gguf_kv_ent *e = &ctx->kv_store[ctx->n_kv_store++];
+                        snprintf(e->key, sizeof(e->key), "%s", keybuf);
+                        e->type = 9; e->len = (int64_t)arr_len * 4;
+                        size_t cap = e->len < (int64_t)sizeof(e->data) ? (size_t)e->len : sizeof(e->data);
+                        if (fread(e->data, 1, cap, f) != cap) { fclose(f); free(ctx); return NULL; }
+                        fseek(f, (int64_t)arr_len * 4 - (int64_t)cap, SEEK_CUR);
+                    } else {
+                        fseek(f, arr_len * elem_size, SEEK_CUR);
+                    }
                 }
                 break;
             }
@@ -708,12 +733,49 @@ gguf_ctx* gguf_open(const char *path) {
 }
 
 gguf_tensor_info* gguf_find_tensor(gguf_ctx *ctx, const char *name) {
+    if (!ctx || !name) return NULL;
     for (int64_t i = 0; i < ctx->n_tensors; i++) {
-        if (strcmp(ctx->tensors[i].name, name) == 0) {
+        if (strcmp(ctx->tensors[i].name, name) == 0)
             return &ctx->tensors[i];
-        }
     }
     return NULL;
+}
+
+/* ---- KV value getters (captured during gguf_open) ---- */
+static struct gguf_kv_ent *kv_find(gguf_ctx *ctx, const char *key) {
+    if (!ctx || !key) return NULL;
+    for (int i = 0; i < ctx->n_kv_store; i++)
+        if (strcmp(ctx->kv_store[i].key, key) == 0)
+            return &ctx->kv_store[i];
+    return NULL;
+}
+
+int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out) {
+    struct gguf_kv_ent *e = kv_find(ctx, key);
+    if (!e || e->len < 4) return 0;
+    int32_t v; memcpy(&v, e->data, 4);
+    if (out) *out = v;
+    return 1;
+}
+
+int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out) {
+    struct gguf_kv_ent *e = kv_find(ctx, key);
+    if (!e || e->len < 4) return 0;
+    float v; memcpy(&v, e->data, 4);
+    if (out) *out = v;
+    return 1;
+}
+
+int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max_n) {
+    struct gguf_kv_ent *e = kv_find(ctx, key);
+    if (!e || e->type != 9 || e->len < 4) return -1;
+    int n = (int)(e->len / 4);
+    if (n > max_n) n = max_n;
+    for (int i = 0; i < n; i++) {
+        int32_t v; memcpy(&v, e->data + (size_t)i * 4, 4);
+        out[i] = v;
+    }
+    return (int)(e->len / 4);
 }
 
 // ========== Q5_K Dequantization ==========

@@ -71,7 +71,10 @@ typedef struct {
     int ff_dim;
     int vocab_size;
     float rope_theta;
+    int conv_k;         /* shortconv kernel (l_cache), default 3 */
     bool *is_conv;      /* per-layer: true=conv block, false=GQA */
+    int is_conv_from_kv;    /* is_conv came from head_count_kv KV array */
+    bool is_conv_kv[128];   /* per-layer conv flag from KV (authoritative) */
     lfm2_layer_t *layers;
     float *embed;       /* [vocab, d_model] (tied with lm_head) */
     float *embed_norm;  /* [d_model] applied to hidden ONCE after all layers (HF Lfm2Model) */

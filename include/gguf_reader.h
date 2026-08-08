@@ -92,6 +92,11 @@ typedef struct {
     // file's own data offsets (the byte truth for unknown/TurboQuant types)
     long file_size;
     int64_t *tensor_raw_bytes;   // n_tensors entries
+
+    // KV value store (captured during open, small types only):
+    // 32 slots, key → {type, value bytes}. Used by gguf_kv_get_i32/f32/arr.
+    int n_kv_store;
+    struct gguf_kv_ent { char key[64]; int32_t type; uint8_t data[256]; int64_t len; } kv_store[32];
 } gguf_ctx;
 
 // Open GGUF file and parse headers
@@ -114,6 +119,13 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
 
 // Find a tensor by name
 gguf_tensor_info* gguf_find_tensor(gguf_ctx *ctx, const char *name);
+
+// KV value getters (values captured during gguf_open). Return 1 on hit.
+// type_filter: GGUF KV type (4=u32, 5=i32, 6=f32, 9=array) or 0 for any.
+int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out);
+int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out);
+/* array of i32: copies up to max_n elements. Returns count, or -1. */
+int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max_n);
 
 // Read tensor data (dequantized to float32)
 // Returns number of floats written, or 0 on error
