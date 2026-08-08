@@ -94,7 +94,7 @@ void wubu_dims_default(void);
  */
 #define SSM_D_STATE   128
 #define SSM_K_HEADS   16
-#define DT_RANK       32
+#define DT_RANK       WUBU_DIMS.dt_rank   /* runtime: Qwen3.5=16, Qwen3.6=32 */
 #define CONV_KERNEL   4
 #define KEY_DIM       (SSM_D_STATE * SSM_K_HEADS)   /* 2048, invariant */
 

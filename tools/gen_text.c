@@ -97,7 +97,11 @@ static int read_embedding(const wubu_model_t *mdl, int token_id, float *out, FIL
             int64_t n_elems = 1;
             for (int d = 0; d < t_emb->n_dims; d++) n_elems *= t_emb->dims[d];
             int64_t raw = gguf_raw_size(t_emb->ggml_type, n_elems);
-            bytes_per_token = (int)(raw / n_elems * t_emb->dims[1]);
+            /* Exact bytes per vocab row: raw / dims[1] (see wubu_model.c
+             * notes — old formula dropped block overhead + used dims[1]). */
+            bytes_per_token = (int)(raw / t_emb->dims[1]);
+            if (bytes_per_token <= 0)
+                bytes_per_token = (int)(raw / n_elems * t_emb->dims[0]);
         }
         gguf_dequantize(mdl->token_embd_q + (size_t)token_id * bytes_per_token,
                         mdl->token_embd_type, D, out);

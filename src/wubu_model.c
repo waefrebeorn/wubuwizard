@@ -571,11 +571,12 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     
     // Allocate state buffers (one SSM state per layer, not per position).
 // The SSM recurrence is sequential — each layer has a single persistent
-// state vector of size v_heads × d_state². max_s=1 for decode.
-// For prefill (B>1), we only need the per-layer state, not per-token.
+// state vector of size v_heads × d_state². The state buffers must be
+// per-LAYER (the forward indexes by global layer index), so allocate
+// n_layers × per-layer size. max_s=1 for decode.
 int max_s = 1;
-    int ssm_state_size = max_s * model->ssm_v_heads * model->ssm_d_state * model->ssm_d_state;
-    int conv_state_size = max_s * (model->conv_kernel - 1) * model->conv_dim;
+    int ssm_state_size = max_s * model->n_layers * model->ssm_v_heads * model->ssm_d_state * model->ssm_d_state;
+    int conv_state_size = max_s * model->n_layers * (model->conv_kernel - 1) * model->conv_dim;
     if (getenv("WUBU_DEBUG")) fprintf(stderr, "DEBUG: Allocating state buffers: max_s=%d, ssm_state_size=%d, conv_state_size=%d\n", max_s, ssm_state_size, conv_state_size);
     model->ssm_states = (float *)calloc(ssm_state_size + conv_state_size, sizeof(float));
     if (getenv("WUBU_DEBUG")) fprintf(stderr, "DEBUG: ssm_states allocated\n");
@@ -624,6 +625,12 @@ int max_s = 1;
         for (int l = 0; l < model->n_layers; l++) {
             wubu_layer_t *layer = &model->layers[l];
             moe_weights_t *moe = &layer->moe;
+
+            // Every pointer wired below is zero-copy into the mmap'd GGUF
+            // blob — the free path must NOT free any of them. Set the flag
+            // up front so dense layers (router fallback resolves the dense
+            // ffn_gate) and MoE layers both free cleanly.
+            moe->load_from_blob = true;
 
             // Router is F32 — direct pointer from blob
             // Qwen3.6-family GGUFs name these ffn_gate.weight / ffn_up.weight /
@@ -1905,7 +1912,15 @@ void wubu_model_forward(wubu_model_t *model,
             int64_t n_elems = 1;
             for (int d = 0; d < t_emb->n_dims; d++) n_elems *= t_emb->dims[d];
             int64_t raw = gguf_raw_size(t_emb->ggml_type, n_elems);
-            bytes_per_token = (int)(raw / n_elems * t_emb->dims[1]);
+            /* One vocab row = dims[0] elements (innermost = d_model). Exact
+             * bytes per row = raw / dims[1] (vocab count). The old code did
+             * (raw / n_elems) * dims[1] — integer division dropped the block
+             * overhead (34/32 for Q8_0), and it used dims[1] instead of
+             * dims[0]; result: ~1024 instead of 1088 bytes -> every token
+             * read misaligned -> garbage embeddings. */
+            bytes_per_token = (int)(raw / t_emb->dims[1]);
+            if (bytes_per_token <= 0)
+                bytes_per_token = (int)(raw / n_elems * t_emb->dims[0]);
         }
         for (int i = 0; i < N; i++) {
             int tok = token_ids[i];
@@ -1975,7 +1990,11 @@ void wubu_model_forward_chunked(wubu_model_t *model,
                 int64_t n_elems = 1;
                 for (int d = 0; d < t_emb->n_dims; d++) n_elems *= t_emb->dims[d];
                 int64_t raw = gguf_raw_size(t_emb->ggml_type, n_elems);
-                bytes_per_token = (int)(raw / n_elems * t_emb->dims[1]);
+                /* Exact bytes per vocab row (see note at wubu_model_forward).
+                 * raw / dims[1] — integer-division-safe and layout-exact. */
+                bytes_per_token = (int)(raw / t_emb->dims[1]);
+                if (bytes_per_token <= 0)
+                    bytes_per_token = (int)(raw / n_elems * t_emb->dims[0]);
             }
             for (int i = 0; i < C; i++) {
                 int tok = token_ids[off + i];
