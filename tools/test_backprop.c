@@ -12,12 +12,22 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include "gpu_wubu.h"   /* the weight-cache dirty mark for the FD perturbations */
 #include <string.h>
 #include <math.h>
 #include "wubu.h"
 #include "wubu_train.h"
 #include "wubu_backprop.h"
+
+/* Weak GPU dispatch (same pattern as wubu_backprop.c): on boxes without
+ * the CUDA backend these symbols are NULL and the FD perturb skips the
+ * weight-cache dirty mark; with the backend they are strong and the
+ * check fires. gpu_wubu.h (strong) would make the address checks dead. */
+#ifdef __GNUC__
+#define BP_WEAK __attribute__((weak))
+#else
+#define BP_WEAK
+#endif
+BP_WEAK void gpu_wubu_mark_weights_dirty(void);
 
 static int failures = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL: %s\n", m); failures++; } } while (0)
