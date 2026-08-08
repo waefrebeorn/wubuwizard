@@ -132,8 +132,19 @@ int wubu_load(wubu_model_t *m, const char *path)
     wubu_block_t blocks[WUBU_LAYERS];
     memset(blocks, 0, sizeof(blocks));
     char name[128];
+    /* probe the checkpoint for the active layer count (progressive-growth
+     * checkpoints save fewer than WUBU_LAYERS). We check for layers.N
+     * tensors and stop at the first missing one. */
+    int active_layers = 0;
+    for (int i = 0; i < WUBU_LAYERS; i++) {
+        snprintf(name, sizeof(name), "layers.%d.attn.q_proj.weight", i);
+        if (!st_find_tensor(r, name)) break;
+        active_layers = i + 1;
+    }
+    if (active_layers == 0) { st_close(r); return -1; }
+    if (active_layers == 1) active_layers = WUBU_LAYERS; /* legacy: no probe -> full */
     int ok = 1;
-    for (int i = 0; i < WUBU_LAYERS && ok; i++) {
+    for (int i = 0; i < active_layers && ok; i++) {
         wubu_block_t *blk = &blocks[i];
         snprintf(name, sizeof(name), "layers.%d.attn.q_proj.weight", i);
         blk->q_proj = load_tensor(r, name, 448 * 448);
@@ -173,7 +184,18 @@ int wubu_load(wubu_model_t *m, const char *path)
         free(embedding); free(final_norm);
         return -1;
     }
-    return wubu_model_init(m, embedding, final_norm, blocks, selectors);
+    if (wubu_model_init(m, embedding, final_norm, blocks, selectors) != 0) return -1;
+    /* apply the probed active-layer count (progressive-growth checkpoints
+     * save fewer than WUBU_LAYERS trained layers; running the untrained
+     * tail corrupts the forward pass — this was the live-loop gibberish
+     * bug, triple-DA flagged 2026-08-08). */
+    m->n_layers = active_layers;
+    /* recompute the rhythm flags for the active range */
+    for (int i = 0; i < active_layers; i++) {
+        m->is_full[i]   = ((i + 1) % WUBU_FULL_EVERY == 0) ? 1 : 0;
+        m->fire_sel[i]  = ((i + 1) % WUBU_SELECT_EVERY == 0) ? 1 : 0;
+    }
+    return 0;
 }
 
 /* ---- the inference buffer ---- */

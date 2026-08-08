@@ -1,8 +1,8 @@
 # Research Papers — WuBuText AI
 
-> **Location:** `/home/wubu/wubuwizard/THEORY/papers/`
-> **Total:** 22 papers (all arxiv abstracts as markdown)
-> **Last updated:** 2026-05-12
+> **Location:** `/home/wubu/bytropix/THEORY/papers/`
+> **Total:** 30 papers (all arxiv abstracts as markdown)
+> **Last updated:** 2026-05-25
 
 ---
 
@@ -67,7 +67,7 @@
 | 25 | **DFT-WuBu** | 31KB | DFT-enhanced WuBu: spectral decomposition + hyperbolic geometry |
 | 26 | **DCT-WuBu** | 20KB | DCT-enhanced WuBu: discrete cosine transform integration |
 
-These originate from `~/HASHMIND/wubuwizard/theory/` (the Python research prototype repo).
+These live at `~/bytropix/ENCODERS/hash-mind/` — the WuBu Mind JAX implementations (WuBuMindJAX*.py, WuBuNest_Trainer.py 200KB, wubu_nesting_impl.py), plus C port at `~/bytropix/ENCODERS/hash-mind/c/`.
 
 ## Runnable Math Proofs (`THEORY/math_viz/`)
 
@@ -81,7 +81,7 @@ These originate from `~/HASHMIND/wubuwizard/theory/` (the Python research protot
 | `06_symplectic_optimizer.py` | Symplectic integration of RSGD in T(H^n) | Same |
 | `07_lean_certificate.py` | Lean formal certificate generator | Same |
 
-All originate from `~/HASHMIND/wubuwizard/math_viz/`.
+All live at `~/bytropix/THEORY/math_viz/` — Python + Lean dual-proven theorems.
 
 ## Systems Reference: Tailslayer (5 files — hedged reads / speculative execution)
 
@@ -97,17 +97,9 @@ All originate from `~/HASHMIND/wubuwizard/math_viz/`.
 
 Origin: `~/HASHMIND/tailslayer/` — clone of [github.com/LaurieWired/tailslayer](https://github.com/LaurieWired/tailslayer)
 
-## Papers Still to Download (rate-limited)
+## Papers Still to Download
 
-The following were identified but hit arxiv API rate limits:
-- `2002.08536` — Hyperbolic Image Embeddings
-- `1904.13331` — Mixed-Curvature Product Spaces
-- `1911.08276` — Riemannian Adaptive Optimization
-- `2208.02813` — Mixture of Experts Survey
-- `2005.13298` — ST-MoE (Fedus)
-- `2312.12461` — Long Context Survey
-- `2303.03378` — LLaMA Foundation Models
-- `2402.06196` — Gemma Open Models
+✅ All previously missing papers downloaded 2026-05-25.
 
 ## PDFs Converted to Markdown
 

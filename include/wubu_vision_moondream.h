@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -140,14 +141,18 @@ static inline float vm_gelu(float x) {
 void vm_layer_norm(float *x, const float *weight, const float *bias, int n, float eps);
 
 /**
- * Scaled dot-product attention (single head).
- * @param q, k, v   [n] query, key, value flattened
- * @param output    [n] output
- * @param n         dimension
- * @param n_heads   number of heads for scaling
+ * Full multi-token SDPA over all tokens: output = softmax(QK^T/√d) V
+ * q, k, v: [n_tokens, D] where D = n_heads * head_dim
+ * output: [n_tokens, D]
+ * attn_scratch: [n_tokens * max_tokens] temp for softmax scores
+ * max_tokens: stride for attn_scratch (allows scratch reuse between calls)
+ * n_tokens: actual number of tokens in this call
+ * n_heads: number of attention heads
+ * head_dim: dimension per head (D / n_heads)
  */
 void vm_attention(const float *q, const float *k, const float *v,
-                  float *output, int n, int n_heads);
+                  float *output, float *attn_scratch,
+                  int max_tokens, int n_tokens, int n_heads, float head_dim);
 
 /**
  * Linear layer: y = x @ W^T + bias

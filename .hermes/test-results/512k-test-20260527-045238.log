@@ -1,0 +1,62 @@
+[04:52:38] === bytropix 512K Test Suite ===
+[04:52:38] Model: /home/wubu2/models/qwen3.6-35b-a3b-UD-IQ2_M.gguf (du 11G)
+[04:52:38] MAX_CTX: 524288
+
+[04:52:39] TEST: KV cache alloc at 524288
+GGUF v3, 733 tensors, 54 KV pairs
+Tensor info end at offset 10990035, aligned to 10990048 (pad=13, alignment=32)
+  GGUF data blob buffered: 10978 MB
+Allocating 40 layers...
+  Layer 0: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 1: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 2: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 3: GQA loaded (quantized attn_q/k/v/output)
+  Layer 4: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 5: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 6: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 7: GQA loaded (quantized attn_q/k/v/output)
+  Layer 8: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 9: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 10: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 11: GQA loaded (quantized attn_q/k/v/output)
+  Layer 12: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 13: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 14: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 15: GQA loaded (quantized attn_q/k/v/output)
+  Layer 16: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 17: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 18: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 19: GQA loaded (quantized attn_q/k/v/output)
+  Layer 20: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 21: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 22: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 23: GQA loaded (quantized attn_q/k/v/output)
+  Layer 24: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 25: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 26: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 27: GQA loaded (quantized attn_q/k/v/output)
+  Layer 28: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 29: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 30: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 31: GQA loaded (quantized attn_q/k/v/output)
+  Layer 32: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 33: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 34: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 35: GQA loaded (quantized attn_q/k/v/output)
+  Layer 36: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 37: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 38: SSM loaded (quantized attn_qkv/gate/out)
+  Layer 39: GQA loaded (quantized attn_q/k/v/output)
+  Final norm loaded
+  Embeddings: 248320 tokens from file (1940 MB)
+  Output weight: will use quantized path (Q4_K via blob pointer)
+  SSM L2 eps: 1.000000e-06
+Model initialized: 40 layers (30 SSM, 10 GQA), 248320 vocab
+  Vocab: 248320 tokens loaded
+  byte_token_ids[0xE4]=160, [0xBD]=121, [0xA0]=254
+  Merges: 247587 loaded (247587 resolved)
+  Merge hash: 247587 entries in 524288 slots (58529 collisions)
+  BOS=248044, EOS=248046, PAD=248055
+Prompt: 1 tokens
+Input: test
+ =

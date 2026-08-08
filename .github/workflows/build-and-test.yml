@@ -1,0 +1,42 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main, cpu-optimize-may26]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install deps
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq libopenblas-dev libjson-c-dev
+
+    - name: Compile & link
+      run: |
+        CFLAGS="-O2 -march=x86-64-v3 -ffast-math -funroll-loops -ftree-vectorize -Wall -Wextra -Wno-unused-parameter -Wno-maybe-uninitialized -Wno-unused-variable -Wno-unused-function -Wno-unused-result -Wno-comment -Wno-alloc-size-larger-than -Wno-psabi -Wno-format -I include -fopenmp"
+        B=/tmp/ci_build
+        mkdir -p $B
+        for src in \
+          src/wubu_mobius.c src/wubu_mobius_linear.c \
+          src/wubu_ssm.c src/wubu_ssm_chunked.c \
+          src/wubu_nested_ssm.c src/wubu_nested_ssm_backward.c \
+          src/wubu_moe.c src/wubu_moe_backward.c \
+          src/wubu_moe_hyperbolic.c src/wubu_moe_hyperbolic_backward.c \
+          src/wubu_poincare_ssm_backward.c \
+          src/wubu_poincare_gqa.c src/wubu_poincare_gqa_backward.c \
+          src/wubu_hyperbolic_output_proj.c \
+          src/wubu_vision.c src/wubu_vision_moondream.c \
+          src/gguf_reader.c src/rsgd.c src/wubu_tst.c \
+          src/dequant_iq2_xxs.c src/quantized_matmul.c \
+          src/quantized_dot_generic.c src/qlearner.c; do
+          gcc $CFLAGS -c -o $B/$(basename ${src%.c}.o) $src
+        done
+        echo "--- Linking test_mobius_linear ---"
+        gcc $CFLAGS -o $B/test_mobius_linear tools/test_mobius_linear.c $B/*.o -lm -fopenmp -lopenblas -ljson-c
+        echo "--- Running test_mobius_linear ---"
+        $B/test_mobius_linear

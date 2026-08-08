@@ -137,7 +137,8 @@ void wubu_nested_ssm_backward(
     float *d_conv1d_weight,            // [CONV_KERNEL, CONV_DIM]
     float *d_ssm_out_weight,           // [VALUE_DIM, D_MODEL]
     float *d_ssm_norm_weight,          // [SSM_D_STATE]
-    float *d_state_init_grad           // [K * SSM_V_HEADS * SSM_D_STATE * SSM_D_STATE]
+    float *d_state_init_grad,          // [K * SSM_V_HEADS * SSM_D_STATE * SSM_D_STATE]
+    float *d_ball_weights_raw          // [K] gradient w.r.t. pre-softmax ball weights (or NULL)
 );
 
 /**

@@ -266,18 +266,35 @@ static void wubu_poincare_gqa_backward_attention(
 
                 // Backward starts here: d_out is gradient w.r.t. attn_out
 
-                // === Step 1: Backprop through log_map(exp_map(·)) ≈ identity ===
-                // d_tangent_sum ≈ d_out (straight-through)
-                // But we need d_V_ball, which requires log_map backward
+                // === Step 1: Backprop through log_map(out_ball) ∘ exp_map(tangent_sum) ===
+                // Forward: tangent_sum = Σ attn_w[t_k] * logV[t_k]
+                //          out_ball = exp_map(tangent_sum)
+                //          out_vec = log_map(out_ball)
+                // Backward: d_tangent_sum = exp_map_backward(tangent_sum,
+                //                                 log_map_backward(out_ball, d_out))
+                float d_tangent_sum[256];
+                {
+                    float tangent_sum[256] = {0};
+                    for (int t_k = 0; t_k < max_t; t_k++) {
+                        const float *lv = logV + ((b*T + t_k) * n_kv + h_kv) * hd;
+                        for (int i = 0; i < hd; i++)
+                            tangent_sum[i] += attn_w[t_k] * lv[i];
+                    }
+                    float out_ball[256];
+                    wubu_exp_map(tangent_sum, hd, R, out_ball);
+                    float d_out_ball[256];
+                    log_map_backward(out_ball, hd, R, d_out, d_out_ball);
+                    exp_map_backward(tangent_sum, hd, R, d_out_ball, d_tangent_sum);
+                }
 
-                // Step 1a: d_attn_weights[t_k] = d_out · log_map(V_ball[t_k])
+                // Step 1a: d_attn_weights[t_k] = d_tangent_sum · log_map(V_ball[t_k])
                 float d_attn_w[4096];
                 float d_log_sum = 0.0f;
                 for (int t_k = 0; t_k < max_t; t_k++) {
                     const float *lv = logV + ((b*T + t_k) * n_kv + h_kv) * hd;
                     double dot = 0.0;
                     for (int i = 0; i < hd; i++)
-                        dot += (double)d_out[i] * (double)lv[i];
+                        dot += (double)d_tangent_sum[i] * (double)lv[i];
                     d_attn_w[t_k] = (float)dot;
                     d_log_sum += d_attn_w[t_k] * attn_w[t_k];
 
@@ -285,8 +302,8 @@ static void wubu_poincare_gqa_backward_attention(
                     float *dv = d_V_ball + ((b*T + t_k) * n_kv + h_kv) * hd;
                     float d_log_v[256];
                     for (int i = 0; i < hd; i++)
-                        d_log_v[i] = attn_w[t_k] * d_out[i];
-                    
+                        d_log_v[i] = attn_w[t_k] * d_tangent_sum[i];
+
                     // Backprop through log_map(V_ball[t_k]) → d_V_ball[t_k] += d_log_v
                     log_map_backward(V_ball + ((b*T + t_k) * n_kv + h_kv) * hd,
                                      hd, R, d_log_v, dv);
@@ -425,6 +442,7 @@ void wubu_poincare_gqa_backward(
 
     // === Step 7: Output projection backward ===
     wubu_ssm_backward_output_proj(attn_out, d_output, w->attn_output_weight,
+                                   w->attn_output_weight_q, w->attn_output_weight_type,
                                    d_attn_out, d_out_weight, N);
 
     // === Step 6: Gate backward ===

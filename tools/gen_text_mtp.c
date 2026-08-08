@@ -1,10 +1,10 @@
 /**
  * gen_text_mtp.c — MTP speculative decode with verification.
- * DRAFT_N=2 (blog: 83% acceptance at 2 drafts, drops to 50% at 4).
+ * DRAFT_N=2 (blog: 83% acceptance at 2, 50% at 4). Max 2 recommended.
  *
  * LOADS TWO MODEL FILES:
- *   Main: /models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf (regular model, layers 0-39)
- *   MTP:  /models/Qwen3.6-35B-A3B-MTP-UD-IQ2_M.gguf (blk.40 head only)
+ *   Main: main GGUF (regular model, layers 0-39)
+ *   MTP:  MTP GGUF (blk.40 head only — streams from file, no blob)
  *
  * These are DIFFERENT quantizations — base weights are only in the regular file.
  *
@@ -12,9 +12,9 @@
  *   1. Emit main model's prediction (argmax of last_logits)
  *   2. Generate 2 draft tokens via MTP head (blk.40 from MTP model)
  *   3. Checkpoint model state
- *   4. Forward main_token through main → verify_logits
+ *   4. Forward main_token through main -> verify_logits
  *   5. Check draft[1] against main's prediction:
- *      - MATCH: emit draft[1] (2 tokens for 1 main forward) ✓
+ *      - MATCH: emit draft[1] (2 tokens for 1 main forward)
  *      - MISMATCH: rollback, emit main's real prediction instead
  *   6. Update h_39 + last_logits for next iteration
  *
@@ -34,9 +34,8 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
-#include "wubu_core_dumps.h"
 
-#define DRAFT_N 2  // Blog: 83% acceptance at 2, 50% at 4. Max 2 recommended.
+#define DRAFT_N 2
 
 static volatile int g_stop = 0;
 static void handle_sigint(int sig) { (void)sig; g_stop = 1; }
@@ -65,9 +64,12 @@ static void get_embd(wubu_model_t *mdl, int token, float *out, FILE *emb_file) {
 }
 
 int main(int argc, char **argv) {
-    wubu_disable_core_dumps();
-    const char *main_model = "/models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf";
-    const char *mtp_model  = "/models/Qwen3.6-35B-A3B-MTP-UD-IQ2_M.gguf";
+    const char *main_model = "/home/wubu2/models/qwen3.6-35b-a3b-UD-IQ2_M.gguf";
+    const char *mtp_model  = "/home/wubu2/models/qwen3.6-35b-a3b-MTP-UD-IQ2_M.gguf";
+    const char *env_mm = getenv("MODEL");
+    const char *env_mtp = getenv("MTP_MODEL");
+    if (env_mm) main_model = env_mm;
+    if (env_mtp) mtp_model = env_mtp;
     const char *prompt = "The meaning of life is";
     int max_tokens = 32;
     int D = D_MODEL;
@@ -84,26 +86,22 @@ int main(int argc, char **argv) {
     if (!wubu_model_init(&mdl, main_model)) return 1;
     mdl.enable_moe = true;
 
-    // ====== Load MTP head from SEPARATE MTP model file ======
+    // ====== Load MTP head from MTP model file (no blob — stream from file) ======
     gguf_ctx *mtp_ctx = NULL;
-    const uint8_t *mtp_blob = NULL;
     if (use_mtp) {
         mtp_ctx = gguf_open(mtp_model);
         if (!mtp_ctx) {
             fprintf(stderr, "Failed to open MTP model: %s\n", mtp_model);
             use_mtp = 0;
         } else {
-            fprintf(stderr, "Opened MTP model: %s\n", mtp_model);
-            gguf_buffer_data(mtp_ctx);
-            mtp_blob = (const uint8_t *)mtp_ctx->data_blob;
-
-            if (!wubu_mtp_load(&mdl.mtp, mtp_model, mtp_ctx, mtp_blob, mdl.gqa_max_ctx)) {
+            fprintf(stderr, "Opened MTP model: %s (no full buffer — stream from file)\n", mtp_model);
+            if (!wubu_mtp_load(&mdl.mtp, mtp_model, mtp_ctx, NULL)) {
                 fprintf(stderr, "MTP head not available in MTP model file\n");
                 gguf_close(mtp_ctx);
                 mtp_ctx = NULL;
                 use_mtp = 0;
             } else {
-                fprintf(stderr, "MTP head loaded (%d draft tokens)\n", DRAFT_N);
+                fprintf(stderr, "MTP head loaded (%d draft tokens, file-streaming mode)\n", DRAFT_N);
             }
         }
     }
@@ -141,11 +139,13 @@ int main(int argc, char **argv) {
     { char buf[2048]; int nc = wubu_tokenizer_decode(&tok, prompt_tokens, n_prompt, buf, 2048);
       if (nc > 0) fprintf(stderr, "Input: %s\n", buf); }
 
+    // Stack-allocate the working buffers (D_MODEL=2048, vs=248320 — logits are too big for stack)
     float *logits_out = (float *)malloc(vs * sizeof(float));
     float *cur = (float *)malloc(D * sizeof(float));
     float *mtp_logits = (float *)malloc(vs * sizeof(float));
-    float *logit_correction = (float *)calloc(vs, sizeof(float));  // EMA correction for MTP logits
-    float *prev_cur = (float *)malloc(D * sizeof(float));
+    float logit_correction[256] = {0};  // EMA correction for first 256 logits
+    int correction_n = 0;  // count of EMA updates, for adaptive decay
+    float prev_cur[D];
     int total_gen = 0;
     int total_accepted = 0;
     int total_attempted = 0;
@@ -155,6 +155,31 @@ int main(int argc, char **argv) {
     float *last_logits = logits_buf + (n_prompt - 1) * vs;
     get_embd(&mdl, prompt_tokens[n_prompt - 1], prev_cur, emb_file);
     memcpy(cur, prev_cur, D * sizeof(float));
+
+    // Bootstrap MTP EMA correction using prefill data
+    if (use_mtp && mdl.mtp.loaded && n_prompt > 1) {
+        fprintf(stderr, "Bootstrapping MTP EMA correction...\n");
+        float *prefill_logits = logits_buf + (n_prompt - 1) * vs;
+        mdl.mtp.cache_len = 0;
+        wubu_mtp_draft_forward(&mdl, h_39, prev_cur, 1, mtp_logits);
+        int matched = 0;
+        for (int v = 0; v < 256 && v < vs; v++) {
+            float diff = prefill_logits[v] - mtp_logits[v];
+            logit_correction[v] = 0.8f * diff;  // Full initial correction (decayed 0.8)
+            if (fabsf(diff) > 0.1f) matched++;
+        }
+        // Check if draft[0] matches argmax after correction
+        for (int v = 0; v < vs; v++) mtp_logits[v] += logit_correction[v % 256];
+        int bootstrap_draft = 0; float bv = mtp_logits[0];
+        for (int v = 1; v < vs; v++) if (mtp_logits[v] > bv) { bv = mtp_logits[v]; bootstrap_draft = v; }
+        int main_arg = 0; float mv = prefill_logits[0];
+        for (int v = 1; v < vs; v++) if (prefill_logits[v] > mv) { mv = prefill_logits[v]; main_arg = v; }
+        fprintf(stderr, "  Bootstrap: correction_top100_mag=%.2f, draft_match=%s\n",
+               sqrtf(matched > 1 ? 0.01f * matched : 0.0f),
+               bootstrap_draft == main_arg ? "YES" : "NO");
+        // Reset MTP cache for actual decode loop
+        mdl.mtp.cache_len = 0;
+    }
 
     // ============================================================
     // Main decode loop
@@ -174,74 +199,74 @@ int main(int argc, char **argv) {
 
         // ====== Attempt speculative decode ======
         int accepted_drafts = 0;
-        (void)accepted_drafts; // suppress unused warning (used inside MTP block)
+        (void)accepted_drafts;
         if (use_mtp && mdl.mtp.loaded) {
             total_attempted++;
 
+            // Reset MTP KV cache for fresh draft generation
+            mdl.mtp.cache_len = 0;
+
             // Generate draft[0] using prev_cur (token before the one we just predicted)
-            // This should predict main_token (same position as last_logits)
             wubu_mtp_draft_forward(&mdl, h_39, prev_cur, 1, mtp_logits);
-            
+
             // Save raw MTP logits before correction (for EMA update)
-            float mtp_raw[256];  // Only first 256 logits needed for EMA (practical approximation)
+            float mtp_raw[256];
             int mtp_raw_n = (vs < 256) ? vs : 256;
             for (int v = 0; v < mtp_raw_n; v++) mtp_raw[v] = mtp_logits[v];
-            
+
             // Apply online logit correction to compensate for quantization bias
-            for (int v = 0; v < vs; v++) mtp_logits[v] += logit_correction[v];
-            
+            for (int v = 0; v < vs; v++) mtp_logits[v] += logit_correction[v % 256];
+
             int draft0 = argmax(mtp_logits, vs);
 
             if (draft0 == main_token) {
-                // draft[0] matches main model! Log this and update correction EMA.
-                // Update EMA correction: correction = 0.9*c + 0.1*(main_logits - mtp_raw_logits)
-                // We use corrected mtp_logits here (slower adaptation but simpler code)
+                // draft[0] matches! Update EMA correction.
+                // Use adaptive alpha: fast convergence early, stable after.
+                float alpha = correction_n < 10 ? 0.2f : 0.05f;
                 if (mtp_raw_n > 0) {
                     for (int v = 0; v < mtp_raw_n; v++) {
                         float diff = last_logits[v] - mtp_raw[v];
-                        logit_correction[v] = 0.9f * logit_correction[v] + 0.1f * diff;
+                        logit_correction[v] = (1.0f - alpha) * logit_correction[v] + alpha * diff;
                     }
+                    correction_n++;
                 }
-                // draft[0] matches main model! Generate draft[1]
+                // Generate draft[1]
                 float mid_cur[D];
                 get_embd(&mdl, main_token, mid_cur, emb_file);
 
-                // Generate draft[1] via MTP head
                 wubu_mtp_draft_forward(&mdl, h_39, mid_cur, 1, mtp_logits);
-                
-                // Save raw MTP logits before correction (for EMA update)
+
                 float mtp_raw1[256];
                 int mtp_raw1_n = (vs < 256) ? vs : 256;
                 for (int v = 0; v < mtp_raw1_n; v++) mtp_raw1[v] = mtp_logits[v];
-                
-                // Apply logit correction before sampling
-                for (int v = 0; v < vs; v++) mtp_logits[v] += logit_correction[v];
-                
+
+                for (int v = 0; v < vs; v++) mtp_logits[v] += logit_correction[v % 256];
+
                 int draft1 = argmax(mtp_logits, vs);
 
-                // Checkpoint current model state before verifying draft[1]
+                // Checkpoint before verifying draft[1]
                 if (!wubu_model_checkpoint(&mdl)) {
                     if (verbose) fprintf(stderr, "\n[MTP] Checkpoint failed\n");
                     goto normal_advance;
                 }
 
-                // Forward main_token through main model to get its prediction
-                // This advances the model's state past main_token
+                // Forward main_token through main model
                 mdl.save_last_hidden = h_39;
                 wubu_model_forward_from_embd(&mdl, mid_cur, 1, 1, logits_out);
                 mdl.save_last_hidden = NULL;
                 int main_next = argmax(logits_out, vs);
-                
-                // Update EMA correction from draft[1] verification
+
+                // Update EMA from draft[1] verification
+                float alpha1 = correction_n < 10 ? 0.2f : 0.05f;
                 if (mtp_raw1_n > 0) {
                     for (int v = 0; v < mtp_raw1_n; v++) {
                         float diff = logits_out[v] - mtp_raw1[v];
-                        logit_correction[v] = 0.9f * logit_correction[v] + 0.1f * diff;
+                        logit_correction[v] = (1.0f - alpha1) * logit_correction[v] + alpha1 * diff;
                     }
                 }
 
                 if (main_next == draft1) {
-                    // BOTH drafts accepted! We emitted main_token already, now emit draft[1]
+                    // BOTH drafts accepted
                     total_accepted++;
                     {
                         char piece[256];
@@ -250,10 +275,8 @@ int main(int argc, char **argv) {
                         fflush(stdout);
                     }
                     total_gen++;
-                    if (verbose) fprintf(stderr, "\n[MTP] 2/2 accepted ✓\n");
+                    if (verbose) fprintf(stderr, "\n[MTP] 2/2 accepted\n");
 
-                    // h_39 now reflects position after main_token
-                    // We need to advance one more step for next iteration
                     get_embd(&mdl, draft1, cur, emb_file);
                     memcpy(prev_cur, mid_cur, D * sizeof(float));
 
@@ -265,9 +288,8 @@ int main(int argc, char **argv) {
                     }
                     last_logits = logits_out;
                 } else {
-                    // draft[1] REJECTED — rollback to pre-main_token state
+                    // draft[1] REJECTED — rollback
                     wubu_model_rollback(&mdl);
-                    // We already emitted main_token. Now forward it and emit main's real next token.
                     mdl.save_last_hidden = h_39;
                     wubu_model_forward_from_embd(&mdl, mid_cur, 1, 1, logits_out);
                     mdl.save_last_hidden = NULL;
@@ -288,20 +310,19 @@ int main(int argc, char **argv) {
                     last_logits = logits_out;
                 }
             } else {
-                // draft[0] doesn't match main model — MTP out of sync
-                // Still update EMA correction from available logits
+                // draft[0] doesn't match main model
                 if (mtp_raw_n > 0) {
                     for (int v = 0; v < mtp_raw_n; v++) {
                         float diff = last_logits[v] - mtp_raw[v];
-                        logit_correction[v] = 0.9f * logit_correction[v] + 0.1f * diff;
+                        logit_correction[v] = logit_correction[v] + 0.5f * diff;
                     }
                 }
-                if (verbose) fprintf(stderr, "\\n[MTP] draft[0] mismatch: main=%d draft=%d\\n", main_token, draft0);
+                if (verbose) fprintf(stderr, "\n[MTP] draft[0] mismatch: main=%d draft=%d\n", main_token, draft0);
                 goto normal_advance;
             }
         } else {
             normal_advance:
-            // No MTP or fallback: normal single-token advance
+            // Normal single-token advance
             get_embd(&mdl, main_token, cur, emb_file);
             memcpy(prev_cur, cur, D * sizeof(float));
 
@@ -328,7 +349,7 @@ int main(int argc, char **argv) {
                100.0 * total_accepted / total_attempted, DRAFT_N);
     }
 
-    free(embd); free(logits_buf); free(logits_out); free(cur); free(mtp_logits); free(logit_correction); free(prev_cur);
+    free(embd); free(logits_buf); free(logits_out); free(cur); free(mtp_logits);
     if (emb_file) fclose(emb_file);
     if (mtp_ctx) gguf_close(mtp_ctx);
     wubu_tokenizer_free(&tok);

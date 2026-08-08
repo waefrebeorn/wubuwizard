@@ -44,7 +44,7 @@ int wubu_save_safetensors(const wubu_model_t *m, const char *path)
     t[n].dims[0] = 448; t[n].n_dims = 1;
     n++;
     char name[128];
-    for (int i = 0; i < WUBU_LAYERS; i++) {
+    for (int i = 0; i < m->n_layers && n < MAX_T; i++) {
         const wubu_block_t *b = &m->blocks[i];
         struct { const char *suffix; const float *data; int64_t r, c; } w[11] = {
             { "attn.q_proj.weight", b->q_proj, 448, 448 },

@@ -651,7 +651,8 @@ void wubu_nested_ssm_backward(
     float *d_qkv_weight, float *d_gate_weight,
     float *d_beta_weight, float *d_alpha_weight,
     float *d_conv1d_weight, float *d_ssm_out_weight,
-    float *d_ssm_norm_weight, float *d_state_init_grad)
+    float *d_ssm_norm_weight, float *d_state_init_grad,
+    float *d_ball_weights_raw)
 {
     if (!save) return;
     const int K = nested_state->K;
@@ -816,8 +817,18 @@ void wubu_nested_ssm_backward(
 
     free(d_ball_combined);
 
-    // d_ball_weights_raw (if requested) — pass through caller if needed
-    // For now, just compute and ignore (ball weights gradient not in function signature).
+    // Backprop through softmax to get d_ball_weights_raw
+    // w_norm[k] = softmax(raw)[k] = exp(raw[k]) / sum_j exp(raw[j])
+    // d_raw[j] = w_norm[j] * (d_w_norm[j] - sum_k w_norm[k] * d_w_norm[k])
+    if (d_ball_weights_raw) {
+        float dot = 0.0f;
+        for (int k = 0; k < K; k++) {
+            dot += save->w_norm[k] * d_w_norm[k];
+        }
+        for (int j = 0; j < K; j++) {
+            d_ball_weights_raw[j] = save->w_norm[j] * (d_w_norm[j] - dot);
+        }
+    }
 
     // ================================================================
     // Step 3: BPTT through K recurrence chains (Step 9a-9h)
@@ -1176,10 +1187,9 @@ void wubu_nested_ssm_backward(
                     }
 
                     // ===== Backward through Möbius scalar mul (Step 9a): h_decayed[i] = gg ⊗ h_before[i] =====
-                    // NOTE: this is recomputed in the second row loop below with log_map contribution.
-                    // We skip here to avoid double-counting.
+                    // NOTE: deferred to second row loop below (avoids double-counting log_map contribution).
 
-                } // end row loop (i) — first pass (incomplete)
+                } // end row loop (i) — first pass (mobius_add backward only)
 
                 // ===== Now backprop through steps 9f → 9e → 9d → 9c → 9b =====
 

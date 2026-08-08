@@ -3,7 +3,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "wubu_ops.h"   /* activations, norm, conv — extracted (ADR-002) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,27 +12,39 @@ extern "C" {
 // Qwen3.6-35B-A3B Gated Delta Net (SSM) Module
 // ============================================================
 
-// Hyperparameters -- now runtime via wubu_dims.h (WUBU_DIMS global).
-// wubuwizard's forward reads D_MODEL / CONV_DIM / VALUE_DIM / etc. which
-// resolve to the model's real dimensions at load time. See wubu_dims.h.
-#include "wubu_dims.h"
+// Hyperparameters (fixed for Qwen3.6-35B-A3B qwen35moe architecture)
+#define D_MODEL     2048   // hidden dimension
+#define D_INNER     4096   // SSM inner dimension (value_dim)
+#define SSM_K_HEADS 16     // SSM num_k_heads (ssm_n_group)
+#define SSM_V_HEADS 32     // SSM num_v_heads (ssm_dt_rank)
+#define SSM_D_STATE 128    // SSM state dimension (head_k_dim = head_v_dim)
+#define KEY_DIM     (SSM_D_STATE * SSM_K_HEADS)   // 2048
+#define VALUE_DIM   (SSM_D_STATE * SSM_V_HEADS)   // 4096
+#define CONV_DIM    (KEY_DIM * 2 + VALUE_DIM)     // 8192 = Q(2048)+K(2048)+V(4096)
+#define CONV_KERNEL 4      // conv1d kernel size
+#define DT_RANK     32     // ssm_time_step_rank
 
-// GQA / rope hyperparameters that are config-derived (not pure shape):
-// routed through WUBU_DIMS where they are shape-driven; rope params kept
-// as macros for now (set per-model in the loader's rope setup).
+// GQA hyperparameters
+#define GQA_Q_HEADS    16
+#define GQA_KV_HEADS   2
+#define GQA_HEAD_DIM   256
+
+// RoPE parameters (from Qwen3.6-35B config.json)
 #define ROPE_THETA          10000000.0f  // rope_theta
 #define PARTIAL_ROTARY_FACTOR 0.25f     // partial_rotary_factor
 #define ROTARY_DIM          ((int)(GQA_HEAD_DIM * PARTIAL_ROTARY_FACTOR))  // 64
+
+// MRoPE sections (from config: rope.dimension_sections = [11, 11, 10, 0])
+// These define how the 32 frequency pairs are split across text/height/width.
+// For text-only, all positions are equal but frequencies restart per section.
 #define MRoPE_SECTIONS      3
 #define MRoPE_SEC0_PAIRS    11
 #define MRoPE_SEC1_PAIRS    11
 #define MRoPE_SEC2_PAIRS    10
-
-// Gated DeltaNet internal scalar / activation constants
-#define SSM_SILU_THRESHOLD  20.0f
+// Total: 11+11+10 = 32 pairs = 64 dims
 
 // All weights for one SSM layer
-typedef struct ssm_layer_weights {
+typedef struct {
     // Fused QKV projection: x @ attn_qkv -> [Q(2048), K(2048), V(4096)]
     float *attn_qkv_weight;  // [D_MODEL, KEY_DIM*2+VALUE_DIM] = [2048, 8192]
     
@@ -62,27 +73,8 @@ typedef struct ssm_layer_weights {
     int attn_gate_weight_type;
     const uint8_t *ssm_out_weight_q;    // raw Q6_K
     int ssm_out_weight_type;
-
-    // F32 weight sources (safetensors/HF path). When f32_mode != 0 the
-    // forward uses these plain float matrices via matmul_nt instead of the
-    // quantized blob pointers above.
-    float *attn_qkv_weight_f32;  // [D_MODEL, CONV_DIM]
-    float *attn_gate_weight_f32; // [D_MODEL, VALUE_DIM]
-    float *ssm_out_weight_f32;    // [VALUE_DIM, D_MODEL]
-    int f32_mode;
-
-    // LAZY BF16 sources (zero-copy). When set, the F32 weight above is NOT
-    // resident; it is dequantized per-call from these raw mmap'd bytes.
-    // This is what makes a real Qwen3.6-27B (F32 + BF16 mix) forward fit in
-    // a 13 GB box: only the active layer's weights are materialized to F32.
-    const uint8_t *attn_qkv_weight_raw;  // mmap'd BF16 [CONVD, D_MODEL]
-    const uint8_t *attn_gate_weight_raw; // mmap'd BF16 [VALUE_DIM, D_MODEL]
-    const uint8_t *ssm_out_weight_raw;   // mmap'd BF16 [D_MODEL, VALUE_DIM]
-    int            lazy_dtype;            // ST_DTYPE_BF16 / ST_DTYPE_F16
-    // Materialized-F32 cache (allocated lazily on first forward). When
-    // *_raw is set but *_f32 is NULL, wubu_ssm_ensure_f32() fills *_f32.
-    int            lazy_f32_done;         // 1 once materialized for this layer
-
+    
+    // Pre-attention and post-attention norms
     float *attn_norm_weight;          // [D_MODEL] = [2048]
     float *post_attention_norm_weight; // [D_MODEL] = [2048]
     
@@ -98,7 +90,7 @@ typedef struct ssm_layer_weights {
 } ssm_layer_weights;
 
 // All weights for one GQA layer
-typedef struct gqa_layer_weights {
+typedef struct {
     // Q + gate fused: wq [D_MODEL, GQA_Q_HEADS*GQA_HEAD_DIM*2] = [2048, 8192]
     float *attn_q_weight;      // [2048, 8192]
     // K projection
@@ -122,27 +114,9 @@ typedef struct gqa_layer_weights {
     float *attn_q_norm_weight;  // [GQA_HEAD_DIM] = [256]
     float *attn_k_norm_weight;  // [GQA_HEAD_DIM] = [256]
     
-    // LAZY BF16 sources (zero-copy) — mirror of ssm_layer_weights.lazy_*.
-    // Per-call materialization keeps dense GQA layers out of RAM until active.
-    const uint8_t *attn_q_weight_raw;     // mmap'd BF16 [GQA_Q_DIM, D_MODEL]
-    const uint8_t *attn_k_weight_raw;     // mmap'd BF16 [GQA_KV_DIM, D_MODEL]
-    const uint8_t *attn_v_weight_raw;     // mmap'd BF16 [GQA_KV_DIM, D_MODEL]
-    const uint8_t *attn_output_weight_raw;// mmap'd BF16 [D_MODEL, GQA_Q_DIM]
-    int            lazy_dtype;            // ST_DTYPE_BF16 / ST_DTYPE_F16
-    int            lazy_f32_done;         // 1 once materialized for this layer
-
     // Pre/post norms
-    float *attn_norm_weight;          // [D_MODEL]
-    float *post_attention_norm_weight; // [D_MODEL]
-
-    // Per-layer dynamic dimensions (extracted from GGUF tensor shapes)
-    int q_dim;        // Q projection dim (fused Q+gate)
-    int kv_dim;       // KV projection dim
-    int out_dim;      // Output projection dim
-    int head_dim;     // Per-head dimension
-    int q_heads;      // Number of Q heads (q_dim / head_dim)
-    int kv_heads;     // Number of KV heads (kv_dim / head_dim)
-    int is_large;     // 1 if this is a large/global attention layer
+    float *attn_norm_weight;          // [D_MODEL] = [2048]
+    float *post_attention_norm_weight; // [D_MODEL] = [2048]
 } gqa_layer_weights;
 
 // Full model state (for SSM recurrent state)
@@ -162,26 +136,43 @@ typedef struct {
 } wubu_model;
 
 // ============================================================
+// SSM Workspace: pre-allocate all intermediate buffers once
+// and reuse across layers to eliminate 17 malloc/free per layer.
+// ============================================================
+typedef struct {
+    float *qkv_all;       // [N, KEY_DIM*2+VALUE_DIM]
+    float *z_all;         // [N, VALUE_DIM]
+    float *beta_raw;      // [N, DT_RANK]
+    float *alpha_raw;     // [N, DT_RANK]
+    float *conv_input;    // [B, T+CONV_KERNEL-1, CONV_DIM]
+    float *conv_output;   // [N, CONV_DIM]
+    float *q_conv;        // [N, KEY_DIM]
+    float *k_conv;        // [N, KEY_DIM]
+    float *v_conv;        // [N, VALUE_DIM]
+    float *q_norm;        // [N, KEY_DIM]
+    float *k_norm;        // [N, KEY_DIM]
+    float *delta_out;     // [N, VALUE_DIM]
+    float *z_silu;        // [N, VALUE_DIM]
+    float *beta_flat;     // [N, DT_RANK]
+    float *gate_flat;     // [N, DT_RANK]
+    float *alpha_biased;  // [N, DT_RANK]
+    float *alpha_softplus;// [N, DT_RANK]
+    int B, T, N;          // dimensions used for allocation
+} ssm_workspace_t;
+
+// Allocate SSM workspace for given batch/token dimensions.
+// Returns NULL on allocation failure. All pointers are 64-byte aligned.
+ssm_workspace_t *wubu_ssm_workspace_alloc(int B, int T);
+
+// Free SSM workspace (NULL-safe).
+void wubu_ssm_workspace_free(ssm_workspace_t *ws);
+
+// ============================================================
 // Forward pass functions
 // ============================================================
 
 // SSM L2 norm epsilon (global, set from GGUF config)
 extern float g_ssm_l2_eps;
-
-// Materialize lazy BF16 SSM proj matrices into F32 (once). Call before
-// wubu_ssm_forward for layers loaded via the zero-copy BF16 path.
-void wubu_ssm_ensure_f32(ssm_layer_weights *w, int d_model, int conv_dim, int value_dim);
-
-// Inverse: free the materialized F32 buffers (streaming — keep only active
-// layer resident). Call after wubu_ssm_forward.
-void wubu_ssm_release_f32(ssm_layer_weights *w);
-
-// Materialize lazy BF16 GQA proj matrices into F32 (once). Call before
-// wubu_gqa_forward / wubu_poincare_gqa_forward for layers on the zero-copy path.
-void wubu_gqa_ensure_f32(gqa_layer_weights *w, int d_model);
-
-// Inverse: free the materialized F32 GQA proj matrices.
-void wubu_gqa_release_f32(gqa_layer_weights *w);
 
 // Single SSM layer forward pass
 // x: [B, T, D_MODEL]
@@ -189,12 +180,14 @@ void wubu_gqa_release_f32(gqa_layer_weights *w);
 // ssm_state: [SSM_V_HEADS, SSM_D_STATE, SSM_D_STATE] (mutable)
 // conv_state: [CONV_KERNEL-1, CONV_DIM] (mutable)
 // output: [B, T, D_MODEL]
+// ws: pre-allocated workspace (NULL = per-call malloc, backward compat)
 void wubu_ssm_forward(const float *x, int B, int T,
-                      const ssm_layer_weights *weights,
+                      const ssm_layer_weights *w,
                       float *ssm_state,
                       float *conv_state,
                       float *output,
-                      const float *gpu_qkv, const float *gpu_z);
+                      const float *gpu_qkv, const float *gpu_z,
+                      ssm_workspace_t *ws);
 
 // Saved SSM forward intermediates (for backward pass)
 // All arrays [B*T x dim] unless noted
@@ -218,8 +211,9 @@ typedef struct {
 } ssm_fwd_save_t;
 
 // Single SSM + save forward (pass save=NULL for standard forward)
+// Does NOT use workspace (training-only path, called once per training step)
 void wubu_ssm_forward_save(const float *x, int B, int T,
-                           const ssm_layer_weights *weights,
+                           const ssm_layer_weights *w,
                            float *ssm_state,
                            float *conv_state,
                            float *output,
@@ -233,11 +227,9 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
 // k_out/v_out: output buffers for the NEW K_norm and V (caller can cache these)
 void wubu_gqa_forward(const float *x, int B, int T,
                       const gqa_layer_weights *weights,
-                      int d_model,
                       float *output,
                       const void *k_cache, const void *v_cache, int cache_len,
-                      void *k_out, void *v_out,
-                      int head_dim, int n_q_heads, int n_kv_heads);
+                      void *k_out, void *v_out);
 
 // Saved GQA forward intermediates (for backward pass)
 typedef struct {
@@ -254,16 +246,14 @@ typedef struct {
 // Single GQA + save forward (pass save=NULL for standard forward)
 void wubu_gqa_forward_save(const float *x, int B, int T,
                            const gqa_layer_weights *weights,
-                           int d_model,
                            float *output,
-                           gqa_fwd_save_t *save,
-                           int head_dim, int n_q_heads, int n_kv_heads);
+                           gqa_fwd_save_t *save);
 
 // Single Poincaré SSM layer forward pass (hyperbolic recurrence)
 // Same interface as wubu_ssm_forward but uses Möbius operations
-// for the recurrence step
+// for the recurrence step.
 void wubu_poincare_ssm_forward(const float *x, int B, int T,
-                               const ssm_layer_weights *weights,
+                               const ssm_layer_weights *w,
                                float *ssm_state,
                                float *conv_state,
                                float R,
@@ -315,22 +305,18 @@ void wubu_ssm_sequential_recurrence(int B, int T,
                                      float *ssm_state,
                                      float *delta_out);
 
-// PRINCIPLED Gated DeltaNet chunkwise-parallel prefill (WY/UT-transform closed
-// form; exact — reduces to the scalar recurrence at C=1, see wubu_ssm_chunked.c).
-// Opt-in behind WUBU_GDN_CHUNK. C = chunk size.
-void wubu_ssm_gdn_chunked(int B, int T,
-                           const float *q_norm,
-                           const float *k_norm,
-                           const float *v_conv,
-                           const float *beta_flat,
-                           const float *gate_flat,
-                           int C,
-                           float *ssm_state,
-                           float *delta_out);
-
-/* wubu_is_ssm_layer is now declared in wubu_ops.h (moved from here).
- * All activation/norm/conv forward+backward declarations moved to
- * wubu_ops.h during the Strangler Fig extraction (ADR-002). */
+// Utility functions
+int wubu_is_ssm_layer(int layer_idx);
+void wubu_softplus(int n, const float *x, float *out);
+void wubu_silu(int n, const float *x, float *out);
+void wubu_sigmoid(int n, const float *x, float *out);
+void wubu_l2_norm(int B, int T, int n_heads, int d,
+                 const float *x, float eps, float *out);
+void wubu_rms_norm(int B, int T, int d,
+                   const float *x, const float *weight, float eps, float *out);
+void wubu_conv1d(int B, int T, int C, int k,
+                 const float *input, const float *kernel,
+                 float *output);
 
 // Qwen3.6 MRoPE
 void wubu_rope(int B, int T, int n_heads, int head_dim,
@@ -340,14 +326,28 @@ void wubu_rope(int B, int T, int n_heads, int head_dim,
 
 // ============================================================
 // Backward Pass Functions (Phase 4)
-// ============================================================
+void wubu_ssm_backward_output_proj(
+    const float *delta_out, const float *d_output,
+    const float *ssm_out_weight,
+    const uint8_t *ssm_out_weight_q, int ssm_out_weight_type,
+    float *d_delta_out, float *d_ssm_out_weight, int N);
 
-/* ============================================================
- * Backward Pass Functions (Phase 4) — wubu_ssm_backward* primitives
- * live in wubu_ops.c; full-layer wrappers below.
- * ============================================================ */
+// Backward through gated normalization (Step 10)
+void wubu_ssm_backward_gated_norm(
+    const float *x, const float *z_silu,
+    const float *d_out, const float *norm_w,
+    float *d_x, float *d_z_silu, int B, int T);
 
-// Full SSM layer backward (chains steps 11 through 0)
+// Backward through SiLU activation
+void wubu_silu_backward(int n, const float *x, const float *y,
+                        const float *dy, float *dx);
+
+// Backward through L2 normalization
+void wubu_l2_norm_backward(int B, int T, int n_heads, int d,
+                           const float *x, float eps,
+                           const float *d_out, float *d_x);
+
+// Backward through SSM delta net recurrence (Step 9) — BPTT
 void wubu_ssm_backward_recurrence(
     int B, int T,
     const float *saved_states,
@@ -359,20 +359,6 @@ void wubu_ssm_backward_recurrence(
     float *d_v_conv,
     float *d_beta_flat, float *d_gate_flat,
     float *d_state_init);
-
-/* Backward primitives extracted to wubu_ops.c (ADR-002 Strangler Fig:
- * definitions now live there — previously only declarations leaked
- * through wubu_ssm.h re-export.) */
-void wubu_ssm_backward_output_proj(
-    const float *delta_out, const float *d_output,
-    const float *ssm_out_weight,
-    float *d_delta_out, float *d_ssm_out_weight, int N);
-void wubu_ssm_backward_gated_norm(
-    const float *x, const float *z_silu, const float *d_out,
-    const float *norm_w, float *d_x, float *d_z_silu, int B, int T);
-void wubu_ssm_backward_gated_norm_weight(
-    const float *x, const float *z_silu, const float *d_out,
-    float *d_norm_weight, int B, int T);
 
 // Full SSM layer backward (chains steps 11 through 0)
 void wubu_ssm_backward(
@@ -405,7 +391,6 @@ void wubu_gqa_backward_attention(
 // Full GQA layer backward (chains steps 7 through 1)
 void wubu_gqa_backward(
     int B, int T,
-    int d_model,
     const float *x, const float *Q_norm, const float *Q_raw,
     const float *K_norm, const float *K_raw,
     const float *V,
@@ -418,7 +403,10 @@ void wubu_gqa_backward(
     float *d_q_norm_weight, float *d_k_norm_weight,
     float *d_out_weight);
 
-// wubu_rms_norm_backward moved to wubu_ops.h (Strangler Fig, ADR-002)
+// RMSNorm backward helper
+void wubu_rms_norm_backward(int B, int T, int d,
+                            const float *x, const float *weight, float eps,
+                            const float *d_out, float *d_x);
 
 #ifdef __cplusplus
 }

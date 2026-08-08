@@ -1,0 +1,6 @@
+[15:05:27] === bytropix 512K Test Suite ===
+[15:05:27] Model: /home/wubu2/models/qwen3.6-35b-a3b-UD-IQ2_M.gguf (du 11G)
+[15:05:27] MAX_CTX: 524288
+
+[15:05:27] TEST: KV cache alloc at 524288
+[15:05:40] ✅ PASS: KV cache alloc at 524288

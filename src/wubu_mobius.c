@@ -179,6 +179,244 @@ void wubu_poincare_linear_comb(const float **xi, const float *wi, int n, int d, 
 }
 
 // ============================================================
+// exp_map backward (tangent → ball)
+// Forward: z = tanh(||v||/R) * v/||v|| * R
+// ============================================================
+void wubu_exp_map_backward(const float *v, int d, float R,
+                            const float *z, const float *dz,
+                            float *dv) {
+    // z = s * v where s = tanh(nv/R) * R / nv
+    // d(z_i) = s * δ_ij * d(v_j) + v_i * ds/dnv * v_j/nv * d(v_j)
+    // dv_i = s * dz_i + v_i * ds/dnv * (v·dz) / nv
+
+    float nv = 0.0f, v_dot_dz = 0.0f;
+    for (int i = 0; i < d; i++) {
+        nv += v[i] * v[i];
+        v_dot_dz += v[i] * dz[i];
+    }
+    nv = sqrtf(nv);
+
+    if (nv < 1e-30f) {
+        // exp_map(0) ≈ 0, gradient ≈ identity: d(z_i)/d(v_j) = δ_ij
+        memcpy(dv, dz, d * sizeof(float));
+        return;
+    }
+
+    float ratio = nv / R;
+    if (ratio >= 0.9999f) ratio = 0.9999f;  // clamp for tanh domain
+
+    float s = tanhf(ratio);                  // tanh(nv/R)
+    float scale = s * R / nv;                // s * R / nv
+
+    // ds/dnv = (1 - s²) / R
+    // dscale/dnv = ((1-s²) * nv - s * R) / (nv²)
+    float dscale_dnv = ((1.0f - s * s) * nv - s * R) / (nv * nv);
+
+    float factor = dscale_dnv * v_dot_dz / nv;
+    for (int i = 0; i < d; i++) {
+        dv[i] = scale * dz[i] + v[i] * factor;
+    }
+}
+
+// ============================================================
+// log_map backward (ball → tangent)
+// Forward: v = R * artanh(||x||/R) * x/||x||
+// ============================================================
+void wubu_log_map_backward(const float *x, int d, float R,
+                            const float *v, const float *dv,
+                            float *dx) {
+    // v = s * x where s = R * artanh(nx/R) / nx
+    // Same structure as exp_map backward
+    float nx = 0.0f, x_dot_dv = 0.0f;
+    for (int i = 0; i < d; i++) {
+        nx += x[i] * x[i];
+        x_dot_dv += x[i] * dv[i];
+    }
+    nx = sqrtf(nx);
+
+    if (nx < 1e-30f) {
+        // log_map(0) ≈ 0, gradient ≈ identity
+        memcpy(dx, dv, d * sizeof(float));
+        return;
+    }
+
+    float ratio = nx / R;
+    if (ratio >= 0.9999f) ratio = 0.9999f;
+
+    float artanh_r = 0.5f * logf((1.0f + ratio) / (1.0f - ratio));
+    float scale = R * artanh_r / nx;          // R * artanh(nx/R) / nx
+
+    // ds/dnx = R * [1/(1-ratio²) * 1/R * nx - artanh(nx/R)] / nx²
+    //        = [nx/(1-ratio²) - R*artanh(nx/R)] / nx²
+    //        = [nx * R²/(R²-nx²) - R*artanh(nx/R)] / nx²
+    float inv_1mr2 = R * R / (R * R - nx * nx);  // 1/(1-ratio²) = R²/(R²-nx²)
+    float dscale_dnx = (nx * inv_1mr2 - R * artanh_r) / (nx * nx);
+
+    float factor = dscale_dnx * x_dot_dv / nx;
+    for (int i = 0; i < d; i++) {
+        dx[i] = scale * dv[i] + x[i] * factor;
+    }
+}
+
+// ============================================================
+// Möbius scalar multiplication backward: z = r ⊗ x
+// Forward: z = tanh(r * artanh(||x||/R)) * x/||x|| * R
+// ============================================================
+void wubu_mobius_scalar_mul_backward(float r, const float *x, int d, float R,
+                                      const float *z, const float *dz,
+                                      float *dx) {
+    // z = scale * x where scale = tanh(r * artanh(nx/R)) * R / nx
+    // Same structure as exp_map backward with r * artanh(nx/R) as argument
+    float nx = 0.0f, x_dot_dz = 0.0f;
+    for (int i = 0; i < d; i++) {
+        nx += x[i] * x[i];
+        x_dot_dz += x[i] * dz[i];
+    }
+    nx = sqrtf(nx);
+
+    if (nx < 1e-30f || fabsf(r) < 1e-30f) {
+        // r ⊗ 0 = 0, or 0 ⊗ x = 0
+        memset(dx, 0, d * sizeof(float));
+        return;
+    }
+
+    float ratio = nx / R;
+    if (ratio >= 0.9999f) ratio = 0.9999f;
+
+    float artanh_r = 0.5f * logf((1.0f + ratio) / (1.0f - ratio));
+    float t = r * artanh_r;
+    // Clamp t to avoid huge tanh values
+    if (t > 80.0f) t = 80.0f;
+    if (t < -80.0f) t = -80.0f;
+
+    float th = tanhf(t);                      // tanh(r * artanh(nx/R))
+    float scale = th * R / nx;                // scale factor
+
+    // d(th)/d(nx) = (1 - th²) * r * d(artanh)/d(nx)
+    // d(artanh)/d(nx) = 1/(1 - ratio²) * 1/R = R/(R² - nx²)
+    // d(th)/d(nx) = (1 - th²) * r * R / (R² - nx²)
+    float dth_dnx = (1.0f - th * th) * r * R / (R * R - nx * nx);
+    // dscale/dnx = (dth_dnx * R * nx - th * R) / nx²
+    float dscale_dnx = (dth_dnx * R * nx - th * R) / (nx * nx);
+
+    float factor = dscale_dnx * x_dot_dz / nx;
+    for (int i = 0; i < d; i++) {
+        dx[i] = scale * dz[i] + x[i] * factor;
+    }
+}
+
+// ============================================================
+// Möbius addition backward (vector-Jacobian product)
+// Computes dx, dy given upstream gradient dz for z = x ⊕ y
+// ============================================================
+void wubu_mobius_add_backward(const float *x, const float *y, int d, float R,
+                               const float *z, const float *dz,
+                               float *dx, float *dy) {
+    // z = (A·x + B·y) / D
+    // where:
+    //   A = 1 + 2c⟨x,y⟩ + c||y||²
+    //   B = 1 - c||x||²
+    //   D = 1 + 2c⟨x,y⟩ + c²||x||²||y||²
+    //   c = 1/R²
+
+    float c = 1.0f / (R * R);
+
+    // Compute dot products and squared norms
+    float dot_xy = 0.0f, nx2 = 0.0f, ny2 = 0.0f;
+    for (int i = 0; i < d; i++) {
+        dot_xy += x[i] * y[i];
+        nx2 += x[i] * x[i];
+        ny2 += y[i] * y[i];
+    }
+
+    if (nx2 < 1e-30f) {
+        // 0 ⊕ y = y, so z = y, dz/dy = I, dz/dx ≈ 0
+        memcpy(dy, dz, d * sizeof(float));
+        if (dx) memset(dx, 0, d * sizeof(float));
+        return;
+    }
+    if (ny2 < 1e-30f) {
+        // x ⊕ 0 = x, so z = x, dz/dx = I, dz/dy ≈ 0
+        memcpy(dx, dz, d * sizeof(float));
+        if (dy) memset(dy, 0, d * sizeof(float));
+        return;
+    }
+
+    // Precompute scalars from forward
+    float cny2 = c * ny2;
+    float cnx2 = c * nx2;
+    float c2nx2ny2 = c * cnx2 * ny2;
+    float two_c_dot = 2.0f * c * dot_xy;
+
+    float A = 1.0f + two_c_dot + cny2;
+    float B = 1.0f - cnx2;
+    float D = 1.0f + two_c_dot + c2nx2ny2;
+    float invD = (fabsf(D) < 1e-30f) ? 0.0f : 1.0f / D;
+    float invD2 = invD * invD;
+
+    // Precompute dz·num (scalar = Σ_i dz_i * num_i)
+    double dot_dz_num = 0.0;
+    for (int i = 0; i < d; i++) {
+        float num_i = A * x[i] + B * y[i];
+        dot_dz_num += (double)dz[i] * num_i;
+    }
+
+    // Precompute dz·x and dz·y
+    double dot_dz_x = 0.0, dot_dz_y = 0.0;
+    for (int i = 0; i < d; i++) {
+        dot_dz_x += (double)dz[i] * x[i];
+        dot_dz_y += (double)dz[i] * y[i];
+    }
+
+    // dx_j = (1/D²) · [ (2c·y_j · (A·x + B·y)·dz + A·dz_j - 2c·x_j · dot_dz_y) · D
+    //                - (A·x + B·y)·dz · (2c·y_j + 2c²·||y||²·x_j) ]
+    // Simplified:
+    // dx_j = invD · A · dz_j + invD2 · [ y_j · (2c · D · dot_dz_num - 2c · dot_dz_num)
+    //                                    - x_j · (2c · dot_dz_y · D + 2c²·||y||² · dot_dz_num) ]
+
+    double dD_dx_pre = 2.0 * c;                 // ∂D/∂x_j = 2c·y_j + 2c²·||y||²·x_j
+    double dA_dx_pre = 2.0 * c;                 // ∂A/∂x_j = 2c·y_j
+    double dB_dx_pre = -2.0 * c;                // ∂B/∂x_j = -2c·x_j
+
+    for (int j = 0; j < d; j++) {
+        // ∂num_i/∂x_j = (∂A/∂x_j)·x_i + A·δ_ij + (∂B/∂x_j)·y_i
+        //             = 2c·y_j·x_i + A·δ_ij - 2c·x_j·y_i
+
+        double dA_dx = dA_dx_pre * y[j];        // 2c·y_j
+        double dB_dx = dB_dx_pre * x[j];        // -2c·x_j
+        double dD_dx = dD_dx_pre * y[j] + 2.0 * c * c * ny2 * x[j]; // 2c·y_j + 2c²·||y||²·x_j
+
+        // dx_j = Σ_i dz_i · ∂z_i/∂x_j
+        // = Σ_i dz_i · ( (∂num_i/∂x_j · D - num_i · ∂D/∂x_j) / D² )
+        // = invD · Σ_i dz_i · ∂num_i/∂x_j  -  invD² · ∂D/∂x_j · Σ_i dz_i · num_i
+
+        // Σ_i dz_i · ∂num_i/∂x_j = dA_dx · Σ_i dz_i · x_i + A·dz_j + dB_dx · Σ_i dz_i · y_i
+        double sum_dz_dnum = dA_dx * dot_dz_x + (double)A * dz[j] + dB_dx * dot_dz_y;
+
+        dx[j] = (float)(invD * sum_dz_dnum - invD2 * dD_dx * dot_dz_num);
+    }
+
+    if (dy) {
+        // ∂A/∂y_j = 2c·x_j + 2c·y_j (from c||y||²)
+        // ∂B/∂y_j = 0 (B doesn't depend on y)
+        // ∂D/∂y_j = 2c·x_j + 2c²·||x||²·y_j
+
+        double dA_dy_pre_x = 2.0 * c;           // from ⟨x,y⟩
+        double dA_dy_pre_y = 2.0 * c;           // from ||y||²
+
+        for (int j = 0; j < d; j++) {
+            double dA_dy = dA_dy_pre_x * x[j] + dA_dy_pre_y * y[j]; // 2c·x_j + 2c·y_j
+            double dD_dy = 2.0 * c * x[j] + 2.0 * c * c * nx2 * y[j]; // 2c·x_j + 2c²·||x||²·y_j
+
+            // Σ_i dz_i · ∂num_i/∂y_j = dA_dy · Σ_i dz_i · x_i + 0 + dB_dy · Σ_i dz_i · y_i + B·dz_j
+            double sum_dz_dnum = dA_dy * dot_dz_x + (double)B * dz[j];
+
+            dy[j] = (float)(invD * sum_dz_dnum - invD2 * dD_dy * dot_dz_num);
+        }
+    }
+}
+
+// ============================================================
 // Möbius gyration operator (optimized: shared dot products)
 // ============================================================
 void wubu_mobius_gyrate(const float *x, const float *y, const float *z, int d, float R, float *out) {

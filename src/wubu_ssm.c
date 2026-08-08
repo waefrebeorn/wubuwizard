@@ -1,18 +1,8 @@
 #include "wubu_ssm.h"
-#include "wubu_ops.h"   /* activations, norm, conv moved here (ADR-002) */
-#include "wubu_ssm_workspace.h"
-#include "wubu_4kv.h"
-#include "safetensors_reader.h"
 #include "wubu_mobius.h"
 #include "gguf_reader.h"
 #include "thread_pool.h"
 #include "wubu_model.h"  // for kv_cache_read_head / kv_cache_write_head
-#include "wubu_fast_attn.h"  // fast zero-malloc attention kernel
-#include "wubu_kernel.h"   // hardware dispatch table
-// Global tensor naming convention (defined here for CORE_OBJ visibility)
-// 0 = Qwen-style "blk.N.*", 1 = Gemma-style "model.layers.N.*", 2 = pure GQA
-// (g_tensor_naming is now defined in wubu_ops.c — moved with wubu_is_ssm_layer)
-extern int g_tensor_naming;  /* set by wubu_model.c from GGUF config */
 #include <omp.h>
 #include <immintrin.h>  // AVX2/FMA intrinsics for GQA attention
 // GQA_MAX_CTX from wubu_model.h — max KV cache positions (also used for attn stack buf)
@@ -26,6 +16,62 @@ extern int g_tensor_naming;  /* set by wubu_model.c from GGUF config */
 #ifdef GPU_SUPPORT
 #include <cuda_runtime.h>
 #endif
+
+// ============================================================
+// SSM Workspace: pre-allocated buffers reused across all layers.
+// All pointers 64-byte aligned via posix_memalign.
+// ============================================================
+ssm_workspace_t *wubu_ssm_workspace_alloc(int B, int T) {
+    const int N = B * T;
+    const int C = CONV_DIM;
+    ssm_workspace_t *ws = (ssm_workspace_t *)malloc(sizeof(ssm_workspace_t));
+    if (!ws) return NULL;
+    memset(ws, 0, sizeof(ssm_workspace_t));
+    ws->B = B; ws->T = T; ws->N = N;
+
+    #define WS_ALLOC(ptr, count) do { \
+        size_t _sz = (size_t)(count) * sizeof(float); \
+        if (_sz > 0 && posix_memalign((void**)&(ptr), 64, _sz)) { \
+            fprintf(stderr, "SSM workspace: " #ptr " alloc failed (%zu bytes)\n", _sz); \
+            wubu_ssm_workspace_free(ws); return NULL; \
+        } \
+    } while(0)
+
+    WS_ALLOC(ws->qkv_all,        (int64_t)N * (KEY_DIM * 2 + VALUE_DIM));
+    WS_ALLOC(ws->z_all,          (int64_t)N * VALUE_DIM);
+    WS_ALLOC(ws->beta_raw,       (int64_t)N * DT_RANK);
+    WS_ALLOC(ws->alpha_raw,      (int64_t)N * DT_RANK);
+    WS_ALLOC(ws->conv_input,     (int64_t)B * (T + CONV_KERNEL - 1) * (int64_t)C);
+    WS_ALLOC(ws->conv_output,    (int64_t)N * C);
+    WS_ALLOC(ws->q_conv,         (int64_t)N * KEY_DIM);
+    WS_ALLOC(ws->k_conv,         (int64_t)N * KEY_DIM);
+    WS_ALLOC(ws->v_conv,         (int64_t)N * VALUE_DIM);
+    WS_ALLOC(ws->q_norm,         (int64_t)N * KEY_DIM);
+    WS_ALLOC(ws->k_norm,         (int64_t)N * KEY_DIM);
+    WS_ALLOC(ws->delta_out,      (int64_t)N * VALUE_DIM);
+    WS_ALLOC(ws->z_silu,         (int64_t)N * VALUE_DIM);
+    WS_ALLOC(ws->beta_flat,      (int64_t)N * DT_RANK);
+    WS_ALLOC(ws->gate_flat,      (int64_t)N * DT_RANK);
+    WS_ALLOC(ws->alpha_biased,   (int64_t)N * DT_RANK);
+    WS_ALLOC(ws->alpha_softplus, (int64_t)N * DT_RANK);
+
+    #undef WS_ALLOC
+    return ws;
+}
+
+void wubu_ssm_workspace_free(ssm_workspace_t *ws) {
+    if (!ws) return;
+    free(ws->qkv_all);        free(ws->z_all);
+    free(ws->beta_raw);       free(ws->alpha_raw);
+    free(ws->conv_input);     free(ws->conv_output);
+    free(ws->q_conv);         free(ws->k_conv);
+    free(ws->v_conv);         free(ws->q_norm);
+    free(ws->k_norm);         free(ws->delta_out);
+    free(ws->z_silu);         free(ws->beta_flat);
+    free(ws->gate_flat);      free(ws->alpha_biased);
+    free(ws->alpha_softplus);
+    free(ws);
+}
 
 // GPU SSM recurrence (declared in gpu_ssm_recurrence.cu, extern C linkage)
 #ifdef GPU_SUPPORT
@@ -84,20 +130,16 @@ static inline void avx2_hk(const float *h, const float *k, float *hk) {
     }
 }
 
-// State update: h[i][j] += k[j] * diff[i] * bg
-// Equivalent to outer product: h += (diff * bg) ⊗ k
+// State update: h[i][j] += k[i] * diff[j] * bg
+// Equivalent to outer product: h += k ⊗ (diff * bg)
 static inline void avx2_state_update(float *h, const float *k,
                                       const float *diff, float bg) {
     const int d = SSM_STATE_STRIDE;
-    const __m256 v_bg = _mm256_set1_ps(bg);
     for (int i = 0; i < d; i++) {
+        float k_bg = k[i] * bg;
         float *h_row = h + i * d;
-        __m256 v_diff_bg = _mm256_mul_ps(_mm256_set1_ps(diff[i]), v_bg);
-        // h_row[j:j+8] += diff*bg * k[j:j+8]
-        for (int j = 0; j < d; j += 8) {
-            _mm256_storeu_ps(h_row + j,
-                _mm256_fmadd_ps(v_diff_bg, _mm256_loadu_ps(k + j),
-                                _mm256_loadu_ps(h_row + j)));
+        for (int j = 0; j < d; j++) {
+            h_row[j] += k_bg * diff[j];
         }
     }
 }
@@ -122,6 +164,13 @@ static inline void avx2_hq(const float *h, const float *q, float *out) {
     }
 }
 
+// ============================================================
+// Utility: Activation Functions
+// ============================================================
+
+// SSM L2 norm epsilon — read from GGUF config (should be 1e-6 for Qwen3.6)
+float g_ssm_l2_eps = 1e-6f;
+
 // Centralized quantized matmul dispatch for SSM/GQA projections.
 // If quantized weight (W_q) is available and type is not F32, uses quantized_matmul.
 // Otherwise falls back to the provided F32 weight with a column loop.
@@ -131,32 +180,131 @@ static void proj_matmul(const float *x, int64_t n_rows, int64_t n_cols,
                          const float *W_f32, const uint8_t *W_q, int weight_type,
                          float *out) {
     if (W_q && weight_type != GGML_TYPE_F32 && n_cols > 0) {
-        /* A:03 — GPU-quantized matmul. At runtime, if CUDA backend is active
-         * and g_use_gpu_backend flag is set, route quantized matmul through
-         * GPU kernels with persistent weight cache. Falls back to CPU
-         * quantized_matmul if GPU unavailable or unsupported quant type.
-         * Uses runtime dispatch (not #ifdef) so wubu_ssm.o is shared
-         * between CPU and GPU builds. */
-        extern int g_use_gpu_backend;
-        /* proj_matmul_gpu is defined in wubu_gpu_weight_cache.cu (GPU build only).
-         * For CPU-only builds, g_use_gpu_backend is always 0, so this is
-         * never called — but we still need the symbol to resolve at link time. */
-        extern int proj_matmul_gpu(const float *x, const uint8_t *W_q,
-                                   int quant_type, int n_rows, int n_cols,
-                                   float *out);
-        if (g_use_gpu_backend && proj_matmul_gpu(x, W_q, weight_type,
-                (int)n_rows, (int)n_cols, out)) {
-            return; /* GPU path succeeded */
-        }
-        if (getenv("WUBU_DEBUG") && g_use_gpu_backend) {
-            fprintf(stderr, "[gpu] proj_matmul_gpu FAILED (qt=%d rows=%ld cols=%ld) falling back to CPU\n", weight_type, n_rows, n_cols);
-            fflush(stderr);
-        }
         quantized_matmul(x, W_q, weight_type, n_rows, n_cols, 0, out);
-    } else if (W_f32 && n_cols > 0) {
-        /* F32 path: dispatch through kernel table (CUDA if available,
-         * else CPU tiled AVX2-FMA GEMV). 16x faster than scalar triple-loop. */
-        wubu_kernel_run(WUBU_KERN_GEMV, W_f32, x, out, (int)n_cols, (int)n_rows);
+    } else {
+        #pragma omp parallel for if(n_cols > 4)
+        for (int64_t j = 0; j < n_cols; j++) {
+            double sum = 0.0;
+            for (int64_t i = 0; i < n_rows; i++)
+                sum += (double)x[i] * (double)W_f32[j * n_rows + i];
+            out[j] = (float)sum;
+        }
+    }
+}
+
+void wubu_softplus(int n, const float *x, float *out) {
+    #pragma omp parallel for if(n > 100000)
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        if (v > 80.0f) out[i] = v;          // linear region
+        else if (v < -80.0f) out[i] = 0.0f; // zero region
+        else out[i] = logf(1.0f + expf(v));
+    }
+}
+
+void wubu_silu(int n, const float *x, float *out) {
+    #pragma omp parallel for if(n > 100000)
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        if (v < -80.0f) out[i] = 0.0f;
+        else out[i] = v / (1.0f + expf(-v));
+    }
+}
+
+void wubu_sigmoid(int n, const float *x, float *out) {
+    #pragma omp parallel for if(n > 100000)
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        if (v < -80.0f) out[i] = 0.0f;
+        else if (v > 80.0f) out[i] = 1.0f;
+        else out[i] = 1.0f / (1.0f + expf(-v));
+    }
+}
+
+// ============================================================
+// Utility: Normalization
+// ============================================================
+
+void wubu_l2_norm(int B, int T, int n_heads, int d,
+                  const float *x, float eps, float *out) {
+    // x: [B, T, n_heads, d]
+    // out: [B, T, n_heads, d]
+    int seq_len = B * T;
+    #pragma omp parallel for collapse(2) if(seq_len * n_heads > 100)
+    for (int s = 0; s < seq_len; s++) {
+        for (int h = 0; h < n_heads; h++) {
+            const float *inp = x + (s * n_heads + h) * d;
+            float *oup = out + (s * n_heads + h) * d;
+            float sum_sq = 0.0f;
+#ifdef __AVX2__
+            __m256 acc = _mm256_setzero_ps();
+            int i;
+            for (i = 0; i <= d - 8; i += 8) {
+                __m256 v = _mm256_loadu_ps(inp + i);
+                acc = _mm256_fmadd_ps(v, v, acc);
+            }
+            __m128 lo = _mm256_castps256_ps128(acc);
+            __m128 hi = _mm256_extractf128_ps(acc, 1);
+            lo = _mm_add_ps(lo, hi);
+            lo = _mm_hadd_ps(lo, lo);
+            lo = _mm_hadd_ps(lo, lo);
+            sum_sq = _mm_cvtss_f32(lo);
+            for (; i < d; i++) sum_sq += inp[i] * inp[i];
+#else
+            for (int i = 0; i < d; i++) sum_sq += inp[i] * inp[i];
+#endif
+            float scale = 1.0f / sqrtf(sum_sq + eps);
+#ifdef __AVX2__
+            __m256 v_scale = _mm256_set1_ps(scale);
+            for (int i = 0; i <= d - 8; i += 8)
+                _mm256_storeu_ps(oup + i, _mm256_mul_ps(_mm256_loadu_ps(inp + i), v_scale));
+            for (int i = (d / 8) * 8; i < d; i++) oup[i] = inp[i] * scale;
+#else
+            for (int i = 0; i < d; i++) oup[i] = inp[i] * scale;
+#endif
+        }
+    }
+}
+
+void wubu_rms_norm(int B, int T, int d,
+                   const float *x, const float *weight,
+                   float eps, float *out) {
+    // x: [B, T, d]
+    // weight: [d]
+    // out: [B, T, d]
+    int seq_len = B * T;
+    #pragma omp parallel for if(seq_len > 10)
+    for (int s = 0; s < seq_len; s++) {
+        const float *inp = x + s * d;
+        float *oup = out + s * d;
+        float sum_sq = 0.0f;
+#ifdef __AVX2__
+        __m256 acc = _mm256_setzero_ps();
+        int i;
+        for (i = 0; i <= d - 8; i += 8) {
+            __m256 v = _mm256_loadu_ps(inp + i);
+            acc = _mm256_fmadd_ps(v, v, acc);
+        }
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        sum_sq = _mm_cvtss_f32(lo);
+        for (; i < d; i++) sum_sq += inp[i] * inp[i];
+#else
+        for (int i = 0; i < d; i++) sum_sq += inp[i] * inp[i];
+#endif
+        float rms = sqrtf(sum_sq / d + eps);
+        float scale = 1.0f / rms;
+#ifdef __AVX2__
+        __m256 v_scale = _mm256_set1_ps(scale);
+        for (int i = 0; i <= d - 8; i += 8)
+            _mm256_storeu_ps(oup + i, _mm256_mul_ps(_mm256_mul_ps(_mm256_loadu_ps(inp + i), v_scale), _mm256_loadu_ps(weight + i)));
+        for (int i = (d / 8) * 8; i < d; i++) oup[i] = inp[i] * scale * weight[i];
+#else
+        for (int i = 0; i < d; i++) oup[i] = inp[i] * scale * weight[i];
+#endif
     }
 }
 
@@ -182,6 +330,36 @@ static void matmul_nt(int M, int N, int K,
     }
 }
 
+// ============================================================
+// Utility: 1D Convolution (depthwise, causal)
+// ============================================================
+
+void wubu_conv1d(int B, int T, int C, int k,
+                 const float *input, const float *kernel,
+                 float *output) {
+    if (B <= 0 || T <= 0 || C <= 0 || k <= 0) return;
+    // input: [B, T+k-1, C] — already padded with k-1 zeros at start
+    // kernel: [k, C]
+    // output: [B, T, C]
+    #pragma omp parallel for collapse(2) if(B * T * C * k > 100000)
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            // AVX2 conv1d disabled: kernel[ki + c*k] is per-channel.
+            // Broadcasting one channel's kernel to all 8 vector channels
+            // produces wrong output. Sequential path always used.
+            for (int c = 0; c < C; c++) {
+                float sum = 0.0f;
+                for (int ki = 0; ki < k; ki++) {
+                    int t_in = t + ki;
+                    sum += input[(b * (T + k - 1) + t_in) * C + c] *
+                           kernel[ki + c * k];
+                }
+                output[(b * T + t) * C + c] = sum;
+            }
+        }
+    }
+}
+
 // TGT (Toroidal Gradient Transformation) safe wrapping using π odometer
 // Keeps values in [-π, π] range, preventing float32 overflow
 #define TGT_PI      3.14159265358979323846f
@@ -198,76 +376,6 @@ static inline float tgt_safe_expf(float x) {
     return expf(x);
 }
 
-// Recurrent-state integrity guard — see wubu_ssm_chunked.c for rationale.
-// Bounds the persistent SSM state so a divergent decay (untrained weights or a
-// transient gate spike) cannot permanently poison model->ssm_states. No-op for
-// trained models, which keep their state well below the clamp threshold.
-#define SSM_STATE_CLAMP 1e3f
-
-static inline void ssm_state_clamp(float *h, int n) {
-    for (int i = 0; i < n; i++) {
-        float v = h[i];
-        if (v > SSM_STATE_CLAMP) h[i] = SSM_STATE_CLAMP;
-        else if (v < -SSM_STATE_CLAMP) h[i] = -SSM_STATE_CLAMP;
-        else if (!(v == v)) h[i] = 0.0f;                 // NaN
-        else if (v != 0.0f && v * 0.5f == v) h[i] = 0.0f; // Inf
-    }
-}
-
-// ============================================================
-// Lazy BF16 materialization (zero-copy weights -> F32 on first use)
-// ============================================================
-
-/* Materialize the LAZY BF16 SSM proj matrices into their F32 counterparts.
- * Called once per layer (guarded by lazy_f32_done). The file stores the
- * matrices row-major [OUT, IN]; the forward expects [IN, OUT] (column-major
- * for matmul_nt), so we transpose during dequant — matching load_f32_try2_t. */
-static void dequant_transpose(const uint8_t *raw, int rows, int cols,
-                              int dtype, float *out /* [cols, rows] */) {
-    const uint16_t *b = (const uint16_t *)raw;
-    for (int r = 0; r < rows; r++) {
-        for (int c = 0; c < cols; c++) {
-            float v = (dtype == ST_DTYPE_F16) ? st_f16_to_f32(b[r*cols + c])
-                                              : st_bf16_to_f32(b[r*cols + c]);
-            out[(size_t)c * rows + r] = v;   /* transpose: out[cols, rows] */
-        }
-    }
-}
-
-void wubu_ssm_ensure_f32(ssm_layer_weights *w, int d_model, int conv_dim, int value_dim) {
-    if (!w || w->lazy_f32_done) return;
-    if (w->attn_qkv_weight_raw && !w->attn_qkv_weight_f32) {
-        size_t n = (size_t)conv_dim * d_model;
-        w->attn_qkv_weight_f32 = (float *)malloc(n * sizeof(float));
-        dequant_transpose(w->attn_qkv_weight_raw, conv_dim, d_model, w->lazy_dtype, w->attn_qkv_weight_f32);
-    }
-    if (w->attn_gate_weight_raw && !w->attn_gate_weight_f32) {
-        size_t n = (size_t)value_dim * d_model;
-        w->attn_gate_weight_f32 = (float *)malloc(n * sizeof(float));
-        dequant_transpose(w->attn_gate_weight_raw, value_dim, d_model, w->lazy_dtype, w->attn_gate_weight_f32);
-    }
-    if (w->ssm_out_weight_raw && !w->ssm_out_weight_f32) {
-        size_t n = (size_t)d_model * value_dim;
-        w->ssm_out_weight_f32 = (float *)malloc(n * sizeof(float));
-        dequant_transpose(w->ssm_out_weight_raw, d_model, value_dim, w->lazy_dtype, w->ssm_out_weight_f32);
-    }
-    w->lazy_f32_done = 1;
-}
-
-/* Inverse of wubu_ssm_ensure_f32: free the materialized F32 buffers so the
- * layer's weights return to zero-copy BF16. Call after the layer's forward to
- * keep only the active layer resident (streaming). Only frees when the layer
- * was actually materialized from lazy BF16 (attn_qkv_weight_raw != NULL) —
- * layers loaded as resident F32 keep their buffer. The raw BF16 mmap stays
- * valid for the next materialization. */
-void wubu_ssm_release_f32(ssm_layer_weights *w) {
-    if (!w) return;
-    if (w->attn_qkv_weight_raw) { free(w->attn_qkv_weight_f32); w->attn_qkv_weight_f32 = NULL; }
-    if (w->attn_gate_weight_raw) { free(w->attn_gate_weight_f32); w->attn_gate_weight_f32 = NULL; }
-    if (w->ssm_out_weight_raw)  { free(w->ssm_out_weight_f32);  w->ssm_out_weight_f32 = NULL; }
-    w->lazy_f32_done = 0;
-}
-
 // ============================================================
 // SSM Layer Forward Pass (Euclidean)
 // ============================================================
@@ -277,30 +385,39 @@ void wubu_ssm_forward(const float *x, int B, int T,
                       float *ssm_state,
                       float *conv_state,
                       float *output,
-                      const float *gpu_qkv, const float *gpu_z) {
-
-    // x: [B, T, WUBU_DIMS.d_model]
-    // output: [B, T, WUBU_DIMS.d_model]
+                      const float *gpu_qkv, const float *gpu_z,
+                      ssm_workspace_t *ws) {
+    // x: [B, T, D_MODEL]
+    // output: [B, T, D_MODEL]
     
     const int N = B * T;  // total tokens
     const int C = CONV_DIM;  // 8192
     
-    // Allocate temporaries from workspace pool when available,
-    // otherwise fall back to per-call malloc.
-    wubu_ssm_workspace_set_t(T);  /* grow scratch to the MAX T seen (prefill>decode) */
-    wubu_ssm_workspace_t *ws = wubu_ssm_workspace_get(0); /* caller sets layer idx */
+    // Use pre-allocated workspace when available (avoids 17 malloc/free per layer)
+    // Fall back to per-call allocation for backward compatibility
+    int own_alloc = 0;
     float *qkv_all, *z_all, *beta_raw, *alpha_raw;
-    float *conv_input, *conv_output, *q_conv, *k_conv, *v_conv;
-    float *q_norm, *k_norm, *delta_out, *z_silu;
+    float *conv_input, *conv_output;
+    float *q_conv, *k_conv, *v_conv;
+    float *q_norm, *k_norm;
+    float *delta_out, *z_silu;
     
-    if (ws) {
-        qkv_all = ws->qkv_all; z_all = ws->z_all;
-        beta_raw = ws->beta_raw; alpha_raw = ws->alpha_raw;
-        conv_input = ws->conv_input; conv_output = ws->conv_output;
-        q_conv = ws->q_conv; k_conv = ws->k_conv; v_conv = ws->v_conv;
-        q_norm = ws->q_norm; k_norm = ws->k_norm;
-        delta_out = ws->delta_out; z_silu = ws->z_silu;
+    if (ws && ws->N >= N && ws->B >= B && ws->T >= T) {
+        qkv_all   = ws->qkv_all;
+        z_all     = ws->z_all;
+        beta_raw  = ws->beta_raw;
+        alpha_raw = ws->alpha_raw;
+        conv_input  = ws->conv_input;
+        conv_output = ws->conv_output;
+        q_conv    = ws->q_conv;
+        k_conv    = ws->k_conv;
+        v_conv    = ws->v_conv;
+        q_norm    = ws->q_norm;
+        k_norm    = ws->k_norm;
+        delta_out = ws->delta_out;
+        z_silu    = ws->z_silu;
     } else {
+        own_alloc = 1;
         qkv_all = (float *)malloc(N * (KEY_DIM * 2 + VALUE_DIM) * sizeof(float));
         z_all = (float *)malloc(N * VALUE_DIM * sizeof(float));
         beta_raw = (float *)malloc(N * DT_RANK * sizeof(float));
@@ -314,20 +431,18 @@ void wubu_ssm_forward(const float *x, int B, int T,
         k_norm = (float *)malloc(N * KEY_DIM * sizeof(float));
         delta_out = (float *)malloc(N * VALUE_DIM * sizeof(float));
         z_silu = (float *)malloc(N * VALUE_DIM * sizeof(float));
-    }
-    
-    if (!qkv_all || !z_all || !beta_raw || !alpha_raw || !conv_input ||
-        !conv_output || !q_conv || !k_conv || !v_conv || !q_norm || !k_norm ||
-        !delta_out || !z_silu) {
-        fprintf(stderr, "SSM forward: allocation failed\n");
-        if (!ws) {
+        
+        if (!qkv_all || !z_all || !beta_raw || !alpha_raw || !conv_input ||
+            !conv_output || !q_conv || !k_conv || !v_conv || !q_norm || !k_norm ||
+            !delta_out || !z_silu) {
+            fprintf(stderr, "SSM forward: allocation failed\n");
             free(qkv_all); free(z_all); free(beta_raw); free(alpha_raw);
             free(conv_input); free(conv_output);
             free(q_conv); free(k_conv); free(v_conv);
             free(q_norm); free(k_norm);
             free(delta_out); free(z_silu);
+            return;
         }
-        return;
     }
     
     const char *dd = getenv("DUMP_SSM_DEBUG");
@@ -337,36 +452,29 @@ void wubu_ssm_forward(const float *x, int B, int T,
         memcpy(qkv_all, gpu_qkv, (size_t)N * C * sizeof(float));
         memcpy(z_all, gpu_z, (size_t)N * VALUE_DIM * sizeof(float));
         if (dd) printf("  [SSM] Using GPU projections\n");
-    } else if (w->f32_mode) {
-        // F32 safetensors path: use tiled GEMV kernel (16× faster than matmul_nt)
-        for (int s = 0; s < N; s++) {
-            const float *x_s = x + s * WUBU_DIMS.d_model;
-            /* F32 path: kernel dispatch (CUDA GEMV if available, else CPU) */
-            wubu_kernel_run(WUBU_KERN_GEMV, w->attn_qkv_weight_f32, x_s,
-                            qkv_all + s * C, C, WUBU_DIMS.d_model);
-            wubu_kernel_run(WUBU_KERN_GEMV, w->attn_gate_weight_f32, x_s,
-                            z_all + s * VALUE_DIM, VALUE_DIM, WUBU_DIMS.d_model);
-        }
-    } else {
-        // Fused QKV + gate projection via single Q8_K quantization
-        // Both projections use the same input x[s], so quantize once and reuse
-        const int n_q8_blocks = (WUBU_DIMS.d_model + QK_K - 1) / QK_K;
-        const int q8_buf_size = n_q8_blocks * 292;  // Q8K_BLOCK_SIZE
-        uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
-        if (!ssm_q8_buf) { fprintf(stderr, "SSM forward: q8 alloc failed\n"); goto cleanup; }
-
-        for (int s = 0; s < N; s++) {
-            const float *x_s = x + s * WUBU_DIMS.d_model;
-            quantize_row_q8_K(x_s, (block_q8_K *)ssm_q8_buf, WUBU_DIMS.d_model);
+    } else if (N > 1) {
+            // Batched prefill: quantize all tokens, weight read once from RAM
+            quantized_matmul_batched(x,
+                w->attn_qkv_weight_q, w->attn_qkv_weight_type,
+                D_MODEL, C, 0, N, qkv_all);
+            quantized_matmul_batched(x,
+                w->attn_gate_weight_q, w->attn_gate_weight_type,
+                D_MODEL, VALUE_DIM, 0, N, z_all);
+        } else {
+            // Decode (N=1): quantize once, reuse for both projections
+            const int n_q8_blocks = (D_MODEL + QK_K - 1) / QK_K;
+            const int q8_buf_size = n_q8_blocks * 292;
+            uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
+            if (!ssm_q8_buf) { fprintf(stderr, "SSM forward: q8 alloc failed\n"); goto cleanup; }
+            quantize_row_q8_K(x, (block_q8_K *)ssm_q8_buf, D_MODEL);
             quantized_matmul_from_q8(ssm_q8_buf,
                 w->attn_qkv_weight_q, w->attn_qkv_weight_type,
-                WUBU_DIMS.d_model, C, 0, qkv_all + s * C);
+                D_MODEL, C, 0, qkv_all);
             quantized_matmul_from_q8(ssm_q8_buf,
                 w->attn_gate_weight_q, w->attn_gate_weight_type,
-                WUBU_DIMS.d_model, VALUE_DIM, 0, z_all + s * VALUE_DIM);
+                D_MODEL, VALUE_DIM, 0, z_all);
+            free(ssm_q8_buf);
         }
-        free(ssm_q8_buf);
-    }
     if (dd) {
         FILE *f = fopen("/tmp/dbg_qkv_out.bin", "wb");
         if (f) { fwrite(qkv_all, sizeof(float), N * C, f); fclose(f); }
@@ -375,14 +483,14 @@ void wubu_ssm_forward(const float *x, int B, int T,
     // Step 3: beta/alpha projections
     #pragma omp parallel for
     for (int s = 0; s < N; s++) {
-        const float *x_s = x + s * WUBU_DIMS.d_model;
+        const float *x_s = x + s * D_MODEL;
         float *beta_s = beta_raw + s * DT_RANK;
         float *alpha_s = alpha_raw + s * DT_RANK;
         for (int j = 0; j < DT_RANK; j++) {
             float sum_b = 0.0f, sum_a = 0.0f;
-            for (int i = 0; i < WUBU_DIMS.d_model; i++) {
-                sum_b += x_s[i] * w->ssm_beta_weight[i + j * WUBU_DIMS.d_model];
-                sum_a += x_s[i] * w->ssm_alpha_weight[i + j * WUBU_DIMS.d_model];
+            for (int i = 0; i < D_MODEL; i++) {
+                sum_b += x_s[i] * w->ssm_beta_weight[i + j * D_MODEL];
+                sum_a += x_s[i] * w->ssm_alpha_weight[i + j * D_MODEL];
             }
             beta_s[j] = sum_b;
             alpha_s[j] = sum_a;
@@ -392,18 +500,27 @@ void wubu_ssm_forward(const float *x, int B, int T,
     // Step 4: Compute beta and gate (decay)
     // beta = sigmoid(beta_raw)
     // alpha_biased = alpha + ssm_dt_bias -> softplus -> * ssm_a
-    float *beta_flat = (float *)malloc(N * DT_RANK * sizeof(float));
-    float *gate_flat = (float *)malloc(N * DT_RANK * sizeof(float));
-    if (!beta_flat || !gate_flat) {
-        fprintf(stderr, "SSM forward: beta/gate alloc failed\n");
-        goto cleanup;
+    // Beta/gate/alpha buffers: use workspace when available
+    float *beta_flat, *gate_flat, *alpha_biased, *alpha_softplus;
+    if (ws && ws->N >= N && ws->B >= B && ws->T >= T) {
+        beta_flat = ws->beta_flat;
+        gate_flat = ws->gate_flat;
+        alpha_biased = ws->alpha_biased;
+        alpha_softplus = ws->alpha_softplus;
+    } else {
+        beta_flat = (float *)malloc(N * DT_RANK * sizeof(float));
+        gate_flat = (float *)malloc(N * DT_RANK * sizeof(float));
+        if (!beta_flat || !gate_flat) {
+            fprintf(stderr, "SSM forward: beta/gate alloc failed\n");
+            goto cleanup;
+        }
+        
+        alpha_biased = (float *)malloc(N * DT_RANK * sizeof(float));
+        alpha_softplus = (float *)malloc(N * DT_RANK * sizeof(float));
+        if (!alpha_biased || !alpha_softplus) goto cleanup;
     }
     
     wubu_sigmoid(N * DT_RANK, beta_raw, beta_flat);
-    
-    float *alpha_biased = (float *)malloc(N * DT_RANK * sizeof(float));
-    float *alpha_softplus = (float *)malloc(N * DT_RANK * sizeof(float));
-    if (!alpha_biased || !alpha_softplus) goto cleanup;
     
     for (int s = 0; s < N; s++) {
         for (int j = 0; j < DT_RANK; j++) {
@@ -519,43 +636,17 @@ void wubu_ssm_forward(const float *x, int B, int T,
     }
 #endif  // GPU_SUPPORT
     
-    // Chunked SSM path (default for prefill, T >= SSM_CHUNK_MIN).
-    // wubu_ssm_chunked_recurrence is the EXACT same Gated DeltaNet update as the
-    // sequential path below (outer-product / rank-1 form), grouped into chunks
-    // only for the inter-chunk state carry. Verified bit-identical to scalar
-    // (maxdiff ~1e-5 from float summation order) across T up to 256K.
-    // Override threshold via SSM_CHUNK_MIN; opt out of chunking entirely with
-    // FORCE_CPU_SSM_SEQ=1 (used by the 256K chunked-prefill harness).
-    int ssm_chunk_min = getenv("SSM_CHUNK_MIN") ? atoi(getenv("SSM_CHUNK_MIN")) : 2;
+    // Chunked SSM path for prefill (T >= CS tokens, CS compiled into chunked function)
+    // Falls through to sequential for decode (T=1) or small batches.
+    // Override threshold via SSM_CHUNK_MIN env var (default 1M — sequential always used for correctness).
+    // NOTE: Chunked SSM (CS=2) is designed for TRAINING/GPU where the A=(I+L)^{-T}
+    // attention matrix mixes tokens within a chunk. This produces DIFFERENT outputs
+    // from sequential (cos-sim ~0.96 at T=4 with constant input) because future K
+    // within the chunk affects past Q outputs — correct for training, wrong for inference.
+    // Sequential path is always correct for inference. Chunked is only appropriate
+    // when exact bit-level match with sequential is NOT required (e.g. GPU training).
+    int ssm_chunk_min = getenv("SSM_CHUNK_MIN") ? atoi(getenv("SSM_CHUNK_MIN")) : 1000000;
     if (T >= ssm_chunk_min && !getenv("FORCE_CPU_SSM_SEQ")) {
-        if (getenv("WUBU_GDN_CHUNK")) {
-            /* PRINCIPLED Gated DeltaNet chunkwise-parallel prefill (WY/UT
-             * closed form). Mathematically identical to the scalar
-             * recurrence at every chunk size (verified by test_gdn_chunk:
-             * 0.0 diff at C=1..64). Opt-in; the scalar-outer-product path
-             * below stays the default. GDN_C sets the chunk size. */
-            int gdn_c = getenv("GDN_C") ? atoi(getenv("GDN_C")) : 64;
-            wubu_ssm_gdn_chunked(B, T, q_norm, k_norm, v_conv,
-                                 beta_flat, gate_flat, gdn_c,
-                                 ssm_state, delta_out);
-            goto gpu_rec_done;
-        }
-        if (getenv("DUMP_SSM_IN")) {
-            static int dumped = 0;
-            if (!dumped) {
-                dumped = 1;
-                const char *pre = getenv("DUMP_PRE") ? getenv("DUMP_PRE") : "ssm_in";
-                char fn[256];
-                #define WF(ext,ptr,sz) do{ snprintf(fn,sizeof(fn),"%s_%s.bin",pre,ext); FILE*f=fopen(fn,"wb"); if(f){fwrite(ptr,sizeof(float),sz,f);fclose(f);} }while(0)
-                WF("q",q_norm,(size_t)N*KEY_DIM);
-                WF("k",k_norm,(size_t)N*KEY_DIM);
-                WF("v",v_conv,(size_t)N*VALUE_DIM);
-                WF("b",beta_flat,(size_t)N*DT_RANK);
-                WF("g",gate_flat,(size_t)N*DT_RANK);
-                #undef WF
-                fprintf(stderr, "DUMP_SSM_IN(%s) wrote N=%d\n", pre, N);
-            }
-        }
         wubu_ssm_chunked_recurrence(B, T, q_norm, k_norm, v_conv,
                                      beta_flat, gate_flat,
                                      ssm_state, delta_out);
@@ -572,88 +663,78 @@ void wubu_ssm_forward(const float *x, int B, int T,
             // For each V-head (32 heads) — fully parallel, each writes non-overlapping state
             #pragma omp parallel for
             for (int vh = 0; vh < SSM_V_HEADS; vh++) {
-                int kh = vh % SSM_K_HEADS;  // cyclic repeat mapping (matches ggml_repeat)
+                if (dd && (vh == 0 || vh == 2)) {
+                    int tmp_kh = vh % SSM_K_HEADS;
+                    float tmp_bg = beta_s[vh];
+                    float tmp_gg = tgt_safe_expf(gate_s[vh]);
+                    const float *tmp_q = q_norm + (s * SSM_K_HEADS + tmp_kh) * SSM_D_STATE;
+                    const float *tmp_k = k_norm + (s * SSM_K_HEADS + tmp_kh) * SSM_D_STATE;
+                    const float *tmp_v = v_conv + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
+                    printf("C_DEBUG s=%d vh=%d kh=%d bg=%.6f gg=%.6f\\\\n", s, vh, tmp_kh, tmp_bg, tmp_gg);
+                    for (int i = 0; i < 5; i++) printf("C_DEBUG q[%d]=%.8f k[%d]=%.8f v[%d]=%.8f\\\\n",
+                        i, tmp_q[i], i, tmp_k[i], i, tmp_v[i]);
+                    float *h_debug = ssm_state + (vh * SSM_D_STATE * SSM_D_STATE);
+                    for (int ri = 0; ri < 3; ri++) for (int rj = 0; rj < 3; rj++)
+                        printf("C_DEBUG state_before[%d][%d]=%.8f\\\\n", ri, rj, h_debug[ri * SSM_D_STATE + rj]);
+                }
                 
-                float bg = beta_s[vh];
-                float gg = tgt_safe_expf(gate_s[vh]);  // TGT: safe exp (clamped, no overflow)
-                
-                // Get Q, K, V for this head
+                // Full gated delta net recurrence (matches llama.cpp EXACT)
+                int kh = vh % SSM_K_HEADS;
+                float beta_val = beta_s[vh];
+                float gate_exp = tgt_safe_expf(gate_s[vh]);
+
                 const float *q_vh = q_norm + (s * SSM_K_HEADS + kh) * SSM_D_STATE;
                 const float *k_vh = k_norm + (s * SSM_K_HEADS + kh) * SSM_D_STATE;
                 const float *v_vh = v_conv + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
-                if (dd && (vh == 0 || vh == 2)) {
-                    printf("C_DEBUG s=%d vh=%d kh=%d bg=%.6f gg=%.6f\\n", s, vh, kh, bg, gg);
-                    for (int i = 0; i < 5; i++) printf("C_DEBUG q[%d]=%.8f k[%d]=%.8f v[%d]=%.8f\\n",
-                        i, q_vh[i], i, k_vh[i], i, v_vh[i]);
-                    // Also print first 3x3 of state
-                    float *h_debug = ssm_state + (vh * SSM_D_STATE * SSM_D_STATE);
-                    for (int ri = 0; ri < 3; ri++) for (int rj = 0; rj < 3; rj++)
-                        printf("C_DEBUG state_before[%d][%d]=%.8f\\n", ri, rj, h_debug[ri * SSM_D_STATE + rj]);
+
+                float *h = ssm_state + (vh * SSM_D_STATE * SSM_D_STATE);
+
+                // Step 8a: State decay — multiply all elements by exp(gate) [llama: ggml_vec_scale]
+                for (int jj = 0; jj < SSM_D_STATE * SSM_D_STATE; jj++) {
+                    h[jj] *= gate_exp;
                 }
-                
-                // Scale Q by 1/sqrt(d) (matches llama.cpp reference)
-                float q_scaled[SSM_D_STATE];
+
+                // Step 8b: Compute h @ k -> hk
+                float hk_tmp[SSM_D_STATE];
+                memset(hk_tmp, 0, sizeof(hk_tmp));
+                for (int i = 0; i < SSM_D_STATE; i++) {
+                    float sum = 0.0f;
+                    for (int j = 0; j < SSM_D_STATE; j++) {
+                        sum += h[i * SSM_D_STATE + j] * k_vh[j];
+                    }
+                    hk_tmp[i] = sum;
+                }
+
+                // Step 8c: delta = (v - hk) * beta
+                float delta[SSM_D_STATE];
+                for (int i = 0; i < SSM_D_STATE; i++) {
+                    delta[i] = (v_vh[i] - hk_tmp[i]) * beta_val;
+                }
+
+                // Step 8d: State update — outer product: h[i][j] += v[i] * k[j] * beta
+                // NOTE: This uses delta[i] (row) * k[j] (col) which matches the model's
+                // trained convention (transposed outer product). Using k[i] * delta[j] (standard
+                // GDN formula) BREAKS single-token output (cos-sim drops 0.97→-0.40).
+                // The model was trained with the transposed convention.
+                for (int i = 0; i < SSM_D_STATE; i++) {
+                    float di = delta[i];
+                    float *h_row = h + i * SSM_D_STATE;
+                    for (int j = 0; j < SSM_D_STATE; j++) {
+                        h_row[j] += k_vh[j] * di;
+                    }
+                }
+
+                // Step 8e: Output = h @ q * scale
+                // [llama: attn_data[j] = sum_i s_out[j*S_v+i] * q[i] * scale]
+                float *out = delta_out + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
                 const float q_scale = 1.0f / sqrtf((float)SSM_D_STATE);
                 for (int i = 0; i < SSM_D_STATE; i++) {
-                    q_scaled[i] = q_vh[i] * q_scale;
+                    float sum = 0.0f;
+                    for (int j = 0; j < SSM_D_STATE; j++) {
+                        sum += h[i * SSM_D_STATE + j] * q_vh[j];
+                    }
+                    out[i] = sum * q_scale;
                 }
-                
-                #ifdef SSM_DEBUG
-                printf("  SSM_DBG tok=%d vh=%d: bg=%.6f gg=%.6f q[0]=%.6f k[0]=%.6f v[0]=%.6f\n",
-                           s, vh, bg, gg, q_scaled[0], k_vh[0], v_vh[0]);
-                #endif
-                
-                // Get state pointer for this V-head
-                float *h = ssm_state + (vh * SSM_D_STATE * SSM_D_STATE);
-                if (dd && vh < 4 && s == 0) {
-                    printf("C_DEBUG_PTR vh=%d offset=%ld\n", vh, (long)(vh * SSM_D_STATE * SSM_D_STATE));
-                }
-    
-                // Step 8a: State decay (AVX2)
-                avx2_state_decay(h, gg);
-                
-                // Step 8b: Compute h @ k -> [SSM_D_STATE] (AVX2)
-                float hk[SSM_D_STATE];
-                memset(hk, 0, sizeof(hk));
-                // DEBUG: verify state before hk
-                if (dd && vh == 2 && s == 1) {
-                    double chk_sum = 0;
-                    for (int jj = 0; jj < SSM_D_STATE; jj++) chk_sum += h[jj];
-                    printf("C_DEBUG_HK2 state_sum_col0=%.12f h[0]=%.8f h[1]=%.8f\\n", chk_sum, h[0], h[1]);
-                }
-                avx2_hk(h, k_vh, hk);
-                if (dd && vh == 2 && s == 1) {
-                    printf("C_DEBUG_HK vh=%d s=%d gg=%.8f bg=%.8f\\n", vh, s, gg, bg);
-                    printf("C_DEBUG_HK k[0]=%.8f k[1]=%.8f k[2]=%.8f\\n", k_vh[0], k_vh[1], k_vh[2]);
-                    printf("C_DEBUG_HK h[0][0]=%.8f h[0][1]=%.8f h[0][2]=%.8f\\n",
-                        h[0*SSM_D_STATE+0], h[0*SSM_D_STATE+1], h[0*SSM_D_STATE+2]);
-                    printf("C_DEBUG_HK h_decayed[0][0]=%.8f\\n", h[0*SSM_D_STATE+0]);
-                    // Compute hk[0] manually to verify
-                    double hk0_manual = 0;
-                    for (int jj = 0; jj < 5; jj++) hk0_manual += h[0*SSM_D_STATE+jj] * (double)k_vh[jj];
-                    printf("C_DEBUG_HK hk0_partial(first5)=%.12f\\n", hk0_manual);
-                }
-                
-                // Step 8c: diff = V - hk
-                float diff[SSM_D_STATE];
-                for (int i = 0; i < SSM_D_STATE; i++) {
-                    diff[i] = v_vh[i] - hk[i];
-                }
-                
-                // State update with diff (AVX2)
-                avx2_state_update(h, k_vh, diff, bg);
-                ssm_state_clamp(h, SSM_D_STATE * SSM_D_STATE);
-                if (dd && (vh == 0 || vh == 2)) {
-                    for (int ri = 0; ri < 3; ri++) for (int rj = 0; rj < 3; rj++)
-                        printf("C_DEBUG state_after[%d][%d]=%.8f\\n", ri, rj, h[ri * SSM_D_STATE + rj]);
-                    printf("C_DEBUG hk[0]=%.8f diff[0]=%.8f\\n", hk[0], diff[0]);
-                }
-                
-                // Step 8e: output = h @ q -> [SSM_D_STATE] (AVX2)
-                // Store in delta_out
-                float *out = delta_out + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
-                memset(out, 0, SSM_D_STATE * sizeof(float));
-                avx2_hq(h, q_scaled, out);
             }
         }
     }
@@ -679,17 +760,6 @@ void wubu_ssm_forward(const float *x, int B, int T,
     // delta_out: [N, SSM_V_HEADS, SSM_D_STATE] = [N, 32, 128]
     // ssm_norm: [SSM_D_STATE] = [128]
     // z_silu: silu(z_all[VALUE_DIM])
-    if (getenv("DUMP_SSM_OUT")) {
-        static int dumpedo = 0;
-        if (!dumpedo) {
-            dumpedo = 1;
-            const char *pre = getenv("DUMP_PRE") ? getenv("DUMP_PRE") : "ssm_out";
-            char fn[256];
-            snprintf(fn,sizeof(fn),"%s_delta.bin",pre);
-            FILE*f=fopen(fn,"wb"); if(f){fwrite(delta_out,sizeof(float),(size_t)N*VALUE_DIM,f);fclose(f);}
-            fprintf(stderr,"DUMP_SSM_OUT_MAIN(%s) wrote N*VAL=%ld\n", pre, (long)N*VALUE_DIM);
-        }
-    }
     wubu_silu(N * VALUE_DIM, z_all, z_silu);
     
     // RMSNorm along SSM_D_STATE per head
@@ -712,30 +782,30 @@ void wubu_ssm_forward(const float *x, int B, int T,
     }
 
     // Step 11: Output projection via quantized or F32 matmul
-    for (int s = 0; s < N; s++) {
-        proj_matmul(delta_out + s * VALUE_DIM, VALUE_DIM, WUBU_DIMS.d_model,
-                    w->ssm_out_weight_f32, w->ssm_out_weight_q, w->ssm_out_weight_type,
-                    output + s * WUBU_DIMS.d_model);
+        // Batched for prefill (N>1): single pass through Q6_K weight for all tokens
+        if (N > 1 && w->ssm_out_weight_q && w->ssm_out_weight_type != GGML_TYPE_F32) {
+            quantized_matmul_batched(delta_out,
+                w->ssm_out_weight_q, w->ssm_out_weight_type,
+                VALUE_DIM, D_MODEL, 0, N, output);
+        } else {
+            for (int s = 0; s < N; s++) {
+                proj_matmul(delta_out + s * VALUE_DIM, VALUE_DIM, D_MODEL,
+                            w->ssm_out_weight, w->ssm_out_weight_q, w->ssm_out_weight_type,
+                            output + s * D_MODEL);
+            }
+        }
+
+    cleanup:
+    if (own_alloc) {
+        free(qkv_all); free(z_all);
+        free(beta_raw); free(alpha_raw);
+        free(conv_input); free(conv_output);
+        free(q_conv); free(k_conv); free(v_conv);
+        free(q_norm); free(k_norm);
+        free(delta_out); free(z_silu);
+        free(beta_flat); free(gate_flat);
+        free(alpha_biased); free(alpha_softplus);
     }
-    
-cleanup:
-    free(qkv_all);
-    free(z_all);
-    free(beta_raw);
-    free(alpha_raw);
-    free(conv_input);
-    free(conv_output);
-    free(q_conv);
-    free(k_conv);
-    free(v_conv);
-    free(q_norm);
-    free(k_norm);
-    free(delta_out);
-    free(z_silu);
-    free(beta_flat);
-    free(gate_flat);
-    free(alpha_biased);
-    free(alpha_softplus);
 }
 
 // SSM forward with intermediate saving (for backward)
@@ -779,30 +849,30 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
     // (Steps 1-10 are identical, just compute)
     
     // Step 1+2: Fused QKV + gate projection via single Q8_K quantization
-    const int n_q8_blocks = (WUBU_DIMS.d_model + QK_K - 1) / QK_K;
+    const int n_q8_blocks = (D_MODEL + QK_K - 1) / QK_K;
     const int q8_buf_size = n_q8_blocks * 292;
     uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
     if (!ssm_q8_buf) { fprintf(stderr, "SSM save: q8 alloc failed\n"); goto cleanup_save; }
     for (int s = 0; s < N; s++) {
-        const float *x_s = x + s * WUBU_DIMS.d_model;
-        quantize_row_q8_K(x_s, (block_q8_K *)ssm_q8_buf, WUBU_DIMS.d_model);
+        const float *x_s = x + s * D_MODEL;
+        quantize_row_q8_K(x_s, (block_q8_K *)ssm_q8_buf, D_MODEL);
         quantized_matmul_from_q8(ssm_q8_buf,
             w->attn_qkv_weight_q, w->attn_qkv_weight_type,
-            WUBU_DIMS.d_model, C, 0, qkv_all + s * C);
+            D_MODEL, C, 0, qkv_all + s * C);
         quantized_matmul_from_q8(ssm_q8_buf,
             w->attn_gate_weight_q, w->attn_gate_weight_type,
-            WUBU_DIMS.d_model, VALUE_DIM, 0, z_all + s * VALUE_DIM);
+            D_MODEL, VALUE_DIM, 0, z_all + s * VALUE_DIM);
     }
     free(ssm_q8_buf);
     
     // Step 3: beta/alpha projections
     for (int s = 0; s < N; s++) {
-        const float *x_s = x + s * WUBU_DIMS.d_model;
+        const float *x_s = x + s * D_MODEL;
         float *beta_s = beta_raw + s * DT_RANK;
         float *alpha_s = alpha_raw + s * DT_RANK;
         for (int j = 0; j < DT_RANK; j++) {
             double sum_b = 0.0, sum_a = 0.0;
-            for (int i = 0; i < WUBU_DIMS.d_model; i++) {
+            for (int i = 0; i < D_MODEL; i++) {
                 sum_b += (double)x_s[i] * (double)w->ssm_beta_weight[i * DT_RANK + j];
                 sum_a += (double)x_s[i] * (double)w->ssm_alpha_weight[i * DT_RANK + j];
             }
@@ -890,7 +960,6 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
                     for (int j = 0; j < SSM_D_STATE; j++)
                         h[i * SSM_D_STATE + j] += k_vh[j] * diff * bg;
                 }
-                ssm_state_clamp(h, SSM_D_STATE * SSM_D_STATE);
                 
                 float *out = delta_out + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
                 memset(out, 0, SSM_D_STATE * sizeof(float));
@@ -905,17 +974,6 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
         memcpy(save->states_t + T * state_sz, ssm_state, state_sz * sizeof(float));
     
     // Step 10: Gated normalization
-    if (getenv("DUMP_SSM_OUT")) {
-        static int dumpedo = 0;
-        if (!dumpedo) {
-            dumpedo = 1;
-            const char *pre = getenv("DUMP_PRE") ? getenv("DUMP_PRE") : "ssm_out";
-            char fn[256];
-            snprintf(fn,sizeof(fn),"%s_delta.bin",pre);
-            FILE*f=fopen(fn,"wb"); if(f){fwrite(delta_out,sizeof(float),(size_t)N*VALUE_DIM,f);fclose(f);}
-            fprintf(stderr,"DUMP_SSM_OUT(%s) wrote N*VAL=%ld\n", pre, (long)N*VALUE_DIM);
-        }
-    }
     wubu_silu(N * VALUE_DIM, z_all, z_silu);
     for (int s = 0; s < N; s++) {
         for (int vh = 0; vh < SSM_V_HEADS; vh++) {
@@ -932,9 +990,9 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
     
     // Step 11: Output projection via quantized or F32 matmul
     for (int s = 0; s < N; s++) {
-        proj_matmul(delta_out + s * VALUE_DIM, VALUE_DIM, WUBU_DIMS.d_model,
-                    w->ssm_out_weight_f32, w->ssm_out_weight_q, w->ssm_out_weight_type,
-                    output + s * WUBU_DIMS.d_model);
+        proj_matmul(delta_out + s * VALUE_DIM, VALUE_DIM, D_MODEL,
+                    w->ssm_out_weight, w->ssm_out_weight_q, w->ssm_out_weight_type,
+                    output + s * D_MODEL);
     }
     
     // === Save intermediates for backward ===
@@ -1029,37 +1087,37 @@ void wubu_poincare_ssm_forward(const float *x, int B, int T,
     
     // Step 1+2: Fused QKV + gate projection via single Q8_K quantization
     // Both projections use the same input x[s], so quantize once and reuse
-    const int n_q8_blocks = (WUBU_DIMS.d_model + QK_K - 1) / QK_K;
+    const int n_q8_blocks = (D_MODEL + QK_K - 1) / QK_K;
     const int q8_buf_size = n_q8_blocks * 292;  // Q8K_BLOCK_SIZE
     uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
     block_q8_K *ssm_q8 = (block_q8_K *)ssm_q8_buf;
     if (!ssm_q8_buf) { fprintf(stderr, "SSM forward: q8 alloc failed\n"); goto cleanup_p; }
     
     for (int s = 0; s < N; s++) {
-        const float *x_s = x + s * WUBU_DIMS.d_model;
+        const float *x_s = x + s * D_MODEL;
         // Quantize once
-        quantize_row_q8_K(x_s, ssm_q8, WUBU_DIMS.d_model);
+        quantize_row_q8_K(x_s, ssm_q8, D_MODEL);
         
         // Reuse for both projections
         quantized_matmul_from_q8(ssm_q8_buf,
             w->attn_qkv_weight_q, w->attn_qkv_weight_type,
-            WUBU_DIMS.d_model, C, 0, qkv_all + s * C);
+            D_MODEL, C, 0, qkv_all + s * C);
         quantized_matmul_from_q8(ssm_q8_buf,
             w->attn_gate_weight_q, w->attn_gate_weight_type,
-            WUBU_DIMS.d_model, VALUE_DIM, 0, z_all + s * VALUE_DIM);
+            D_MODEL, VALUE_DIM, 0, z_all + s * VALUE_DIM);
     }
     free(ssm_q8_buf);
     
     // Step 3: beta/alpha projections
     for (int s = 0; s < N; s++) {
-        const float *x_s = x + s * WUBU_DIMS.d_model;
+        const float *x_s = x + s * D_MODEL;
         float *beta_s = beta_raw + s * DT_RANK;
         float *alpha_s = alpha_raw + s * DT_RANK;
         for (int j = 0; j < DT_RANK; j++) {
             float sum_b = 0.0f, sum_a = 0.0f;
-            for (int i = 0; i < WUBU_DIMS.d_model; i++) {
-                sum_b += x_s[i] * w->ssm_beta_weight[i + j * WUBU_DIMS.d_model];
-                sum_a += x_s[i] * w->ssm_alpha_weight[i + j * WUBU_DIMS.d_model];
+            for (int i = 0; i < D_MODEL; i++) {
+                sum_b += x_s[i] * w->ssm_beta_weight[i + j * D_MODEL];
+                sum_a += x_s[i] * w->ssm_alpha_weight[i + j * D_MODEL];
             }
             beta_s[j] = sum_b;
             alpha_s[j] = sum_a;
@@ -1251,9 +1309,9 @@ void wubu_poincare_ssm_forward(const float *x, int B, int T,
     }
     
     for (int s = 0; s < N; s++) {
-        proj_matmul(delta_out + s * VALUE_DIM, VALUE_DIM, WUBU_DIMS.d_model,
-                    w->ssm_out_weight_f32, w->ssm_out_weight_q, w->ssm_out_weight_type,
-                    output + s * WUBU_DIMS.d_model);
+        proj_matmul(delta_out + s * VALUE_DIM, VALUE_DIM, D_MODEL,
+                    w->ssm_out_weight, w->ssm_out_weight_q, w->ssm_out_weight_type,
+                    output + s * D_MODEL);
     }
     
 cleanup_p:
@@ -1272,30 +1330,12 @@ cleanup_p:
 
 void wubu_gqa_forward(const float *x, int B, int T,
                       const gqa_layer_weights *w,
-                      int d_model,
                       float *output,
                       const void *k_cache, const void *v_cache, int cache_len,
-                      void *k_out, void *v_out,
-                      int head_dim, int n_q_heads, int n_kv_heads) {
+                      void *k_out, void *v_out) {
     const int N = B * T;
-    const int q_dim = n_q_heads * head_dim;
-    const int kv_dim = n_kv_heads * head_dim;
-    
-    // DUMP_GQA_DEBUG_DIR: dump function inputs
-    {
-        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
-        if (gqa_dump_dir && gqa_dump_dir[0]) {
-            const char *prefix = getenv("DUMP_GQA_PREFIX");
-            if (!prefix) prefix = "";
-            char fname[1024];
-            if (prefix[0])
-                snprintf(fname, sizeof(fname), "%s/%s_input.bin", gqa_dump_dir, prefix);
-            else
-                snprintf(fname, sizeof(fname), "%s/input.bin", gqa_dump_dir);
-            FILE *fp = fopen(fname, "wb");
-            if (fp) { fwrite(x, sizeof(float), N * d_model, fp); fclose(fp); }
-        }
-    }
+    const int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;  // 4096
+    const int kv_dim = GQA_KV_HEADS * GQA_HEAD_DIM;  // 512
     
     // Allocate
     // Q_full: [N, q_dim*2] = [N, 8192] — first q_dim=4096 Q, next 4096 gate
@@ -1314,99 +1354,34 @@ void wubu_gqa_forward(const float *x, int B, int T,
         return;
     }
     
-    // Step 1: Q + gate fused projection via quantized or F32 matmul
-    // Step 2-3: K and V projections — share quantization buffer
-    // When d_model is not 256-aligned (e.g. WuBu-35M d_model=448),
-    // Q8_K block layout can't represent a partial block — use the
-    // dequant+SGEMM fallback path in quantized_matmul() instead.
-    const int use_q8_gqa = (d_model % QK_K == 0);
-    void *gqa_q8_buf = NULL;
-    if (use_q8_gqa) {
-        const int n_q8_blocks = (d_model + QK_K - 1) / QK_K;
-        gqa_q8_buf = malloc((size_t)n_q8_blocks * 292);
-        if (!gqa_q8_buf) { free(Q_full); free(gate); free(K); free(V); free(Q_norm); free(K_norm); free(attn_out); return; }
-    }
+    // Step 1: Q + gate fused projection — batched for all N tokens
+    // Weight read ONCE from RAM via quantized_matmul_batched
+    quantized_matmul_batched(x,
+        w->attn_q_weight_q, w->attn_q_weight_type,
+        D_MODEL, q_dim * 2, 0, N, Q_full);
     
+    // Extract gate from Q_full — INTERLEAVED per-head layout:
+    // Q_full layout: [Q_h0(256) | gate_h0(256) | Q_h1(256) | gate_h1(256) | ...]
     for (int s = 0; s < N; s++) {
-        const float *x_s = x + s * d_model;
-        if (use_q8_gqa) {
-            quantize_row_q8_K(x_s, (block_q8_K *)gqa_q8_buf, d_model);
-        }
-        
-        // Q + gate projection
         int q_offset = s * q_dim * 2;
-        if (use_q8_gqa) {
-            quantized_matmul_from_q8(gqa_q8_buf,
-                w->attn_q_weight_q, w->attn_q_weight_type,
-                d_model, q_dim * 2, 0, Q_full + q_offset);
-        } else {
-            quantized_matmul(x_s,
-                w->attn_q_weight_q, w->attn_q_weight_type,
-                d_model, q_dim * 2, 0, Q_full + q_offset);
-        }
-        // Extract gate from Q_full — INTERLEAVED per-head layout:
-        // Q_full layout: [Q_h0(256) | gate_h0(256) | Q_h1(256) | gate_h1(256) | ...]
-        // gate[s * q_dim + j] should get all gate values (second 256 per head)
-        for (int h = 0; h < n_q_heads; h++) {
-            for (int j = 0; j < head_dim; j++) {
-                int qf_idx = q_offset + h * (2 * head_dim) + head_dim + j;
-                int g_idx  = s * q_dim + h * head_dim + j;
+        for (int h = 0; h < GQA_Q_HEADS; h++) {
+            for (int j = 0; j < GQA_HEAD_DIM; j++) {
+                int qf_idx = q_offset + h * (2 * GQA_HEAD_DIM) + GQA_HEAD_DIM + j;
+                int g_idx  = s * q_dim + h * GQA_HEAD_DIM + j;
                 gate[g_idx] = Q_full[qf_idx];
             }
         }
-        
-        // K projection
-        if (use_q8_gqa) {
-            quantized_matmul_from_q8(gqa_q8_buf,
-                w->attn_k_weight_q, w->attn_k_weight_type,
-                d_model, kv_dim, 0, K + s * kv_dim);
-        } else {
-            quantized_matmul(x_s,
-                w->attn_k_weight_q, w->attn_k_weight_type,
-                d_model, kv_dim, 0, K + s * kv_dim);
-        }
-        // V projection
-        if (use_q8_gqa) {
-            quantized_matmul_from_q8(gqa_q8_buf,
-                w->attn_v_weight_q, w->attn_v_weight_type,
-                d_model, kv_dim, 0, V + s * kv_dim);
-        } else {
-            quantized_matmul(x_s,
-                w->attn_v_weight_q, w->attn_v_weight_type,
-                d_model, kv_dim, 0, V + s * kv_dim);
-        }
     }
-    if (gqa_q8_buf) free(gqa_q8_buf);
     
-    // DUMP_GQA_DEBUG_DIR: dump Q/K/V projections for 1:1 parity comparison
-    {
-        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
-        if (gqa_dump_dir && gqa_dump_dir[0]) {
-            const char *prefix = getenv("DUMP_GQA_PREFIX");
-            if (!prefix) prefix = "";
-            FILE *fp;
-            char fname[1024];
-            if (prefix[0]) {
-                snprintf(fname, sizeof(fname), "%s/%s_Q_full.bin", gqa_dump_dir, prefix);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_full, sizeof(float), N * q_dim * 2, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/%s_gate.bin", gqa_dump_dir, prefix);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(gate, sizeof(float), N * q_dim, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/%s_K.bin", gqa_dump_dir, prefix);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(K, sizeof(float), N * kv_dim, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/%s_V.bin", gqa_dump_dir, prefix);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(V, sizeof(float), N * kv_dim, fp); fclose(fp); }
-            } else {
-                snprintf(fname, sizeof(fname), "%s/Q_full.bin", gqa_dump_dir);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_full, sizeof(float), N * q_dim * 2, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/gate.bin", gqa_dump_dir);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(gate, sizeof(float), N * q_dim, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/K.bin", gqa_dump_dir);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(K, sizeof(float), N * kv_dim, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/V.bin", gqa_dump_dir);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(V, sizeof(float), N * kv_dim, fp); fclose(fp); }
-            }
-        }
-    }
+    // K projection — batched
+    quantized_matmul_batched(x,
+        w->attn_k_weight_q, w->attn_k_weight_type,
+        D_MODEL, kv_dim, 0, N, K);
+    
+    // V projection — batched
+    quantized_matmul_batched(x,
+        w->attn_v_weight_q, w->attn_v_weight_type,
+        D_MODEL, kv_dim, 0, N, V);
     
     // NaN guard: replace any NaN/Inf in Q_full, K, V with 0
     // Only check when debug is enabled; normally matmul produces no NaN
@@ -1430,21 +1405,21 @@ void wubu_gqa_forward(const float *x, int B, int T,
     if (!Q_only) { free(Q_full); free(gate); free(K); free(V); free(Q_norm); free(K_norm); free(attn_out); return; }
     for (int s = 0; s < N; s++) {
         int q_offset = s * q_dim * 2;
-        for (int h = 0; h < n_q_heads; h++) {
-            for (int j = 0; j < head_dim; j++) {
-                Q_only[s * q_dim + h * head_dim + j] = Q_full[q_offset + h * (2 * head_dim) + j];
+        for (int h = 0; h < GQA_Q_HEADS; h++) {
+            for (int j = 0; j < GQA_HEAD_DIM; j++) {
+                Q_only[s * q_dim + h * GQA_HEAD_DIM + j] = Q_full[q_offset + h * (2 * GQA_HEAD_DIM) + j];
             }
         }
     }
-    wubu_rms_norm(B, T * n_q_heads, head_dim, Q_only, w->attn_q_norm_weight, 1e-6f, Q_norm);
+    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, w->attn_q_norm_weight, 1e-6f, Q_norm);
     free(Q_only);
     
     // K RMSNorm — K has [N, kv_dim] = [N, KV_HEADS * HEAD_DIM]
     // Data layout: K[(b*T+t)*kv_dim + h*HEAD_DIM + i]
     // RMSNorm sees [B, T*KV_HEADS, HEAD_DIM] same layout
-    wubu_rms_norm(B, T * n_kv_heads, head_dim, K, w->attn_k_norm_weight, 1e-6f, K_norm);
+    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, w->attn_k_norm_weight, 1e-6f, K_norm);
     
-    // Step 4: IMRoPE (Interleaved MultiRoPE)
+    // Step 4: IMRoPE (Interleaved MultiRoPE) with pre-computed theta table
     // Qwen3.6: rope.dimension_sections=[11,11,10,0], rope.dimension_count=64, rope.freq_base=10000000.0
     // For text-only generation: all position IDs equal, reduces to standard RoPE
     // Apply to first N_ROT=64 dims of each head for both Q and K
@@ -1454,6 +1429,8 @@ void wubu_gqa_forward(const float *x, int B, int T,
     // RoPE extrapolation (Qwen2.5-1M §3.1):
     //   ROPE_SCALE_FACTOR=0.25 extends 64K→256K (4x)
     //   theta_i(pos) = (pos * scale) * freq_base^{-2i/N_ROT}
+    //
+    // Optimization: pre-compute theta_i table (static, once) to eliminate powf() calls
     {
         const int n_rot = 64;  // rope.dimension_count
         const float freq_base = 10000000.0f;
@@ -1461,16 +1438,27 @@ void wubu_gqa_forward(const float *x, int B, int T,
         const char *rope_scale_env = getenv("ROPE_SCALE_FACTOR");
         const float scale_factor = rope_scale_env ? atof(rope_scale_env) : 1.0f;
         
+        // Static pre-computed theta_i table (freq_base^{-2i/n_rot})
+        // Computed once, reused across all forward calls
+        static float rope_theta[32];
+        static int rope_theta_ready = 0;
+        if (!rope_theta_ready) {
+            for (int i = 0; i < q_rot_pairs; i++)
+                rope_theta[i] = powf(freq_base, -2.0f * i / (float)n_rot);
+            rope_theta_ready = 1;
+        }
+        
         for (int b = 0; b < B; b++) {
             for (int t = 0; t < T; t++) {
                 float pos = (float)(b * T + t);
+                float pos_scale = pos * scale_factor;
                 
-                // Apply to all Q heads — fully parallel
+                // Apply to all 16 Q heads — fully parallel
                 #pragma omp parallel for
-                for (int h = 0; h < n_q_heads; h++) {
-                    float *q_h = Q_norm + ((b * T + t) * n_q_heads + h) * head_dim;
+                for (int h = 0; h < GQA_Q_HEADS; h++) {
+                    float *q_h = Q_norm + ((b * T + t) * GQA_Q_HEADS + h) * GQA_HEAD_DIM;
                     for (int i = 0; i < q_rot_pairs; i++) {
-                        float theta = (pos * scale_factor) * powf(freq_base, -2.0f * i / (float)n_rot);
+                        float theta = pos_scale * rope_theta[i];
                         float cos_t = cosf(theta);
                         float sin_t = sinf(theta);
                         float x0 = q_h[2*i];
@@ -1480,11 +1468,11 @@ void wubu_gqa_forward(const float *x, int B, int T,
                     }
                 }
                 
-                // Apply to all KV heads
-                for (int h = 0; h < n_kv_heads; h++) {
-                    float *k_h = K_norm + ((b * T + t) * n_kv_heads + h) * head_dim;
+                // Apply to all 2 KV heads
+                for (int h = 0; h < GQA_KV_HEADS; h++) {
+                    float *k_h = K_norm + ((b * T + t) * GQA_KV_HEADS + h) * GQA_HEAD_DIM;
                     for (int i = 0; i < q_rot_pairs; i++) {
-                        float theta = (pos * scale_factor) * powf(freq_base, -2.0f * i / (float)n_rot);
+                        float theta = pos_scale * rope_theta[i];
                         float cos_t = cosf(theta);
                         float sin_t = sinf(theta);
                         float x0 = k_h[2*i];
@@ -1493,28 +1481,6 @@ void wubu_gqa_forward(const float *x, int B, int T,
                         k_h[2*i+1] = x0 * sin_t + x1 * cos_t;
                     }
                 }
-            }
-        }
-    }
-    
-    // DUMP_GQA_DEBUG_DIR: dump Q_norm/K_norm after RoPE
-    {
-        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
-        if (gqa_dump_dir && gqa_dump_dir[0]) {
-            const char *prefix = getenv("DUMP_GQA_PREFIX");
-            if (!prefix) prefix = "";
-            FILE *fp;
-            char fname[1024];
-            if (prefix[0]) {
-                snprintf(fname, sizeof(fname), "%s/%s_Q_norm.bin", gqa_dump_dir, prefix);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_norm, sizeof(float), N * q_dim, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/%s_K_norm.bin", gqa_dump_dir, prefix);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(K_norm, sizeof(float), N * kv_dim, fp); fclose(fp); }
-            } else {
-                snprintf(fname, sizeof(fname), "%s/Q_norm.bin", gqa_dump_dir);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_norm, sizeof(float), N * q_dim, fp); fclose(fp); }
-                snprintf(fname, sizeof(fname), "%s/K_norm.bin", gqa_dump_dir);
-                fp = fopen(fname, "wb"); if(fp) { fwrite(K_norm, sizeof(float), N * kv_dim, fp); fclose(fp); }
             }
         }
     }
@@ -1530,146 +1496,27 @@ void wubu_gqa_forward(const float *x, int B, int T,
     int use_sparse = getenv("USE_SPARSE_ATTN") != NULL;
     int sparse_w = getenv("SPARSE_W") ? atoi(getenv("SPARSE_W")) : 512;   // local window size
     int sparse_g = getenv("SPARSE_G") ? atoi(getenv("SPARSE_G")) : 128;   // global positions count
-    int sparse_min_len = getenv("SPARSE_MIN") ? atoi(getenv("SPARSE_MIN")) : 4096;  // min ctx for sparse
+    int sparse_min_len = getenv("SPARSE_MIN") ? atoi(getenv("SPARSE_MIN")) : 512;  // min ctx for sparse (was 4096, lowered May 27: GQA is not bottleneck, but helps at >2K)
     
-    // Pre-allocate sparse index buffer (reused per query position)
+    // Pre-allocate sparse index buffer (stack for small, heap for extreme)
     int max_sparse = sparse_w + sparse_g + 1;  // window + global + self
+    int sparse_stack[2048];  // up to 2048 ints = 8KB stack (max realistic: 512+128+1=641)
     int *sparse_buf = NULL;
     if (use_sparse && total_kv >= sparse_min_len) {
-        sparse_buf = (int *)malloc((size_t)max_sparse * sizeof(int));
-        if (!sparse_buf) use_sparse = 0;
+        if (max_sparse <= 2048) {
+            sparse_buf = sparse_stack;
+        } else {
+            sparse_buf = (int *)malloc((size_t)max_sparse * sizeof(int));
+            if (!sparse_buf) use_sparse = 0;
+        }
     } else {
         use_sparse = 0;
     }
     
-    // n_q_heads Q heads, n_kv_heads KV heads. Each KV head serves n_q_heads/n_kv_heads Q heads.
-    float scale = 1.0f / sqrtf(head_dim);
-
-    // KB1: FlashDecoding fast-path (doc 015). When N==1 (single-token decode)
-    // and the cache is non-trivial (>=64 positions), and the env opt-in is set,
-    // route through chunked online-softmax decode attention. Mathematically
-    // identical to the serial loop below (verified at 1e-7 maxdiff on the
-    // standalone test_flashdecode oracle), but parallelizes over the KV axis
-    // for long-context speedup.
-    // KB1: Fast attention fast-path (wubu_fast_attn).
-    // Zero-malloc, precomputed-RoPE, bandwidth-optimal decode attention.
-    // Default for N==1 decode (no env var required) — the old path does
-    // ~175 malloc/free per layer which is catastrophic at 512K context.
-    int use_fast_attn = (N == 1) && !use_sparse && (cache_len >= 1);
-    if (use_fast_attn) {
-        extern wubu_fast_attn_ctx_t *wubu_fast_attn_get_ctx(int n_q, int n_kv, int hd,
-                                                            int n_rot, float freq_base,
-                                                            float scale_factor);
-        extern void wubu_fast_attn_decode(wubu_fast_attn_ctx_t *ctx,
-                                               const float *q,
-                                               const float *k_cache,
-                                               const float *v_cache,
-                                               int cache_len,
-                                               float *out,
-                                               int n_threads);
-        extern void wubu_fast_attn_decode_splitk(wubu_fast_attn_ctx_t *ctx,
-                                                       const float *q,
-                                                       const float *k_cache,
-                                                       const float *v_cache,
-                                                       int cache_len,
-                                                       float *out,
-                                                       int n_threads,
-                                                       int n_splits);
-        extern void wubu_fast_attn_decode_q8_tiled(wubu_fast_attn_ctx_t *ctx,
-                                                        const float *q,
-                                                        const void *k_cache_q8,
-                                                        const void *v_cache_q8,
-                                                        int cache_len,
-                                                        float *out,
-                                                        int n_threads,
-                                                        int tile_tokens);
-        wubu_fast_attn_ctx_t *fctx = wubu_fast_attn_get_ctx(n_q_heads, n_kv_heads,
-                                                            head_dim, 64, 10000000.0f, 1.0f);
-        if (fctx) {
-            /* A10: RoPE-aware KV prefetch — software-prefetch KV blocks for
-             * nearby positions before the attention scan loop. Overlapped with
-             * current token's QKV projection compute. High temporal locality (3). */
-            {
-                extern void wubu_rope_prefetch_kv_f32(const float *k_cache,
-                    const float *v_cache, int cache_len, int kv_stride,
-                    int pos, int lookback, int lookahead);
-                int kv_stride = n_kv_heads * head_dim;
-                wubu_rope_prefetch_kv_f32((const float *)k_cache,
-                    (const float *)v_cache, cache_len, kv_stride,
-                    cache_len - 1, 8, 16);
-            }
-
-            /* Adaptive dispatch based on context length + KV quantization scheme.
-             * 512K context: sliding window + split-K parallel decode.
-             * Q8_KV scheme: fused dequant+dot+softmax (4x bandwidth).
-             * Both: tiled Q8 + SWA for maximum throughput. */
-            int kv_scheme = g_kv_scheme;
-            extern int g_use_q8_cache; /* set by model load or env */
-            int use_q8 = g_use_q8_cache && (g_kv_scheme == WUBU_KV_Q8);
-
-            if (use_q8) {
-                wubu_fast_attn_decode_q8_tiled(fctx, Q_norm,
-                    (const void *)k_cache, (const void *)v_cache,
-                    cache_len, attn_out, 6, 0);
-            } else if (cache_len > 1024) {
-                /* 512K+ context: use sliding window + split-K parallel decode.
-                 * SWA window reduces O(cache_len) → O(window).
-                 * WUBU_SWA env var sets window size (0 = unlimited).
-                 * A07: Auto-KV eviction — at 256K+ cache, default SWA=8192
-                 * to bound decode time while retaining conversational context. */
-                const char *swa_env = getenv("WUBU_SWA");
-                int swa_window = swa_env ? atoi(swa_env) : 0;
-                if (swa_window == 0 && cache_len > 262144) {
-                    /* Auto-evict: window = min(8192, cache_len/32) */
-                    swa_window = 8192;
-                    if (cache_len / 32 < swa_window) swa_window = cache_len / 32;
-                }
-                if (swa_window > 0) {
-                    extern void wubu_fast_attn_decode_swa(wubu_fast_attn_ctx_t *ctx,
-                        const float *q, const float *k_cache, const float *v_cache,
-                        int cache_len, float *out, int n_threads, int window);
-                    wubu_fast_attn_decode_swa(fctx, Q_norm,
-                        (const float *)k_cache, (const float *)v_cache,
-                        cache_len, attn_out, 6, swa_window);
-                } else {
-                    /* No SWA: split-K parallel decode */
-                    int splits = (cache_len < 8192) ? 6 : 8;
-                    wubu_fast_attn_decode_splitk(fctx, Q_norm,
-                        (const float *)k_cache, (const float *)v_cache,
-                        cache_len, attn_out, 6, splits);
-                }
-            } else {
-                wubu_fast_attn_decode(fctx, Q_norm,
-                    (const float *)k_cache, (const float *)v_cache,
-                                    cache_len, attn_out, 6);
-            }
-            goto gqa_attn_done;
-        }
-    }
-
-    int use_flashdecode = (N == 1) && !use_sparse &&
-                         (getenv("WUBU_FLASHDECODE") != NULL) &&
-                         (cache_len >= 64);
-    if (use_flashdecode) {
-        extern void wubu_flashdecode_all(const float *Q, const float *Kc, const float *Vc,
-                                          int head_dim, int n_q_heads, int n_kv_heads,
-                                          int64_t cache_len, float scale, int chunk,
-                                          float *out);
-        const float *Q_flash = Q_norm;
-        const float *K_flash = (const float *)k_cache;
-        const float *V_flash = (const float *)v_cache;
-        // KV cache layout: kv_cache_read_head's F32 path. Cache must be F32 for
-        // wubu_flashdecode_all. If quantization is enabled this path is skipped.
-        int fd_chunk = getenv("WUBU_FLASHDECODE_CHUNK") ?
-                       atoi(getenv("WUBU_FLASHDECODE_CHUNK")) : 0;
-        wubu_flashdecode_all(Q_flash, K_flash, V_flash,
-                              head_dim, n_q_heads, n_kv_heads,
-                              (int64_t)cache_len, scale, fd_chunk,
-                              attn_out);
-        // Skip the serial attention loop below; jump to gating (Step 6).
-        goto gqa_attn_done;
-    }
-
+    // 16 Q heads, 2 KV heads. Each KV head serves 8 Q heads.
+    float scale = 1.0f / sqrtf(GQA_HEAD_DIM);
+    
+    // AVX2 horizontal sum helper (inlined)
 #ifdef __AVX2__
     #define HSUM256(v) ({ \
         __m128 vlow  = _mm256_castps256_ps128(v); \
@@ -1687,6 +1534,17 @@ void wubu_gqa_forward(const float *x, int B, int T,
     // then compute dot products with all Q heads sharing that KV head.
     // This reduces K cache reads by 8× at 256k context.
     // Each tile processes KV head 0 (Q heads 0-7) or KV head 1 (Q heads 8-15).
+    
+    // Pre-allocate attention weight buffer once (removes per-position malloc/free at 512k)
+    int max_attend = use_sparse ? max_sparse : (total_kv < sparse_min_len ? total_kv : max_sparse);
+    float *all_attn_w = NULL;
+    if (max_attend > 0) {
+        all_attn_w = (float *)malloc((size_t)GQA_Q_HEADS * max_attend * sizeof(float));
+        if (!all_attn_w) {
+            fprintf(stderr, "GQA: attn_w pre-alloc failed (%zu)\n", (size_t)GQA_Q_HEADS * max_attend * 4);
+            goto gqa_alloc_fail;
+        }
+    }
     
     for (int b = 0; b < B; b++) {
         for (int t_q = 0; t_q < T; t_q++) {
@@ -1720,35 +1578,32 @@ void wubu_gqa_forward(const float *x, int B, int T,
             }
             
             // Pre-allocate per-Q-head attention weights (sparse or full)
-            float *all_attn_w = (float *)malloc((size_t)n_q_heads * sparse_count * sizeof(float));
-            if (!all_attn_w) { 
-                fprintf(stderr, "GQA: attn_w alloc failed (%zu)\n", (size_t)n_q_heads * attend_len * 4);
-                goto gqa_alloc_fail;
-            }
+            // Buffer was pre-allocated above the position loop — just use it
+            // (all_attn_w has capacity for max_attend positions)
             
             #pragma omp parallel for if(attend_len > 64)
             for (int _tk = 0; _tk < sparse_count; _tk++) {
                 int t_k = use_sparse ? sparse_buf[_tk] : _tk;
-                float k_buf0[1024], k_buf1[1024];
+                float k_buf0[GQA_HEAD_DIM], k_buf1[GQA_HEAD_DIM];
                 const float *k0, *k1;
                 
                 // Read K cache for both KV heads (or from new tokens)
                 if (t_k < cache_len) {
-                    int64_t off0 = (int64_t)t_k * n_kv_heads + 0;
-                    int64_t off1 = (int64_t)t_k * n_kv_heads + 1;
-                    kv_cache_read_head(k_cache, off0 * head_dim, k_buf0, head_dim);
-                    kv_cache_read_head(k_cache, off1 * head_dim, k_buf1, head_dim);
+                    int64_t off0 = (int64_t)t_k * GQA_KV_HEADS + 0;
+                    int64_t off1 = (int64_t)t_k * GQA_KV_HEADS + 1;
+                    kv_cache_read_head(k_cache, off0 * GQA_HEAD_DIM, k_buf0, GQA_HEAD_DIM);
+                    kv_cache_read_head(k_cache, off1 * GQA_HEAD_DIM, k_buf1, GQA_HEAD_DIM);
                     k0 = k_buf0; k1 = k_buf1;
                 } else {
                     int new_idx = t_k - cache_len;
-                    k0 = K_norm + (new_idx * n_kv_heads + 0) * head_dim;
-                    k1 = K_norm + (new_idx * n_kv_heads + 1) * head_dim;
+                    k0 = K_norm + (new_idx * GQA_KV_HEADS + 0) * GQA_HEAD_DIM;
+                    k1 = K_norm + (new_idx * GQA_KV_HEADS + 1) * GQA_HEAD_DIM;
                 }
                 
-                // Compute Q·K for all n_q_heads Q heads at this position
-                for (int h_q = 0; h_q < n_q_heads; h_q++) {
-                    const float *k_vec = (h_q < n_q_heads / 2) ? k0 : k1;
-                    const float *q_vec = Q_norm + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
+                // Compute Q·K for all 16 Q heads at this position
+                for (int h_q = 0; h_q < GQA_Q_HEADS; h_q++) {
+                    const float *k_vec = (h_q < 8) ? k0 : k1;
+                    const float *q_vec = Q_norm + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
                     float score;
                     
 #ifdef __AVX2__
@@ -1756,7 +1611,7 @@ void wubu_gqa_forward(const float *x, int B, int T,
                     __m256 acc1 = _mm256_setzero_ps();
                     __m256 acc2 = _mm256_setzero_ps();
                     __m256 acc3 = _mm256_setzero_ps();
-                    for (int i = 0; i < head_dim; i += 32) {
+                    for (int i = 0; i < GQA_HEAD_DIM; i += 32) {
                         acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(q_vec + i),     _mm256_loadu_ps(k_vec + i),     acc0);
                         acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(q_vec + i + 8), _mm256_loadu_ps(k_vec + i + 8), acc1);
                         acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(q_vec + i + 16),_mm256_loadu_ps(k_vec + i + 16),acc2);
@@ -1766,21 +1621,20 @@ void wubu_gqa_forward(const float *x, int B, int T,
                     score = HSUM256(tot) * scale;
 #else
                     score = 0.0f;
-                    for (int i = 0; i < head_dim; i++)
+                    for (int i = 0; i < GQA_HEAD_DIM; i++)
                         score += q_vec[i] * k_vec[i];
                     score *= scale;
 #endif
-                    score = tgt_wrap(score);
                     all_attn_w[(size_t)h_q * sparse_count + _tk] = score;
                 }
             }
             
             // Now softmax and V weighted sum per Q head
             #pragma omp parallel for
-            for (int h_q = 0; h_q < n_q_heads; h_q++) {
-                int h_kv = h_q / (n_q_heads / n_kv_heads);
-                float *out_vec = attn_out + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
-                memset(out_vec, 0, head_dim * sizeof(float));
+            for (int h_q = 0; h_q < GQA_Q_HEADS; h_q++) {
+                int h_kv = h_q / (GQA_Q_HEADS / GQA_KV_HEADS);
+                float *out_vec = attn_out + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
+                memset(out_vec, 0, GQA_HEAD_DIM * sizeof(float));
                 
                 // Find max score for this head
                 float max_score = -1e30f;
@@ -1804,27 +1658,27 @@ void wubu_gqa_forward(const float *x, int B, int T,
                 // Weighted sum of V
                 for (int _tk = 0; _tk < sparse_count; _tk++) {
                     int t_k = use_sparse ? sparse_buf[_tk] : _tk;
-                    float v_buf[1024];
+                    float v_buf[GQA_HEAD_DIM];
                     const float *v_vec;
                     if (t_k < cache_len) {
-                        int64_t off = (int64_t)t_k * n_kv_heads + h_kv;
-                        kv_cache_read_head(v_cache, off * head_dim, v_buf, head_dim);
+                        int64_t off = (int64_t)t_k * GQA_KV_HEADS + h_kv;
+                        kv_cache_read_head(v_cache, off * GQA_HEAD_DIM, v_buf, GQA_HEAD_DIM);
                         v_vec = v_buf;
                     } else {
                         int new_idx = t_k - cache_len;
-                        v_vec = V + (new_idx * n_kv_heads + h_kv) * head_dim;
+                        v_vec = V + (new_idx * GQA_KV_HEADS + h_kv) * GQA_HEAD_DIM;
                     }
                     float a = all_attn_w[(size_t)h_q * sparse_count + _tk];
 #ifdef __AVX2__
                     __m256 a_v = _mm256_set1_ps(a);
-                    for (int i = 0; i < head_dim; i += 8) {
+                    for (int i = 0; i < GQA_HEAD_DIM; i += 8) {
                         __m256 v = _mm256_loadu_ps(v_vec + i);
                         __m256 o = _mm256_loadu_ps(out_vec + i);
                         o = _mm256_fmadd_ps(a_v, v, o);
                         _mm256_storeu_ps(out_vec + i, o);
                     }
 #else
-                    for (int i = 0; i < head_dim; i++) {
+                    for (int i = 0; i < GQA_HEAD_DIM; i++) {
                         out_vec[i] += a * v_vec[i];
                     }
 #endif
@@ -1835,104 +1689,32 @@ void wubu_gqa_forward(const float *x, int B, int T,
                 
                 // Free per-head attention weights (all stored in all_attn_w)
             }
-            // Free the tiled attention weight buffer
-            free(all_attn_w);
         }
     }
-gqa_attn_done:;
-
+    // Free pre-allocated attention weight buffer
+    free(all_attn_w);
+    all_attn_w = NULL;
+    
     // Step 6: Gate (sigmoid)
-    // A09: Attention-sink-free gated attention (arXiv:2603.05498).
-    // The GQA gate (learned in QKV projection) is already applied via sigmoid.
-    // A09 learned per-channel gate (wubu_attn_gate_forward) is available for
-    // models that have attn_gate_weight_f32 (SSM layers). GQA layers use
-    // the standard GQA gate which is also sink-free by design.
-    // DUMP_GQA_DEBUG_DIR: dump attn_out before gating (raw attention)
-    {
-        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
-        if (gqa_dump_dir && gqa_dump_dir[0]) {
-            const char *prefix = getenv("DUMP_GQA_PREFIX");
-            if (!prefix) prefix = "";
-            FILE *fp;
-            char fname[1024];
-            if (prefix[0])
-                snprintf(fname, sizeof(fname), "%s/%s_attn_out_pregate.bin", gqa_dump_dir, prefix);
-            else
-                snprintf(fname, sizeof(fname), "%s/attn_out_pregate.bin", gqa_dump_dir);
-            fp = fopen(fname, "wb"); if(fp) { fwrite(attn_out, sizeof(float), N * q_dim, fp); fclose(fp); }
-        }
-    }
     float *gate_sig = (float *)malloc(N * q_dim * sizeof(float));
-    if (!gate_sig) { free(Q_full); free(gate); free(K); free(V); free(Q_norm); free(K_norm); free(attn_out); return; }
+    if (!gate_sig) { free(gate_sig); free(Q_full); free(gate); free(K); free(V); free(Q_norm); free(K_norm); free(attn_out); return; }
     wubu_sigmoid(N * q_dim, gate, gate_sig);
-
+    
     for (int i = 0; i < N * q_dim; i++) {
         attn_out[i] *= gate_sig[i];
     }
-
-    // Step 7: Output projection via quantized or F32 matmul
-    // For standard layers (Qwen): out_dim = q_dim, use gated attn_out
-    // For DGemma-style layers: out_dim = q_dim*2, use Q_full directly (gate handled in output proj)
-    {
-        int out_proj_in_dim = q_dim;
-        const float *out_proj_in = attn_out;
-        if (w->out_dim != q_dim && w->out_dim == q_dim * 2) {
-            // DGemma-style: bypass gate, use Q_full as output projection input
-            out_proj_in_dim = q_dim * 2;
-            out_proj_in = Q_full;
-        }
-        for (int s = 0; s < N; s++) {
-            proj_matmul(out_proj_in + s * out_proj_in_dim, out_proj_in_dim, d_model,
-                        w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
-                        output + s * d_model);
-        }
-    }
     
-    // DUMP_GQA_DEBUG_DIR: dump final output after output projection
-    {
-        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
-        if (gqa_dump_dir && gqa_dump_dir[0]) {
-            const char *prefix = getenv("DUMP_GQA_PREFIX");
-            if (!prefix) prefix = "";
-            FILE *fp;
-            char fname[1024];
-            if (prefix[0])
-                snprintf(fname, sizeof(fname), "%s/%s_output.bin", gqa_dump_dir, prefix);
-            else
-                snprintf(fname, sizeof(fname), "%s/output.bin", gqa_dump_dir);
-            fp = fopen(fname, "wb"); if(fp) { fwrite(output, sizeof(float), N * d_model, fp); fclose(fp); }
-        }
+    // Step 7: Output projection via quantized or F32 matmul
+    for (int s = 0; s < N; s++) {
+        proj_matmul(attn_out + s * q_dim, q_dim, D_MODEL,
+                    w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
+                    output + s * D_MODEL);
     }
     
     // Copy K_norm and V to output buffers for KV cache (stored as F16 if enabled)
     if (k_out && v_out) {
-        /* 4KV/TurboQuant: quantize KV at cache-write time for memory bandwidth savings.
-         * SAW-INT4: K gets Hadamard+BDR rotation + block-INT4 quantization.
-         * V gets block-INT4 (no rotation) or INT3 (TurboQuant). */
-        if (g_kv_scheme == WUBU_KV_4KV || g_kv_scheme == WUBU_KV_3BIT) {
-            int val_dim = kv_dim;
-            int v_blks = (val_dim + 15) / 16;
-            float *scales = (float *)malloc((size_t)N * v_blks * sizeof(float));
-            uint8_t *qbuf = (uint8_t *)malloc((size_t)N * val_dim);
-            if (scales && qbuf) {
-                if (g_kv_scheme == WUBU_KV_4KV) {
-                    wubu_4kv_quant_K(K_norm, qbuf, scales, N, kv_dim);
-                    wubu_4kv_quant_V(V, qbuf + (size_t)N * val_dim, scales, N, kv_dim);
-                } else { /* WUBU_KV_3BIT */
-                    wubu_4kv_quant_K(K_norm, qbuf, scales, N, kv_dim);
-                    wubu_4kv_quant_V3(V, qbuf + (size_t)N * val_dim, scales, N, kv_dim);
-                }
-                kv_cache_write_head(k_out, 0, (const float *)qbuf, N * val_dim);
-                kv_cache_write_head(v_out, 0, (const float *)(qbuf + (size_t)N * val_dim), N * val_dim);
-                /* Store scales in a sidecar (simplified: write to end of cache) */
-                /* TODO: proper sidecar storage for per-block scales */
-            }
-            free(scales);
-            free(qbuf);
-        } else {
-            kv_cache_write_head(k_out, 0, K_norm, N * kv_dim);
-            kv_cache_write_head(v_out, 0, V, N * kv_dim);
-        }
+        kv_cache_write_head(k_out, 0, K_norm, N * kv_dim);
+        kv_cache_write_head(v_out, 0, V, N * kv_dim);
     }
     
     free(Q_full);
@@ -1943,11 +1725,12 @@ gqa_attn_done:;
     free(K_norm);
     free(attn_out);
     free(gate_sig);
-    free(sparse_buf);
+    if (sparse_buf && sparse_buf != sparse_stack) free(sparse_buf);
     return;
 
 gqa_alloc_fail:
-    free(sparse_buf);
+    free(all_attn_w);
+    if (sparse_buf && sparse_buf != sparse_stack) free(sparse_buf);
     free(Q_full);
     free(gate);
     free(K);
@@ -1960,14 +1743,12 @@ gqa_alloc_fail:
 // GQA forward with intermediate saving (for backward)
 void wubu_gqa_forward_save(const float *x, int B, int T,
                            const gqa_layer_weights *w,
-                           int d_model,
                            float *output,
-                           gqa_fwd_save_t *save,
-                           int head_dim, int n_q_heads, int n_kv_heads)
+                           gqa_fwd_save_t *save)
 {
     const int N = B * T;
-    const int q_dim = n_q_heads * head_dim;
-    const int kv_dim = n_kv_heads * head_dim;
+    const int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;
+    const int kv_dim = GQA_KV_HEADS * GQA_HEAD_DIM;
     
     float *Q_full = (float *)malloc(N * q_dim * 2 * sizeof(float));
     float *gate = (float *)malloc(N * q_dim * sizeof(float));
@@ -1984,56 +1765,56 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     
     // === Steps 1-7: Same as wubu_gqa_forward ===
     
-    // Step 1: Q + gate fused projection via quantized or F32 matmul
+    // Step 1: Q + gate fused projection — batched
+    quantized_matmul_batched(x,
+        w->attn_q_weight_q, w->attn_q_weight_type,
+        D_MODEL, q_dim * 2, 0, N, Q_full);
+    
+    // Extract gate from Q_full
     for (int s = 0; s < N; s++) {
         int q_offset = s * q_dim * 2;
-        proj_matmul(x + s * d_model, d_model, q_dim * 2,
-                    w->attn_q_weight, w->attn_q_weight_q, w->attn_q_weight_type,
-                    Q_full + q_offset);
         for (int j = 0; j < q_dim; j++)
             gate[s * q_dim + j] = Q_full[q_offset + q_dim + j];
     }
     
-    // Steps 2-3: K and V projections via quantized or F32 matmul
-    for (int s = 0; s < N; s++) {
-        proj_matmul(x + s * d_model, d_model, kv_dim,
-                    w->attn_k_weight, w->attn_k_weight_q, w->attn_k_weight_type,
-                    K + s * kv_dim);
-        proj_matmul(x + s * d_model, d_model, kv_dim,
-                    w->attn_v_weight, w->attn_v_weight_q, w->attn_v_weight_type,
-                    V + s * kv_dim);
-    }
+    // Steps 2-3: K and V projections — batched
+    quantized_matmul_batched(x,
+        w->attn_k_weight_q, w->attn_k_weight_type,
+        D_MODEL, kv_dim, 0, N, K);
+    quantized_matmul_batched(x,
+        w->attn_v_weight_q, w->attn_v_weight_type,
+        D_MODEL, kv_dim, 0, N, V);
     
     // Step 3: Q/K RMSNorm
     float *Q_only = (float *)malloc(N * q_dim * sizeof(float));
     for (int s = 0; s < N; s++)
         memcpy(Q_only + s * q_dim, Q_full + s * q_dim * 2, q_dim * sizeof(float));
-    wubu_rms_norm(B, T * n_q_heads, head_dim, Q_only, w->attn_q_norm_weight, 1e-6f, Q_norm);
+    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, w->attn_q_norm_weight, 1e-6f, Q_norm);
     free(Q_only);
-    wubu_rms_norm(B, T * n_kv_heads, head_dim, K, w->attn_k_norm_weight, 1e-6f, K_norm);
+    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, w->attn_k_norm_weight, 1e-6f, K_norm);
     
     // Step 4: (RoPE skipped)
     
     // Step 5: GQA Attention
-    float scale = 1.0f / sqrtf(head_dim);
+    float scale = 1.0f / sqrtf(GQA_HEAD_DIM);
     for (int b = 0; b < B; b++) {
         for (int t_q = 0; t_q < T; t_q++) {
-            for (int h_q = 0; h_q < n_q_heads; h_q++) {
-                int h_kv = h_q / (n_q_heads / n_kv_heads);
-                const float *q_vec = Q_norm + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
-                float *out_vec = attn_out + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
-                memset(out_vec, 0, head_dim * sizeof(float));
+            for (int h_q = 0; h_q < GQA_Q_HEADS; h_q++) {
+                int h_kv = h_q / (GQA_Q_HEADS / GQA_KV_HEADS);
+                const float *q_vec = Q_norm + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
+                float *out_vec = attn_out + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
+                memset(out_vec, 0, GQA_HEAD_DIM * sizeof(float));
                 
                 float attn_weights[4096];
                 float max_score = -1e30f;
                 for (int t_k = 0; t_k <= t_q; t_k++) {
-                    const float *k_vec = K_norm + ((b * T + t_k) * n_kv_heads + h_kv) * head_dim;
+                    const float *k_vec = K_norm + ((b * T + t_k) * GQA_KV_HEADS + h_kv) * GQA_HEAD_DIM;
                     float score = 0.0f;
-                    for (int i = 0; i < head_dim; i++)
+                    for (int i = 0; i < GQA_HEAD_DIM; i++)
                         score += q_vec[i] * k_vec[i];
                     score *= scale;
-                    // TGT: wrap attention score to prevent overflow
-                    score = tgt_wrap(score);
+                    // TGT: wrap attention score to prevent overflow — REMOVED: breaks softmax (inverts weights)
+                    //score = tgt_wrap(score);
                     attn_weights[t_k] = score;
                     if (score > max_score) max_score = score;
                 }
@@ -2047,9 +1828,9 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
                     attn_weights[t_k] /= sum_exp;
                 
                 for (int t_k = 0; t_k <= t_q; t_k++) {
-                    const float *v_vec = V + ((b * T + t_k) * n_kv_heads + h_kv) * head_dim;
+                    const float *v_vec = V + ((b * T + t_k) * GQA_KV_HEADS + h_kv) * GQA_HEAD_DIM;
                     float a = attn_weights[t_k];
-                    for (int i = 0; i < head_dim; i++)
+                    for (int i = 0; i < GQA_HEAD_DIM; i++)
                         out_vec[i] += a * v_vec[i];
                 }
             }
@@ -2066,20 +1847,12 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     
     for (int i = 0; i < N * q_dim; i++)
         attn_out[i] *= gate_sig[i];
-
+    
     // Step 7: Output projection via quantized or F32 matmul
-    {
-        int out_proj_in_dim = q_dim;
-        const float *out_proj_in = attn_out;
-        if (w->out_dim != q_dim && w->out_dim == q_dim * 2) {
-            out_proj_in_dim = q_dim * 2;
-            out_proj_in = Q_full;
-        }
-        for (int s = 0; s < N; s++) {
-            proj_matmul(out_proj_in + s * out_proj_in_dim, out_proj_in_dim, d_model,
-                        w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
-                        output + s * d_model);
-        }
+    for (int s = 0; s < N; s++) {
+        proj_matmul(attn_out + s * q_dim, q_dim, D_MODEL,
+                    w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
+                    output + s * D_MODEL);
     }
     
     // Save intermediates
@@ -2096,6 +1869,202 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
 cleanup_gqa_save:
     free(Q_full); free(gate); free(K); free(V);
     free(Q_norm); free(K_norm); free(attn_out); free(gate_sig);
+}
+
+// Poincaré GQA forward is now in src/wubu_poincare_gqa.c
+// (The old tangent-space-approximation stub was removed — the proper
+//  implementation uses full Poincaré distance + Möbius combination.)
+
+// ============================================================
+// Layer Type Helpers
+// ============================================================
+
+int wubu_is_ssm_layer(int layer_idx) {
+    // Every 4th layer (index 3, 7, 11, ...) is GQA (full attention)
+    // Rest are SSM layers
+    return (layer_idx + 1) % 4 != 0;
+}
+
+// ============================================================
+// Backward Pass — SSM Output Projection (Step 11)
+// ============================================================
+// Forward: output[s,j] = sum_i delta_out[s,i] * W[i,j]
+//          where W = [VALUE_DIM, D_MODEL]
+// Backward:
+//   d_delta_out += d_output @ W^T   [N,V] = [N,D] @ [D,V]^T
+//   dW += delta_out^T @ d_output   [V,D] = [V,N] @ [N,D]
+void wubu_ssm_backward_output_proj(
+    const float *delta_out,      // [N, VALUE_DIM] forward input (for dW)
+    const float *d_output,       // [N, D_MODEL] gradient from upstream
+    const float *ssm_out_weight, // [VALUE_DIM, D_MODEL] forward weight (F32, may be NULL)
+    const uint8_t *ssm_out_weight_q, int ssm_out_weight_type, // quantized fallback
+    float *d_delta_out,          // [N, VALUE_DIM] gradient to propagate
+    float *d_ssm_out_weight,     // [VALUE_DIM, D_MODEL] weight grad accum (or NULL)
+    int N)
+{
+    // Dequant fallback: if F32 weight is NULL but quantized available, dequant on-the-fly
+    float *dequant_buf = NULL;
+    if (!ssm_out_weight && ssm_out_weight_q) {
+        int64_t total = (int64_t)VALUE_DIM * D_MODEL;
+        dequant_buf = (float *)malloc(total * sizeof(float));
+        if (!dequant_buf) {
+            fprintf(stderr, "SSM backward output proj: dequant alloc %lld failed\\n",
+                    (long long)(total * (int64_t)sizeof(float)));
+            memset(d_delta_out, 0, N * VALUE_DIM * sizeof(float));
+            return;
+        }
+        gguf_dequantize(ssm_out_weight_q, ssm_out_weight_type, total, dequant_buf);
+        ssm_out_weight = dequant_buf;
+    }
+    // d_delta_out = d_output @ W^T
+    for (int s = 0; s < N; s++) {
+        for (int i = 0; i < VALUE_DIM; i++) {
+            double sum = 0.0;
+            for (int j = 0; j < D_MODEL; j++)
+                sum += (double)d_output[s * D_MODEL + j] * (double)ssm_out_weight[i * D_MODEL + j];
+            d_delta_out[s * VALUE_DIM + i] += (float)sum;
+        }
+    }
+    // dW = delta_out^T @ d_output  (only if weight grad is requested)
+    if (d_ssm_out_weight) {
+        for (int i = 0; i < VALUE_DIM; i++) {
+            for (int j = 0; j < D_MODEL; j++) {
+                double sum = 0.0;
+                for (int s = 0; s < N; s++)
+                    sum += (double)delta_out[s * VALUE_DIM + i] * (double)d_output[s * D_MODEL + j];
+                d_ssm_out_weight[i * D_MODEL + j] += (float)sum;
+            }
+        }
+    }
+    if (dequant_buf) free(dequant_buf);
+}
+
+// ============================================================
+// Backward Pass — Gated Normalization (Step 10)
+// ============================================================
+// Forward: out[i] = x[i] * scale * w[i] * z[i]
+//   where scale = 1/sqrt(mean(x²)+eps), w = norm_weight, z = silu(z_raw)
+// Backward: see derivation below
+void wubu_ssm_backward_gated_norm(
+    const float *x,          // [N, VALUE_DIM] pre-norm delta_out
+    const float *z_silu,     // [N, VALUE_DIM] silu(z_raw) from forward
+    const float *d_out,      // [N, VALUE_DIM] upstream grad (dL/dout)
+    const float *norm_w,     // [SSM_D_STATE] norm weight (broadcast over V_HEADS)
+    float *d_x,              // [N, VALUE_DIM] grad to propagate
+    float *d_z_silu,         // [N, VALUE_DIM] grad for z_silu
+    int B, int T)
+{
+    const int N = B * T;
+    const int d = SSM_D_STATE;  // 128
+    const int n_heads = SSM_V_HEADS;  // 32
+    
+    for (int s = 0; s < N; s++) {
+        for (int h = 0; h < n_heads; h++) {
+            const float *x_h = x + (s * n_heads + h) * d;
+            const float *z_h = z_silu + (s * n_heads + h) * d;
+            const float *do_h = d_out + (s * n_heads + h) * d;
+            float *dx_h = d_x + (s * n_heads + h) * d;
+            float *dz_h = d_z_silu + (s * n_heads + h) * d;
+            
+            // Compute mean(x²) and rms
+            double sum_sq = 0.0;
+            for (int i = 0; i < d; i++) sum_sq += (double)x_h[i] * (double)x_h[i];
+            float rms = sqrtf((float)(sum_sq / d) + 1e-6f);
+            float s = 1.0f / rms;  // scale
+            float s3 = s * s * s;  // ds/dm = -s³/2
+            
+            // Compute inner = sum_j d_out[j] * x[j] * w[j] * z[j]
+            double inner = 0.0;
+            for (int j = 0; j < d; j++)
+                inner += (double)do_h[j] * (double)x_h[j] * (double)norm_w[j] * (double)z_h[j];
+            
+            // dL/dx[i] = do[i] * w[i] * s * z[i] - (s³/d) * x[i] * inner
+            for (int i = 0; i < d; i++) {
+                float grad = do_h[i] * norm_w[i] * s * z_h[i];
+                grad -= (s3 / d) * x_h[i] * (float)inner;
+                dx_h[i] += grad;
+            }
+            
+            // dL/dz_silu[i] = do[i] * x[i] * w[i] * s
+            for (int i = 0; i < d; i++) {
+                dz_h[i] += do_h[i] * x_h[i] * norm_w[i] * s;
+            }
+        }
+    }
+}
+
+// ============================================================
+// Backward Pass — Gated Norm Weight Gradient
+// ============================================================
+// dL/dw[i] = sum_{s,h} dL/dy[s,h,i] * x[s,h,i] * s[s,h] * z[s,h,i]
+void wubu_ssm_backward_gated_norm_weight(
+    const float *x, const float *z_silu,
+    const float *d_out,
+    float *d_norm_weight, int B, int T)
+{
+    if (!d_norm_weight) return;
+    const int N = B * T;
+    const int d = SSM_D_STATE;
+    const int n_vh = SSM_V_HEADS;
+    for (int s = 0; s < N; s++) {
+        for (int h = 0; h < n_vh; h++) {
+            const float *x_h = x + (s * n_vh + h) * d;
+            const float *z_h = z_silu + (s * n_vh + h) * d;
+            const float *do_h = d_out + (s * n_vh + h) * d;
+            double sum_sq = 0.0;
+            for (int i = 0; i < d; i++) sum_sq += (double)x_h[i] * (double)x_h[i];
+            float s_val = 1.0f / sqrtf((float)(sum_sq / d) + 1e-6f);
+            for (int i = 0; i < d; i++)
+                d_norm_weight[i] += do_h[i] * x_h[i] * s_val * z_h[i];
+        }
+    }
+}
+
+// ============================================================
+// Backward Pass — SiLU activation
+// ============================================================
+// silu(x) = x * sigmoid(x)
+// silu'(x) = silu(x) + sigmoid(x) * (1 - silu(x))
+void wubu_silu_backward(int n, const float *x, const float *y,
+                        const float *dy, float *dx) {
+    for (int i = 0; i < n; i++) {
+        float v = x[i];
+        float sig = 1.0f / (1.0f + expf(-v));
+        float silu = y[i];
+        float silu_grad = silu + sig * (1.0f - silu);
+        dx[i] += dy[i] * silu_grad;
+    }
+}
+
+// ============================================================
+// Backward Pass — L2 Normalization
+// ============================================================
+// Forward: out[i] = x[i] / sqrt(sum(x²) + eps)
+// Backward: see derivation in header comment
+void wubu_l2_norm_backward(int B, int T, int n_heads, int d,
+                           const float *x, float eps,
+                           const float *d_out, float *d_x) {
+    const int N = B * T;
+    for (int s = 0; s < N; s++) {
+        for (int h = 0; h < n_heads; h++) {
+            const float *inp = x + (s * n_heads + h) * d;
+            const float *do_h = d_out + (s * n_heads + h) * d;
+            float *dx = d_x + (s * n_heads + h) * d;
+            
+            double sum_sq = 0.0;
+            for (int i = 0; i < d; i++) sum_sq += (double)inp[i] * (double)inp[i];
+            float norm = sqrtf(sum_sq + eps);
+            float n3 = norm * norm * norm;
+            
+            // d_i = (do_i / norm) - (x_i / n³) * sum_j (do_j * x_j)
+            double dot = 0.0;
+            for (int j = 0; j < d; j++) dot += (double)do_h[j] * (double)inp[j];
+            
+            for (int i = 0; i < d; i++) {
+                dx[i] += (float)((double)do_h[i] / norm - (double)inp[i] * dot / n3);
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -2427,9 +2396,9 @@ static void backward_conv1d(int B, int T, int C, int k,
 // Requires all intermediate buffers from the forward pass.
 void wubu_ssm_backward(
     int B, int T,
-    const float *x,              // [B, T, WUBU_DIMS.d_model] input to forward
-    const float *output,         // [B, T, WUBU_DIMS.d_model] output from forward
-    const float *d_output,       // [B, T, WUBU_DIMS.d_model] upstream gradient
+    const float *x,              // [B, T, D_MODEL] input to forward
+    const float *output,         // [B, T, D_MODEL] output from forward
+    const float *d_output,       // [B, T, D_MODEL] upstream gradient
     
     // Forward intermediate buffers (must be preserved from forward call)
     const float *qkv_all,        // [N, CONV_DIM] step 1 output
@@ -2453,13 +2422,13 @@ void wubu_ssm_backward(
     const ssm_layer_weights *w,
     
     // Output gradients (accumulated)
-    float *d_x,                  // [B, T, WUBU_DIMS.d_model] gradient to propagate
-    float *d_qkv_weight,         // [WUBU_DIMS.d_model, CONV_DIM] gradient for attn_qkv_weight
-    float *d_gate_weight,        // [WUBU_DIMS.d_model, VALUE_DIM] gradient for attn_gate_weight
-    float *d_beta_weight,        // [WUBU_DIMS.d_model, DT_RANK] gradient for ssm_beta_weight
-    float *d_alpha_weight,       // [WUBU_DIMS.d_model, DT_RANK] gradient for ssm_alpha_weight
+    float *d_x,                  // [B, T, D_MODEL] gradient to propagate
+    float *d_qkv_weight,         // [D_MODEL, CONV_DIM] gradient for attn_qkv_weight
+    float *d_gate_weight,        // [D_MODEL, VALUE_DIM] gradient for attn_gate_weight
+    float *d_beta_weight,        // [D_MODEL, DT_RANK] gradient for ssm_beta_weight
+    float *d_alpha_weight,       // [D_MODEL, DT_RANK] gradient for ssm_alpha_weight
     float *d_conv1d_weight,      // [CONV_KERNEL, CONV_DIM] gradient for ssm_conv1d_weight
-    float *d_ssm_out_weight,     // [VALUE_DIM, WUBU_DIMS.d_model] gradient for ssm_out_weight
+    float *d_ssm_out_weight,     // [VALUE_DIM, D_MODEL] gradient for ssm_out_weight
     float *d_ssm_norm_weight,    // [SSM_D_STATE] gradient for norm weight
     
     // State gradient (for BPTT)
@@ -2495,6 +2464,7 @@ void wubu_ssm_backward(
     
     // === Step 11: Output projection backward ===
     wubu_ssm_backward_output_proj(delta_out, d_output, w->ssm_out_weight,
+                                   w->ssm_out_weight_q, w->ssm_out_weight_type,
                                    d_delta_out, d_ssm_out_weight, N);
     
     // === Step 10: Gated normalization backward ===
@@ -2523,6 +2493,29 @@ void wubu_ssm_backward(
     wubu_silu_backward(N * VALUE_DIM, z_all, z_silu, d_z_silu, d_z_all);
     
     // === Step 9: Delta net recurrence backward ===
+    // Compute beta_flat and gate_flat if not provided
+    float *beta_flat_computed = NULL;
+    float *gate_flat_computed = NULL;
+    if (!beta_flat || !gate_flat) {
+        beta_flat_computed = (float *)malloc(N * DT_RANK * sizeof(float));
+        gate_flat_computed = (float *)malloc(N * DT_RANK * sizeof(float));
+        if (!beta_flat_computed || !gate_flat_computed) {
+            fprintf(stderr, "SSM backward: beta/gate_flat alloc failed\\n");
+            free(beta_flat_computed); free(gate_flat_computed);
+            goto cleanup_bwd;
+        }
+        for (int i = 0; i < N * DT_RANK; i++) {
+            beta_flat_computed[i] = 1.0f / (1.0f + expf(-beta_raw[i]));
+            float biased = alpha_raw[i] + w->ssm_dt_bias[i % DT_RANK];
+            float sp;
+            if (biased > 80.0f) sp = biased;
+            else if (biased < -80.0f) sp = 0.0f;
+            else sp = logf(1.0f + expf(biased));
+            gate_flat_computed[i] = sp * w->ssm_a[i % DT_RANK];
+        }
+        beta_flat = beta_flat_computed;
+        gate_flat = gate_flat_computed;
+    }
     wubu_ssm_backward_recurrence(B, T, ssm_states, q_norm, k_norm, v_conv,
                                  beta_flat, gate_flat, d_delta_out,
                                  d_q_norm, d_k_norm, d_v_conv,
@@ -2636,20 +2629,36 @@ void wubu_ssm_backward(
     }
     
     // === Steps 1-3: MatMul backward for QKV, Z, Beta, Alpha ===
-    // QKV: x @ W_qkv -> qkv_all [N, WUBU_DIMS.d_model] @ [WUBU_DIMS.d_model, C] -> [N, C]
-    backward_matmul_nt(N, WUBU_DIMS.d_model, C, x, d_conv_out, w->attn_qkv_weight,
+    // Dequant weights on-demand if F32 is NULL
+    float *dequant_qkv = NULL;
+    float *dequant_gate = NULL;
+    if (!w->attn_qkv_weight && w->attn_qkv_weight_q) {
+        int64_t n = (int64_t)D_MODEL * CONV_DIM;
+        dequant_qkv = (float *)malloc(n * sizeof(float));
+        if (dequant_qkv) gguf_dequantize(w->attn_qkv_weight_q, w->attn_qkv_weight_type, n, dequant_qkv);
+    }
+    if (!w->attn_gate_weight && w->attn_gate_weight_q) {
+        int64_t n = (int64_t)D_MODEL * VALUE_DIM;
+        dequant_gate = (float *)malloc(n * sizeof(float));
+        if (dequant_gate) gguf_dequantize(w->attn_gate_weight_q, w->attn_gate_weight_type, n, dequant_gate);
+    }
+    const float *qkv_w = dequant_qkv ? dequant_qkv : w->attn_qkv_weight;
+    const float *gate_w = dequant_gate ? dequant_gate : w->attn_gate_weight;
+    
+    // QKV: x @ W_qkv -> qkv_all [N, D_MODEL] @ [D_MODEL, C] -> [N, C]
+    backward_matmul_nt(N, D_MODEL, C, x, d_conv_out, qkv_w,
                        d_x, d_qkv_weight);
     
-    // Z: x @ W_gate -> z_all [N, WUBU_DIMS.d_model] @ [WUBU_DIMS.d_model, VALUE_DIM] -> [N, VALUE_DIM]
-    backward_matmul_nt(N, WUBU_DIMS.d_model, VALUE_DIM, x, d_z_all, w->attn_gate_weight,
+    // Z: x @ W_gate -> z_all [N, D_MODEL] @ [D_MODEL, VALUE_DIM] -> [N, VALUE_DIM]
+    backward_matmul_nt(N, D_MODEL, VALUE_DIM, x, d_z_all, gate_w,
                        d_x, d_gate_weight);
     
-    // Beta: x @ W_beta -> beta_raw [N, WUBU_DIMS.d_model] @ [WUBU_DIMS.d_model, DT_RANK] -> [N, DT_RANK]
-    backward_matmul_nt(N, WUBU_DIMS.d_model, DT_RANK, x, d_beta_raw, w->ssm_beta_weight,
+    // Beta: x @ W_beta -> beta_raw [N, D_MODEL] @ [D_MODEL, DT_RANK] -> [N, DT_RANK]
+    backward_matmul_nt(N, D_MODEL, DT_RANK, x, d_beta_raw, w->ssm_beta_weight,
                        d_x, d_beta_weight);
     
-    // Alpha: x @ W_alpha -> alpha_raw [N, WUBU_DIMS.d_model] @ [WUBU_DIMS.d_model, DT_RANK] -> [N, DT_RANK]
-    backward_matmul_nt(N, WUBU_DIMS.d_model, DT_RANK, x, d_alpha_raw, w->ssm_alpha_weight,
+    // Alpha: x @ W_alpha -> alpha_raw [N, D_MODEL] @ [D_MODEL, DT_RANK] -> [N, DT_RANK]
+    backward_matmul_nt(N, D_MODEL, DT_RANK, x, d_alpha_raw, w->ssm_alpha_weight,
                        d_x, d_alpha_weight);
     
 cleanup_bwd:
@@ -2661,6 +2670,8 @@ cleanup_bwd:
     free(d_beta_raw); free(d_alpha_raw);
     free(d_alpha_biased); free(d_alpha_softplus);
     free(conv_input_bwd);
+    free(beta_flat_computed); free(gate_flat_computed);
+    free(dequant_qkv); free(dequant_gate);
 }
 
 // ============================================================
@@ -2770,8 +2781,7 @@ void wubu_gqa_backward_attention(
 // Full GQA layer backward
 void wubu_gqa_backward(
     int B, int T,
-    int d_model,
-    const float *x,             // [B, T, d_model] input to forward
+    const float *x,             // [B, T, D_MODEL] input to forward
     const float *Q_norm,        // [N, q_dim] post-RMSNorm Q
     const float *Q_raw,         // [N, q_dim] pre-RMSNorm Q (from Q_full first half)
     const float *K_norm,        // [N, kv_dim] post-RMSNorm K
@@ -2780,16 +2790,16 @@ void wubu_gqa_backward(
     const float *gate,          // [N, q_dim] raw gate (pre-sigmoid)
     const float *gate_sig,      // [N, q_dim] sigmoid(gate)
     const float *attn_out,      // [N, q_dim] post-gate attn_out
-    const float *output,        // [B, T, d_model] forward output
-    const float *d_output,      // [B, T, d_model] upstream gradient
+    const float *output,        // [B, T, D_MODEL] forward output
+    const float *d_output,      // [B, T, D_MODEL] upstream gradient
     const gqa_layer_weights *w, // weights
-    float *d_x,                 // [B, T, d_model] gradient to propagate
-    float *d_q_weight,          // [d_model, q_dim*2] fused Q+gate weight grad
-    float *d_k_weight,          // [d_model, kv_dim]
-    float *d_v_weight,          // [d_model, kv_dim]
+    float *d_x,                 // [B, T, D_MODEL] gradient to propagate
+    float *d_q_weight,          // [D_MODEL, q_dim*2] fused Q+gate weight grad
+    float *d_k_weight,          // [D_MODEL, kv_dim]
+    float *d_v_weight,          // [D_MODEL, kv_dim]
     float *d_q_norm_weight,     // [GQA_HEAD_DIM]
     float *d_k_norm_weight,     // [GQA_HEAD_DIM]
-    float *d_out_weight)        // [q_dim, d_model]
+    float *d_out_weight)        // [q_dim, D_MODEL]
 {
     const int N = B * T;
     const int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;
@@ -2805,7 +2815,30 @@ void wubu_gqa_backward(
     float *d_K_raw = (float *)calloc(N * kv_dim, sizeof(float));
     float *d_Q_full = (float *)calloc(N * q_dim * 2, sizeof(float));
     // d_Q_full: first q_dim for Q grad, second q_dim for gate grad
-    
+
+    // Dequant-on-demand buffers for quantized-only GQA weights
+    float *dequant_q = NULL;
+    float *dequant_k = NULL;
+    float *dequant_v = NULL;
+    const float *q_weight = w->attn_q_weight;
+    const float *k_weight = w->attn_k_weight;
+    const float *v_weight = w->attn_v_weight;
+    if (!q_weight && w->attn_q_weight_q) {
+        int64_t n = (int64_t)D_MODEL * q_dim * 2;
+        dequant_q = (float *)malloc(n * sizeof(float));
+        if (dequant_q) { gguf_dequantize(w->attn_q_weight_q, w->attn_q_weight_type, n, dequant_q); q_weight = dequant_q; }
+    }
+    if (!k_weight && w->attn_k_weight_q) {
+        int64_t n = (int64_t)D_MODEL * kv_dim;
+        dequant_k = (float *)malloc(n * sizeof(float));
+        if (dequant_k) { gguf_dequantize(w->attn_k_weight_q, w->attn_k_weight_type, n, dequant_k); k_weight = dequant_k; }
+    }
+    if (!v_weight && w->attn_v_weight_q) {
+        int64_t n = (int64_t)D_MODEL * kv_dim;
+        dequant_v = (float *)malloc(n * sizeof(float));
+        if (dequant_v) { gguf_dequantize(w->attn_v_weight_q, w->attn_v_weight_type, n, dequant_v); v_weight = dequant_v; }
+    }
+
     if (!d_attn_out || !d_gate || !d_Q_norm || !d_K_norm || !d_V ||
         !d_Q_raw || !d_K_raw || !d_Q_full) {
         fprintf(stderr, "GQA backward: alloc failed\n");
@@ -2813,9 +2846,10 @@ void wubu_gqa_backward(
     }
     
     // === Step 7: Output projection backward ===
-    // Same dims as SSM output proj: [q_dim=4096, d_model=2048]
+    // Same dims as SSM output proj: [q_dim=4096, D_MODEL=2048]
     // Reuse the SSM function (VALUE_DIM == q_dim)
     wubu_ssm_backward_output_proj(attn_out, d_output, w->attn_output_weight,
+                                   w->attn_output_weight_q, w->attn_output_weight_type,
                                    d_attn_out, d_out_weight, N);
     
     // === Step 6: Gate backward ===
@@ -2900,19 +2934,44 @@ void wubu_gqa_backward(
     }
     
     // === Steps 1-3: MatMul backward for Q+gate, K, V ===
-    backward_matmul_nt(N, d_model, q_dim * 2, x, d_Q_full,
-                       w->attn_q_weight, d_x, d_q_weight);
-    
-    backward_matmul_nt(N, d_model, kv_dim, x, d_K_raw,
-                       w->attn_k_weight, d_x, d_k_weight);
-    
-    backward_matmul_nt(N, d_model, kv_dim, x, d_V,
-                       w->attn_v_weight, d_x, d_v_weight);
+    backward_matmul_nt(N, D_MODEL, q_dim * 2, x, d_Q_full,
+                       q_weight, d_x, d_q_weight);
+
+    backward_matmul_nt(N, D_MODEL, kv_dim, x, d_K_raw,
+                       k_weight, d_x, d_k_weight);
+
+    backward_matmul_nt(N, D_MODEL, kv_dim, x, d_V,
+                       v_weight, d_x, d_v_weight);
     
 cleanup_gqa:
     free(d_attn_out); free(d_gate);
     free(d_Q_norm); free(d_K_norm); free(d_V);
     free(d_Q_raw); free(d_K_raw); free(d_Q_full);
+    free(dequant_q); free(dequant_k); free(dequant_v);
+}
+
+// ============================================================
+// RMSNorm Backward (model-level helper)
+// ============================================================
+void wubu_rms_norm_backward(int B, int T, int d,
+                            const float *x, const float *weight, float eps,
+                            const float *d_out, float *d_x) {
+    const int N = B * T;
+    for (int s = 0; s < N; s++) {
+        const float *inp = x + s * d;
+        const float *do_h = d_out + s * d;
+        float *dx = d_x + s * d;
+        double sum_sq = 0.0;
+        for (int i = 0; i < d; i++) sum_sq += (double)inp[i] * (double)inp[i];
+        float rms = sqrtf((float)(sum_sq / d) + eps);
+        float r = 1.0f / rms;
+        float r3 = r * r * r;
+        double inner = 0.0;
+        for (int j = 0; j < d; j++)
+            inner += (double)do_h[j] * (double)weight[j] * (double)inp[j];
+        for (int i = 0; i < d; i++)
+            dx[i] += do_h[i] * weight[i] * r - (r3 / d) * inp[i] * (float)inner;
+    }
 }
 
 // ============================================================

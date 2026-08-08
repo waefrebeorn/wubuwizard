@@ -33,26 +33,8 @@ enum ggml_type {
     GGML_TYPE_IQ3_S   = 21,
     GGML_TYPE_IQ2_S   = 22,
     GGML_TYPE_IQ4_XS  = 23,
-    GGML_TYPE_I8      = 24,
-    GGML_TYPE_I16     = 25,
-    GGML_TYPE_I32     = 26,
-    GGML_TYPE_I64     = 27,
-    GGML_TYPE_F64     = 28,
     GGML_TYPE_IQ1_M   = 29,
     GGML_TYPE_BF16    = 30,  // bfloat16 (IEEE)
-    /* TurboQuant family (IDs per TheTom/llama-cpp-turboquant tom/merge-upstream-dsv4) */
-    GGML_TYPE_TQ1_0   = 34,
-    GGML_TYPE_TQ2_0   = 35,
-    /* TurboQuant branch extensions (IDs 36-47, PACE 2026-08-04) */
-    GGML_TYPE_MXFP4   = 39,  /* OCP Microscaling FP4: E2M1 + E8M0 per 32-elm block */
-    GGML_TYPE_NVFP4   = 40,  /* NVIDIA FP4: E2M1 + E4M3 mscale per 16-elm sub-block (64 total) */
-    GGML_TYPE_Q1_0    = 41,  /* 1.5625 bpw: 4-bit code + 1-bit sign per 32-element block */
-    GGML_TYPE_TURBO2_0 = 42, /* TurboQuant 2-bit */
-    GGML_TYPE_TURBO3_0 = 43, /* TurboQuant 3-bit */
-    GGML_TYPE_TURBO4_0 = 44, /* TurboQuant 4-bit */
-    GGML_TYPE_TQ3_1S  = 45,  /* WHT-rotated 3-bit Lloyd-Max, block 32, 16 B */
-    GGML_TYPE_TQ4_1S  = 46,  // WHT-rotated 4-bit Lloyd-Max, block 32, 20 B
-    GGML_TYPE_Q2_0    = 47,  /* 2-bit, block 64, 18 B (branch Q2_0; legacy alias 42) */
 };
 
 // GGUF tensor info
@@ -71,32 +53,22 @@ typedef struct {
     int64_t n_tensors;
     int64_t n_kv;
     uint32_t alignment;
-
+    
     // Tensor info array
     gguf_tensor_info *tensors;
-
+    
     // Data blob location in file
     uint64_t data_blob_offset;
-
+    
+    // Tensor info location in file (start of first tensor info entry)
+    uint64_t tensors_offset;
+    
     // File handle
     FILE *file;
-
+    
     // Optional: buffered data blob (mmap or malloc'd copy)
     void *data_blob;
     size_t data_blob_size;
-
-    // Track if data_blob is mmap'd (for proper cleanup)
-    int data_blob_is_mmap;
-
-    // File size (for clamping) + per-tensor raw byte spans derived from the
-    // file's own data offsets (the byte truth for unknown/TurboQuant types)
-    long file_size;
-    int64_t *tensor_raw_bytes;   // n_tensors entries
-
-    // KV value store (captured during open, small types only):
-    // 32 slots, key → {type, value bytes}. Used by gguf_kv_get_i32/f32/arr.
-    int n_kv_store;
-    struct gguf_kv_ent { char key[64]; int32_t type; uint8_t data[256]; int64_t len; } kv_store[32];
 } gguf_ctx;
 
 // Open GGUF file and parse headers
@@ -109,23 +81,11 @@ int gguf_buffer_data(gguf_ctx *ctx);
 // Calculate raw (quantized) byte size for a tensor type/element count
 int64_t gguf_raw_size(int ggml_type, int64_t n_elems);
 
-// The ONE canonical half -> float converter. Every dequant path
-// (gguf_dequantize, wubu_weight, quantized_matmul) must call this —
-// inline F16 copies have historically diverged (zero -> 6.1e-5 bug).
-float gguf_f16_to_f32(uint16_t h);
-
 // Dequantize raw quantized bytes to f32
 void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float *output);
 
 // Find a tensor by name
 gguf_tensor_info* gguf_find_tensor(gguf_ctx *ctx, const char *name);
-
-// KV value getters (values captured during gguf_open). Return 1 on hit.
-// type_filter: GGUF KV type (4=u32, 5=i32, 6=f32, 9=array) or 0 for any.
-int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out);
-int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out);
-/* array of i32: copies up to max_n elements. Returns count, or -1. */
-int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max_n);
 
 // Read tensor data (dequantized to float32)
 // Returns number of floats written, or 0 on error
@@ -136,7 +96,6 @@ void gguf_close(gguf_ctx *ctx);
 
 // IQ1_S / Q6_K dequantization (called internally by gguf_read_tensor_f32)
 void dequantize_q6_K_row(const uint8_t *data, float *output, int64_t n_elems);
-void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq1_s_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq2_xxs_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq2_s_row(const uint8_t *data, float *output, int64_t n_elems);
@@ -168,7 +127,6 @@ typedef struct {
 void quantize_row_q8_K(const float *x, block_q8_K *y, int64_t k);
 
 // Generic Q8_K-based quantized matmul
-// Optionally activate per-thread SmoothQuant via quantized_matmul_set_smoothquant()
 void quantized_matmul(const float *x,
                       const void *W, int weight_type,
                       int64_t n_rows, int64_t n_cols,
@@ -182,11 +140,36 @@ void quantized_matmul_from_q8(const void *q8_x,
                               int64_t col_stride_bytes,
                               float *y);
 
+// Batched quantized matmul: N input vectors through same weight
+// Weight data read ONCE from RAM, shared across all N tokens
+void quantized_matmul_batched(const float *x,
+                              const void *W, int weight_type,
+                              int64_t n_rows, int64_t n_cols,
+                              int64_t col_stride_bytes,
+                              int N,
+                              float *y);
+
+// Subset quantized matmul: compute only specified columns
+// col_indices: array of n_cols column indices to compute
+// y: output array [n_cols], one logit per specified column
+void quantized_matmul_subset(const float *x,
+                              const void *W, int weight_type,
+                              int64_t n_rows,
+                              const int *col_indices, int n_cols,
+                              int64_t col_stride_bytes,
+                              float *y);
+
 // IQ1_S grid table (2048 × uint64) for GPU constant memory upload
 const uint64_t *gguf_get_iq1s_grid(void);
+
+// Read raw quantized bytes from a tensor (no dequantization)
+// Works with or without buffered data_blob. If data_blob is NULL, reads from file.
+// Allocates internal buffer and copies data into 'output' (which must be at least raw_size bytes).
+// Returns the number of bytes read, or 0 on error.
+int gguf_read_raw_tensor(gguf_ctx *ctx, gguf_tensor_info *tensor, void *output);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* GGUF_READER_H */
+#endif // GGUF_READER_H

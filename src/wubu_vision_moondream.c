@@ -19,43 +19,214 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <math.h>
-/* No third-party JSON lib — the index.json parser is a stub.
- * When implemented, use a self-contained hand-written parser
- * (same approach as wubu_model_adapter.c's find_str/find_int). */
+#include <json-c/json.h>
+
+// ── Tensor name → struct field mapping ─────────────────────────────────
+
+// Helper: map tensor name to (field_ptr, expected_bytes) for reading.
+// Returns 1 if matched, 0 if unknown.
+static int map_tensor(const char *name, vm_state_t *state,
+                      float **field, size_t *expected_bytes) {
+    vm_weights_t *w = &state->w;
+    int n = -1;
+
+    // Parse: model.vision.blocks.N.{sub}.{param}
+    // Or:     model.vision.{other}.{param}
+    if (sscanf(name, "model.vision.blocks.%d.", &n) == 1) {
+        if (n < 0 || n >= VM_ENC_N_LAYERS) return 0;
+        // Find the rest after "model.vision.blocks.N." where N is variable length
+        const char *rest = strstr(name, "blocks.");
+        if (!rest) return 0;
+        rest = strchr(rest + 7, '.'); // skip "blocks.N"
+        if (!rest) return 0;
+        rest++; // skip the dot
+
+        if (!strcmp(rest, "attn.proj.bias"))       { *field = w->blocks[n].attn_proj_bias;       *expected_bytes = VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "attn.proj.weight"))  { *field = w->blocks[n].attn_proj_weight;     *expected_bytes = (size_t)VM_ENC_DIM * VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "attn.qkv.bias"))     { *field = w->blocks[n].attn_qkv_bias;       *expected_bytes = (size_t)3 * VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "attn.qkv.weight"))   { *field = w->blocks[n].attn_qkv_weight;     *expected_bytes = (size_t)3 * VM_ENC_DIM * VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "ln1.bias"))           { *field = w->blocks[n].ln1_bias;           *expected_bytes = VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "ln1.weight"))         { *field = w->blocks[n].ln1_weight;         *expected_bytes = VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "ln2.bias"))           { *field = w->blocks[n].ln2_bias;           *expected_bytes = VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "ln2.weight"))         { *field = w->blocks[n].ln2_weight;         *expected_bytes = VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "mlp.fc1.bias"))       { *field = w->blocks[n].mlp_fc1_bias;       *expected_bytes = VM_ENC_FF_DIM * sizeof(float); }
+        else if (!strcmp(rest, "mlp.fc1.weight"))     { *field = w->blocks[n].mlp_fc1_weight;     *expected_bytes = (size_t)VM_ENC_FF_DIM * VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "mlp.fc2.bias"))       { *field = w->blocks[n].mlp_fc2_bias;       *expected_bytes = VM_ENC_DIM * sizeof(float); }
+        else if (!strcmp(rest, "mlp.fc2.weight"))     { *field = w->blocks[n].mlp_fc2_weight;     *expected_bytes = (size_t)VM_ENC_DIM * VM_ENC_FF_DIM * sizeof(float); }
+        else return 0;
+        return 1;
+    }
+
+    // Non-block tensors
+    if (!strcmp(name, "model.vision.patch_emb.bias"))     { *field = w->patch_emb_bias;       *expected_bytes = VM_ENC_DIM * sizeof(float); }
+    else if (!strcmp(name, "model.vision.patch_emb.weight")) { *field = w->patch_emb_weight;  *expected_bytes = (size_t)VM_ENC_DIM * VM_PATCH_DIM * sizeof(float); }
+    else if (!strcmp(name, "model.vision.pos_emb"))          { *field = w->pos_emb;            *expected_bytes = (size_t)VM_N_PATCHES * VM_ENC_DIM * sizeof(float); }
+    else if (!strcmp(name, "model.vision.post_ln.bias"))     { *field = w->post_ln_bias;       *expected_bytes = VM_ENC_DIM * sizeof(float); }
+    else if (!strcmp(name, "model.vision.post_ln.weight"))   { *field = w->post_ln_weight;     *expected_bytes = VM_ENC_DIM * sizeof(float); }
+    else if (!strcmp(name, "model.vision.proj_mlp.fc1.bias"))   { *field = w->proj_mlp_fc1_bias;   *expected_bytes = VM_PROJ_INNER * sizeof(float); }
+    else if (!strcmp(name, "model.vision.proj_mlp.fc1.weight")) { *field = w->proj_mlp_fc1_weight; *expected_bytes = (size_t)VM_PROJ_INNER * 2 * VM_ENC_DIM * sizeof(float); }
+    else if (!strcmp(name, "model.vision.proj_mlp.fc2.bias"))   { *field = w->proj_mlp_fc2_bias;   *expected_bytes = VM_PROJ_OUT * sizeof(float); }
+    else if (!strcmp(name, "model.vision.proj_mlp.fc2.weight")) { *field = w->proj_mlp_fc2_weight; *expected_bytes = (size_t)VM_PROJ_OUT * VM_PROJ_INNER * sizeof(float); }
+    else return 0;
+    return 1;
+}
 
 // ── Weight Loading ─────────────────────────────────────────────────────
 
-static bool load_json_index(const char *path, void **entries, int *n) {
-    // TODO: parse moondream3_vision_index.json
-    // For each entry: read offset, size_bytes, shape from JSON
-    // Map to vm_weights_t fields by tensor key name
-    fprintf(stderr, "[vm] load_json_index: %s\n", path);
-    return false;  // stub
+static void *load_tensor(const char *name, struct json_object *index,
+                          FILE *bin, vm_state_t *state) {
+    struct json_object *entry, *joff, *jsz;
+    if (!json_object_object_get_ex(index, name, &entry)) {
+        fprintf(stderr, "[vm] WARNING: tensor '%s' not found in index\n", name);
+        return NULL;
+    }
+    json_object_object_get_ex(entry, "offset", &joff);
+    json_object_object_get_ex(entry, "size_bytes", &jsz);
+    long offset = (long)json_object_get_int64(joff);
+    size_t size = (size_t)json_object_get_int64(jsz);
+
+    float *field = NULL;
+    size_t expected = 0;
+    if (!map_tensor(name, state, &field, &expected)) {
+        fprintf(stderr, "[vm] WARNING: no struct mapping for '%s'\n", name);
+        return NULL;
+    }
+
+    if (size != expected) {
+        fprintf(stderr, "[vm] WARNING: '%s' size mismatch: bin=%zu expected=%zu\n",
+                name, size, expected);
+        // Still proceed — the .bin is ground truth
+    }
+
+    if (fseek(bin, offset, SEEK_SET) != 0) {
+        fprintf(stderr, "[vm] ERROR: seek failed for '%s' at offset %ld\n", name, offset);
+        return NULL;
+    }
+    if (fread(field, 1, size, bin) != size) {
+        fprintf(stderr, "[vm] ERROR: read failed for '%s' (%zu bytes)\n", name, size);
+        return NULL;
+    }
+    return field;
 }
+
+// ── Init / Free ─────────────────────────────────────────────────────────
 
 bool vm_init(vm_state_t *state, const char *bin_path, const char *index_path) {
     memset(state, 0, sizeof(*state));
 
-    // 1. Load index
-    // 2. Open binary file
-    // 3. For each tensor key:
-    //    - Parse model.vision.blocks.N.{submodule}.{param}
-    //    - Seek to offset, read size_bytes into the correct vm_weights_t field
-    // 4. Allocate scratch buffer for max intermediate tensor
+    // 1. Allocate all weight pointers
+    vm_weights_t *w = &state->w;
+    w->patch_emb_weight   = (float *)calloc((size_t)VM_ENC_DIM * VM_PATCH_DIM, sizeof(float));
+    w->patch_emb_bias     = (float *)calloc(VM_ENC_DIM, sizeof(float));
+    w->pos_emb            = (float *)calloc((size_t)VM_N_PATCHES * VM_ENC_DIM, sizeof(float));
+    w->post_ln_weight     = (float *)calloc(VM_ENC_DIM, sizeof(float));
+    w->post_ln_bias       = (float *)calloc(VM_ENC_DIM, sizeof(float));
+    w->proj_mlp_fc1_weight = (float *)calloc((size_t)VM_PROJ_INNER * 2 * VM_ENC_DIM, sizeof(float));
+    w->proj_mlp_fc1_bias   = (float *)calloc(VM_PROJ_INNER, sizeof(float));
+    w->proj_mlp_fc2_weight = (float *)calloc((size_t)VM_PROJ_OUT * VM_PROJ_INNER, sizeof(float));
+    w->proj_mlp_fc2_bias   = (float *)calloc(VM_PROJ_OUT, sizeof(float));
 
-    fprintf(stderr, "[vm] init: weights=%s index=%s\n", bin_path, index_path);
-    state->loaded = false;
-    return state->loaded;
+    for (int i = 0; i < VM_ENC_N_LAYERS; i++) {
+        float **ptrs[] = {
+            &w->blocks[i].ln1_weight, &w->blocks[i].ln1_bias,
+            &w->blocks[i].attn_qkv_weight, &w->blocks[i].attn_qkv_bias,
+            &w->blocks[i].attn_proj_weight, &w->blocks[i].attn_proj_bias,
+            &w->blocks[i].ln2_weight, &w->blocks[i].ln2_bias,
+            &w->blocks[i].mlp_fc1_weight, &w->blocks[i].mlp_fc1_bias,
+            &w->blocks[i].mlp_fc2_weight, &w->blocks[i].mlp_fc2_bias,
+        };
+        size_t sizes[] = {
+            VM_ENC_DIM, VM_ENC_DIM,
+            (size_t)3 * VM_ENC_DIM * VM_ENC_DIM, (size_t)3 * VM_ENC_DIM,
+            (size_t)VM_ENC_DIM * VM_ENC_DIM, VM_ENC_DIM,
+            VM_ENC_DIM, VM_ENC_DIM,
+            (size_t)VM_ENC_FF_DIM * VM_ENC_DIM, VM_ENC_FF_DIM,
+            (size_t)VM_ENC_DIM * VM_ENC_FF_DIM, VM_ENC_DIM,
+        };
+        for (int j = 0; j < 12; j++)
+            *ptrs[j] = (float *)calloc(sizes[j], sizeof(float));
+    }
+
+    // 2. Allocate large scratch (max intermediate = patches + qkv + attn_output + mlp_hidden + proj)
+    //    Max usage: proj_hidden[N * 8192] + proj_input[N * 2304] = ~7.5M floats
+    size_t max_scratch = (size_t)VM_N_PATCHES * (VM_PROJ_INNER + 2 * VM_ENC_DIM);
+    state->scratch = (float *)calloc(max_scratch, sizeof(float));
+
+    // 3. Load JSON index
+    struct json_object *index = json_object_from_file(index_path);
+    if (!index) {
+        fprintf(stderr, "[vm] ERROR: failed to parse %s\n", index_path);
+        goto fail;
+    }
+
+    // 4. Open binary weight file
+    FILE *bin = fopen(bin_path, "rb");
+    if (!bin) {
+        fprintf(stderr, "[vm] ERROR: cannot open %s\n", bin_path);
+        json_object_put(index);
+        goto fail;
+    }
+
+    // 5. Load each tensor name from the JSON index
+    //    Iterate over all keys in the JSON object
+    json_object_object_foreach(index, key, val) {
+        (void)val;  // unused — we use key to look up
+        // Skip metadata fields that aren't tensor names
+        if (strcmp(key, "n_elems") == 0 || strcmp(key, "offset") == 0 ||
+            strcmp(key, "size_bytes") == 0 || strcmp(key, "shape") == 0)
+            continue;
+        if (!load_tensor(key, index, bin, state)) {
+            fprintf(stderr, "[vm] WARNING: failed to load '%s'\n", key);
+        }
+    }
+
+    fclose(bin);
+    json_object_put(index);
+
+    state->loaded = true;
+    fprintf(stderr, "[vm] init OK: %s + %s\n", bin_path, index_path);
+    return true;
+
+fail:
+    vm_free(state);
+    return false;
 }
 
 void vm_free(vm_state_t *state) {
     if (!state) return;
-    // Free all weight pointers allocated in vm_init
-    // Free scratch buffer
-    memset(state, 0, sizeof(*state));
+    vm_weights_t *w = &state->w;
+
+    // Non-block weights
+    free(w->patch_emb_weight);   w->patch_emb_weight = NULL;
+    free(w->patch_emb_bias);     w->patch_emb_bias = NULL;
+    free(w->pos_emb);            w->pos_emb = NULL;
+    free(w->post_ln_weight);     w->post_ln_weight = NULL;
+    free(w->post_ln_bias);       w->post_ln_bias = NULL;
+    free(w->proj_mlp_fc1_weight); w->proj_mlp_fc1_weight = NULL;
+    free(w->proj_mlp_fc1_bias);   w->proj_mlp_fc1_bias = NULL;
+    free(w->proj_mlp_fc2_weight); w->proj_mlp_fc2_weight = NULL;
+    free(w->proj_mlp_fc2_bias);   w->proj_mlp_fc2_bias = NULL;
+
+    // Block weights
+    for (int i = 0; i < VM_ENC_N_LAYERS; i++) {
+        free(w->blocks[i].ln1_weight);      w->blocks[i].ln1_weight = NULL;
+        free(w->blocks[i].ln1_bias);        w->blocks[i].ln1_bias = NULL;
+        free(w->blocks[i].attn_qkv_weight); w->blocks[i].attn_qkv_weight = NULL;
+        free(w->blocks[i].attn_qkv_bias);   w->blocks[i].attn_qkv_bias = NULL;
+        free(w->blocks[i].attn_proj_weight); w->blocks[i].attn_proj_weight = NULL;
+        free(w->blocks[i].attn_proj_bias);  w->blocks[i].attn_proj_bias = NULL;
+        free(w->blocks[i].ln2_weight);      w->blocks[i].ln2_weight = NULL;
+        free(w->blocks[i].ln2_bias);        w->blocks[i].ln2_bias = NULL;
+        free(w->blocks[i].mlp_fc1_weight);  w->blocks[i].mlp_fc1_weight = NULL;
+        free(w->blocks[i].mlp_fc1_bias);    w->blocks[i].mlp_fc1_bias = NULL;
+        free(w->blocks[i].mlp_fc2_weight);  w->blocks[i].mlp_fc2_weight = NULL;
+        free(w->blocks[i].mlp_fc2_bias);    w->blocks[i].mlp_fc2_bias = NULL;
+    }
+
+    free(state->scratch);
+    state->scratch = NULL;
+    state->loaded = false;
 }
 
 // ── Core Ops ───────────────────────────────────────────────────────────
@@ -109,29 +280,65 @@ void vm_layer_norm(float *x, const float *weight, const float *bias,
 }
 
 void vm_attention(const float *q, const float *k, const float *v,
-                  float *output, int n, int n_heads) {
-    // Scaled dot-product attention (single token, all heads)
-    // q, k, v: [n] where n = n_heads * head_dim
-    // output: [n]
-    // Equivalent to F.scaled_dot_product_attention for B=1, T=1
+                  float *output, float *attn_scratch,
+                  int N, int n_tokens, int n_heads, float head_dim) {
+    // Full scaled dot-product attention: output = softmax(QK^T/√d) V
+    // q, k, v: [n_tokens, D] where D = n_heads * head_dim
+    // output: [n_tokens, D]
+    // attn_scratch: [n_tokens * n_tokens] temp for softmax scores
+    // N: max tokens (for scratch stride), n_tokens: actual tokens this call
+    //
+    // For each head h:
+    //   attn[t][s] = sum_i q[t][h*hd+i] * k[s][h*hd+i] / sqrt(hd)
+    //   attn[t][:] = softmax(attn[t][:])
+    //   output[t][h*hd+i] = sum_s attn[t][s] * v[s][h*hd+i]
 
-    int head_dim = n / n_heads;
-    float scale = 1.0f / sqrtf((float)head_dim);
+    float scale = 1.0f / sqrtf(head_dim);
 
     for (int h = 0; h < n_heads; h++) {
-        int base = h * head_dim;
-        const float *qh = &q[base];
-        const float *kh = &k[base];
-        const float *vh = &v[base];
-        float *out_h = &output[base];
+        int base = (int)(h * head_dim);
+        int D = (int)(n_heads * head_dim);
 
-        /* Single-token attention (T=1): the softmax over a single KV
-         * reduces to 1.0, so output = V directly. The score computation
-         * below is retained for the multi-token path (future extension). */
-        (void)qh; (void)kh; (void)scale;
-        /* Weighted sum — for T=1, attention weight is trivially 1.0 */
-        for (int i = 0; i < head_dim; i++)
-            out_h[i] = vh[i];  /* placeholder until multi-token support */
+        // Compute attention scores: Q @ K^T per head
+        for (int t = 0; t < n_tokens; t++) {
+            for (int s = 0; s < n_tokens; s++) {
+                float score = 0.0f;
+                for (int i = 0; i < (int)head_dim; i++) {
+                    score += q[t * D + base + i] * k[s * D + base + i];
+                }
+                score *= scale;
+                attn_scratch[t * N + s] = score;
+            }
+        }
+
+        // Softmax over last dimension (over s)
+        for (int t = 0; t < n_tokens; t++) {
+            float max_val = attn_scratch[t * N];
+            for (int s = 1; s < n_tokens; s++) {
+                if (attn_scratch[t * N + s] > max_val)
+                    max_val = attn_scratch[t * N + s];
+            }
+            float sum = 0.0f;
+            for (int s = 0; s < n_tokens; s++) {
+                attn_scratch[t * N + s] = expf(attn_scratch[t * N + s] - max_val);
+                sum += attn_scratch[t * N + s];
+            }
+            float inv_sum = 1.0f / (sum + 1e-30f);
+            for (int s = 0; s < n_tokens; s++) {
+                attn_scratch[t * N + s] *= inv_sum;
+            }
+        }
+
+        // Weighted sum: output[t][h] = sum_s attn[t][s] * v[s][h]
+        for (int t = 0; t < n_tokens; t++) {
+            for (int i = 0; i < (int)head_dim; i++) {
+                float wsum = 0.0f;
+                for (int s = 0; s < n_tokens; s++) {
+                    wsum += attn_scratch[t * N + s] * v[s * D + base + i];
+                }
+                output[t * D + base + i] = wsum;
+            }
+        }
     }
 }
 
@@ -205,13 +412,8 @@ void vm_forward(vm_state_t *state, const float *pixels, int H, int W,
         }
     }
 
-    /* scratch layout:
-     *   [0, N*Pd)          = patches
-     *   [N*Pd, N*Pd+N*D)   = x (embeddings)
-     *   [N*Pd+N*D, ...)    = residual + temp buffers
-     */
-    int scratch_off = N * Pd + N * D;
-    float *residual = scratch + scratch_off;
+    // 4. Transformer blocks
+    float *residual = scratch + (N * Pd + N * D) / sizeof(float);  // temp
     for (int l = 0; l < VM_ENC_N_LAYERS; l++) {
         // Block: x = x + attention(layer_norm(x))
         //        x = x + mlp(layer_norm(x))
@@ -239,12 +441,11 @@ void vm_forward(vm_state_t *state, const float *pixels, int H, int W,
         // In-place reshape: qkv [N, 3D] → q [N, D], k [N, D], v [N, D]
         // Already laid out this way since we write to qkv linearly
 
-        // Attention per head (simplified full SDPA)
+        // Attention per head — full SDPA over all N tokens
         float *attn_out = scratch + 3 * N * D;
-        for (int i = 0; i < N; i++) {
-            vm_attention(&q[i * D], &k[i * D], &v[i * D],
-                         &attn_out[i * D], D, VM_ENC_N_HEADS);
-        }
+        float *attn_scratch = scratch + 4 * N * D;  // [N, N] attention score matrix
+        float head_dim = (float)D / (float)VM_ENC_N_HEADS;
+        vm_attention(q, k, v, attn_out, attn_scratch, N, N, VM_ENC_N_HEADS, head_dim);
 
         // Output projection
         float *proj_out = scratch;  // reuse qkv space

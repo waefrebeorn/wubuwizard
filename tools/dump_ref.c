@@ -1,8 +1,8 @@
 // dump_ref.c — Dump reference logits and per-layer hidden states from llama.cpp
 // Compile: gcc -o /tmp/dump_ref dump_ref.c -I/home/wubu/llama.cpp -I/home/wubu/llama.cpp/common
 //   -I/home/wubu/llama.cpp/ggml/include -L/home/wubu/llama.cpp/build/bin
-//   -Wl,-rpath,/home/wubu/llama.cpp/build/bin -lggml-cpu
-//   -L/home/wubu/llama.cpp/build -l:libllama.a -lm -lpthread -ldl -lstdc++
+//   -Wl,-rpath,/home/wubu/llama.cpp/build/bin -lggml-cpu -lggml -lllama -lllama-common
+//   -lm -lpthread -ldl -lstdc++
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +12,7 @@
 #define D_MODEL 2048
 
 int main(int argc, char **argv) {
-    const char *model_path = "/models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf";
+    const char *model_path = argc > 1 ? argv[1] : "/models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf";
     
     // Initialize llama backend
     llama_backend_init();
@@ -21,8 +21,8 @@ int main(int argc, char **argv) {
     struct llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0;
     
-    // Load model
-    struct llama_model *model = llama_load_model_from_file(model_path, model_params);
+    // Load model using new API
+    struct llama_model *model = llama_model_load_from_file(model_path, model_params);
     if (!model) {
         fprintf(stderr, "Failed to load model\n");
         return 1;
@@ -31,31 +31,57 @@ int main(int argc, char **argv) {
     // Create context
     struct llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = 512;
-    ctx_params.n_batch = 1;
+    ctx_params.n_batch = 64;
+    ctx_params.embeddings = true;
     
-    struct llama_context *ctx = llama_new_context_with_model(model, ctx_params);
+    struct llama_context *ctx = llama_init_from_model(model, ctx_params);
     if (!ctx) {
         fprintf(stderr, "Failed to create context\n");
-        llama_free_model(model);
+        llama_model_free(model);
         return 1;
     }
     
-    // Prepare input: token 248044
-    llama_token token = 248044;
-    llama_batch batch = llama_batch_get_one(&token, 1);
+    // Prepare input from argv[2] or tokenize default "cat"
+    const char *prompt = argc > 2 ? argv[2] : "cat";
+    llama_token tokens[64];
+    int n_tokens = llama_tokenize(
+        llama_model_get_vocab(model),
+        prompt, (int32_t)strlen(prompt),
+        tokens, 64, false, false);
+    printf("Prompt: %s (%d tokens)\n", prompt, n_tokens);
+    if (n_tokens <= 0) {
+        fprintf(stderr, "Failed to tokenize prompt\n");
+        llama_model_free(model);
+        return 1;
+    }
+    // Print tokens
+    printf("Tokens: ");
+    for (int i = 0; i < n_tokens; i++) printf("%d ", tokens[i]);
+    printf("\n");
+    llama_batch batch = llama_batch_get_one(tokens, n_tokens);
     
     // Run forward pass
     if (llama_decode(ctx, batch) != 0) {
         fprintf(stderr, "llama_decode failed\n");
         llama_free(ctx);
-        llama_free_model(model);
+        llama_model_free(model);
         return 1;
     }
     
     // Get logits
-    float *logits = llama_get_logits(ctx);
-    int n_vocab = llama_n_vocab(model);
+    float *logits = llama_get_logits_ith(ctx, 0);
+    int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
     printf("llama.cpp output: n_vocab=%d\n", n_vocab);
+    
+    // Dump final hidden state (before output proj)
+    const float *embd = llama_get_embeddings_ith(ctx, 0);
+    if (embd) {
+        FILE *he = fopen("/tmp/ref_final_hidden.bin", "wb");
+        if (he) { fwrite(embd, sizeof(float), D_MODEL, he); fclose(he); }
+        printf("  Hidden state saved to /tmp/ref_final_hidden.bin\n");
+    }
+    
+    // Dump logits
     
     // Dump logits
     FILE *f = fopen("/tmp/llama_logits_new.bin", "wb");
@@ -88,7 +114,7 @@ int main(int argc, char **argv) {
     printf("Skipping per-layer comparison for now.\n");
     
     llama_free(ctx);
-    llama_free_model(model);
+    llama_model_free(model);
     llama_backend_free();
     return 0;
 }
