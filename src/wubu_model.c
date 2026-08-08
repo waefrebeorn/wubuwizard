@@ -118,6 +118,17 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     if (d_model == 0) d_model = D_MODEL; // fallback
     model->d_model = d_model;
 
+    // Extract d_ff (FFN intermediate dim) from the GGUF ffn_gate tensor.
+    // Dense-FFN hybrid models (Qwen3.5: 3584) differ from the compile-time
+    // DEF_D_FF (512) — using the hardcode made the dense FFN read only the
+    // first 512 of 3584 rows -> wrong logits (finite but garbage).
+    int d_ff = D_FF;
+    {
+        gguf_tensor_info *fg = resolve(0, WUBU_T_FFN_GATE);
+        if (fg && fg->n_dims >= 2 && fg->dims[1] > 0) d_ff = (int)fg->dims[1];
+    }
+    model->d_ff = d_ff;
+
     // Extract GQA dimensions from tensor shapes via resolver
     int gqa_head_dim = GQA_HEAD_DIM;
     {
@@ -195,7 +206,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     model->gqa_kv_heads = GQA_KV_HEADS;
     model->gqa_head_dim = gqa_head_dim;
     model->rotary_dim = (int)(gqa_head_dim * PARTIAL_ROTARY_FACTOR);
-    model->d_ff = D_FF;
+    /* d_ff set from GGUF ffn_gate above (Qwen3.5 = 3584) */
     model->n_experts = N_EXPERTS;
     model->n_active_experts = N_ACTIVE_EXPTS;
 
@@ -1495,12 +1506,21 @@ layer_timing:
         // Residual: x = x + attn_out
         #pragma omp parallel for if(N * model->d_model > 500000)
         for (int i = 0; i < N * model->d_model; i++) x[i] += attn_out[i];
+
+        // Post-attention RMSNorm -> normed2 (the FFN input). This was
+        // MISSING — normed2 stayed all-zeros, so the dense FFN computed
+        // 0 and every layer ran attention-only (Qwen3.5: post_attention_norm).
+        wubu_rms_norm(B, T, model->d_model, x, layer->post_attn_norm_weight,
+                      1e-6f, normed2);
         
         // MoE (FFN) forward — ds4-ssd slot-bank takes precedence (page experts
         // from the checkpoint shards; the resident blobs are intentionally NULL
         // in this path, so it MUST be checked before the resident `loaded` path).
         double t_moe0 = wall_time();
-        if (layer->dense_ffn && wubu_dense_ffn_ready(layer->dense_ffn)) {
+        if (getenv("FFN_OFF") && layer->dense_ffn) {
+            memcpy(ffn_out, normed2, N * model->d_model * sizeof(float));
+            have_prev_experts = 0;
+        } else if (layer->dense_ffn && wubu_dense_ffn_ready(layer->dense_ffn)) {
             /* Dense SwiGLU FFN (hybrid models) — zero-copy quantized */
             for (int t = 0; t < N; t++) {
                 wubu_dense_ffn_forward(layer->dense_ffn,
