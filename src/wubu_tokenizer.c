@@ -282,10 +282,17 @@ bool wubu_tokenizer_init_from_gguf(wubu_tokenizer_t *tok, const char *gguf_path)
             int right_id = find_token_by_string(tok, (const uint8_t *)(space + 1),
                                                 (int)strlen(space + 1));
             uint8_t mb[WUBU_TOKENIZER_MAX_TOKEN_BYTES];
-            int mbl = (int)(space - m) + (int)strlen(space + 1);
+            int llen = (int)(space - m);
+            int rlen = (int)strlen(space + 1);
+            int mbl = llen + rlen;
             if (mbl > WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1) mbl = WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1;
-            memcpy(mb, m, (size_t)(space - m));
-            memcpy(mb + (space - m), space + 1, strlen(space + 1));
+            /* Cap each copy so the concatenation fits mb[] exactly —
+             * LFM2.5-class byte vocab merges can exceed 256 bytes and the
+             * uncapped second memcpy was a stack overflow (glibc fortify). */
+            int cl = llen < mbl ? llen : mbl;
+            int cr = mbl - cl;
+            memcpy(mb, m, (size_t)cl);
+            memcpy(mb + cl, space + 1, (size_t)cr);
             int merged_id = find_token_by_string(tok, mb, mbl);
             if (left_id >= 0 && right_id >= 0 && merged_id >= 0) {
                 tok->merges[tok->n_merges].left_id = left_id;

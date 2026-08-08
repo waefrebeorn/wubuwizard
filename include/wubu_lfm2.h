@@ -44,6 +44,21 @@ typedef struct {
     /* Norms */
     float *ffn_norm;    /* [d_model] */
     float *op_norm;     /* [d_model] operator (attn/conv) norm */
+
+    /* LAZY quantized sources (GGUF blob, zero-copy). When set, the F32
+     * fields above are NULL until lfm2_layer_materialize() dequantizes
+     * THIS layer only; lfm2_layer_release() frees after the forward
+     * pass. Keeps peak RAM ~= one layer, not the whole model. */
+    const uint8_t *q_in_proj;  int q_in_proj_t;
+    const uint8_t *q_conv_w;   int q_conv_w_t;
+    const uint8_t *q_out_proj; int q_out_proj_t;
+    const uint8_t *q_q_proj;   int q_q_proj_t;
+    const uint8_t *q_k_proj;   int q_k_proj_t;
+    const uint8_t *q_v_proj;   int q_v_proj_t;
+    const uint8_t *q_o_proj;   int q_o_proj_t;
+    const uint8_t *q_w1;       int q_w1_t;
+    const uint8_t *q_w2;       int q_w2_t;
+    const uint8_t *q_w3;       int q_w3_t;
 } lfm2_layer_t;
 
 typedef struct {
@@ -60,6 +75,11 @@ typedef struct {
     lfm2_layer_t *layers;
     float *embed;       /* [vocab, d_model] (tied with lm_head) */
     float *embed_norm;  /* [d_model] applied to hidden ONCE after all layers (HF Lfm2Model) */
+    /* quantized embed source (GGUF blob) — embed stays NULL until a row
+     * is dequantized on demand (1GB F32 vs ~350MB quantized) */
+    const uint8_t *q_embed;
+    int q_embed_type;
+    int embed_bytes_per_row;
     /* KV cache for attention layers: [n_layers][2][n_kv_heads*head_dim*maxT] */
     float *kv_cache;
     int    kv_max_t;
@@ -76,6 +96,18 @@ void lfm2_free(lfm2_model_t *m);
  * logits[vocab] out (last token). Allocates scratch internally. */
 bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T,
                   float *logits);
+
+/* Materialize ONE layer's quantized weights to F32 (fills the float*
+ * fields; no-op if already materialized). Returns true on success.
+ * Call before the layer's forward, lfm2_layer_release() after. */
+bool lfm2_layer_materialize(lfm2_layer_t *L, int d_model, int conv_dim,
+                            int ff_dim);
+
+/* Free the F32 fields of one layer (keeps the quantized blob pointers). */
+void lfm2_layer_release(lfm2_layer_t *L);
+
+/* Quantized tied lm_head: dequantize each vocab row on the fly. */
+void lfm2_lmhead_q(const float *h, const lfm2_model_t *m, float *logits);
 
 #ifdef __cplusplus
 }

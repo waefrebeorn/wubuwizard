@@ -64,6 +64,9 @@ typedef enum {
     WUBU_T_MOE_DOWN_EXPS,      /* MoE routed down weights */
     WUBU_T_MOE_UP_SHEXP,       /* MoE shared-expert up */
     WUBU_T_MOE_DOWN_SHEXP,     /* MoE shared-expert down */
+    WUBU_T_CONV_IN,            /* LFM shortconv in_proj (shortconv.in_proj.weight) */
+    WUBU_T_CONV_W,             /* LFM shortconv depthwise causal conv (shortconv.conv.weight) */
+    WUBU_T_CONV_OUT,           /* LFM shortconv out_proj (shortconv.out_proj.weight) */
     WUBU_T_TOKEN_EMBD,         /* token embeddings (token_embd.weight / embedding.weight) */
     WUBU_T_OUTPUT,             /* logit head (output.weight / lm_head.weight) */
     WUBU_T_OUTPUT_NORM,        /* final norm (output_norm.weight / final_norm.weight /

@@ -22,6 +22,7 @@
 static st_ctx *g_shards[8];
 static int g_nsh = 0;
 static gguf_ctx *g_gguf = NULL;
+static const uint8_t *g_gguf_blob = NULL;
 static wubu_gguf_names_t g_names;
 
 static int is_gguf_path(const char *p) {
@@ -67,6 +68,9 @@ static int lfm2_open_gguf(const char *model_dir) {
     g_gguf = gguf_open(path);
     if (!g_gguf) return 0;
     wubu_gguf_names_detect(g_gguf, &g_names);
+    gguf_buffer_data(g_gguf);   /* mmap the quantized blob, zero copy */
+    g_gguf_blob = (const uint8_t *)g_gguf->data_blob;
+    if (!g_gguf_blob) { fprintf(stderr, "lfm2: gguf buffer_data failed\n"); return 0; }
     fprintf(stderr, "[lfm2] gguf detect: conv=%d layers=%d ssm=%d moe=%d dense=%d gqa=%d\n",
             g_names.convention, g_names.n_layers, g_names.has_ssm,
             g_names.has_moe, g_names.has_dense_ffn, g_names.has_gqa);
@@ -77,11 +81,17 @@ static int lfm2_open_gguf(const char *model_dir) {
  * The engine's role-based resolver (wubu_gguf_find) handles all
  * naming dialects; this maps a safetensors path to a role. */
 static wubu_gguf_role_t name_to_role(const char *st_name) {
-    if (strstr(st_name, "conv.in_proj.weight") || strstr(st_name, "self_attn.q_proj.weight"))
+    if (strstr(st_name, "conv.in_proj.weight"))
+        return WUBU_T_CONV_IN;
+    if (strstr(st_name, "conv.conv.weight"))
+        return WUBU_T_CONV_W;
+    if (strstr(st_name, "conv.out_proj.weight"))
+        return WUBU_T_CONV_OUT;
+    if (strstr(st_name, "self_attn.q_proj.weight"))
         return WUBU_T_ATTN_Q;
-    if (strstr(st_name, "conv.conv.weight") || strstr(st_name, "self_attn.k_proj.weight"))
+    if (strstr(st_name, "self_attn.k_proj.weight"))
         return WUBU_T_ATTN_K;
-    if (strstr(st_name, "conv.out_proj.weight") || strstr(st_name, "self_attn.v_proj.weight"))
+    if (strstr(st_name, "self_attn.v_proj.weight"))
         return WUBU_T_ATTN_V;
     if (strstr(st_name, "self_attn.out_proj.weight"))
         return WUBU_T_ATTN_O;
@@ -106,23 +116,26 @@ static wubu_gguf_role_t name_to_role(const char *st_name) {
     return WUBU_T_COUNT;
 }
 
+/* Find a tensor by safetensors name across opened shards OR GGUF.
+ * Returns the GGUF tensor info (blob pointer + type) or NULL. */
+static gguf_tensor_info *find_tensor_info(const char *name) {
+    if (!g_gguf) return NULL;
+    gguf_tensor_info *t = NULL;
+    wubu_gguf_role_t role = name_to_role(name);
+    int layer = -1;
+    sscanf(name, "model.layers.%d.", &layer);
+    if (role != WUBU_T_COUNT) {
+        t = wubu_gguf_find(g_gguf, layer, role);
+        if (!t && layer < 0) t = wubu_gguf_find_global(g_gguf, role);
+    }
+    if (!t) t = gguf_find_tensor(g_gguf, name);
+    return t;
+}
+
 /* Load a BF16/F32 tensor by name across opened shards OR GGUF. */
 static float *load_bf16_f32(const char *name) {
     if (g_gguf) {
-        gguf_tensor_info *t = NULL;
-        /* role-based resolution first (handles ANY naming dialect) */
-        wubu_gguf_role_t role = name_to_role(name);
-        int layer = -1;
-        sscanf(name, "model.layers.%d.", &layer);
-        if (role != WUBU_T_COUNT) {
-            t = wubu_gguf_find(g_gguf, layer, role);
-            if (!t && layer < 0) t = wubu_gguf_find_global(g_gguf, role);
-        }
-        if (!t) {
-            /* fallback: exact-name match (some GGUFs keep the same
-             * names as safetensors) */
-            t = gguf_find_tensor(g_gguf, name);
-        }
+        gguf_tensor_info *t = find_tensor_info(name);
         if (!t) return NULL;
         int64_t ne = 1;
         for (int di = 0; di < t->n_dims; di++) ne *= t->dims[di];
@@ -147,6 +160,7 @@ static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) { fprintf(
 bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
     memset(m, 0, sizeof(*m));
     int have = 0;
+    int head_dim_inf = 0;   /* from attn_q_norm [hd] in the GGUF, if present */
     if (lfm2_open_gguf(model_dir)) {
         have = 1;
         fprintf(stderr, "[lfm2] opened GGUF: %s\n", model_dir);
@@ -185,6 +199,7 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
          * n_q_heads * head_dim. ffn_gate rows = ff_dim. */
         m->d_model = 0; m->n_layers = 0; m->ff_dim = 0; m->n_q_heads = 0;
         m->n_kv_heads = 0; m->vocab_size = 0; m->conv_dim = 0;
+        int head_dim_inf = 0;
         for (int64_t i = 0; i < g_gguf->n_tensors; i++) {
             const gguf_tensor_info *t = &g_gguf->tensors[i];
             const char *n = t->name;
@@ -194,27 +209,41 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
             } else if (strncmp(n, "blk.", 4) == 0) {
                 int layer = atoi(n + 4);
                 if (layer + 1 > m->n_layers) m->n_layers = layer + 1;
-                if (strstr(n, "attn_q.weight")) {
-                    m->n_q_heads = (int)t->dims[1]; /* n_q_heads * head_dim */
-                    /* keep dims[0] as d_model if not set */
+                if (strstr(n, "attn_q_norm.weight")) {
+                    /* [head_dim] — the per-head q norm reveals head_dim */
+                    head_dim_inf = (int)t->dims[0];
+                } else if (strstr(n, "attn_q.weight")) {
                     if (!m->d_model) m->d_model = (int)t->dims[0];
                 } else if (strstr(n, "attn_k.weight")) {
                     m->n_kv_heads = (int)t->dims[1];
+                } else if (strstr(n, "shortconv.in_proj.weight")) {
+                    /* GGUF dims: [d_model, 3*conv_dim] — conv_dim = dims[1]/3 */
+                    int d1 = (int)(t->n_dims > 1 ? t->dims[1] : 0);
+                    if (d1 % 3 == 0) m->conv_dim = d1 / 3;
+                } else if (strstr(n, "shortconv.out_proj.weight")) {
+                    /* [d_model, conv_dim] — cross-check */
+                    int d1 = (int)(t->n_dims > 1 ? t->dims[1] : 0);
+                    if (!m->conv_dim) m->conv_dim = d1;
                 } else if (strstr(n, "ffn_gate.weight") || strstr(n, "ffn_up.weight")) {
                     m->ff_dim = (int)t->dims[1];
                 }
             }
         }
-        fprintf(stderr, "[lfm2] config.json absent; inferred d=%d layers=%d ff=%d q=%d kv=%d vocab=%d\n",
-                m->d_model, m->n_layers, m->ff_dim, m->n_q_heads, m->n_kv_heads, m->vocab_size);
+        fprintf(stderr, "[lfm2] config.json absent; inferred d=%d layers=%d ff=%d q=%d kv=%d vocab=%d hd=%d\n",
+                m->d_model, m->n_layers, m->ff_dim, m->n_q_heads, m->n_kv_heads, m->vocab_size, head_dim_inf);
     }
     if (!have_config && !g_gguf) {
         fprintf(stderr, "lfm2: no config.json\n");
         return false;
     }
 
-    m->head_dim = m->d_model / m->n_q_heads;
-    /* rope_theta: prefer nested rope_parameters.rope_theta (LFM2.5 = 1e7) */
+    m->head_dim = (head_dim_inf > 0) ? head_dim_inf :
+                  (m->n_q_heads > 0 ? m->d_model / m->n_q_heads : 128);
+    /* n_kv_heads from attn_k dims[1] is actually kv_dim (heads*hd); if it
+     * exceeds d_model it's kv_dim — normalize to heads. */
+    if (m->n_kv_heads > 0 && m->head_dim > 0 && m->n_kv_heads > m->d_model / m->head_dim)
+        m->n_kv_heads = m->n_kv_heads / m->head_dim;
+    if (m->n_kv_heads <= 0) m->n_kv_heads = 8;   /* LFM2.5 default */
     m->rope_theta = 10000.0f;
     {
         FILE *fp = fopen(cfg, "rb");
@@ -258,10 +287,13 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
             if (li != m->n_layers) fprintf(stderr, "lfm2: warn layer_types count %d != %d\n", li, m->n_layers);
         } else if (g_gguf) {
             /* infer conv layers: a layer with conv tensors has
-             * blk.N.conv.weight — check per layer */
+             * blk.N.conv.weight or blk.N.shortconv.conv.weight —
+             * check per layer (LFM2.5 GGUF names them shortconv.*) */
             for (int l = 0; l < m->n_layers; l++) {
                 char tn[128]; snprintf(tn, sizeof(tn), "blk.%d.conv.weight", l);
-                if (gguf_find_tensor(g_gguf, tn)) m->is_conv[l] = true;
+                char tn2[128]; snprintf(tn2, sizeof(tn2), "blk.%d.shortconv.conv.weight", l);
+                if (gguf_find_tensor(g_gguf, tn) || gguf_find_tensor(g_gguf, tn2))
+                    m->is_conv[l] = true;
             }
         }
     }
@@ -271,38 +303,59 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
         lfm2_layer_t *L = &m->layers[l];
         L->conv_k = 3;
         char nm[160];
+        /* GGUF: big matrices stay QUANTIZED in the blob (lazy materialize
+         * per layer in forward — never dequantize all 30 layers to F32,
+         * that OOMs the 5.8GB box: ~10GB). Norms stay F32. */
+#define LOADQ(var, qvar, qtype, fmt) do { snprintf(nm, sizeof(nm), fmt, l); \
+            gguf_tensor_info *ti = g_gguf ? find_tensor_info(nm) : NULL; \
+            if (ti) { L->qvar = (const uint8_t *)g_gguf_blob + ti->data_offset; L->qtype = ti->ggml_type; } \
+            else { L->var = load_bf16_f32(nm); \
+                   if (!L->var) fprintf(stderr, "lfm2: missing %s\n", nm); } } while (0)
 #define LOAD(var, fmt) do { snprintf(nm, sizeof(nm), fmt, l); \
             L->var = load_bf16_f32(nm); \
             if (!L->var) fprintf(stderr, "lfm2: missing %s\n", nm); } while (0)
         if (m->is_conv[l]) {
-            LOAD(in_proj, "model.layers.%d.conv.in_proj.weight");
-            LOAD(conv_w,   "model.layers.%d.conv.conv.weight");
-            LOAD(out_proj, "model.layers.%d.conv.out_proj.weight");
+            LOADQ(in_proj, q_in_proj, q_in_proj_t, "model.layers.%d.conv.in_proj.weight");
+            LOADQ(conv_w,   q_conv_w,  q_conv_w_t,  "model.layers.%d.conv.conv.weight");
+            LOADQ(out_proj, q_out_proj,q_out_proj_t,"model.layers.%d.conv.out_proj.weight");
         } else {
-            LOAD(q_proj, "model.layers.%d.self_attn.q_proj.weight");
-            LOAD(k_proj, "model.layers.%d.self_attn.k_proj.weight");
-            LOAD(v_proj, "model.layers.%d.self_attn.v_proj.weight");
-            LOAD(o_proj, "model.layers.%d.self_attn.out_proj.weight");
+            LOADQ(q_proj, q_q_proj, q_q_proj_t, "model.layers.%d.self_attn.q_proj.weight");
+            LOADQ(k_proj, q_k_proj, q_k_proj_t, "model.layers.%d.self_attn.k_proj.weight");
+            LOADQ(v_proj, q_v_proj, q_v_proj_t, "model.layers.%d.self_attn.v_proj.weight");
+            LOADQ(o_proj, q_o_proj, q_o_proj_t, "model.layers.%d.self_attn.out_proj.weight");
             LOAD(q_ln,   "model.layers.%d.self_attn.q_layernorm.weight");
             LOAD(k_ln,   "model.layers.%d.self_attn.k_layernorm.weight");
         }
-        LOAD(w1,      "model.layers.%d.feed_forward.w1.weight");
-        LOAD(w2,      "model.layers.%d.feed_forward.w2.weight");
-        LOAD(w3,      "model.layers.%d.feed_forward.w3.weight");
+        LOADQ(w1,      q_w1, q_w1_t, "model.layers.%d.feed_forward.w1.weight");
+        LOADQ(w2,      q_w2, q_w2_t, "model.layers.%d.feed_forward.w2.weight");
+        LOADQ(w3,      q_w3, q_w3_t, "model.layers.%d.feed_forward.w3.weight");
         LOAD(ffn_norm, "model.layers.%d.ffn_norm.weight");
         LOAD(op_norm,  "model.layers.%d.operator_norm.weight");
+#undef LOADQ
 #undef LOAD
     }
 
     /* embeddings + norms (tied lm_head) */
-    m->embed = load_bf16_f32("model.embed_tokens.weight");
+    if (g_gguf) {
+        gguf_tensor_info *te = find_tensor_info("model.embed_tokens.weight");
+        if (te && g_gguf_blob) {
+            m->q_embed = g_gguf_blob + te->data_offset;
+            m->q_embed_type = te->ggml_type;
+            int64_t n_elems = 1;
+            for (int di = 0; di < te->n_dims; di++) n_elems *= te->dims[di];
+            int64_t raw = gguf_raw_size(te->ggml_type, n_elems);
+            m->embed_bytes_per_row = (int)(raw / te->dims[1]); /* exact bytes per vocab row */
+            if (m->embed_bytes_per_row <= 0) m->embed_bytes_per_row = m->d_model * 4;
+        }
+    }
+    if (!m->q_embed) m->embed = load_bf16_f32("model.embed_tokens.weight");
     m->embed_norm = load_bf16_f32("model.embedding_norm.weight");
     m->kv_max_t = 8192;
     size_t kv_bytes = (size_t)m->n_layers * 2 * m->n_kv_heads * m->head_dim * m->kv_max_t;
     m->kv_cache = (float *)xmalloc(kv_bytes * sizeof(float));
     memset(m->kv_cache, 0, kv_bytes * sizeof(float));
 
-    if (!m->embed || !m->embed_norm) { fprintf(stderr, "lfm2: missing embed/embed_norm\n"); return false; }
+    if ((!m->embed && !m->q_embed) || !m->embed_norm) { fprintf(stderr, "lfm2: missing embed/embed_norm\n"); return false; }
     fprintf(stderr, "[lfm2] loaded d=%d layers=%d q=%d kv=%d hd=%d ff=%d vocab=%d conv_dim=%d rope_theta=%.0f\n",
             m->d_model, m->n_layers, m->n_q_heads, m->n_kv_heads, m->head_dim, m->ff_dim, m->vocab_size, m->conv_dim, m->rope_theta);
     return true;

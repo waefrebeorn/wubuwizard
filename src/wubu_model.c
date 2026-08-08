@@ -623,8 +623,6 @@ int max_s = 1;
             model->output_weight_type = t_out->ggml_type;
             model->tied_output = false;
         } else if (model->tied_output) {
-     // Tied: output_weight_q was set to token_embd tensor info earlier,
-     // but we need the actual blob pointer
      gguf_tensor_info *t_embd = resolve(-1, WUBU_T_TOKEN_EMBD);
      if (t_embd && blob) {
          model->output_weight_q = blob + t_embd->data_offset;

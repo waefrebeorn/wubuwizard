@@ -243,6 +243,21 @@ static const wubu_gguf_tmpl_t g_role_templates[WUBU_T_COUNT][12] = {
     { { QWEN,   "ffn_down_shexp.weight" },
       { HFBARE, "ffn.down_shexp.weight" },
       { "", "" } },
+    /* WUBU_T_CONV_IN (LFM shortconv in_proj) */
+    { { QWEN,   "shortconv.in_proj.weight" },
+      { HFBARE, "shortconv.in_proj.weight" },
+      { HFFULL, "conv.in_proj.weight" },
+      { "", "" } },
+    /* WUBU_T_CONV_W (LFM shortconv depthwise causal conv) */
+    { { QWEN,   "shortconv.conv.weight" },
+      { HFBARE, "shortconv.conv.weight" },
+      { HFFULL, "conv.conv.weight" },
+      { "", "" } },
+    /* WUBU_T_CONV_OUT (LFM shortconv out_proj) */
+    { { QWEN,   "shortconv.out_proj.weight" },
+      { HFBARE, "shortconv.out_proj.weight" },
+      { HFFULL, "conv.out_proj.weight" },
+      { "", "" } },
     /* WUBU_T_TOKEN_EMBD */
     { { "", "token_embd.weight" },
       { "", "embedding.weight" },
@@ -259,6 +274,7 @@ static const wubu_gguf_tmpl_t g_role_templates[WUBU_T_COUNT][12] = {
       { "", "final_norm.weight" },
       { "", "model.norm.weight" },
       { "", "model.language_model.final_norm.weight" },
+      { "", "token_embd_norm.weight" },   /* LFM2.5: embed_norm applied after all layers */
       { "", "" } },
 };
 

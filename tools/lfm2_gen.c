@@ -40,8 +40,15 @@ int main(int argc, char **argv) {
     int produced = 0;
     for (int step = 0; step < max_new; step++) {
         for (int t = 0; t < T; t++) {
-            const float *row = m.embed + (size_t)seq[t] * m.d_model;
-            memcpy(emb + (size_t)t * m.d_model, row, m.d_model * sizeof(float));
+            if (m.embed) {
+                const float *row = m.embed + (size_t)seq[t] * m.d_model;
+                memcpy(emb + (size_t)t * m.d_model, row, m.d_model * sizeof(float));
+            } else if (m.q_embed) {
+                /* quantized embed: dequantize ONE row per token */
+                const uint8_t *row = m.q_embed + (size_t)seq[t] * m.embed_bytes_per_row;
+                gguf_dequantize(row, m.q_embed_type, m.d_model,
+                                emb + (size_t)t * m.d_model);
+            }
         }
         if (!lfm2_forward(&m, emb, 1, T, logits)) { fprintf(stderr, "lfm2: forward failed at step %d\n", step); break; }
 
