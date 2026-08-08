@@ -639,6 +639,13 @@ test_lfm: tools/test_lfm.c src/wubu_lfm.o src/wubu_linear_attn.o
 	$(CC) $(CFLAGS) -o $@ tools/test_lfm.c src/wubu_lfm.o src/wubu_linear_attn.o $(LDFLAGS) -lm
 	./test_lfm
 
+test_dense_ffn: tools/test_dense_ffn.c src/wubu_dense_ffn.o $(CORE_OBJ)
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_dense_ffn.c src/wubu_dense_ffn.o $(CORE_OBJ) $(LDFLAGS) -lm
+	./test_dense_ffn
+
+src/wubu_dense_ffn.o: src/wubu_dense_ffn.c include/wubu_dense_ffn.h include/gguf_reader.h
+	$(CC) $(CFLAGS) -c -o $@ src/wubu_dense_ffn.c
+
 test_multiteach: tools/multiteach_selftest.c src/wubu_multiteach.o
 	$(CC) $(CFLAGS) -o $@ tools/multiteach_selftest.c src/wubu_multiteach.o $(LDFLAGS) -lm
 	./test_multiteach
