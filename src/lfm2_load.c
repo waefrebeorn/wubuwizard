@@ -1,15 +1,17 @@
 /* lfm2_load.c -- LFM2.5 loader (C11, self-contained).
  *
  * MODIFIED (2026-08-07): loads BOTH safetensors shards AND GGUF
- * files. "make it load whatever" — if model_dir is a .gguf file
- * (or a dir containing one), tensors come through the in-tree
- * gguf_reader (dequant to F32) with safetensors->GGUF name
- * translation. Otherwise the existing safetensors shard path.
+ * files via the engine's role-based name resolver (wubu_gguf_names
+ * — handles Qwen/Gemma/HF naming dialects + SSM/dense/MoE
+ * detection). "Make it load whatever": pass a .gguf file (or a
+ * dir containing one) and tensors come through the in-tree
+ * gguf_reader, resolved by ROLE not by hardcoded name.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "lfm2_load.h"
 #include "safetensors_reader.h"
 #include "gguf_reader.h"
+#include "wubu_gguf_names.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +22,7 @@
 static st_ctx *g_shards[8];
 static int g_nsh = 0;
 static gguf_ctx *g_gguf = NULL;
+static wubu_gguf_names_t g_names;
 
 static int is_gguf_path(const char *p) {
     size_t n = strlen(p);
@@ -62,84 +65,63 @@ static int lfm2_open_gguf(const char *model_dir) {
         if (!path[0]) return 0;
     }
     g_gguf = gguf_open(path);
-    return g_gguf ? 1 : 0;
+    if (!g_gguf) return 0;
+    wubu_gguf_names_detect(g_gguf, &g_names);
+    fprintf(stderr, "[lfm2] gguf detect: conv=%d layers=%d ssm=%d moe=%d dense=%d gqa=%d\n",
+            g_names.convention, g_names.n_layers, g_names.has_ssm,
+            g_names.has_moe, g_names.has_dense_ffn, g_names.has_gqa);
+    return 1;
 }
 
 /* ---- safetensors -> GGUF tensor name translation (LFM2.5) ----
- * GGUF uses blk.N.attn_q.weight / attn_k / attn_v / attn_output,
- * ffn_gate / ffn_down / ffn_up, attn_q_norm / attn_k_norm,
- * token_embd.weight, output_norm.weight. The safetensors names are
- * model.layers.N.self_attn.q_proj.weight etc. Map role + layer. */
-static void translate_name(const char *st_name, char *out, size_t outsz) {
-    /* try direct first (same name in some GGUFs) */
-    snprintf(out, outsz, "%s", st_name);
-    int layer = -1;
-    char role[64] = {0};
-    if (sscanf(st_name, "model.layers.%d.", &layer) == 1) {
-        const char *rest = strstr(st_name, ".");
-        rest = strstr(rest + 1, ".");
-        rest = strstr(rest + 1, ".");
-        if (rest) {
-            rest++; /* past the third dot */
-            if      (strstr(rest, "self_attn.q_proj.weight"))     snprintf(role, sizeof(role), "attn_q.weight");
-            else if (strstr(rest, "self_attn.k_proj.weight"))     snprintf(role, sizeof(role), "attn_k.weight");
-            else if (strstr(rest, "self_attn.v_proj.weight"))     snprintf(role, sizeof(role), "attn_v.weight");
-            else if (strstr(rest, "self_attn.out_proj.weight"))   snprintf(role, sizeof(role), "attn_output.weight");
-            else if (strstr(rest, "self_attn.q_layernorm.weight"))snprintf(role, sizeof(role), "attn_q_norm.weight");
-            else if (strstr(rest, "self_attn.k_layernorm.weight"))snprintf(role, sizeof(role), "attn_k_norm.weight");
-            else if (strstr(rest, "feed_forward.w1.weight"))      snprintf(role, sizeof(role), "ffn_gate.weight");
-            else if (strstr(rest, "feed_forward.w2.weight"))      snprintf(role, sizeof(role), "ffn_down.weight");
-            else if (strstr(rest, "feed_forward.w3.weight"))      snprintf(role, sizeof(role), "ffn_up.weight");
-            else if (strstr(rest, "ffn_norm.weight"))             snprintf(role, sizeof(role), "ffn_norm.weight");
-            else if (strstr(rest, "operator_norm.weight"))        snprintf(role, sizeof(role), "attn_output_norm.weight");
-            else if (strstr(rest, "conv.in_proj.weight"))         snprintf(role, sizeof(role), "attn_q.weight");
-            else if (strstr(rest, "conv.conv.weight"))            snprintf(role, sizeof(role), "attn_k.weight");
-            else if (strstr(rest, "conv.out_proj.weight"))        snprintf(role, sizeof(role), "attn_v.weight");
-            if (role[0]) {
-                snprintf(out, outsz, "blk.%d.%s", layer, role);
-                return;
-            }
-        }
-    }
-    if      (strcmp(st_name, "model.embed_tokens.weight") == 0)   snprintf(out, outsz, "token_embd.weight");
-    else if (strcmp(st_name, "model.embedding_norm.weight") == 0) snprintf(out, outsz, "output_norm.weight");
+ * The engine's role-based resolver (wubu_gguf_find) handles all
+ * naming dialects; this maps a safetensors path to a role. */
+static wubu_gguf_role_t name_to_role(const char *st_name) {
+    if (strstr(st_name, "conv.in_proj.weight") || strstr(st_name, "self_attn.q_proj.weight"))
+        return WUBU_T_ATTN_Q;
+    if (strstr(st_name, "conv.conv.weight") || strstr(st_name, "self_attn.k_proj.weight"))
+        return WUBU_T_ATTN_K;
+    if (strstr(st_name, "conv.out_proj.weight") || strstr(st_name, "self_attn.v_proj.weight"))
+        return WUBU_T_ATTN_V;
+    if (strstr(st_name, "self_attn.out_proj.weight"))
+        return WUBU_T_ATTN_O;
+    if (strstr(st_name, "self_attn.q_layernorm.weight"))
+        return WUBU_T_ATTN_Q_NORM;
+    if (strstr(st_name, "self_attn.k_layernorm.weight"))
+        return WUBU_T_ATTN_K_NORM;
+    if (strstr(st_name, "feed_forward.w1.weight"))
+        return WUBU_T_FFN_GATE;
+    if (strstr(st_name, "feed_forward.w2.weight"))
+        return WUBU_T_FFN_DOWN;
+    if (strstr(st_name, "feed_forward.w3.weight"))
+        return WUBU_T_FFN_UP;
+    if (strstr(st_name, "ffn_norm.weight"))
+        return WUBU_T_FFN_NORM;
+    if (strstr(st_name, "operator_norm.weight"))
+        return WUBU_T_POST_ATTN_NORM;
+    if (strcmp(st_name, "model.embed_tokens.weight") == 0)
+        return WUBU_T_TOKEN_EMBD;
+    if (strcmp(st_name, "model.embedding_norm.weight") == 0)
+        return WUBU_T_OUTPUT_NORM;
+    return WUBU_T_COUNT;
 }
 
 /* Load a BF16/F32 tensor by name across opened shards OR GGUF. */
 static float *load_bf16_f32(const char *name) {
     if (g_gguf) {
-        char gname[256];
-        translate_name(name, gname, sizeof(gname));
-        gguf_tensor_info *t = gguf_find_tensor(g_gguf, gname);
-        if (!t && strcmp(gname, name) != 0) t = gguf_find_tensor(g_gguf, name);
+        gguf_tensor_info *t = NULL;
+        /* role-based resolution first (handles ANY naming dialect) */
+        wubu_gguf_role_t role = name_to_role(name);
+        int layer = -1;
+        sscanf(name, "model.layers.%d.", &layer);
+        if (role != WUBU_T_COUNT) {
+            t = wubu_gguf_find(g_gguf, layer, role);
+            if (!t && layer < 0) t = wubu_gguf_find_global(g_gguf, role);
+        }
         if (!t) {
-            /* "load whatever": prefix-scan the GGUF's actual tensors.
-             * Match by the trailing role (e.g. ".self_attn.q_proj.weight"
-             * or ".conv.conv.weight") + layer number. This handles any
-             * naming dialect. */
-            int layer = -1;
-            if (sscanf(name, "model.layers.%d.", &layer) == 1) {
-                const char *role = strstr(name, ".self_attn.");
-                if (!role) role = strstr(name, ".feed_forward.");
-                if (!role) role = strstr(name, ".ffn_norm.");
-                if (!role) role = strstr(name, ".operator_norm.");
-                if (!role) role = strstr(name, ".conv.");
-                if (!role) role = strstr(name, ".embedding_norm.");
-                if (role) {
-                    for (int64_t i = 0; i < g_gguf->n_tensors && !t; i++) {
-                        const gguf_tensor_info *cand = &g_gguf->tensors[i];
-                        const char *cn = cand->name;
-                        /* same layer AND same role suffix */
-                        char layerbuf[16];
-                        snprintf(layerbuf, sizeof(layerbuf), "%d.", layer);
-                        if (strstr(cn, layerbuf) && strstr(cn, role + 1)) {
-                            t = (gguf_tensor_info *)cand;
-                        }
-                    }
-                }
-            } else if (strcmp(name, "model.embed_tokens.weight") == 0) {
-                t = gguf_find_tensor(g_gguf, "token_embd.weight");
-            }
+            /* fallback: exact-name match (some GGUFs keep the same
+             * names as safetensors) */
+            t = gguf_find_tensor(g_gguf, name);
         }
         if (!t) return NULL;
         int64_t ne = 1;
