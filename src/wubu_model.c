@@ -674,6 +674,26 @@ int max_s = 1;
                 moe->loaded = true;
                 moe->load_from_blob = true;
             }
+
+            // Dense SwiGLU FFN (hybrid models): resolve ffn_gate/up/down
+            // roles. When the layer has dense FFN tensors and NO MoE
+            // exps, create the dense module (zero-copy quantized).
+            if (!moe->loaded) {
+                gguf_tensor_info *tg = resolve(l, WUBU_T_FFN_GATE);
+                gguf_tensor_info *tu = resolve(l, WUBU_T_FFN_UP);
+                gguf_tensor_info *td = resolve(l, WUBU_T_FFN_DOWN);
+                if (tg && tu && td && blob) {
+                    layer->dense_ffn = wubu_dense_ffn_create(
+                        blob + tg->data_offset, tg->ggml_type,
+                        blob + tu->data_offset, tu->ggml_type,
+                        blob + td->data_offset, td->ggml_type,
+                        model->d_model, model->d_ff);
+                    if (layer->dense_ffn && !wubu_dense_ffn_ready(layer->dense_ffn)) {
+                        wubu_dense_ffn_free(layer->dense_ffn);
+                        layer->dense_ffn = NULL;
+                    }
+                }
+            }
         }
 
     // Count actual SSM and GQA layers
@@ -954,6 +974,11 @@ void wubu_model_free(wubu_model_t *model) {
         wubu_layer_t *layer = &model->layers[l];
         free(layer->attn_norm_weight);
         free(layer->post_attn_norm_weight);
+        /* dense FFN is zero-copy blob-backed; free the handle only */
+        if (layer->dense_ffn) {
+            wubu_dense_ffn_free(layer->dense_ffn);
+            layer->dense_ffn = NULL;
+        }
         // Free MoE weights (skip if blob-backed)
         if (!layer->moe.load_from_blob) {
             free(layer->moe.ffn_gate_inp);
@@ -1468,7 +1493,15 @@ layer_timing:
         // from the checkpoint shards; the resident blobs are intentionally NULL
         // in this path, so it MUST be checked before the resident `loaded` path).
         double t_moe0 = wall_time();
-        if (model->enable_moe && model->ssd_moe && layer->moe.loaded >= 0 &&
+        if (layer->dense_ffn && wubu_dense_ffn_ready(layer->dense_ffn)) {
+            /* Dense SwiGLU FFN (hybrid models) — zero-copy quantized */
+            for (int t = 0; t < N; t++) {
+                wubu_dense_ffn_forward(layer->dense_ffn,
+                                       normed2 + t * model->d_model,
+                                       ffn_out + t * model->d_model);
+            }
+            have_prev_experts = 0;
+        } else if (model->enable_moe && model->ssd_moe && layer->moe.loaded >= 0 &&
             (model->moe_max_layers == 0 || l < model->moe_max_layers)) {
             // ds4-ssd slot-bank: page routed experts from the on-disk checkpoint.
             wubu_moe_forward_ssd(normed2, B, T, &layer->moe, model->ssd_moe, l,

@@ -15,25 +15,25 @@
 extern "C" {
 #endif
 
-typedef struct wubu_dense_ffn wubu_dense_ffn;
+typedef struct wubu_dense_ffn wubu_dense_ffn_t;
 
 /* Create from quantized blob pointers (zero-copy, not owned). */
-wubu_dense_ffn *wubu_dense_ffn_create(
+wubu_dense_ffn_t *wubu_dense_ffn_create(
     const uint8_t *gate_q, int gate_type,
     const uint8_t *up_q,   int up_type,
     const uint8_t *down_q, int down_type,
     int d_model, int d_ff);
 
-void wubu_dense_ffn_free(wubu_dense_ffn *f);
+void wubu_dense_ffn_free(wubu_dense_ffn_t *f);
 
 /* Forward: y = SwiGLU(x @ gate^T) @ down^T, where
  * SwiGLU(a,b) = a * sigmoid(a) * b  (SiLU gate * up).
  * x and y are d_model floats each (single token). */
-void wubu_dense_ffn_forward(wubu_dense_ffn *f,
+void wubu_dense_ffn_forward(wubu_dense_ffn_t *f,
                             const float *x, float *y);
 
 /* 1 when all three weight pointers are present. */
-int wubu_dense_ffn_ready(const wubu_dense_ffn *f);
+int wubu_dense_ffn_ready(const wubu_dense_ffn_t *f);
 
 #ifdef __cplusplus
 }

@@ -3,6 +3,7 @@
 
 #include "wubu_ssm.h"
 #include "wubu_moe.h"
+#include "wubu_dense_ffn.h" /* opaque dense FFN for hybrid layers */
 #include "wubu_safetensors_shard.h"
 #include "wubu_kvcache_quant.h"
 #include "wubu_kv_select.h"
@@ -43,6 +44,10 @@ typedef struct wubu_layer_t {
     
     // MoE (FFN) weights
     moe_weights_t moe;
+
+    // Dense SwiGLU FFN (hybrid models: Qwen3.5 family use dense
+    // ffn_gate/up/down, no MoE exps). NULL when the layer is MoE.
+    wubu_dense_ffn_t *dense_ffn;
 } wubu_layer_t;
 
 // Complete model

@@ -17,14 +17,14 @@ struct wubu_dense_ffn {
     int d_ff;
 };
 
-wubu_dense_ffn *wubu_dense_ffn_create(
+wubu_dense_ffn_t *wubu_dense_ffn_create(
     const uint8_t *gate_q, int gate_type,
     const uint8_t *up_q,   int up_type,
     const uint8_t *down_q, int down_type,
     int d_model, int d_ff)
 {
     if (d_model <= 0 || d_ff <= 0) return NULL;
-    wubu_dense_ffn *f = calloc(1, sizeof(*f));
+    wubu_dense_ffn_t *f = calloc(1, sizeof(*f));
     if (!f) return NULL;
     f->gate_q = gate_q; f->gate_type = gate_type;
     f->up_q = up_q;     f->up_type = up_type;
@@ -34,17 +34,17 @@ wubu_dense_ffn *wubu_dense_ffn_create(
     return f;
 }
 
-void wubu_dense_ffn_free(wubu_dense_ffn *f)
+void wubu_dense_ffn_free(wubu_dense_ffn_t *f)
 {
     free(f); /* weights are zero-copy, not owned */
 }
 
-int wubu_dense_ffn_ready(const wubu_dense_ffn *f)
+int wubu_dense_ffn_ready(const wubu_dense_ffn_t *f)
 {
     return (f && f->gate_q && f->up_q && f->down_q) ? 1 : 0;
 }
 
-void wubu_dense_ffn_forward(wubu_dense_ffn *f,
+void wubu_dense_ffn_forward(wubu_dense_ffn_t *f,
                             const float *x, float *y)
 {
     if (!wubu_dense_ffn_ready(f) || !x || !y) return;
