@@ -95,6 +95,10 @@ bool wubu_tokenizer_init_from_files(wubu_tokenizer_t *tok,
 // Initialize tokenizer from GGUF file
 bool wubu_tokenizer_init(wubu_tokenizer_t *tok, const char *gguf_path);
 
+// Initialize tokenizer from the GGUF's own tokenizer.ggml.* KV pairs
+// (self-contained; no data/*.bin extraction needed)
+bool wubu_tokenizer_init_from_gguf(wubu_tokenizer_t *tok, const char *gguf_path);
+
 // Free tokenizer resources
 void wubu_tokenizer_free(wubu_tokenizer_t *tok);
 

@@ -647,6 +647,7 @@ src/wubu_dense_ffn.o: src/wubu_dense_ffn.c include/wubu_dense_ffn.h include/gguf
 	$(CC) $(CFLAGS) -c -o $@ src/wubu_dense_ffn.c
 
 CORE_OBJ += src/wubu_dense_ffn.o
+CORE_OBJ += src/wubu_gguf_tokenizer.o
 
 test_multiteach: tools/multiteach_selftest.c src/wubu_multiteach.o
 	$(CC) $(CFLAGS) -o $@ tools/multiteach_selftest.c src/wubu_multiteach.o $(LDFLAGS) -lm

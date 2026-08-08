@@ -238,6 +238,101 @@ bool wubu_tokenizer_init(wubu_tokenizer_t *tok, const char *gguf_path) {
     return true;
 }
 
+// ========== Init from GGUF-embedded tokenizer KV pairs ==========
+// Reads tokenizer.ggml.tokens / tokenizer.ggml.merges straight from the
+// .gguf file (self-contained — no data/*.bin extraction step needed).
+
+#include "wubu_gguf_tokenizer.h"
+
+bool wubu_tokenizer_init_from_gguf(wubu_tokenizer_t *tok, const char *gguf_path) {
+    if (!tok || !gguf_path) return false;
+    memset(tok, 0, sizeof(*tok));
+    tok->bos_id = -1; tok->eos_id = -1; tok->pad_id = -1;
+
+    wubu_gguf_tokenizer_data_t d;
+    if (!wubu_gguf_tokenizer_extract(gguf_path, &d)) return false;
+
+    /* vocab */
+    tok->vocab_size = d.n_tokens;
+    tok->vocab = (wubu_token_t *)calloc((size_t)d.n_tokens, sizeof(wubu_token_t));
+    if (!tok->vocab) { wubu_gguf_tokenizer_free(&d); return false; }
+    for (int i = 0; i < d.n_tokens; i++) {
+        const char *s = d.tokens[i];
+        size_t l = strlen(s);
+        if (l > WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1) l = WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1;
+        memcpy(tok->vocab[i].bytes, s, l);
+        tok->vocab[i].bytes[l] = '\0';
+        tok->vocab[i].byte_len = (int)l;
+        tok->vocab[i].id = i;
+    }
+    build_vocab_hash(tok);
+    build_byte_token_ids(tok);
+    printf("  Vocab: %d tokens loaded (GGUF)\n", tok->vocab_size);
+
+    /* merges */
+    tok->n_merges = 0;
+    if (d.merges && d.n_merges > 0) {
+        tok->merges = (wubu_merge_t *)calloc((size_t)d.n_merges, sizeof(wubu_merge_t));
+        if (!tok->merges) { wubu_gguf_tokenizer_free(&d); return false; }
+        for (int mi = 0; mi < d.n_merges; mi++) {
+            const char *m = d.merges[mi];
+            const char *space = strchr(m, ' ');
+            if (!space) continue;
+            int left_id = find_token_by_string(tok, (const uint8_t *)m, (int)(space - m));
+            int right_id = find_token_by_string(tok, (const uint8_t *)(space + 1),
+                                                (int)strlen(space + 1));
+            uint8_t mb[WUBU_TOKENIZER_MAX_TOKEN_BYTES];
+            int mbl = (int)(space - m) + (int)strlen(space + 1);
+            if (mbl > WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1) mbl = WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1;
+            memcpy(mb, m, (size_t)(space - m));
+            memcpy(mb + (space - m), space + 1, strlen(space + 1));
+            int merged_id = find_token_by_string(tok, mb, mbl);
+            if (left_id >= 0 && right_id >= 0 && merged_id >= 0) {
+                tok->merges[tok->n_merges].left_id = left_id;
+                tok->merges[tok->n_merges].right_id = right_id;
+                tok->merges[tok->n_merges].new_id = merged_id;
+                tok->merges[tok->n_merges].priority = mi;
+                tok->n_merges++;
+            }
+        }
+        printf("  Merges: %d loaded (%d resolved, GGUF)\n", d.n_merges, tok->n_merges);
+    }
+
+    /* special tokens */
+    tok->bos_id = d.bos_id; tok->eos_id = d.eos_id; tok->pad_id = d.pad_id;
+
+    /* merge hash */
+    if (tok->n_merges > 0) {
+        tok->merge_hash_size = 1;
+        while (tok->merge_hash_size < tok->n_merges * 2) tok->merge_hash_size *= 2;
+        tok->merge_hash = (wubu_merge_hash_entry_t *)calloc(tok->merge_hash_size, sizeof(wubu_merge_hash_entry_t));
+        if (!tok->merge_hash) { wubu_gguf_tokenizer_free(&d); return false; }
+        int collisions = 0;
+        for (int i = 0; i < tok->n_merges; i++) {
+            uint32_t h = merge_hash_key(tok->merges[i].left_id, tok->merges[i].right_id);
+            int idx = (int)(h & (uint32_t)(tok->merge_hash_size - 1));
+            for (int j = 0; j < tok->merge_hash_size; j++) {
+                int e = (idx + j) & (tok->merge_hash_size - 1);
+                if (!tok->merge_hash[e].valid) {
+                    tok->merge_hash[e].left_id = tok->merges[i].left_id;
+                    tok->merge_hash[e].right_id = tok->merges[i].right_id;
+                    tok->merge_hash[e].merged_id = tok->merges[i].new_id;
+                    tok->merge_hash[e].priority = tok->merges[i].priority;
+                    tok->merge_hash[e].valid = 1;
+                    if (j > 0) collisions++;
+                    break;
+                }
+            }
+        }
+        printf("  Merge hash: %d entries in %d slots (%d collisions)\n",
+               tok->n_merges, tok->merge_hash_size, collisions);
+    }
+
+    printf("  BOS=%d, EOS=%d, PAD=%d (GGUF)\n", tok->bos_id, tok->eos_id, tok->pad_id);
+    wubu_gguf_tokenizer_free(&d);
+    return true;
+}
+
 // ========== Init from text files ==========
 static void build_byte_token_ids(wubu_tokenizer_t *tok) {
     // Look up each byte's Latin-1 character in the vocab (matches merge table encoding).

@@ -306,10 +306,17 @@ int main(int argc, char **argv) {
     }
 
     wubu_tokenizer_t tok;
-    /* For safetensors/Colonel models, prefer the HF tokenizer.json in the
-     * same directory. Fall back to the GGUF tokenizer otherwise. */
+    /* GGUF models: use the GGUF's OWN embedded tokenizer (tokenizer.ggml.*
+     * KV pairs) — it is byte-exact with llama.cpp's vocab/merges. The HF
+     * tokenizer.json from the model repo can drift from what the GGUF
+     * actually contains (Qwen3.5: 248044 vs 248320 — wrong merges -> wrong
+     * tokens -> logits that can never match the oracle). HF json is only a
+     * fallback for safetensors/Colonel models. */
     wubu_tok_hf_t *hf_tok = NULL;
-    {
+    int tok_ok = wubu_tokenizer_init_from_gguf(&tok, model_path);
+    if (tok_ok) {
+        wubu_print_stat("Tokenizer", "GGUF-embedded (%d tokens)", tok.vocab_size);
+    } else {
         char hf_path[1024];
         const char *slash = strrchr(model_path, '/');
         if (slash) {
@@ -320,17 +327,17 @@ int main(int argc, char **argv) {
         }
         FILE *tf = fopen(hf_path, "rb");
         if (tf) { fclose(tf); hf_tok = wubu_tok_hf_load(hf_path); }
-    }
-    if (hf_tok) {
-        wubu_print_stat("Tokenizer", "HF tokenizer.json (%d tokens)",
-                        wubu_tok_hf_vocab_size(hf_tok));
-        /* minimal wubu_tokenizer_t compatibility shim */
-        tok.bos_id = wubu_tok_hf_bos_id(hf_tok);
-        tok.eos_id = wubu_tok_hf_eos_id(hf_tok);
-    } else if (!wubu_tokenizer_init(&tok, model_path)) {
-        fprintf(stderr, "Failed to init tokenizer\n");
-        wubu_model_free(&mdl);
-        return 1;
+        if (hf_tok) {
+            wubu_print_stat("Tokenizer", "HF tokenizer.json (%d tokens)",
+                            wubu_tok_hf_vocab_size(hf_tok));
+            /* minimal wubu_tokenizer_t compatibility shim */
+            tok.bos_id = wubu_tok_hf_bos_id(hf_tok);
+            tok.eos_id = wubu_tok_hf_eos_id(hf_tok);
+        } else if (!wubu_tokenizer_init(&tok, model_path)) {
+            fprintf(stderr, "Failed to init tokenizer\n");
+            wubu_model_free(&mdl);
+            return 1;
+        }
     }
 
     // --- Repetition suppression (repeat_penalty + DRY) ---
