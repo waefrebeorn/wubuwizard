@@ -1041,6 +1041,10 @@ test_amoeba: tools/test_amoeba.c src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
 
+test_diagnosis: tools/test_diagnosis.c src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 test_nest: tools/test_nest.c src/wubu_nest.o $(CPU_OBJ)
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
