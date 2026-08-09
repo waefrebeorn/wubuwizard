@@ -1077,6 +1077,10 @@ test_harness: tools/test_harness.c src/wubu_harness.o src/wubu_trajcell.o src/wu
 test_skillcell: tools/test_skillcell.c src/wubu_skillcell.o src/wubu_hive.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_toolreg: tools/test_toolreg.c src/wubu_toolreg.o src/wubu_trajcell.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
