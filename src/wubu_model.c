@@ -139,7 +139,20 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                     gguf_tensor_info *tk = gguf_find_tensor(ctx, tn);
                     int64_t kv_dim = tk ? tk->dims[1] : 0;
                     if (dd.gqa_head_dim > 0 && q_dim % dd.gqa_head_dim == 0) {
-                        dd.gqa_q_heads  = (int)(q_dim / dd.gqa_head_dim);
+                        /* attn_q columns are the Q+gate FUSED pair
+                         * (gated-attn family): [q_h0 | gate_h0 | q_h1 |
+                         * gate_h1 | ...] = 2*q_heads*hd. The true q_dim is
+                         * attn_output's INPUT dim (2048 for Qwen3.5-0.8B →
+                         * 8 heads × 256; q_dim/plain_hd would wrongly say
+                         * 16 and the matmul would read past the weight). */
+                        int64_t out_dim = 0;
+                        snprintf(tn, sizeof(tn), "blk.%d.attn_output.weight", gl);
+                        gguf_tensor_info *to_ = gguf_find_tensor(ctx, tn);
+                        if (to_) out_dim = to_->dims[0];
+                        if (out_dim > 0 && out_dim % dd.gqa_head_dim == 0)
+                            dd.gqa_q_heads = (int)(out_dim / dd.gqa_head_dim);
+                        else
+                            dd.gqa_q_heads = (int)(q_dim / dd.gqa_head_dim);
                         if (kv_dim > 0 && kv_dim % dd.gqa_head_dim == 0) {
                             dd.gqa_kv_heads = (int)(kv_dim / dd.gqa_head_dim);
                             dd.gqa_kv_dim   = (int)kv_dim;

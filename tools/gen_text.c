@@ -104,8 +104,13 @@ static int decode_loop(wubu_model_t *mdl, wubu_tokenizer_t *tok,
     int generated = 0;
     int result_pos = 0;
     FILE *emb_file = NULL;
-    if (mdl->use_embedding_file)
-        emb_file = fopen("data/qwen36_embeddings_c.bin.raw", "rb");
+    if (mdl->use_embedding_file) {
+        char ep[256];
+        snprintf(ep, sizeof(ep), "data/embeddings_%d_%d.bin.raw", mdl->vocab_size, D_MODEL);
+        emb_file = fopen(ep, "rb");
+        if (!emb_file)
+            fprintf(stderr, "  WARN: no embedding file %s — embeddings will be ZEROS\n", ep);
+    }
 
     while (generated < max_tokens && !g_stop) {
         int topk_idxs[256];
@@ -117,6 +122,8 @@ static int decode_loop(wubu_model_t *mdl, wubu_tokenizer_t *tok,
             topk_idxs[k] = maxi; last_logits[maxi] = -1e30f;
         }
         int next_token = topk_idxs[0];
+        if (getenv("DBG_DECODE")) fprintf(stderr, "  [dbg] top1=%d eos=%d bos=%d\n",
+                next_token, tok->eos_id, tok->bos_id);
         if (next_token == tok->eos_id || next_token == tok->bos_id) break;
 
         char piece_buf[256];
@@ -306,8 +313,13 @@ int main(int argc, char **argv) {
 
     // Embed
     FILE *emb_file = NULL;
-    if (mdl.use_embedding_file)
-        emb_file = fopen("data/qwen36_embeddings_c.bin.raw", "rb");
+    if (mdl.use_embedding_file) {
+        char ep[256];
+        snprintf(ep, sizeof(ep), "data/embeddings_%d_%d.bin.raw", mdl.vocab_size, D_MODEL);
+        emb_file = fopen(ep, "rb");
+        if (!emb_file)
+            fprintf(stderr, "  WARN: no embedding file %s — embeddings will be ZEROS\n", ep);
+    }
 
     float *embd = (float *)malloc((size_t)n_prompt * D * sizeof(float));
     for (int i = 0; i < n_prompt; i++)

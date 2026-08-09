@@ -378,10 +378,15 @@ void quantized_matmul_from_q8(const void *q8_x,
                               int64_t col_stride_bytes,
                               float *y) {
     // Handle IQ1_M and other rare types without vec_dot: dequant then SGEMM
+    // Q8_0 also goes here: q8_0_vec_dot expects Q8_0-format activations
+    // (34-byte blocks), but callers pass a Q8_K buffer (292-byte blocks) —
+    // feeding it to q8_0_vec_dot reads garbage scales. Dequant-SGEMM is
+    // correct for any weight type against the Q8_K-dequantized activation.
     if (weight_type == GGML_TYPE_IQ1_M || weight_type == GGML_TYPE_IQ1_S ||
         weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ2_XS ||
         weight_type == GGML_TYPE_IQ3_S ||
-        weight_type == GGML_TYPE_Q2_K || weight_type == GGML_TYPE_Q3_K) {
+        weight_type == GGML_TYPE_Q2_K || weight_type == GGML_TYPE_Q3_K ||
+        weight_type == GGML_TYPE_Q8_0) {
         int64_t total_elems = n_rows * n_cols;
         float *f32_w = (float *)malloc(total_elems * sizeof(float));
         if (!f32_w) { fprintf(stderr, "quantized_matmul_from_q8: alloc %lld failed\n", (long long)total_elems); return; }
@@ -429,7 +434,6 @@ void quantized_matmul_from_q8(const void *q8_x,
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
 #endif
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
-        case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:
             fprintf(stderr, "quantized_matmul_from_q8: unsupported quant type %d\n", weight_type);
             return;
