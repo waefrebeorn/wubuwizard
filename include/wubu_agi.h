@@ -72,4 +72,52 @@ int wubu_agi_step(wubu_agi_t *agi, uint16_t observation,
 /* A6: telemetry. */
 void wubu_agi_stats(const wubu_agi_t *agi, char *buf, size_t cap);
 
+/* ── the specialist-cell orchestrator (the user directive #3: the
+ * biggest missing pillar — hierarchical planning / multi-agent
+ * orchestration, pure C11, no Python) ────────────────────────── */
+
+/* the specialist lenses (what each cell is good at) */
+typedef enum {
+    WUBU_CELL_CODE = 0,     /* the code lens */
+    WUBU_CELL_MATH = 1,     /* the math lens */
+    WUBU_CELL_TOOL = 2,     /* the tool-use lens */
+    WUBU_CELL_CRIT = 3,     /* the critique lens (the adversary) */
+    WUBU_CELL_JUDGE = 4     /* the judge (merges the specialists) */
+} wubu_cell_lens_t;
+
+/* one specialist cell: a short-lived hive insert with a lens */
+typedef struct {
+    wubu_cell_lens_t lens;
+    uint16_t goal_token;       /* the sub-goal this cell attacks */
+    float    confidence;       /* the cell's self-reported confidence */
+    int      accepted;         /* the judge's verdict on this cell */
+    uint64_t batch;            /* provenance */
+} wubu_specialist_t;
+
+/* the orchestrator state (a sub-session of the AGI loop) */
+typedef struct {
+    wubu_hive_t *tissue;         /* the shared hive (cells insert here) */
+    uint16_t     goal;           /* the goal token */
+    wubu_specialist_t cells[4];  /* code/math/tool/critique */
+    int          n_cells;        /* spawned this session */
+    uint16_t     decision;       /* the judge's merged decision token */
+    float        judge_confidence;
+    uint64_t     batch;
+} wubu_orch_t;
+
+/* O1: spawn the specialist cells for a goal. Each cell is a temporary
+ * hive insert (a short-lived lens worker). Returns the count spawned. */
+int wubu_orch_spawn(wubu_orch_t *orch, wubu_hive_t *tissue,
+                    uint16_t goal, uint64_t batch);
+
+/* O2: collect each specialist's verdict (the cells report back —
+ * in the real loop these are the lens-forward passes; the stub wires
+ * the mechanism). Returns the merged decision token (the judge cell). */
+int wubu_orch_judge(wubu_orch_t *orch, const float *cell_confidences);
+
+/* O3: the hive insert for a specialist (the cell IS a hive cell —
+ * the colony is the memory). Returns 0 on success. */
+int wubu_orch_insert_cell(wubu_orch_t *orch, wubu_cell_lens_t lens,
+                          float confidence);
+
 #endif
