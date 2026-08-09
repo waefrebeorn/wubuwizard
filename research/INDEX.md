@@ -2090,4 +2090,30 @@ per-component decode profile (conv/attn/ffn/head). test_lfm 23/23, CUDA_HOME
 must be /usr/local/cuda-13.3. `wired` (tokenizer fix + head vec-dot + AVX2/NEON
 dispatch + timers, committed 37143be..608107e, pushed e56b816)
 
+|- AN27B V1 TOOLSET LOAD GATE (2026-08-09, the Distiller V1 models on the wizard):
+MiniCPM5-1B-Q4_K_M `wired` — loads + generates + TOP-1 parity with the V1's
+llama.cpp (token 5 fim_prefix for "Hello"); per-head q/k norms OPTIONAL
+(LOAD_SILENT). 140M-TinyLLama-Mini-Cinder.F16 `wired` — standard LLaMA/MQA,
+loads + generates. Qwen3.5-0.8B-Q8_0 `open` — hybrid GatedDeltaNet + Gated
+Attention, 17 hybrid + 6 pure-attn layers, fused attn_qkv[6d] + attn_gate +
+ssm_* — full arch decoded in research/AN28-qwen35-hybrid.md (gated-attn:
+q_and_gate 2*d_out chunk -> sigmoid gate elementwise; GDN: in_proj_qkv +
+conv1d + delta rule; wizard's wubu_ssm already models the family). FastSAM
+`open` (vision, separate domain). lfm2_gen repetition penalty (default 1.0
+log-space) breaks the LFM2.5's greedy loops.
+
+|- AN28 QWEN3.5 HYBRID ADAPTER (research/AN28-qwen35-hybrid.md — the arch
+decoded from the GGUF + prior art: openvinotoolkit#4138, raschka gated-
+attention gallery, rasbt qwen3.5 notebook, transformers qwen3_next/qwen3_5
+modular): 17 hybrid layers = parallel [gated-attn (fused attn_qkv [0:2d_out]
+q_and_gate chunk + QK norms + RoPE + SDPA + sigmoid-gate elementwise + W_o
+[2d->d]) + GatedDeltaNet (in_proj_qkv + causal conv1d k=4 + split q/k/v +
+delta-rule state + z gate + ssm_out)] + post_attention_norm + FFN; 6 pure-
+attn layers = the standard GQA (q=4d hd=256, kv=0.5d, q/k norms). wubu_ssm.h
+already models the GDN family (Gemma-4 dims; Qwen3.5: d=1024 dt_rank=16
+conv_dim=6144 d_state=128 value_dim=2048). Open question: the fused 6144 =
+4096+512+512+1024 — the extra 1024's split (resolve via the HF modeling code
+or logit-parity vs the V1's llama.cpp, which supports qwen35). `research`
+(build next: loader roles + hybrid forward + GDN state + parity).
+
 ## WaefreBeorn Umbrella License v3.0
