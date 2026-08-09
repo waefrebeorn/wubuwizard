@@ -206,7 +206,12 @@ int main(int argc, char **argv)
             e.n_contract_checks = contracts.n_checks;
             e.n_contract_violations = contracts.n_violations;
             e.cell_idx = (uint8_t)(r % 8);
-            e.prio_fisher = wubu_prio_survival(&prio, (uint8_t)(r % 8));
+            /* the Fisher evidence for the attributed cell (the struct
+             * is public — the priority store's diagonal) */
+            e.prio_fisher = 0.0f;
+            for (int pc = 0; pc < prio.n; pc++)
+                if (prio.cells[pc].cell_idx == (uint8_t)(r % 8))
+                    e.prio_fisher = prio.cells[pc].fisher;
             e.skill_version = (uint32_t)loop.n_accepted;
             e.traj_id = (uint64_t)harness.step;
             wubu_events_append(&evrec, &e);
