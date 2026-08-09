@@ -73,52 +73,60 @@ static int load_checkpoint(wubu_model_t *m, const char *path)
     int nl = 0;
     if (magic == 0xBA000002u) {
         if (fread(&nl, 4, 1, f) != 1) { fclose(f); return -1; }
-        if (nl < 1 || nl > WUBU_LAYERS) { fclose(f); return -1; }
+        if (nl < 1 || nl > WUBU_MAX_LAYERS) { fclose(f); return -1; }
     }
     long n = 0;
     if (fread(&n, sizeof(long), 1, f) != 1) { fclose(f); return -1; }
-    /* build the model from fresh buffers (the released sizes) */
-    float *embedding = (float *)malloc(sizeof(float) * 16384 * 448);
-    float *final_norm = (float *)malloc(sizeof(float) * 448);
-    float **sel = (float **)calloc(WUBU_SELECTORS, sizeof(float *));
-    wubu_block_t *blocks = (wubu_block_t *)calloc(WUBU_LAYERS, sizeof(wubu_block_t));
+    /* the AGNOSTIC loader: the checkpoint's OWN param count drives the
+     * geometry (the amoeba doctrine — dims are data). The count implies
+     * the runtime dims: embed = vocab*d, per-layer = d*(8+2)*hd... The
+     * checkpoint was SAVED with the runtime dims, so the runtime macros
+     * (set by the save path / defaults) must match. Build the model at
+     * the runtime dims and read EXACTLY that many floats. */
+    float *embedding = (float *)malloc(sizeof(float) * (size_t)WUBU_VOCAB * WUBU_DIM);
+    float *final_norm = (float *)malloc(sizeof(float) * WUBU_DIM);
+    float **sel = (float **)calloc(WUBU_SELECTORS > 0 ? WUBU_SELECTORS : 1, sizeof(float *));
+    wubu_block_t *blocks = (wubu_block_t *)calloc(WUBU_MAX_LAYERS, sizeof(wubu_block_t));
     if (!embedding || !final_norm || !sel || !blocks) { fclose(f); return -1; }
-    for (int i = 0; i < WUBU_SELECTORS; i++) sel[i] = (float *)malloc(sizeof(float) * 448);
+    for (int i = 0; i < WUBU_SELECTORS; i++) sel[i] = (float *)malloc(sizeof(float) * WUBU_DIM);
     wubu_block_t *b = blocks;
+    const size_t hw = (size_t)WUBU_HEADS * WUBU_HEAD_DIM;      /* q/o width */
+    const size_t kw = (size_t)WUBU_KV_HEADS * WUBU_HEAD_DIM;   /* k/v width */
+    const size_t gu = (size_t)2 * WUBU_FFN_DIM;                /* gate_up width */
     for (int i = 0; i < WUBU_LAYERS; i++, b++) {
-        b->q_proj    = (float *)malloc(sizeof(float) * 448 * 448);
-        b->k_proj    = (float *)malloc(sizeof(float) * 448 * 64);
-        b->v_proj    = (float *)malloc(sizeof(float) * 448 * 64);
-        b->o_proj    = (float *)malloc(sizeof(float) * 448 * 448);
-        b->g_proj    = (float *)malloc(sizeof(float) * 448 * 448);
-        b->q_norm    = (float *)malloc(sizeof(float) * 64);
-        b->k_norm    = (float *)malloc(sizeof(float) * 64);
-        b->attn_norm = (float *)malloc(sizeof(float) * 448);
-        b->gate_up   = (float *)malloc(sizeof(float) * 448 * 2456);
-        b->down      = (float *)malloc(sizeof(float) * 1228 * 448);
-        b->ffn_norm  = (float *)malloc(sizeof(float) * 448);
+        b->q_proj    = (float *)malloc(sizeof(float) * (size_t)WUBU_DIM * hw);
+        b->k_proj    = (float *)malloc(sizeof(float) * (size_t)WUBU_DIM * kw);
+        b->v_proj    = (float *)malloc(sizeof(float) * (size_t)WUBU_DIM * kw);
+        b->o_proj    = (float *)malloc(sizeof(float) * hw * WUBU_DIM);
+        b->g_proj    = (float *)malloc(sizeof(float) * (size_t)WUBU_DIM * WUBU_DIM);
+        b->q_norm    = (float *)malloc(sizeof(float) * WUBU_HEAD_DIM);
+        b->k_norm    = (float *)malloc(sizeof(float) * WUBU_HEAD_DIM);
+        b->attn_norm = (float *)malloc(sizeof(float) * WUBU_DIM);
+        b->gate_up   = (float *)malloc(sizeof(float) * (size_t)WUBU_DIM * gu);
+        b->down      = (float *)malloc(sizeof(float) * (size_t)WUBU_FFN_DIM * WUBU_DIM);
+        b->ffn_norm  = (float *)malloc(sizeof(float) * WUBU_DIM);
         if (!b->q_proj || !b->k_proj || !b->v_proj || !b->o_proj || !b->g_proj ||
             !b->q_norm || !b->k_norm || !b->attn_norm || !b->gate_up || !b->down ||
             !b->ffn_norm) { fclose(f); return -1; }
     }
-    if (fread(embedding, sizeof(float), 16384 * 448, f) != 16384 * 448 ||
-        fread(final_norm, sizeof(float), 448, f) != 448) { fclose(f); return -1; }
+    if (fread(embedding, sizeof(float), (size_t)WUBU_VOCAB * WUBU_DIM, f) != (size_t)WUBU_VOCAB * WUBU_DIM ||
+        fread(final_norm, sizeof(float), WUBU_DIM, f) != (size_t)WUBU_DIM) { fclose(f); return -1; }
     b = blocks;
     for (int i = 0; i < WUBU_LAYERS; i++, b++) {
-        if (fread(b->q_proj, sizeof(float), 448 * 448, f) != 448 * 448 ||
-            fread(b->k_proj, sizeof(float), 448 * 64, f) != 448 * 64 ||
-            fread(b->v_proj, sizeof(float), 448 * 64, f) != 448 * 64 ||
-            fread(b->o_proj, sizeof(float), 448 * 448, f) != 448 * 448 ||
-            fread(b->g_proj, sizeof(float), 448 * 448, f) != 448 * 448 ||
-            fread(b->q_norm, sizeof(float), 64, f) != 64 ||
-            fread(b->k_norm, sizeof(float), 64, f) != 64 ||
-            fread(b->attn_norm, sizeof(float), 448, f) != 448 ||
-            fread(b->gate_up, sizeof(float), 448 * 2456, f) != 448 * 2456 ||
-            fread(b->down, sizeof(float), 1228 * 448, f) != 1228 * 448 ||
-            fread(b->ffn_norm, sizeof(float), 448, f) != 448) { fclose(f); return -1; }
+        if (fread(b->q_proj, sizeof(float), (size_t)WUBU_DIM * hw, f) != (size_t)WUBU_DIM * hw ||
+            fread(b->k_proj, sizeof(float), (size_t)WUBU_DIM * kw, f) != (size_t)WUBU_DIM * kw ||
+            fread(b->v_proj, sizeof(float), (size_t)WUBU_DIM * kw, f) != (size_t)WUBU_DIM * kw ||
+            fread(b->o_proj, sizeof(float), hw * WUBU_DIM, f) != hw * WUBU_DIM ||
+            fread(b->g_proj, sizeof(float), (size_t)WUBU_DIM * WUBU_DIM, f) != (size_t)WUBU_DIM * WUBU_DIM ||
+            fread(b->q_norm, sizeof(float), WUBU_HEAD_DIM, f) != (size_t)WUBU_HEAD_DIM ||
+            fread(b->k_norm, sizeof(float), WUBU_HEAD_DIM, f) != (size_t)WUBU_HEAD_DIM ||
+            fread(b->attn_norm, sizeof(float), WUBU_DIM, f) != (size_t)WUBU_DIM ||
+            fread(b->gate_up, sizeof(float), (size_t)WUBU_DIM * gu, f) != (size_t)WUBU_DIM * gu ||
+            fread(b->down, sizeof(float), (size_t)WUBU_FFN_DIM * WUBU_DIM, f) != (size_t)WUBU_FFN_DIM * WUBU_DIM ||
+            fread(b->ffn_norm, sizeof(float), WUBU_DIM, f) != (size_t)WUBU_DIM) { fclose(f); return -1; }
     }
     for (int i = 0; i < WUBU_SELECTORS; i++)
-        if (fread(sel[i], sizeof(float), 448, f) != 448) { fclose(f); return -1; }
+        if (fread(sel[i], sizeof(float), WUBU_DIM, f) != (size_t)WUBU_DIM) { fclose(f); return -1; }
     fclose(f);
     if (wubu_model_init(m, embedding, final_norm, blocks, sel) != 0) return -1;
     if (nl > 0) m->n_layers = nl;   /* the v2 progressive state */
@@ -159,24 +167,27 @@ static int save_checkpoint(const wubu_model_t *m, const char *path)
     fwrite(&nl, 4, 1, f);
     long n = wubu_parameter_count(m);
     fwrite(&n, sizeof(long), 1, f);
-    fwrite(m->embedding, sizeof(float), 16384 * 448, f);
-    fwrite(m->final_norm, sizeof(float), 448, f);
+    const size_t hw = (size_t)WUBU_HEADS * WUBU_HEAD_DIM;      /* q/o width */
+    const size_t kw = (size_t)WUBU_KV_HEADS * WUBU_HEAD_DIM;   /* k/v width */
+    const size_t gu = (size_t)2 * WUBU_FFN_DIM;                /* gate_up width */
+    fwrite(m->embedding, sizeof(float), (size_t)WUBU_VOCAB * WUBU_DIM, f);
+    fwrite(m->final_norm, sizeof(float), WUBU_DIM, f);
     for (int i = 0; i < WUBU_LAYERS; i++) {
         wubu_block_t *b = (wubu_block_t *)&m->blocks[i];
-        fwrite(b->q_proj, sizeof(float), 448 * 448, f);
-        fwrite(b->k_proj, sizeof(float), 448 * 64, f);
-        fwrite(b->v_proj, sizeof(float), 448 * 64, f);
-        fwrite(b->o_proj, sizeof(float), 448 * 448, f);
-        fwrite(b->g_proj, sizeof(float), 448 * 448, f);
-        fwrite(b->q_norm, sizeof(float), 64, f);
-        fwrite(b->k_norm, sizeof(float), 64, f);
-        fwrite(b->attn_norm, sizeof(float), 448, f);
-        fwrite(b->gate_up, sizeof(float), 448 * 2456, f);
-        fwrite(b->down, sizeof(float), 1228 * 448, f);
-        fwrite(b->ffn_norm, sizeof(float), 448, f);
+        fwrite(b->q_proj, sizeof(float), (size_t)WUBU_DIM * hw, f);
+        fwrite(b->k_proj, sizeof(float), (size_t)WUBU_DIM * kw, f);
+        fwrite(b->v_proj, sizeof(float), (size_t)WUBU_DIM * kw, f);
+        fwrite(b->o_proj, sizeof(float), hw * WUBU_DIM, f);
+        fwrite(b->g_proj, sizeof(float), (size_t)WUBU_DIM * WUBU_DIM, f);
+        fwrite(b->q_norm, sizeof(float), WUBU_HEAD_DIM, f);
+        fwrite(b->k_norm, sizeof(float), WUBU_HEAD_DIM, f);
+        fwrite(b->attn_norm, sizeof(float), WUBU_DIM, f);
+        fwrite(b->gate_up, sizeof(float), (size_t)WUBU_DIM * gu, f);
+        fwrite(b->down, sizeof(float), (size_t)WUBU_FFN_DIM * WUBU_DIM, f);
+        fwrite(b->ffn_norm, sizeof(float), WUBU_DIM, f);
     }
     for (int i = 0; i < WUBU_SELECTORS; i++)
-        fwrite(m->selectors[i], sizeof(float), 448, f);
+        fwrite(m->selectors[i], sizeof(float), WUBU_DIM, f);
     fclose(f);
     return 0;
 }
@@ -250,6 +261,10 @@ int main(int argc, char **argv)
     wubu_model_t m;
     if (resume) {
         printf("wubu_train_cli: resuming from %s ...\n", resume);
+        /* the agnostic resume: set the runtime dims BEFORE loading (the
+         * checkpoint was saved at the runtime geometry; the defaults
+         * are the aligned WuBu1 geometry unless already set) */
+        if (WUBU_RUNTIME_DIMS.dim == 0) wubu_runtime_dims_default();
         if (load_checkpoint(&m, resume) != 0) {
             fprintf(stderr, "cannot load checkpoint %s\n", resume);
             return 1;
