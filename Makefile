@@ -1074,6 +1074,10 @@ test_contracts: tools/test_contracts.c src/wubu_contracts.o src/wubu_hive.o
 test_harness: tools/test_harness.c src/wubu_harness.o src/wubu_trajcell.o src/wubu_hive.o src/wubu_loopguard.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_skillcell: tools/test_skillcell.c src/wubu_skillcell.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
