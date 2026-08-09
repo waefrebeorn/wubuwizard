@@ -27,12 +27,12 @@
 #include <stddef.h>
 
 /* The RUNTIME dims (the agnostic loader doctrine): the dimensional macros
- * are DATA — set by wubu35_dims_probe/set at load time. wubu35_dims.h
- * comes FIRST so its WUBU35_DIMS-backed macros win (WUBU_DIM =
- * WUBU35_DIMS.dim etc). The block below is the DEFAULT (wubu-35m seed)
+ * are DATA — set by wubu_runtime_dims_probe/set at load time. wubu_runtime_dims.h
+ * comes FIRST so its WUBU_RUNTIME_DIMS-backed macros win (WUBU_DIM =
+ * WUBU_RUNTIME_DIMS.dim etc). The block below is the DEFAULT (wubu-35m seed)
  * geometry, used only when the runtime dims were not set yet. */
-#include "wubu35_dims.h"
-#ifndef WUBU35_DIMS_H
+#include "wubu_runtime_dims.h"
+#ifndef WUBU_RUNTIME_DIMS_H
 #define WUBU_VOCAB       16384
 #define WUBU_DIM         448
 #define WUBU_LAYERS      12
@@ -127,7 +127,7 @@ typedef struct {
 int wubu_model_init(wubu_model_t *m, float *embedding, float *final_norm,
                     wubu_block_t *blocks, float **selectors);
 /* The from-scratch random-init builder: allocates the FULL model at the
- * runtime WUBU35_DIMS geometry with zero pretrained weights (the amoeba
+ * runtime WUBU_RUNTIME_DIMS geometry with zero pretrained weights (the amoeba
  * doctrine — 'delete the old model, make a new model'). */
 int wubu_model_random_init(wubu_model_t *m);
 

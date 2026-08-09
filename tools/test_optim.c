@@ -15,7 +15,7 @@
 #include "wubu_train.h"
 #include "wubu_backprop.h"
 #include "wubu_optim.h"
-#include "wubu35_dims.h"
+#include "wubu_runtime_dims.h"
 
 static int failures = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL: %s\n", m); failures++; } } while (0)
@@ -25,7 +25,7 @@ static int model_freed = 0;   /* wubu_free already released the buffers */
 static int build_model(wubu_model_t *m)
 {
     memset(m, 0, sizeof(*m));
-    wubu35_dims_t d;
+    wubu_runtime_dims_t d;
     memset(&d, 0, sizeof(d));
     d.vocab = 512; d.dim = 256; d.layers = 4; d.heads = 4;
     d.kv_heads = 1; d.head_dim = 64; d.rope_dim = 32;
@@ -33,7 +33,7 @@ static int build_model(wubu_model_t *m)
     d.full_every = 4; d.select_every = 2; d.selectors = 0;
     d.clip = 10.0f; d.eps = 1e-6f; d.params = 0;
     d.rope_theta = 10000.0f;
-    wubu35_dims_set(&d);
+    wubu_runtime_dims_set(&d);
     printf("  dims after set: D=%d FF=%d L=%d heads=%d hd=%d sel=%d\n",
            WUBU_DIM, WUBU_FFN_DIM, WUBU_LAYERS, WUBU_HEADS, WUBU_HEAD_DIM,
            WUBU_SELECTORS);

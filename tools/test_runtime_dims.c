@@ -1,8 +1,8 @@
 /*
- * test_wubu35_dims.c -- the Revolver Doctrine + Aligned Rewrite gate (S1-S5, ADR005).
+ * test_wubu_runtime_dims.c -- the Revolver Doctrine + Aligned Rewrite gate (S1-S5, ADR005).
  *
  * Proves:
- *   1. wubu35_dims_probe() reads the REAL tensor shapes from the checkpoint.
+ *   1. wubu_runtime_dims_probe() reads the REAL tensor shapes from the checkpoint.
  *   2. The probe ALIGNs geometry upward (Theory/08): 448→512 so every quant
  *      block (QK_K=256) tiles evenly — no remainder guards fire.
  *   3. wubu_load() probes + sets the runtime global BEFORE loading.
@@ -15,7 +15,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "wubu.h"
-#include "wubu35_dims.h"
+#include "wubu_runtime_dims.h"
 
 static int failures = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL: %s\n", m); failures++; } } while (0)
@@ -23,11 +23,11 @@ static int failures = 0;
 int main(int argc, char **argv)
 {
     const char *path = (argc > 1) ? argv[1] : "models/wubu/model.safetensors";
-    printf("=== test_wubu35_dims (the Revolver Doctrine gate) ===\n");
+    printf("=== test_runtime_dims (the Revolver Doctrine gate) ===\n");
 
     /* 1. The probe reads REAL geometry from the checkpoint. */
-    wubu35_dims_t d;
-    CHECK(wubu35_dims_probe(path, &d) == 0, "probe opens checkpoint");
+    wubu_runtime_dims_t d;
+    CHECK(wubu_runtime_dims_probe(path, &d) == 0, "probe opens checkpoint");
     printf("  probed: vocab=%d dim=%d layers=%d heads=%d kv_heads=%d "
            "ffn_dim=%d rope_dim=%d rope_theta=%.0f\n",
            d.vocab, d.dim, d.layers, d.heads, d.kv_heads, d.ffn_dim,
@@ -46,15 +46,15 @@ int main(int argc, char **argv)
     CHECK(d.rope_dim == 32, "probe: rope_dim == 32 (head_dim/2)");
 
     /* 2. The defaults seed the aligned geometry. */
-    wubu35_dims_default();
+    wubu_runtime_dims_default();
     CHECK(WUBU_VOCAB == 16384 && WUBU_DIM == 512 && WUBU_LAYERS == 12,
           "defaults seed aligned geometry (Theory/08)");
 
     /* 3. The revolver rotates: a DIFFERENT dims set changes what the
      * macros report (no fixed geometry — a grown model is loadable). */
-    wubu35_dims_t grown = d;
+    wubu_runtime_dims_t grown = d;
     grown.layers = 16;   /* a hypothetical grown checkpoint */
-    wubu35_dims_set(&grown);
+    wubu_runtime_dims_set(&grown);
     CHECK(WUBU_LAYERS == 16, "revolver: WUBU_LAYERS now 16 after set");
     CHECK(WUBU_SELECTORS == 16 / WUBU_SELECT_EVERY,
           "revolver: selectors derived from active layers");
@@ -65,7 +65,7 @@ int main(int argc, char **argv)
      * geometry is self-describing from the defaults. The old seed-sft2
      * checkpoint is frozen to SD archive per WuBu1's total break; the
      * new model trains from scratch in aligned geometry). */
-    wubu35_dims_set(&d);
+    wubu_runtime_dims_set(&d);
     CHECK(WUBU_LAYERS == 12, "revolver: back to 12 after restore");
 
     wubu_model_t m;
@@ -82,7 +82,7 @@ int main(int argc, char **argv)
     CHECK(WUBU_DIM % 64 == 0, "dim divides 64 (AVX-512 cache line)");
     CHECK(WUBU_HEAD_DIM % 16 == 0, "head_dim divides 16 (VNNI int8 tile)");
 
-    if (failures == 0) printf("=== ALL WUBU35-DIMS TESTS PASSED ===\n");
+    if (failures == 0) printf("=== ALL RUNTIME-DIMS TESTS PASSED ===\n");
     else printf("=== %d FAILURES ===\n", failures);
     return failures ? 1 : 0;
 }

@@ -47,7 +47,7 @@ contract at runtime — because THE STATIC ASSUMPTION IS THE UNIVERSAL PITFALL.*
 
 Run this over ANY module before calling it done:
 
-- [ ] **Geometry**: are dims/layers/heads `#define` or runtime (`WUBU_DIMS`)? → CLOSED S1-S5 (wubu35_dims.h/.c, wubu_moe_dims.h/.c)
+- [ ] **Geometry**: are dims/layers/heads `#define` or runtime (`WUBU_DIMS`)? → CLOSED S1-S5 (wubu_runtime_dims.h/.c, wubu_moe_dims.h/.c)
 - [ ] **Capacity**: are counts fixed (N_EXPERTS, WUBU_MAX_SEQ) or banked? → CLOSED S2-S3, S6 (gqa_max_ctx banked)
 - [ ] **Config**: is the schedule/tuning a constant or a negotiated object? → CLOSED S12 (negotiated wubu_train_cfg_t)
 - [ ] **Backends**: is there a `*_register()` slot, or a hardcoded if-chain? → CLOSED S7-S11 (seccomp, anticheat, styx, colonel, image registries)

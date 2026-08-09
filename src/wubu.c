@@ -19,7 +19,7 @@
  * Kept for lineage + the role-resolver fixture; new work is WuBu1.
  */
 #include "wubu.h"
-#include "wubu35_dims.h"
+#include "wubu_runtime_dims.h"
 #include "wubu_foldmath.h"
 #include "safetensors_reader.h"
 #include "wubu_moe2.h"
@@ -130,7 +130,7 @@ static float *load_tensor(st_ctx *r, const char *name, size_t expect_elems)
 
 /* ---- the from-scratch random-init builder (the amoeba doctrine:
  * 'delete the old model, make a new model' — dims are data, the fresh
- * model is born at the runtime WUBU35_DIMS geometry, zero pretrained
+ * model is born at the runtime WUBU_RUNTIME_DIMS geometry, zero pretrained
  * weights. Every matrix gets the GPT-2-style init (N(0, 0.02), scaled
  * by 1/sqrt(2*n_layers) for the residual path). ---- */
 
@@ -160,7 +160,7 @@ int wubu_model_random_init(wubu_model_t *m)
     /* the runtime dims must be live BEFORE any allocation (the amoeba
      * doctrine: dims are data). Use the aligned WuBu1 geometry default
      * unless a probe already set it. */
-    if (WUBU35_DIMS.dim == 0) wubu35_dims_default();
+    if (WUBU_RUNTIME_DIMS.dim == 0) wubu_runtime_dims_default();
     unsigned seed = (unsigned)(time(NULL) ^ (uintptr_t)m);
     float *embedding = malloc_f((size_t)WUBU_VOCAB * WUBU_DIM * sizeof(float));
     float *final_norm = calloc_f((size_t)WUBU_DIM);
@@ -222,8 +222,8 @@ int wubu_load(wubu_model_t *m, const char *path)
      * aligned (512) so real == aligned for them; a legacy 448 seed
      * loads at 448 exactly. */
     {
-        wubu35_dims_t d;
-        if (wubu35_dims_probe(path, &d) == 0) {
+        wubu_runtime_dims_t d;
+        if (wubu_runtime_dims_probe(path, &d) == 0) {
             /* the probe's ckpt_* fields hold the file's unaligned
              * truth; the top-level fields may hold an aligned override
              * (Theory/08). For an agnostic exact load, use the truth. */
@@ -232,7 +232,7 @@ int wubu_load(wubu_model_t *m, const char *path)
             if (d.ckpt_head_dim > 0) { d.head_dim = d.ckpt_head_dim; }
             if (d.ckpt_heads > 0)    { d.heads    = d.ckpt_heads;    }
             if (d.ckpt_kv_heads > 0) { d.kv_heads = d.ckpt_kv_heads; }
-            wubu35_dims_set(&d);
+            wubu_runtime_dims_set(&d);
         }
     }
 
@@ -805,12 +805,12 @@ int wubu_muon_step(wubu_model_t *m, float lr, float weight_decay)
 long wubu_parameter_count(const wubu_model_t *m)
 {
     if (!m) return -1;
-    int d      = WUBU35_DIMS.dim;            /* 512 (aligned) */
-    int ffn    = WUBU35_DIMS.ffn_dim;        /* 2048 (hardware-native) */
-    int vocab  = WUBU35_DIMS.vocab;          /* 16384 */
-    int heads  = WUBU35_DIMS.heads;          /* 8 */
-    int kh     = WUBU35_DIMS.kv_heads;       /* 1 */
-    int hd     = WUBU35_DIMS.head_dim;       /* 64 */
+    int d      = WUBU_RUNTIME_DIMS.dim;            /* 512 (aligned) */
+    int ffn    = WUBU_RUNTIME_DIMS.ffn_dim;        /* 2048 (hardware-native) */
+    int vocab  = WUBU_RUNTIME_DIMS.vocab;          /* 16384 */
+    int heads  = WUBU_RUNTIME_DIMS.heads;          /* 8 */
+    int kh     = WUBU_RUNTIME_DIMS.kv_heads;       /* 1 */
+    int hd     = WUBU_RUNTIME_DIMS.head_dim;       /* 64 */
     long n = 0;
     n += (long)vocab * d;               /* embedding (tied) */
     n += d;                             /* final_norm */
@@ -825,7 +825,7 @@ long wubu_parameter_count(const wubu_model_t *m)
         n += (long)d * (2 * ffn);             /* gate_up */
         n += (long)ffn * d;                   /* down */
     }
-    for (int i = 0; i < WUBU35_DIMS.selectors; i++) n += d;  /* selectors */
+    for (int i = 0; i < WUBU_RUNTIME_DIMS.selectors; i++) n += d;  /* selectors */
     return n;
 }
 

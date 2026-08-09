@@ -84,7 +84,7 @@ Gate: `make test_wubu_alignment` — 13 checks, all passing:
 - KV cache Q8_0 block tiles evenly (2 tokens/block)
 - Q4_K input dim divides QK_K (AVX2 route, no zero-fill)
 
-Gate: `make test_wubu35_dims_run` — probe + param count, PASS.
+Gate: `make test_runtime_dims_run` — probe + param count, PASS.
 
 ## Related: THEORY/07 (quantized_dot_generic.c)
 The zero-dequant kernels already exist (Q4_K, Q5_K, Q6_K AVX2 paths).

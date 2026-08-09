@@ -1,9 +1,9 @@
 /*
- * wubu35_dims.c -- runtime dimensions for the WuBu-35M engine.
+ * wubu_runtime_dims.c -- runtime dimensions for the WuBu-35M engine.
  *
  * The Revolver Doctrine (THEORY/06): probe, don't assume. The loader
  * probes the real checkpoint tensor shapes and fills the runtime global
- * WUBU35_DIMS; every WUBU_* macro reads from it.
+ * WUBU_RUNTIME_DIMS; every WUBU_* macro reads from it.
  *
  * The probe uses safetensors_reader (st_*) to inspect tensor shapes:
  *   - embedding.weight   -> vocab × dim   (16384 × 448)
@@ -12,23 +12,23 @@
  *   - layers.N.attn.q_proj.weight presence -> ACTIVE layer count
  *     (progressive-growth checkpoints save fewer than 12)
  *   - layers.0.ffn.gate_up.weight -> dim × 2*ffn_dim
- * Fallback: wubu35_dims_default() for anything the probe cannot see.
+ * Fallback: wubu_runtime_dims_default() for anything the probe cannot see.
  */
-#include "wubu35_dims.h"
+#include "wubu_runtime_dims.h"
 #include "safetensors_reader.h"
 #include <stdio.h>
 #include <string.h>
 
-wubu35_dims_t WUBU35_DIMS = {0};
+wubu_runtime_dims_t WUBU_RUNTIME_DIMS = {0};
 
-void wubu35_dims_default(void)
+void wubu_runtime_dims_default(void)
 {
     /* Theory/08: the Aligned Rewrite.
      * Every geometry is chosen so the quant block (QK_K=256), the SIMD
      * tile (64), the 2:4 sparse mask (4), and the VNNI int8 tile (16)
      * all divide evenly — no remainder handling, no generic fallbacks.
      * Parameter count stays ~35M (was 35,072,768; aligned is 35,176,448). */
-    wubu35_dims_t d;
+    wubu_runtime_dims_t d;
     d.vocab        = 16384;
     d.dim          = 512;    /* was 448 — 512 div 256, 64, 4, 16 */
     d.layers       = 12;
@@ -57,16 +57,16 @@ void wubu35_dims_default(void)
     d.ckpt_head_dim = 64;
     d.ckpt_heads    = 7;
     d.ckpt_kv_heads = 1;
-    WUBU35_DIMS = d;
+    WUBU_RUNTIME_DIMS = d;
 }
 
-void wubu35_dims_set(const wubu35_dims_t *d)
+void wubu_runtime_dims_set(const wubu_runtime_dims_t *d)
 {
     if (!d) return;
-    WUBU35_DIMS = *d;
+    WUBU_RUNTIME_DIMS = *d;
     /* Derived: selectors = layers / select_every (the released layout). */
-    if (WUBU35_DIMS.select_every > 0)
-        WUBU35_DIMS.selectors = WUBU35_DIMS.layers / WUBU35_DIMS.select_every;
+    if (WUBU_RUNTIME_DIMS.select_every > 0)
+        WUBU_RUNTIME_DIMS.selectors = WUBU_RUNTIME_DIMS.layers / WUBU_RUNTIME_DIMS.select_every;
 }
 
 /* Binary-search the ACTIVE layer count: walk for the highest layer index
@@ -83,11 +83,11 @@ static int probe_active_layers(st_ctx *r, char *name, size_t name_sz)
     return lo;
 }
 
-int wubu35_dims_probe(const char *path, wubu35_dims_t *d)
+int wubu_runtime_dims_probe(const char *path, wubu_runtime_dims_t *d)
 {
     if (!path || !d) return -1;
-    wubu35_dims_default();
-    wubu35_dims_t out = WUBU35_DIMS;
+    wubu_runtime_dims_default();
+    wubu_runtime_dims_t out = WUBU_RUNTIME_DIMS;
     char name[128];
 
     st_ctx *r = st_open(path);

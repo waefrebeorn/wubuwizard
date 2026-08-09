@@ -132,10 +132,10 @@ is VARIABLE, and every interface between them is a runtime-probed slot.
 
 | # | Static thing | Where | Revolver replacement | Status |
 |---|---|---|---|---|
-| S1 | `WUBU_VOCAB/DIM/LAYERS/HEADS` as `#define` | `include/wubu.h` (35M engine) | `wubu35_dims.h/.c` runtime global; loader probes real checkpoint tensor shapes (`wubu35_dims_probe`); macros read WUBU35_DIMS | **WIRED** (test_wubu35_dims PASS: probes 16384/448/12/7/1/1228 from real shapes; rotation works) |
-| S2 | `WUBU_MAX_SEQ 2048`, `WUBU_LOCAL_WIN 256` | `include/wubu.h` | dims fields in wubu35_dims_t, seeded by probe/default | **WIRED** (via S1) |
+| S1 | `WUBU_VOCAB/DIM/LAYERS/HEADS` as `#define` | `include/wubu.h` (agnostic engine) | `wubu_runtime_dims.h/.c` runtime global; loader probes real checkpoint tensor shapes (`wubu_runtime_dims_probe`); macros read WUBU_RUNTIME_DIMS | **WIRED** (test_runtime_dims PASS: probes 16384/448/12/7/1/1228 from real shapes; rotation works) |
+| S2 | `WUBU_MAX_SEQ 2048`, `WUBU_LOCAL_WIN 256` | `include/wubu.h` | dims fields in wubu_runtime_dims_t, seeded by probe/default | **WIRED** (via S1) |
 | S3 | `N_EXPERTS 256`, `N_ACTIVE_EXPTS 8` fixed | `include/wubu_moe.h` | `wubu_moe_dims.h/.c` runtime global; loader probes router tensor shape (`dims[1]`); macros read WUBU_MOE_DIMS | **WIRED** (test_moe PASS on Qwen3.6-35B: top-5 [24,40,225,109,102], no NaN) |
-| S4 | `rope theta 10000.0f` hardcoded | `src/wubu.c` | `WUBU_ROPE_THETA` → WUBU35_DIMS.rope_theta | **WIRED** |
+| S4 | `rope theta 10000.0f` hardcoded | `src/wubu.c` | `WUBU_ROPE_THETA` → WUBU_RUNTIME_DIMS.rope_theta | **WIRED** |
 | S5 | `static float rope_theta[32]` memoized-forever | `src/wubu_ssm.c:1443` | keyed memoization on (freq_base, n_rot) — recomputes on model switch | **WIRED** |
 | S6 | Fixed `GQA_MAX_CTX 524288` KV cache | `include/wubu_model.h` | KV namespace paging + banked `gqa_max_ctx` runtime field | `model->gqa_max_ctx` set from `WUBU_MAX_CTX` env / `GQA_MAX_CTX` default; per-layer stride uses runtime field (test_wubu_kv_stride PASS) | **WIRED** (2026-08-08: gqa_max_ctx field + env override + stride fix) |
 | S7 | `g_seccomp_*_allowlist[]` static const | wubunos `ct_iso_seccomp.c` | Policy registry, runtime-extensible | `wubu_seccomp_profile_register()`; env-var probe reads live registry; allowlists moved to seccomp_registry.c | **WIRED** (test_revolver PASS) |
@@ -162,7 +162,7 @@ is VARIABLE, and every interface between them is a runtime-probed slot.
 ## Status
 
 `S1-S12 CLOSED (2026-08-08).` All eleven static-geometry/policy gaps are
-wired to runtime registries and verified by gate tests (test_wubu35_dims,
+wired to runtime registries and verified by gate tests (test_runtime_dims,
 test_moe, test_wubu_kv_stride, test_revolver, test_colonel). S6 (KV context
 cap) is banked via model->gqa_max_ctx (env WUBU_MAX_CTX); the safetensors
 bridge (LFM track) has a pre-existing merge-residue signature mismatch with
