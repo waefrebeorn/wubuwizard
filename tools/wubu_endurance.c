@@ -34,6 +34,7 @@
 #include "wubu_priority_store.h"
 #include "wubu_harness.h"
 #include "wubu_metadiag.h"
+#include "wubu_events.h"
 
 static int arg_int(int argc, char **argv, const char *name, int dflt)
 {
@@ -106,6 +107,16 @@ int main(int argc, char **argv)
     loop.contracts = &contracts;
     loop.prio = &prio;
 
+    /* A1: the run recorder — every round appends a JSONL event next
+     * to the sidecars (the post-mortem tools read it) */
+    wubu_events_t evrec;
+    char evpath[640];
+    snprintf(evpath, sizeof(evpath), "%s.events.jsonl", out_base);
+    if (wubu_events_open(&evrec, evpath) != 0)
+        printf("  [endurance] WARNING: cannot open %s (events off)\n", evpath);
+    else
+        printf("  [endurance] recording events -> %s\n", evpath);
+
     /* the resume: the colony's history comes back from the sidecars */
     int start_round = 1;
     if (resume) {
@@ -174,11 +185,32 @@ int main(int argc, char **argv)
         rec.prev_fitness = rec.loss + 0.05f;   /* the improvement */
         rec.n_experts = 8;
         rec.grad_norm_mean = 0.4f;
-        wubu_diag_cycle(&loop, &rec, rec.loss);
+        wubu_diag_verdict_t v = wubu_diag_cycle(&loop, &rec, rec.loss);
         /* the lineage + prio bookkeeping */
         wubu_prio_register(&prio, (uint8_t)(r % 8), 2, 0.6f, (uint64_t)r);
         wubu_prio_update_fisher(&prio, (uint8_t)(r % 8), 0.7f, 0.1f);
         suite_prev = rec.loss;
+
+        /* A1: the event — round, loss, suite, verdict, policy reason,
+         * contract counters, attribution (the cell + its evidence) */
+        {
+            wubu_event_t e;
+            memset(&e, 0, sizeof(e));
+            e.round = (uint64_t)r;
+            e.loss = rec.loss;
+            e.suite_score = score;
+            e.verdict = (int)v;
+            e.policy_reason = md.n_policy_changes > 0 ? 3 : 0; /* see below */
+            e.mutation_rate = md.mutation_rate;
+            e.fitness_floor = md.fitness_floor;
+            e.n_contract_checks = contracts.n_checks;
+            e.n_contract_violations = contracts.n_violations;
+            e.cell_idx = (uint8_t)(r % 8);
+            e.prio_fisher = wubu_prio_survival(&prio, (uint8_t)(r % 8));
+            e.skill_version = (uint32_t)loop.n_accepted;
+            e.traj_id = (uint64_t)harness.step;
+            wubu_events_append(&evrec, &e);
+        }
 
         if (r % 5 == 0 || r == start_round) {
             printf("  round %4d: suite %.3f accepted %d rejected %d "
@@ -193,6 +225,7 @@ int main(int argc, char **argv)
 
     /* the final state: the whole history is the sidecars (replayable) */
     endurance_save(&loop, &prio, out_base);
+    wubu_events_close(&evrec);
     char lst[256], mds[256], hs[256];
     wubu_lineage_stats(&lineage, lst, sizeof(lst));
     wubu_metadiag_stats(&md, mds, sizeof(mds));
