@@ -308,7 +308,11 @@ void wubu_kvfs_handle_close(wubu_kvfs_handle_t *h) {
     free(h);
 }
 
-/* ---- path-based convenience (resolve + I/O) ---- */
+uint32_t wubu_kvfs_block_size(const wubu_kvfs_t *fs) {
+    return fs ? fs->block_size : 0;
+}
+
+/* ---- the path-based convenience API ---- */
 int wubu_kvfs_read(const wubu_kvfs_t *fs, const char *path,
                        const float *kv_base, float *dst, size_t n_floats) {
     if (!fs || !path || !kv_base || !dst || n_floats == 0) return -1;

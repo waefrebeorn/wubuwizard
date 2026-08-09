@@ -27,6 +27,7 @@
  *   wubu_kvfs_handle_read(h, kv_base, dst, n)  — hot read (memcpy)
  *   wubu_kvfs_handle_write(h, kv_base, src, n) — hot write (memcpy)
  *   wubu_kvfs_handle_close(h)              — release the handle
+ *   wubu_kvfs_block_size(fs)               — the namespace block size
  *   wubu_kvfs_read(fs, path, kv_base, dst, n)  — path read (convenience)
  *   wubu_kvfs_write(fs, path, kv_base, src, n) — path write (convenience)
  *   wubu_kvfs_snapshot_json(fs, out_len)   — JSON view of the namespace
@@ -128,6 +129,9 @@ size_t wubu_kvfs_handle_capacity(const wubu_kvfs_handle_t *h);
 
 /* Release a resolved handle. */
 void wubu_kvfs_handle_close(wubu_kvfs_handle_t *h);
+
+/* The namespace's block size (floats per block). */
+uint32_t wubu_kvfs_block_size(const wubu_kvfs_t *fs);
 
 /* ---- path-based convenience (cold-ish: resolves then I/Os) ---- */
 
