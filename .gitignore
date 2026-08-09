@@ -197,3 +197,6 @@ wubu_cli
 gen_text
 api_server
 /txt2img_sd
+wubu_endurance
+wubu_replay
+wubu_report
