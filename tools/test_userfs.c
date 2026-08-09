@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <zlib.h>
 
 #include "wubu_kvfs.h"
 #include "wubu_encoder.h"
@@ -197,6 +198,95 @@ int main(void)
         CHECK(distinct, "paragraph 0 and paragraph 2 are distinct chunks");
     } else {
         CHECK(0, "chunk 2 exists (3-paragraph file)");
+    }
+
+    /* ---- 6. ALL FILE TYPES (images + office via OUR decoders) ---- */
+    {
+        /* an image: a tiny real PNG written to disk, ingested through
+         * the user space -> decoded by OUR png decoder -> our ViT ->
+         * an embedding file in the namespace */
+        unsigned char png[16384];
+        unsigned char *b = png;
+        size_t p = 0;
+        static const unsigned char sig[8] = {0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A};
+        memcpy(b+p, sig, 8); p += 8;
+        unsigned char ihdr[25];
+        memset(ihdr, 0, sizeof(ihdr));
+        ihdr[3]=13; ihdr[4]='I'; ihdr[5]='H'; ihdr[6]='D'; ihdr[7]='R';
+        ihdr[11]=64; ihdr[15]=64; ihdr[16]=8; ihdr[17]=2;   /* 64x64 RGB8 */
+        memcpy(b+p, ihdr, 25); p += 25;
+        unsigned char raw[64*193];
+        for (int y = 0; y < 64; y++) {
+            raw[y*193] = 0;
+            for (int x = 0; x < 64; x++) {
+                raw[y*193+1+x*3] = (unsigned char)(y*4);
+                raw[y*193+2+x*3] = (unsigned char)(x*4);
+                raw[y*193+3+x*3] = 128;
+            }
+        }
+        uLongf clen = sizeof(png) - p - 20;
+        if (compress2(b + p + 12, &clen, raw, sizeof(raw), 6) == Z_OK) {
+            unsigned char idath[8];
+            idath[0]=(unsigned char)(clen>>24); idath[1]=(unsigned char)(clen>>16);
+            idath[2]=(unsigned char)(clen>>8);  idath[3]=(unsigned char)clen;
+            idath[4]='I'; idath[5]='D'; idath[6]='A'; idath[7]='T';
+            memcpy(b+p, idath, 8); p += 8;
+            memmove(b + p, b + p + 4, clen);
+            p += clen;
+            unsigned char iend[12] = {0,0,0,0,'I','E','N','D',0,0,0,0};
+            memcpy(b+p, iend, 12); p += 12;
+            char png_path[512];
+            snprintf(png_path, sizeof(png_path), "%s/photo.png", dir);
+            FILE *pf = fopen(png_path, "wb");
+            if (pf) { fwrite(png, 1, p, pf); fclose(pf); }
+            CHECK(wubu_userfs_ingest(m, png_path) == 0,
+                  "PNG image ingests through the user space");
+            printf("  ok: photo.png -> our PNG decoder -> our ViT -> "
+                   "embedding file\n");
+        }
+    }
+    {
+        /* a docx: a genuine ZIP with word/document.xml written to disk,
+         * ingested -> OUR ZIP+XML extractor -> text chunks */
+        const char *xml = "<?xml version=\"1.0\"?><w:document><w:body>"
+                          "<w:p><w:r><w:t>Office doc paragraph.</w:t></w:r></w:p>"
+                          "</w:body></w:document>";
+        unsigned char zipbuf[8192];
+        size_t p = 0;
+        unsigned char lh[30] = {0};
+        lh[0]='P'; lh[1]='K'; lh[2]=3; lh[3]=4;
+        lh[26]=17; lh[27]=0;
+        memcpy(zipbuf+p, lh, 30); p += 30;
+        memcpy(zipbuf+p, "word/document.xml", 17); p += 17;
+        size_t xlen = strlen(xml);
+        memcpy(zipbuf+p, xml, xlen); p += xlen;
+        size_t cd_off = p;
+        unsigned char cd[46] = {0};
+        cd[0]='P'; cd[1]='K'; cd[2]=1; cd[3]=2;
+        cd[20]=(unsigned char)xlen; cd[21]=(unsigned char)(xlen>>8);
+        cd[22]=(unsigned char)(xlen>>16); cd[23]=(unsigned char)(xlen>>24);
+        cd[24]=(unsigned char)xlen; cd[25]=(unsigned char)(xlen>>8);
+        cd[26]=(unsigned char)(xlen>>16); cd[27]=(unsigned char)(xlen>>24);
+        cd[28]=17; cd[29]=0;
+        cd[42]=0; cd[43]=0; cd[44]=0; cd[45]=0;
+        memcpy(zipbuf+p, cd, 46); p += 46;
+        memcpy(zipbuf+p, "word/document.xml", 17); p += 17;
+        unsigned char eocd[22] = {0};
+        eocd[0]='P'; eocd[1]='K'; eocd[2]=5; eocd[3]=6;
+        eocd[8]=1; eocd[9]=0; eocd[10]=1; eocd[11]=0;
+        size_t cdsz = p - cd_off;
+        eocd[12]=(unsigned char)cdsz; eocd[13]=(unsigned char)(cdsz>>8);
+        eocd[14]=(unsigned char)(cdsz>>16); eocd[15]=(unsigned char)(cdsz>>24);
+        eocd[16]=(unsigned char)cd_off; eocd[17]=(unsigned char)(cd_off>>8);
+        eocd[18]=(unsigned char)(cd_off>>16); eocd[19]=(unsigned char)(cd_off>>24);
+        memcpy(zipbuf+p, eocd, 22); p += 22;
+        char docx_path[512];
+        snprintf(docx_path, sizeof(docx_path), "%s/report.docx", dir);
+        FILE *df = fopen(docx_path, "wb");
+        if (df) { fwrite(zipbuf, 1, p, df); fclose(df); }
+        CHECK(wubu_userfs_ingest(m, docx_path) == 0,
+              "docx office file ingests through the user space");
+        printf("  ok: report.docx -> our ZIP+XML -> text chunks\n");
     }
 
     wubu_userfs_free(m);

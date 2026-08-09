@@ -6,10 +6,21 @@
  * (implicit feedback, arXiv:2606.20482). Every chunk is its own
  * embedding file; every usage event is a preference annotation.
  *
+ * ALL FILE TYPES (the user's directive): images (PNG/JPEG via OUR
+ * decoders -> our ViT), video (AVI/MJPEG frames -> our ViT per frame),
+ * office (docx/xlsx/pptx via OUR ZIP+XML -> text chunks), PDF (OUR
+ * FlateDecode + Tj/TJ -> text chunks). zlib is the only system lib.
+ *
  * C11.
  */
 #include "wubu_userfs.h"
 #include "wubu_audio.h"   /* WUBU_AUDIO_* caps for the PCM buffer */
+#include "wubu_png.h"
+#include "wubu_jpeg.h"
+#include "wubu_video.h"
+#include "wubu_ooxml.h"
+#include "wubu_pdf.h"
+#include "wubu_imgenc.h"  /* the image encoder the frames feed */
 
 #include <stdlib.h>
 #include <string.h>
@@ -397,6 +408,112 @@ int wubu_userfs_ingest(wubu_userfs_t *m, const char *real_path) {
             rc = chunk_write(m, base, 0, emb, block_size);
             n_chunks = 1;
         }
+    } else if (strcmp(ext, "png") == 0 || strcmp(ext, "jpg") == 0 ||
+               strcmp(ext, "jpeg") == 0) {
+        /* IMAGE: decode with OUR png/jpeg decoder -> downscale to the
+         * ViT input -> our image encoder -> the shared space */
+        float *rgb = NULL; int w = 0, h = 0;
+        int dec = (strcmp(ext, "png") == 0)
+            ? wubu_png_decode(data, (size_t)fsize, &rgb, &w, &h)
+            : wubu_jpeg_decode(data, (size_t)fsize, &rgb, &w, &h);
+        if (dec == 0 && rgb && w > 0 && h > 0) {
+            /* downscale (area-ish via stride sampling) to 64x64x3 */
+            float img[WUBU_IMGENC_IMAGE * WUBU_IMGENC_IMAGE * WUBU_IMGENC_CHANNELS];
+            wubu_imgenc_t v;
+            if (wubu_imgenc_init(&v, 20260808u) == 0) {
+                for (int y = 0; y < WUBU_IMGENC_IMAGE; y++) {
+                    int sy = (int)((long)y * h / WUBU_IMGENC_IMAGE);
+                    if (sy >= h) sy = h - 1;
+                    for (int x = 0; x < WUBU_IMGENC_IMAGE; x++) {
+                        int sx = (int)((long)x * w / WUBU_IMGENC_IMAGE);
+                        if (sx >= w) sx = w - 1;
+                        size_t src = ((size_t)sy * w + sx) * 3;
+                        size_t dst = ((size_t)y * WUBU_IMGENC_IMAGE + x) * 3;
+                        img[dst]   = rgb[src];
+                        img[dst+1] = rgb[src+1];
+                        img[dst+2] = rgb[src+2];
+                    }
+                }
+                float tokens[WUBU_IMGENC_N_TOKENS * WUBU_IMGENC_EMBED_DIM];
+                if (wubu_imgenc_encode(&v, img, tokens) == 0) {
+                    /* the CLS token is the image's embedding */
+                    memcpy(emb, &tokens[WUBU_IMGENC_N_PATCHES *
+                                        WUBU_IMGENC_EMBED_DIM],
+                           (size_t)WUBU_IMGENC_EMBED_DIM * sizeof(float));
+                    rc = 0;
+                }
+            }
+            type = "image";
+            if (rc == 0) {
+                rc = chunk_write(m, base, 0, emb, block_size);
+                n_chunks = 1;
+            }
+        }
+        free(rgb);
+    } else if (strcmp(ext, "avi") == 0) {
+        /* VIDEO: AVI container -> MJPEG frames -> our ViT per frame
+         * -> one embedding file per frame (the sequence) */
+        wubu_video_info_t vi;
+        float **frames = NULL;
+        int nf = wubu_video_decode(data, (size_t)fsize, &vi, &frames, 16);
+        if (nf > 0 && frames) {
+            wubu_imgenc_t v;
+            if (wubu_imgenc_init(&v, 20260808u) == 0) {
+                for (int f = 0; f < nf; f++) {
+                    float img[WUBU_IMGENC_IMAGE * WUBU_IMGENC_IMAGE *
+                              WUBU_IMGENC_CHANNELS];
+                    for (int y = 0; y < WUBU_IMGENC_IMAGE; y++) {
+                        int sy = (int)((long)y * vi.height / WUBU_IMGENC_IMAGE);
+                        if (sy >= vi.height) sy = vi.height - 1;
+                        for (int x = 0; x < WUBU_IMGENC_IMAGE; x++) {
+                            int sx = (int)((long)x * vi.width / WUBU_IMGENC_IMAGE);
+                            if (sx >= vi.width) sx = vi.width - 1;
+                            size_t src = ((size_t)sy * vi.width + sx) * 3;
+                            size_t dst = ((size_t)y * WUBU_IMGENC_IMAGE + x) * 3;
+                            img[dst]   = frames[f][src];
+                            img[dst+1] = frames[f][src+1];
+                            img[dst+2] = frames[f][src+2];
+                        }
+                    }
+                    float tokens[WUBU_IMGENC_N_TOKENS * WUBU_IMGENC_EMBED_DIM];
+                    if (wubu_imgenc_encode(&v, img, tokens) == 0) {
+                        memcpy(emb, &tokens[WUBU_IMGENC_N_PATCHES *
+                                            WUBU_IMGENC_EMBED_DIM],
+                               (size_t)WUBU_IMGENC_EMBED_DIM * sizeof(float));
+                        if (chunk_write(m, base, f, emb, block_size) == 0)
+                            n_chunks++;
+                    }
+                    free(frames[f]);
+                }
+            }
+            free(frames);
+            rc = (n_chunks > 0) ? 0 : -1;
+            type = "video";
+        } else {
+            type = "video";
+        }
+    } else if (strcmp(ext, "docx") == 0 || strcmp(ext, "xlsx") == 0 ||
+               strcmp(ext, "pptx") == 0) {
+        /* OFFICE: OUR ZIP+XML extractor -> text -> the SAME chunked
+         * text path as .md/.txt (the office content is text) */
+        char *txt = wubu_ooxml_extract_text(data, (size_t)fsize);
+        if (txt) {
+            n_chunks = ingest_text_chunked(m, (const unsigned char *)txt,
+                                           strlen(txt), base, block_size);
+            rc = (n_chunks > 0) ? 0 : -1;
+            free(txt);
+        }
+        type = "office";
+    } else if (strcmp(ext, "pdf") == 0) {
+        /* PDF: OUR FlateDecode + Tj/TJ extractor -> text chunks */
+        char *txt = wubu_pdf_extract_text(data, (size_t)fsize);
+        if (txt) {
+            n_chunks = ingest_text_chunked(m, (const unsigned char *)txt,
+                                           strlen(txt), base, block_size);
+            rc = (n_chunks > 0) ? 0 : -1;
+            free(txt);
+        }
+        type = "pdf";
     }
     free(data);
     if (rc != 0) return 1;   /* unsupported/undeccodable */
