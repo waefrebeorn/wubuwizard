@@ -197,6 +197,24 @@ int main(void)
         }
     }
 
+    /* ---- ON-CHIP MEASURE (research/063-F, OHQ) ---- */
+    {
+        wubu_scale_hw_t hw;
+        memset(&hw, 0, sizeof(hw));
+        hw.ram_bytes = 16ull * 1024 * 1024 * 1024;
+        hw.cores = 8;
+        hw.simd_bits = 256;
+        wubu_scale_prec_t best;
+        int rc = wubu_scale_measure(&hw, &best);
+        CHECK(rc == 0, "on-chip measure succeeds");
+        if (rc == 0) {
+            printf("  ok: measured-fastest cascade precision = %d (0=F32 1=F16 2=Q8 3=Q4 4=Q2)\n",
+                   (int)best);
+            CHECK(best >= WUBU_SCALE_F16 && best <= WUBU_SCALE_Q2,
+                  "measure returns a tightened cascade (not F32 default)");
+        }
+    }
+
     /* ---- the WuBu1 real number on real hardware ---- */
     /* On the laptop-class host, the full seed (56.4M) must fit: the
      * plan's ecosystem + core weight budget >= the seed's F16 size. */

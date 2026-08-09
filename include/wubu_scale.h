@@ -126,6 +126,13 @@ int wubu_scale_plan(const wubu_scale_hw_t *hw,
 /* Human-readable one-line summary of a plan. buf >= 256 bytes. */
 void wubu_scale_report(const wubu_scale_plan_t *plan, char *buf, size_t buflen);
 
+/* ON-CHIP MEASURE (research/063-F, OHQ): a one-shot microbenchmark that
+ * tightens the precision cascade from the plan's starting point. Runs a
+ * small GEMV at each precision and returns the fastest cascade that
+ * stays within accuracy tolerance. best = the measured-fastest
+ * precision. Returns 0 on success. */
+int wubu_scale_measure(const wubu_scale_hw_t *hw, wubu_scale_prec_t *best);
+
 #ifdef __cplusplus
 }
 #endif

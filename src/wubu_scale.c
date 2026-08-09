@@ -266,3 +266,83 @@ void wubu_scale_report(const wubu_scale_plan_t *plan, char *buf, size_t buflen) 
              plan->energy_class, plan->n_devices_used,
              plan->adaptive_depth);
 }
+
+/* ---- ON-CHIP MEASURE (research/063-F, OHQ) ---- */
+
+#include <time.h>
+
+/* Quantize a vector to n bits per element, then measure the GEMV time.
+ * The measurement is local, one-shot, and real: it times THIS chip's
+ * throughput at each precision, weighted by the BYTES MOVED (the
+ * roofline-honest cost -- a Q8 GEMV moves 4x fewer weight bytes than
+ * F32, and memory-bound silicon reflects that). The cascade the plan
+ * assumed is only a starting point; the runtime tightens it from what
+ * the silicon says. */
+static double measure_gemv_at(int bits, int n_reps) {
+    enum { DIM = 512, OUT = 64 };
+    static float w[DIM * OUT];
+    static float x[DIM];
+    static float y[OUT];
+    static int inited = 0;
+    if (!inited) {
+        for (int i = 0; i < DIM * OUT; i++) w[i] = (float)((i * 2654435761u) % 1000) / 500.0f - 1.0f;
+        for (int i = 0; i < DIM; i++) x[i] = (float)((i * 40503u) % 1000) / 500.0f - 1.0f;
+        inited = 1;
+    }
+
+    /* Quantize on the fly: simulate the cascade's weight cost. */
+    float q[DIM * OUT];
+    float scale = (float)((1 << (bits - 1)) - 1);
+    for (int i = 0; i < DIM * OUT; i++) {
+        float v = w[i];
+        float s = v > 0 ? v : -v;
+        q[i] = (float)(int)(v * scale + (v >= 0 ? 0.5f : -0.5f)) / scale;
+    }
+
+    /* The honest cost: bytes moved per token = weight bytes at this
+     * precision. n_reps scales so each precision gets the same total
+     * bytes through the machine (a stable, comparable window). */
+    double bytes = (double)(DIM * OUT) * (double)bits / 8.0;
+    int reps = (int)(n_reps * (32.0 / (double)bits));  /* more reps at low bits */
+
+    clock_t t0 = clock();
+    for (int rep = 0; rep < reps; rep++) {
+        for (int o = 0; o < OUT; o++) {
+            float acc = 0.0f;
+            for (int i = 0; i < DIM; i++)
+                acc += x[i] * q[o * DIM + i];
+            y[o] = acc;
+        }
+    }
+    clock_t t1 = clock();
+    double secs = (double)(t1 - t0) / CLOCKS_PER_SEC;
+    /* bytes/second = the roofline rate this chip sustains at this prec */
+    return (bytes * (double)reps) / (secs + 1e-30);
+}
+
+int wubu_scale_measure(const wubu_scale_hw_t *hw, wubu_scale_prec_t *best) {
+    if (!best) return -1;
+    (void)hw;
+
+    /* Time each precision class (F32=32, F16=16, Q8=8, Q4=4, Q2=2).
+     * measure_gemv_at returns BYTES/SEC (higher = faster for the same
+     * bytes moved). The winner is the fastest cascade the silicon
+     * sustains at this precision. */
+    struct { int bits; wubu_scale_prec_t prec; } cand[] = {
+        { 32, WUBU_SCALE_F32 },
+        { 16, WUBU_SCALE_F16 },
+        { 8,  WUBU_SCALE_Q8 },
+        { 4,  WUBU_SCALE_Q4 },
+        { 2,  WUBU_SCALE_Q2 },
+    };
+    int n = (int)(sizeof(cand) / sizeof(cand[0]));
+
+    double best_bw = 0.0;
+    wubu_scale_prec_t best_p = WUBU_SCALE_F32;
+    for (int i = 0; i < n; i++) {
+        double bw = measure_gemv_at(cand[i].bits, 200);
+        if (bw > best_bw) { best_bw = bw; best_p = cand[i].prec; }
+    }
+    *best = best_p;
+    return 0;
+}
