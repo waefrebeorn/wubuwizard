@@ -34,6 +34,8 @@ static inline float wubu_sd_f16_to_f32(uint16_t h) {
  * OpenMP-parallel over M; the workhorse linear for CLIP/UNet. */
 void wubu_sd_matmul_nt(const float *x, const float *W, int M, int K, int N,
                        float *y);
+void wubu_sd_matmul_q(const void *x, int xf16, const void *W, int wtype,
+                      int M, int K, int N, float *y);
 
 /* y[n][c][h][w] = sum over k,kh,kw of x[n][k][h*stride+kh][w*stride+kw]
  *                  * w[c][k][kh][kw] + b[c]

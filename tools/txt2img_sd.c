@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 /* xorshift64 PRNG for reproducible init noise */
 static uint64_t rng_state;
@@ -39,9 +40,14 @@ int main(int argc, char **argv) {
 
     gguf_ctx *g = gguf_open(model);
     if (!g) return 1;
+    double t0 = (double)clock() / CLOCKS_PER_SEC;
     wubu_sd_clip_t *clip = wubu_sd_clip_load(g);
+    double t1 = (double)clock() / CLOCKS_PER_SEC;
     wubu_sd_unet_t *unet = wubu_sd_unet_load(g);
+    double t2 = (double)clock() / CLOCKS_PER_SEC;
     wubu_sd_vae_t *vae = wubu_sd_vae_load(g);
+    double t3 = (double)clock() / CLOCKS_PER_SEC;
+    fprintf(stderr, "[load] clip %.2fs unet %.2fs vae %.2fs\n", t1 - t0, t2 - t1, t3 - t2);
     if (!clip || !unet || !vae) { fprintf(stderr, "module load failed\n"); return 1; }
 
     /* CLIP encode */
@@ -97,39 +103,48 @@ int main(int argc, char **argv) {
     for (int s = 0; s < steps; s++)
         sched[s] = sigmas[(int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1))];
     sched[steps] = 0.0f;
-    for (int s = 0; s < steps; s++) {
-        float sigma = sched[s], sigma_to = sched[s + 1];
-        int t = (int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1));
-        float c_in = 1.0f / sqrtf(sigma * sigma + 1.0f);
-        float *noise = (float *)malloc(4 * 64 * 64 * sizeof(float));
-        float *xscaled = (float *)malloc(4 * 64 * 64 * sizeof(float));
-        for (int i = 0; i < 4 * 64 * 64; i++) xscaled[i] = x[i] * c_in;
-        if (wubu_sd_unet_forward(unet, xscaled, t, ctx, noise) != 0) {
-            fprintf(stderr, "unet step %d failed\n", s); return 1;
-        }
-        /* uncond guidance: eps = uncond + g*(cond - uncond), g=7.5 */
-        {
-            float *nc = (float *)malloc(4 * 64 * 64 * sizeof(float));
-            /* uncond context = REAL CLIP embedding of the empty prompt "" */
-            float empty_ctx[77 * 768];
-            float empty_pool[768];
-            if (wubu_sd_clip_encode(clip, "", empty_ctx, empty_pool) != 0) return 1;
-            if (wubu_sd_unet_forward(unet, xscaled, t, empty_ctx, nc) != 0) return 1;
+    /* uncond guidance: eps = uncond + g*(cond - uncond), g=7.5 */
+    {
+        /* uncond context = REAL CLIP embedding of the empty prompt "" —
+         * encoded ONCE (hoisted out of the step loop; was 12 wasted CLIP
+         * forwards per image). */
+        float empty_ctx[77 * 768];
+        float empty_pool[768];
+        if (wubu_sd_clip_encode(clip, "", empty_ctx, empty_pool) != 0) return 1;
+        /* cfg_every: run the uncond only every N steps and reuse the last
+         * uncond eps for the skipped steps (standard CFG-skip trick, ~25%
+         * off the UNet budget at N=2). Default 1 = full CFG, unchanged. */
+        int cfg_every = 1;
+        if (argc > 7) cfg_every = atoi(argv[7]);
+        if (cfg_every < 1) cfg_every = 1;
+        float *nc = (float *)malloc(4 * 64 * 64 * sizeof(float));
+        if (!nc) return 1;
+        for (int s = 0; s < steps; s++) {
+            float sigma = sched[s], sigma_to = sched[s + 1];
+            int t = (int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1));
+            float c_in = 1.0f / sqrtf(sigma * sigma + 1.0f);
+            float *noise = (float *)malloc(4 * 64 * 64 * sizeof(float));
+            float *xscaled = (float *)malloc(4 * 64 * 64 * sizeof(float));
+            for (int i = 0; i < 4 * 64 * 64; i++) xscaled[i] = x[i] * c_in;
+            if (wubu_sd_unet_forward(unet, xscaled, t, ctx, noise) != 0) {
+                fprintf(stderr, "unet step %d failed\n", s); return 1;
+            }
+            if (s % cfg_every == 0) {
+                if (wubu_sd_unet_forward(unet, xscaled, t, empty_ctx, nc) != 0) return 1;
+            }
             for (int i = 0; i < 4 * 64 * 64; i++) noise[i] = nc[i] + 7.5f * (noise[i] - nc[i]);
-            free(nc);
-        }
-        /* denoised = x - sigma*eps; x = (sigma_to/sigma)*x + (1-sigma_to/sigma)*denoised */
-        float ratio = (sigma_to > 0.0f) ? sigma_to / sigma : 0.0f;
-        #pragma omp parallel for
-        for (int i = 0; i < 4 * 64 * 64; i++) {
-            float denoised = x[i] - sigma * noise[i];
-            x[i] = ratio * x[i] + (1.0f - ratio) * denoised;
-        }
-        free(noise); free(xscaled);
-        double rms = 0.0;
-        for (int i = 0; i < 4 * 64 * 64; i++) rms += (double)x[i] * x[i];
-        rms = sqrt(rms / (4.0 * 64.0 * 64.0));
-        double means[4] = {0};
+            /* denoised = x - sigma*eps; x = (sigma_to/sigma)*x + (1-sigma_to/sigma)*denoised */
+            float ratio = (sigma_to > 0.0f) ? sigma_to / sigma : 0.0f;
+            #pragma omp parallel for
+            for (int i = 0; i < 4 * 64 * 64; i++) {
+                float denoised = x[i] - sigma * noise[i];
+                x[i] = ratio * x[i] + (1.0f - ratio) * denoised;
+            }
+            free(noise); free(xscaled);
+            double rms = 0.0;
+            for (int i = 0; i < 4 * 64 * 64; i++) rms += (double)x[i] * x[i];
+            rms = sqrt(rms / (4.0 * 64.0 * 64.0));
+            double means[4] = {0};
         for (int c = 0; c < 4; c++) {
             double m = 0.0;
             for (int i = 0; i < 64 * 64; i++) m += x[c * 64 * 64 + i];
@@ -137,6 +152,8 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "[txt2img] step %d/%d (t=%d sigma=%.4f): rms=%.4f ch-means=[%.3f %.3f %.3f %.3f]\n",
                 s + 1, steps, t, sigma, rms, means[0], means[1], means[2], means[3]);
+        }
+        free(nc);
     }
 
     /* VAE decode -> 512x512x3 (free UNet cache first: phase separation).

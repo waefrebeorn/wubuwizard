@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+#endif
 #include <math.h>
 #include <omp.h>
 
@@ -31,10 +34,16 @@ int g_attn2_slot2 = -1;
 /* stage capture: 0=off, 1=middle-block input, 2=after middle transformer,
  * 3=final pre-conv activations (out.0 gn out), 4=out.2 conv out (eps),
  * 5=output block N result (g_stage_block), 6=after output block transformer */
+#include <time.h>
+/* perf counters: 0=conv 1=linear 2=gn 3=silu 4=attn 5=ffn 6=lookup 7=other */
+double g_t[8];
+int g_timing = 0;
+static double t_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9; }
+
 int g_stage_capture = 0;
 int g_stage_block = 0;
 int g_stage_count = 0;
-float g_stage_out[2][1280 * 64 * 64];
+float g_stage_out[5][1280 * 64 * 64];
 
 /* per-block channels (SD1.5): block -> in_channels */
 /* input blocks (SD1.5 GGUF ground truth):
@@ -90,7 +99,14 @@ static unet_raw_t unet_get_raw(wubu_sd_unet_t *u, const char *name) {
  * W is column-major [K][N] (ggml dims[0]=K innermost). */
 static void unet_linear(const void *W, int wtype, const float *b, int N, int K,
                         const float *x, int M, float *out) {
+    double t0 = g_timing ? t_now() : 0;
     wubu_sd_linear_qb(x, W, wtype, b, M, K, N, out);
+    if (g_timing) {
+        double dt = t_now() - t0;
+        g_t[1] += dt;
+        if (dt > 0.01)
+            fprintf(stderr, "LIN %dx%d->%d: %.1fms\n", M, K, N, dt * 1e3);
+    }
 }
 
 /* tiny F32 read for 1D params (biases, layernorm) — a few KB each,
@@ -114,21 +130,33 @@ static int unet_conv_q(wubu_sd_unet_t *u, const char *wname, const char *bname,
     unet_raw_t w = unet_get_raw(u, wname);
     if (!w.found) return -1;
     float *b = bname ? unet_get_f32(u, bname) : NULL;
+    double t0 = g_timing ? t_now() : 0;
     wubu_sd_conv2d_q(x, 1, C_in, H, W, w.ptr, w.type, b, C_out, KH, KW,
                      stride, pad_h, pad_w, y, NULL, NULL);
+    if (g_timing) {
+        double dt = t_now() - t0;
+        g_t[0] += dt;
+        if (dt > 0.005)
+            fprintf(stderr, "CONV %s %dx%d %d->%d s%d p%d: %.1fms\n",
+                    wname, H, W, C_in, C_out, stride, pad_h, dt * 1e3);
+    }
     free(b);
     return 0;
 }
 
 /* silu in place */
 static void unet_silu(float *x, int n) {
+    double t0 = g_timing ? t_now() : 0;
     #pragma omp parallel for
     for (int i = 0; i < n; i++) x[i] = x[i] / (1.0f + expf(-x[i]));
+    if (g_timing) g_t[3] += t_now() - t0;
 }
 
 /* groupnorm in place, G=32 */
 static void unet_gn(float *x, int C, int HW, const float *g, const float *b) {
+    double t0 = g_timing ? t_now() : 0;
     wubu_sd_groupnorm(x, 1, C, 1, HW, 32, 1e-6f, g, b, x);
+    if (g_timing) g_t[2] += t_now() - t0;
 }
 
 /* timestep embedding: sinusoidal 320 -> Linear -> silu -> Linear -> 1280 */
@@ -187,12 +215,14 @@ static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
     unet_silu(xn, C * HW);
     if (unet_conv_q(u, conv_nm, conv_bn, xn, C, H, W, Cout, 3, 3, 1, 1, 1,
                     scratch) != 0) { free(scratch); free(xn); return -1; }
+    if (g_timing) { int nn=0; for (int z=0;z<Cout*H*W;z++) if (isnan(scratch[z])) {nn++;break;} if (nn) fprintf(stderr, "NAN after conv1 %s\n", prefix); }
     free(xn);
 
     /* emb_layers: nn.Sequential(SiLU, Linear(1280 -> Cout)) — GGUF stores
      * emb_layers.1.weight = the Linear; SiLU is the non-parametric .0 and
-     * comes FIRST. y = Linear(silu(temb)). Applied to scratch channel-wise:
-     * scratch *= (1 + y[c]). */
+     * comes FIRST. y = Linear(silu(temb)). ADDED channel-wise to the
+     * activations (h = h + emb_out — the original LDM ResBlock form; the
+     * multiplicative (1+y) form is SD3/DiT-style and WRONG here). */
     snprintf(nm, sizeof(nm), "%s.emb_layers.1.weight", prefix);
     unet_raw_t emb_w = unet_get_raw(u, nm);
     snprintf(nm, sizeof(nm), "%s.emb_layers.1.bias", prefix);
@@ -205,7 +235,7 @@ static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
     #pragma omp parallel for
     for (int c = 0; c < Cout; c++)
         for (int p = 0; p < HW; p++)
-            scratch[(size_t)c * HW + p] *= (1.0f + emb_out[c]);
+            scratch[(size_t)c * HW + p] += emb_out[c];
 
     /* out_layers: groupnorm(32,Cout) -> silu -> conv3x3 Cout->Cout */
     snprintf(nm, sizeof(nm), "%s.out_layers.0.weight", prefix);
@@ -248,9 +278,25 @@ static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
  * input [C][H][W] -> treat each spatial position as a token).
  * attn1 = self (n = H*W), attn2 = cross (k/v from ctx 77x768).
  * heads = 8, head_dim = C/8. */
+/* fast exp for x <= 0 (softmax after max-subtraction): exp(x) = 2^(x*log2e),
+ * degree-5 exp2 poly on [-0.5,0.5] + exponent-field scaling. ~3ns vs ~15ns
+ * for expf; relative error ~1e-6 (irrelevant for softmax weights). */
+static inline float fast_expf(float x) {
+    float t = x * 1.4426950408889634f;
+    float n = rintf(t);
+    float f = t - n;
+    float p = 1.0f + f * (0.6931471805599453f + f * (0.2402265069591007f +
+              f * (0.0555041086648216f + f * (0.00961812910762848f +
+              f * 0.001333355814642844f))));
+    union { float f; uint32_t u; } uu;
+    uu.u = ((uint32_t)(int)n + 127u) << 23;
+    return p * uu.f;
+}
+
 static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
                      float *x, int C, int H, int W,
                      const float *ctx /*[77][768]*/, int is_cross) {
+    double t0 = g_timing ? t_now() : 0;
     char nm[256];
     const int n = H * W;
     const int hd = C / U_HEADS;
@@ -312,6 +358,48 @@ static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
      * array (NOT a full n*U_HEADS*Tk matrix: 536MB at 64x64 self-attn). */
     float *out = (float *)calloc((size_t)n * dim, sizeof(float));
     const float scale = 1.0f / sqrtf((float)hd);
+#if defined(__AVX2__) && defined(__FMA__)
+    const int hd8 = hd / 8;   /* hd is always a multiple of 8 here */
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int i = 0; i < n; i++)
+        for (int h = 0; h < U_HEADS; h++) {
+            float att_h[4096]; /* private per iteration: Tk <= 4096 */
+            const float *qi = q + (size_t)i * dim + (size_t)h * hd;
+            const float *kth = kt + (size_t)h * Tk * hd;
+            const float *vth = vt + (size_t)h * Tk * hd;
+            float mx = -INFINITY;
+            for (int j = 0; j < Tk; j++) {
+                const float *kj = kth + (size_t)j * hd;
+                __m256 acc = _mm256_setzero_ps();
+                for (int d8 = 0; d8 < hd8; d8++)
+                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(qi + 8 * d8),
+                                          _mm256_loadu_ps(kj + 8 * d8), acc);
+                float t[8];
+                _mm256_storeu_ps(t, acc);
+                float s = (t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7]) * scale;
+                att_h[j] = s;
+                if (s > mx) mx = s;
+            }
+            float sum = 0;
+            for (int j = 0; j < Tk; j++) {
+                float e = fast_expf(att_h[j] - mx);
+                att_h[j] = e;
+                sum += e;
+            }
+            const float inv_sum = 1.0f / sum;
+            float *oi = out + (size_t)i * dim + (size_t)h * hd;
+            __m256 oacc[20];
+            for (int d8 = 0; d8 < hd8; d8++) oacc[d8] = _mm256_setzero_ps();
+            for (int j = 0; j < Tk; j++) {
+                __m256 wv = _mm256_set1_ps(att_h[j] * inv_sum);
+                const float *vj = vth + (size_t)j * hd;
+                for (int d8 = 0; d8 < hd8; d8++)
+                    oacc[d8] = _mm256_fmadd_ps(wv, _mm256_loadu_ps(vj + 8 * d8), oacc[d8]);
+            }
+            for (int d8 = 0; d8 < hd8; d8++)
+                _mm256_storeu_ps(oi + 8 * d8, oacc[d8]);
+        }
+#else
     #pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < n; i++)
         for (int h = 0; h < U_HEADS; h++) {
@@ -340,6 +428,7 @@ static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
                 for (int d = 0; d < hd; d++) oi[d] += w_ * vj[d];
             }
         }
+#endif
     free(kt); free(vt);
     /* out_proj */
     snprintf(nm, sizeof(nm), "%s.to_out.0.weight", prefix);
@@ -350,11 +439,21 @@ static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
     unet_linear(ow.ptr, ow.type, ob, dim, dim, out, n, x);
     free(q); free(k); free(v); free(out);
     free(qb); free(kb); free(vb); free(ob);
+    if (g_timing) g_t[4] += t_now() - t0;
     return 0;
+}
+
+/* fast tanh via fast_expf: tanh(z) = (1-e)/(1+e), e = exp(-2|z|). */
+static inline float fast_tanhf(float z) {
+    float az = fabsf(z);
+    float e = fast_expf(-2.0f * az);
+    float t = (1.0f - e) / (1.0f + e);
+    return copysignf(t, z);
 }
 
 /* GEGLU FFN: Linear C->8C (half = 4C for gelu) -> Linear 4C->C */
 static int unet_ffn(wubu_sd_unet_t *u, const char *prefix, float *x, int C, int n) {
+    double t0 = g_timing ? t_now() : 0;
     char nm[256];
     const int hidden = C * 8;
     snprintf(nm, sizeof(nm), "%s.net.0.proj.weight", prefix);
@@ -379,12 +478,13 @@ static int unet_ffn(wubu_sd_unet_t *u, const char *prefix, float *x, int C, int 
         for (int j = 0; j < hidden / 2; j++) {
             float a = h[(size_t)i * hidden + j];
             float b = h[(size_t)i * hidden + j + hidden / 2];
-            float ge = 0.5f * b * (1.0f + tanhf(0.7978845608028654f * (b + 0.044715f * b * b * b)));
+            float ge = 0.5f * b * (1.0f + fast_tanhf(0.7978845608028654f * (b + 0.044715f * b * b * b)));
             g[(size_t)i * (hidden / 2) + j] = a * ge;
         }
     free(h);
     unet_linear(f_w.ptr, f_w.type, f_b, C, hidden / 2, g, n, x);
     free(g);
+    if (g_timing) g_t[5] += t_now() - t0;
     return 0;
 }
 
@@ -416,6 +516,7 @@ static int unet_transformer(wubu_sd_unet_t *u, const char *prefix,
     memcpy(xorig, x, (size_t)C * HW * sizeof(float));
     wubu_sd_groupnorm(x, 1, C, H, W, 32, 1e-6f, ln_w, ln_b, ln);
     if (unet_conv_q(u, pi_nm, pi_bn, ln, C, H, W, C, 1, 1, 1, 0, 0, x) != 0) { free(ln); free(xorig); return -1; }
+    if (g_timing) { int nn=0; for (int z=0;z<C*HW;z++) if (isnan(x[z])) {nn++;break;} if (nn) fprintf(stderr, "NAN after proj_in %s\n", prefix); }
     free(ln);
     /* transformer_blocks.0 */
     char tb[300];
@@ -609,6 +710,16 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
             }
         }
         skips[i] = cur;
+        /* NaN checkpoint (debug) */
+        if (g_timing) {
+            int cc = (type == 3) ? IN_OUT_CH[i - 1] : IN_OUT_CH[i];
+            int nn = 0;
+            for (int z = 0; z < cc * H * W; z++) if (isnan(cur[z])) { nn++; break; }
+            if (nn) fprintf(stderr, "NAN at input_blocks.%d (C=%d H=%d W=%d)\n", i, cc, H, W);
+        }
+        /* capture input_blocks.1 output (320ch @ 64x64) for sd.cpp parity */
+        if (g_stage_capture & 1 && i == 1)
+            memcpy(g_stage_out[0], cur, (size_t)320 * 64 * 64 * sizeof(float));
         /* cur is now OWNED by skips[i] */
     }
 
@@ -617,11 +728,11 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     {
         float *m = (float *)malloc((size_t)1280 * H * W * sizeof(float));
         float *m2 = (float *)malloc((size_t)1280 * H * W * sizeof(float));
-        if (g_stage_capture == 1) memcpy(g_stage_out[0], cur, (size_t)1280 * H * W * sizeof(float));
+        if (g_stage_capture & 2) memcpy(g_stage_out[1], cur, (size_t)1280 * H * W * sizeof(float));
         if (unet_resblock(u, "model.diffusion_model.middle_block.0", cur, 1280, 1280, H, W, temb, m) != 0) return -1;
         /* middle attention: uses transformer-style attn with ctx (cross) */
         if (unet_transformer(u, "model.diffusion_model.middle_block.1", m, 1280, H, W, ctx) != 0) return -1;
-        if (g_stage_capture == 2) memcpy(g_stage_out[0], m, (size_t)1280 * H * W * sizeof(float));
+        if (g_stage_capture & 4) memcpy(g_stage_out[2], m, (size_t)1280 * H * W * sizeof(float));
         if (unet_resblock(u, "model.diffusion_model.middle_block.2", m, 1280, 1280, H, W, temb, m2) != 0) return -1;
         free(m);
         cur = m2;
@@ -672,13 +783,13 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     float *gn_w = unet_get_f32(u, "model.diffusion_model.out.0.weight");
     float *gn_b = unet_get_f32(u, "model.diffusion_model.out.0.bias");
     if (!gn_w) return -1;
-    if (g_stage_capture == 3) memcpy(g_stage_out[0], cur, (size_t)320 * 64 * 64 * sizeof(float));
+    if (g_stage_capture & 8) memcpy(g_stage_out[3], cur, (size_t)320 * 64 * 64 * sizeof(float));
     unet_gn(cur, 320, 64 * 64, gn_w, gn_b);
     unet_silu(cur, 320 * 64 * 64);
     if (unet_conv_q(u, "model.diffusion_model.out.2.weight",
                     "model.diffusion_model.out.2.bias",
                     cur, 320, 64, 64, 4, 3, 3, 1, 1, 1, out) != 0) return -1;
-    if (g_stage_capture == 4) memcpy(g_stage_out[0], out, (size_t)4 * 64 * 64 * sizeof(float));
+    if (g_stage_capture & 16) memcpy(g_stage_out[4], out, (size_t)4 * 64 * 64 * sizeof(float));
     free(cur);
     for (int i = 0; i < 12; i++) free(skips[i]);
     return 0;

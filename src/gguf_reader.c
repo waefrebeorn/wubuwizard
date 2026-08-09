@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 // ========== IQ1_S Grid Table (2048 × uint64) ==========
 // From ggml-common.h — lookup table for 1.5625 bpw dequantization
@@ -948,6 +950,22 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
                 output[b * 32 + j] = d * (float)qs[j];
         }
     }
+    else if (tensor->ggml_type == GGML_TYPE_Q4_0) {
+        // Q4_0 dequantization (4.5 bpw, 32 elements per block)
+        int64_t q4_blocks = (n_elems + 31) / 32;
+        for (int64_t b = 0; b < q4_blocks; b++) {
+            uint16_t d_bits;
+            memcpy(&d_bits, src + b * 18, 2);
+            float d = gguf_f16_to_f32(d_bits);
+            const uint8_t *qs = src + b * 18 + 2;
+            for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
+                /* ggml layout: elems 0-15 = LOW nibbles, 16-31 = HIGH */
+                int8_t q = (j < 16) ? (int8_t)(qs[j] & 0x0F) - 8
+                                    : (int8_t)(qs[j - 16] >> 4) - 8;
+                output[b * 32 + j] = d * (float)q;
+            }
+        }
+    }
     else if (tensor->ggml_type == GGML_TYPE_IQ1_S) {
         dequantize_iq1_s_row(src, output, n_elems);
     }
@@ -1062,7 +1080,12 @@ float gguf_read_kv_f32(const char *path, const char *key, float default_val) {
 void gguf_close(gguf_ctx *ctx) {
     if (ctx) {
         if (ctx->file) fclose(ctx->file);
-        free(ctx->data_blob);
+        if (ctx->data_blob) {
+            if (ctx->data_blob_is_mmap)
+                munmap(ctx->data_blob_mmap_base, ctx->data_blob_mmap_len);
+            else
+                free(ctx->data_blob);
+        }
         free(ctx->tensors);
         free(ctx);
     }
@@ -1169,6 +1192,22 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
             }
             break;
         }
+        case GGML_TYPE_Q4_0: {
+            int64_t n_blocks = (n_elems + 31) / 32;
+            for (int64_t b = 0; b < n_blocks; b++) {
+                uint16_t d_bits;
+                memcpy(&d_bits, data + b * 18, 2);
+                float d = gguf_f16_to_f32(d_bits);
+                const uint8_t *qs = data + b * 18 + 2;
+                for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
+                    /* ggml layout: elems 0-15 = LOW nibbles, 16-31 = HIGH */
+                    int8_t q = (j < 16) ? (int8_t)(qs[j] & 0x0F) - 8
+                                        : (int8_t)(qs[j - 16] >> 4) - 8;
+                    output[b * 32 + j] = d * (float)q;
+                }
+            }
+            break;
+        }
         case GGML_TYPE_IQ1_S: dequantize_iq1_s_row(data, output, n_elems); break;
         case GGML_TYPE_IQ1_M: dequantize_iq1_m_row(data, output, n_elems); break;
         case GGML_TYPE_IQ2_XXS: dequantize_iq2_xxs_row(data, output, n_elems); break;
@@ -1208,6 +1247,7 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_Q6_K:  return n_blocks * 210;  // d[2] + ql[128] + qh[64] + scales[16]
         case GGML_TYPE_Q5_K:  return n_blocks * 176;  // d[2] + dmin[2] + scales[12] + qh[32] + qs[128] (verified from model file)
         case GGML_TYPE_Q8_0:  return ((n_elems + 31) / 32) * 34;  // d[2] + qs[32]
+        case GGML_TYPE_Q4_0:  return ((n_elems + 31) / 32) * 18;  // d[2] + qs[16] nibbles
         case GGML_TYPE_IQ1_S: return n_blocks * 42;   // d[2] + qs[32] + qh[8]
         case GGML_TYPE_IQ1_M: return n_blocks * 56;   // d[2] + qs[32] + qh[16] + scales[6]
         case GGML_TYPE_IQ2_XXS: return n_blocks * 66; // d[2] + qs[64] = 66 (NOT 72 — verified empirically)
@@ -1223,18 +1263,49 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
     }
 }
 
-// Buffer the entire GGUF data blob in RAM for fast random access
-// After this, gguf_read_tensor_f32 reads from RAM instead of SSD
+// Map the entire GGUF data blob for random access. Uses mmap (lazy, shared
+// with the page cache — the "raw mmap'd blob" the weight law demands), with
+// a malloc+fread fallback when mmap is unavailable.
 int gguf_buffer_data(gguf_ctx *ctx) {
     if (ctx->data_blob) return 1;  // already buffered
-    
+
     // Get file size
     fseek(ctx->file, 0, SEEK_END);
     long file_size = ftell(ctx->file);
     uint64_t blob_size = file_size - ctx->data_blob_offset;
+    if (blob_size == 0) return 0;
+
+#if defined(_POSIX_MAPPED_FILES)
+    /* mmap requires a page-aligned offset — GGUF's blob offset is only
+     * 32-aligned, so map from the aligned base and shift the pointer. */
+    {
+        const long pg = sysconf(_SC_PAGESIZE);
+        const off_t aligned_off = ((off_t)ctx->data_blob_offset / pg) * pg;
+        const size_t shift = (size_t)(ctx->data_blob_offset - aligned_off);
+        void *base = mmap(NULL, blob_size + shift, PROT_READ, MAP_PRIVATE,
+                          fileno(ctx->file), aligned_off);
+        if (base != MAP_FAILED) {
+            ctx->data_blob = (uint8_t *)base + shift;
+            ctx->data_blob_size = blob_size;
+            ctx->data_blob_is_mmap = 1;
+            ctx->data_blob_mmap_base = base;
+            ctx->data_blob_mmap_len = blob_size + shift;
+            /* Prefetch + 2MB huge pages on the ALIGNED base (madvise needs
+             * page alignment): kills the per-4KB major-fault stall. */
+#if defined(__linux__)
+            madvise(base, ctx->data_blob_mmap_len, MADV_WILLNEED);
+            madvise(base, ctx->data_blob_mmap_len, MADV_HUGEPAGE);
+#endif
+            fprintf(stderr, "  GGUF data blob mmap'd: %lu MB\n", (unsigned long)(blob_size / (1024*1024)));
+            return 1;
+        }
+        fprintf(stderr, "  gguf_buffer_data: mmap failed, falling back to malloc+fread\n");
+    }
+#endif
+
+    {
+    // Fallback: 64-byte aligned allocation for optimal DDR4 burst reads
     fseek(ctx->file, ctx->data_blob_offset, SEEK_SET);
-    
-    // 64-byte aligned allocation for optimal DDR4 burst reads
     void *blob = NULL;
     if (posix_memalign(&blob, 64, blob_size) != 0) {
         fprintf(stderr, "gguf_buffer_data: posix_memalign failed for %lu bytes\n", (unsigned long)blob_size);
@@ -1255,6 +1326,7 @@ int gguf_buffer_data(gguf_ctx *ctx) {
     ctx->data_blob_size = blob_size;
     fprintf(stderr, "  GGUF data blob buffered: %lu MB\n", (unsigned long)(blob_size / (1024*1024)));
     return 1;
+    }
 }
 
 // Q4_K block: d(fp16,2) + dmin(fp16,2) + scales[12] + qs[128] = 144 bytes per 256 elements (modern, NO qh field)

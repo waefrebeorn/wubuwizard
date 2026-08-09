@@ -69,6 +69,9 @@ typedef struct {
     // Optional: buffered data blob (mmap or malloc'd copy)
     void *data_blob;
     size_t data_blob_size;
+    int data_blob_is_mmap;   /* munmap (not free) on close */
+    void *data_blob_mmap_base;   /* page-aligned mapping start (munmap target) */
+    size_t data_blob_mmap_len;
 } gguf_ctx;
 
 // Open GGUF file and parse headers
