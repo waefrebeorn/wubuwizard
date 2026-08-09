@@ -67,6 +67,15 @@ int64_t wubu_skill_match(wubu_skill_tracker_t *sk, uint16_t goal,
  * extinction can prune unused skills). */
 void wubu_skill_use(wubu_skill_tracker_t *sk, int64_t cell_idx);
 
+/* K9: the C1 skill-quality DECAY — a matched skill whose use produced
+ * a BAD traj outcome loses fitness (the match returned it, the work
+ * failed: the skill is misleading). The decay is gradual (an EMA of
+ * the outcomes), so ONE bad use doesn't kill a good skill — but a
+ * skill that consistently matches-and-fails demotes itself toward the
+ * prune floor (auto-demote before prune). Returns the updated fitness. */
+float wubu_skill_report_outcome(wubu_skill_tracker_t *sk, int64_t cell_idx,
+                                int outcome_ok);
+
 /* K6: the extinction pass — skills with uses==0 and low fitness get
  * pruned (the hive erases them). Returns the pruned count. */
 int wubu_skill_prune(wubu_skill_tracker_t *sk, uint64_t min_uses,

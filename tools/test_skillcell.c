@@ -91,6 +91,22 @@ int main(void)
     if (m3 < 0) FAIL("the restored goal-42 lens-1 skill does not match");
     remove(spath);
 
+    /* 6. C1: the skill-quality DECAY — a matched skill that keeps
+     * FAILING demotes itself toward the prune floor (the auto-demote
+     * before prune) */
+    float f0 = 0.9f;
+    float f_decayed = f0;
+    for (int i = 0; i < 8; i++)
+        f_decayed = wubu_skill_report_outcome(&sk2, m2, 0);   /* 8 fails */
+    printf("  decay: fitness %.2f -> %.2f after 8 bad outcomes\n", f0, f_decayed);
+    if (f_decayed >= f0) FAIL("the skill did not decay on bad outcomes");
+    if (f_decayed > 0.5f) FAIL("8 fails should demote below 0.5 (got %.2f)",
+                               f_decayed);
+    /* a good outcome nudges it back up */
+    float f_recovered = wubu_skill_report_outcome(&sk2, m2, 1);
+    printf("  recovery: after 1 good outcome: %.2f\n", f_recovered);
+    if (f_recovered <= f_decayed) FAIL("the good outcome did not reinforce");
+
     printf("=== ALL SKILLCELL TESTS PASSED (the colony learns skills) ===\n");
     return 0;
 }

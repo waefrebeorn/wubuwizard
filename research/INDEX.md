@@ -2061,6 +2061,8 @@ archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
 - AN57 SKILL-STORE PERSISTENCE `wired` (include/wubu_skillcell.h K7/K8: wubu_skill_save/load — the LEARNED skills ride the .skills sidecar; the nightly gate CAUGHT the resume re-learning from zero (the .hive/.prio saved the ledger + evidence but the skills were memory-only). Resume now restores 233 learned skills + the replay boundary divergence is GONE. test_skillcell pins the round-trip)
 - AN58 NIGHTLY COLONY GATE `wired` (tools/test_colony_nightly.sh — fixed wall-clock budget + ONE forced resume + published artifacts to colony-runs/nightly-<ts>/; asserts zero contract violations, the suite at the LEARNED level, .hive/.prio/.events/.skills present, report + replay post-mortem run. The 60s smoke PASSED; the 30-60min nightly job uses the same path)
 - AN59 RESOURCE LEDGER CELL + SOFT FITNESS `wired` (A3/A4: wubu_res_cell_t hive meta-cells — per-200-round RSS/CPU/throughput snapshots the walk can read; the metadiag's fast signal carries soft_fitness, and SUSTAINED RESOURCE STRESS (soft < 0.5) is a first-class aggression trigger — reason code 4 fires even when the loss is flat + the suite is healthy. test_metadiag: resource stress + fine loss -> rate 0.60)
+- AN60 SKILL-QUALITY DECAY `wired` (C1: wubu_skill_report_outcome (K9) — a matched skill whose use FAILED decays its fitness (an EMA toward 0.1); a consistently-misleading skill auto-demotes toward the prune floor (fitness 0.90 -> 0.44 after 8 fails, test_skillcell pins it), and a good outcome reinforces back. Wired into the runner: every task's pass/fail feeds the matched skill. Healthy loop confirmed: suite 0.836, 85% pass, no decay spiral)
+
 
 
 

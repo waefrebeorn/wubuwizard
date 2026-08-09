@@ -105,6 +105,21 @@ void wubu_skill_use(wubu_skill_tracker_t *sk, int64_t cell_idx)
     cell->uses++;
 }
 
+float wubu_skill_report_outcome(wubu_skill_tracker_t *sk, int64_t cell_idx,
+                                int outcome_ok)
+{
+    wubu_skill_t *cell = find_cell(sk ? sk->tissue : NULL, cell_idx);
+    if (!cell || cell->draft) return 0.0f;
+    cell->uses++;
+    /* the C1 decay: the fitness is an EMA of the outcomes. A good
+     * outcome nudges it UP toward 1.0; a bad one DOWN toward the
+     * prune floor. The 0.9/0.1 blend means a single bad use is a
+     * 10% hit — a consistently-misleading skill demotes itself. */
+    float target = outcome_ok ? 1.0f : 0.1f;
+    cell->fitness = 0.9f * cell->fitness + 0.1f * target;
+    return cell->fitness;
+}
+
 /* the prune: TWO PASSES — collect the doomed pointers, then erase
  * (the hive walk cannot erase-while-iterating: the block being walked
  * would be mutated). */

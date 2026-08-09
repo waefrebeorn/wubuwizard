@@ -204,15 +204,18 @@ int main(int argc, char **argv)
         for (int t = 0; t < harness.n_tasks; t++) {
             uint16_t goal = harness.suite[t].goal_token;
             int64_t m = wubu_skill_match(&skills, goal, 0, 0.2f);
-            if (r < 6 || (r >= 28 && r < 32) || (r >= 38 && r < 42))
-                printf("  [task] round %d task %d goal %u: match %s\n",
-                       r, t, goal, m >= 0 ? "YES" : "no");
             /* a matched skill -> high correctness (the colony knows the
              * task); no skill -> low (it guesses). The 0.7 floor in the
              * harness decides pass/fail — so only REAL skills pass. */
             float corr = (m >= 0) ? 0.9f : 0.55f;
             /* enough steps for every task (max required is 5) */
-            wubu_harness_run_task(&harness, t, 5, corr, 0.3f);
+            int passed = wubu_harness_run_task(&harness, t, 5, corr, 0.3f);
+            /* C1: the skill-quality DECAY — the matched skill gets the
+             * REAL outcome (wubu_skill_report_outcome): a pass
+             * reinforces it, a fail decays it toward the prune floor
+             * (a skill that matches but fails is misleading). */
+            if (m >= 0)
+                wubu_skill_report_outcome(&skills, m, passed);
         }
         float score = wubu_harness_suite_score(&harness);
 
