@@ -1,3 +1,4 @@
+#include "gguf_reader.h"
 /* lfm2_forward.c -- LFM2.5 forward orchestrator (C11, self-contained).
  * SPDX-License-Identifier: WaefreBeorn-UMV3 */
 #include "lfm2_forward.h"

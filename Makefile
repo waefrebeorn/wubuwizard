@@ -41,7 +41,21 @@ cuda_check:
 
 .PHONY: all clean help ninja test_all
 
-all: test_nested_ssm test_nested_ssm_backward load_model test_model test_cpu_timing test_model_adapter infer_moe infer_moe_lazy infer_unified infer_poincare test_256k test_kv_cache test_poincare_gqa test_tst test_moe_hyperbolic test_mobius_linear test_hyperbolic_output_proj train_integrated test_chunked_ssm api_server
+# EXTRA_OBJ — the 39 orphaned-but-clean modules (the module registry,
+# MODULES.md): compiled into the build so nothing sits in the toolbox.
+# Collision-free vs CORE_OBJ (verified by nm 2026-08-09).
+EXTRA_OBJ = src/gaad_nesting_llm.o src/lfm2_attn.o src/lfm2_conv.o src/lfm2_ffn.o src/lfm2_forward.o src/lfm2_load.o src/lfm2_math.o src/thread_pool.o src/wubu_agi.o src/wubu_ambig.o src/wubu_bear_mlp.o src/wubu_colonel.o src/wubu_credit_sft.o src/wubu_dbstate.o src/wubu_dedup.o src/wubu_dense_ffn.o src/wubu_dsv4_layer.o src/wubu_epcap.o src/wubu_eval.o src/wubu_fmt.o src/wubu_gaad.o src/wubu_h3_norm.o src/wubu_kernel_budget.o src/wubu_masked_ce.o src/wubu_mix.o src/wubu_mmrope.o src/wubu_passk.o src/wubu_patch_embed.o src/wubu_priority.o src/wubu_recency.o src/wubu_rollout.o src/wubu_seed.o src/wubu_spawn_win.o src/wubu_traj_grpo.o src/wubu_traj_sft.o src/wubu_user_sim.o src/wubu_uuid.o src/wubu_vision_moondream.o src/wubu_width.o src/wubu_win.o src/quantized_matmul_fixed.o
+
+# Build every EXTRA module (objects only — their tools link them on demand)
+$(EXTRA_OBJ): src/%.o: src/%.c
+	$(CC) $(CFLAGS) -I include -c -o $@ $<
+
+# the module-registry gate: all EXTRA objects compile
+.PHONY: module-registry
+module-registry: $(EXTRA_OBJ)
+	@echo "=== MODULE REGISTRY: $(words $(EXTRA_OBJ)) EXTRA modules compiled ==="
+
+all: module-registry test_nested_ssm test_nested_ssm_backward load_model test_model test_cpu_timing test_model_adapter infer_moe infer_moe_lazy infer_unified infer_poincare test_256k test_kv_cache test_poincare_gqa test_tst test_moe_hyperbolic test_mobius_linear test_hyperbolic_output_proj train_integrated test_chunked_ssm api_server
 
 # Generate compile_commands.json for clangd / IDE / agent tooling (research 066-C1).
 compile_commands.json:
@@ -1598,6 +1612,15 @@ test_mix: tools/test_mix.c src/wubu_mix.c include/wubu_mix.h
 	./$@
 test_dedup: tools/test_dedup.c src/wubu_dedup.c include/wubu_dedup.h
 	$(CC) $(CFLAGS) -I include -o $@ tools/test_dedup.c src/wubu_dedup.c
+	./$@
+test_bear_mlp: tools/test_bear_mlp.c src/wubu_bear_mlp.c include/wubu_bear_mlp.h
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_bear_mlp.c src/wubu_bear_mlp.c -lm
+	./$@
+test_gaad: tools/test_gaad.c src/wubu_gaad.c include/wubu_gaad.h
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_gaad.c src/wubu_gaad.c -lm
+	./$@
+test_uuid: tools/test_uuid.c src/wubu_uuid.c include/wubu_uuid.h
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_uuid.c src/wubu_uuid.c
 	./$@
 test_masked_ce: tools/test_masked_ce.c src/wubu_masked_ce.c include/wubu_masked_ce.h
 	$(CC) $(CFLAGS) -I include -o $@ tools/test_masked_ce.c src/wubu_masked_ce.c -lm

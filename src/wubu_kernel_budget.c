@@ -1,3 +1,4 @@
+#include <stdio.h>
 /*
  * wubu_kernel_budget.c -- byte-budget compiler for the kernel-layer model.
  *

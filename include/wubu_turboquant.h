@@ -91,6 +91,8 @@ static inline void dequantize_q2_0_block(const block_q2_0_t* b, float* x) {
 }
 
 // TurboQuant: extract 2 elements at once for V dequant
+
+#if defined(__CUDACC__)
 __device__ __forceinline__ float2 dequant_q2_0_pair(const block_q2_0_t* b, int idx) {
     int q0 = (b->qs[idx / 4] >> (2 * (idx % 4))) & 0x3;
     int q1 = (b->qs[(idx+1) / 4] >> (2 * ((idx+1) % 4))) & 0x3;
@@ -154,6 +156,8 @@ typedef struct {
 
 #define MAX_TILES (524288 / 64)  // 8192 tiles for 512k context
 #define TILES_PER_WINDOW (8192 / 64)  // 128 tiles for 8k window
+
+#endif /* __CUDACC__ — tile_manager below is CPU */
 
 typedef struct {
     kv_tile_t tiles[MAX_TILES];

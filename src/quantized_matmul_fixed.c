@@ -1,3 +1,10 @@
+#include <stdint.h>
+#include <stddef.h>
+#include "gguf_reader.h"
+#include <immintrin.h>
+#ifndef QK_K
+#define QK_K 256
+#endif
 // weight_type: GGML_TYPE for W
 // n_rows, n_cols: dimensions
 // col_stride_bytes: byte stride between columns (0 = packed)

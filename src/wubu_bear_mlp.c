@@ -1,3 +1,8 @@
+#include <stddef.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 /*
  * wubu_bear_mlp.c  --  BearRL MLP Policy Forward (CPU, C11 fallback).
  *
