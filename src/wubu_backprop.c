@@ -36,6 +36,7 @@
 #include "gpu_wubu.h"
 #if defined(__GNUC__)
 #define BP_WEAK __attribute__((weak))
+#define HD (WUBU_HEAD_DIM)      /* the head width (bp hardcoded 64) */
 #else
 #define BP_WEAK
 #endif
@@ -83,10 +84,10 @@ int wubu_bp_alloc(wubu_bp_t *bp, int max_seq)
     bp->emb_in    = calloc_f(sd);
     bp->attn_norm = calloc_f((size_t)L * sd);
     bp->q_pre     = calloc_f((size_t)L * sd);
-    bp->k_pre     = calloc_f((size_t)L * (size_t)max_seq * 64);
+    bp->k_pre     = calloc_f((size_t)L * (size_t)max_seq * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
     bp->q         = calloc_f((size_t)L * sd);
-    bp->k         = calloc_f((size_t)L * (size_t)max_seq * 64);
-    bp->v         = calloc_f((size_t)L * (size_t)max_seq * 64);
+    bp->k         = calloc_f((size_t)L * (size_t)max_seq * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
+    bp->v         = calloc_f((size_t)L * (size_t)max_seq * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
     bp->attn_out  = calloc_f((size_t)L * sd);
     bp->o_out     = calloc_f((size_t)L * sd);
     bp->g_val     = calloc_f((size_t)L * sd);
@@ -100,8 +101,8 @@ int wubu_bp_alloc(wubu_bp_t *bp, int max_seq)
     bp->final_h   = calloc_f(sd);
     bp->logits    = calloc_f((size_t)max_seq * WUBU_VOCAB);
     bp->s_dq      = calloc_f(sd);
-    bp->s_dk      = calloc_f((size_t)max_seq * 64);
-    bp->s_dv      = calloc_f((size_t)max_seq * 64);
+    bp->s_dk      = calloc_f((size_t)max_seq * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
+    bp->s_dv      = calloc_f((size_t)max_seq * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
     bp->s_dao     = calloc_f(sd);
     bp->s_dfg     = calloc_f((size_t)max_seq * 2 * FF);
     bp->s_dfu     = calloc_f((size_t)max_seq * FF);
@@ -367,7 +368,7 @@ static void cpu_attn_loop(float *acc, const float *q, const float *k,
             int lo = is_full ? 0
                              : (s > WUBU_LOCAL_WIN ? s - WUBU_LOCAL_WIN + 1 : 0);
             int kv_n = 0;
-            float probs[WUBU_LOCAL_WIN + 2];
+            float probs[seq + 1];  /* full-attention rows can fill the whole seq */
             for (int t = lo; t <= s; t++) {
                 const float *krow = k + (size_t)t * 64;
                 float dot = 0;
@@ -414,7 +415,7 @@ static void cpu_attn_backward_loop(float *dq, float *dk, float *dv,
             int lo = is_full ? 0
                              : (s > WUBU_LOCAL_WIN ? s - WUBU_LOCAL_WIN + 1 : 0);
             int kv_n = 0;
-            float probs[WUBU_LOCAL_WIN + 2];
+            float probs[seq + 1];  /* full-attention rows can fill the whole seq */
             float maxv = -1e30f;
             for (int t = lo; t <= s; t++) {
                 const float *krow = k + (size_t)t * 64;

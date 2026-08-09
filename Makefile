@@ -1622,6 +1622,9 @@ test_gaad: tools/test_gaad.c src/wubu_gaad.c include/wubu_gaad.h
 test_uuid: tools/test_uuid.c src/wubu_uuid.c include/wubu_uuid.h
 	$(CC) $(CFLAGS) -I include -o $@ tools/test_uuid.c src/wubu_uuid.c
 	./$@
+test_optim: tools/test_optim.c src/wubu_optim.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu35_dims.o src/qlearner.o src/rsgd.o src/wubu_mobius.o src/gguf_reader.o
+	$(CC) $(CFLAGS) -fopenmp -I include -o $@ tools/test_optim.c src/wubu_optim.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu35_dims.o src/qlearner.o src/rsgd.o src/wubu_mobius.o src/gguf_reader.o -lm
+	./$@
 test_masked_ce: tools/test_masked_ce.c src/wubu_masked_ce.c include/wubu_masked_ce.h
 	$(CC) $(CFLAGS) -I include -o $@ tools/test_masked_ce.c src/wubu_masked_ce.c -lm
 	./$@

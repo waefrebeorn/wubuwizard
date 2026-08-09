@@ -20,6 +20,8 @@
 #define WUBU_TRAIN_H
 
 #include "wubu.h"
+/* NOTE: wubu.h defines wubu_model_t (the direct-weights training model).
+ * wubu_model.h is the gguf-loader's OPAQUE model — do NOT include both. */
 
 /* The training config (the reference recipe). */
 typedef struct {
@@ -45,35 +47,37 @@ typedef struct {
  *   [4*L+1+i] = selectors[i]                        (i in 0..S-1)
  */
 #define WUBU_NORM_SLOTS (4 * WUBU_LAYERS + 1 + WUBU_SELECTORS)
+#define WUBU_MAX_LAYERS 64    /* struct pointer-array cap (runtime L <= 64) */
+#define WUBU_MAX_NORM_SLOTS (4 * WUBU_MAX_LAYERS + 1 + 8)
 
 /* Gradient accumulators: one float per weight, only for the Muon-updated
  * matrices (the big ones). The norms + embeddings + selectors use
  * AdamW states. */
 typedef struct wubu_train {
     /* per-block matrix gradients */
-    float *q_proj_g[WUBU_LAYERS];  /* [448,448] */
-    float *k_proj_g[WUBU_LAYERS];  /* [448,64] */
-    float *v_proj_g[WUBU_LAYERS];
-    float *o_proj_g[WUBU_LAYERS];
-    float *g_proj_g[WUBU_LAYERS];
-    float *gate_up_g[WUBU_LAYERS]; /* [448,2456] */
-    float *down_g[WUBU_LAYERS];    /* [1228,448] */
+    float *q_proj_g[WUBU_MAX_LAYERS];  /* [448,448] */
+    float *k_proj_g[WUBU_MAX_LAYERS];  /* [448,64] */
+    float *v_proj_g[WUBU_MAX_LAYERS];
+    float *o_proj_g[WUBU_MAX_LAYERS];
+    float *g_proj_g[WUBU_MAX_LAYERS];
+    float *gate_up_g[WUBU_MAX_LAYERS]; /* [448,2456] */
+    float *down_g[WUBU_MAX_LAYERS];    /* [1228,448] */
     /* AdamW states for the embedding */
     float *emb_g;   /* [16384,448] the gradient accumulator */
     float *emb_m;   /* [16384,448] the AdamW first moment */
     float *emb_v;   /* [16384,448] the AdamW second moment */
     /* the 1-D params (norms + selectors) -> AdamW: gradient + states */
-    float *norm_g[WUBU_NORM_SLOTS];
-    float *norm_m[WUBU_NORM_SLOTS];
-    float *norm_v[WUBU_NORM_SLOTS];
+    float *norm_g[WUBU_MAX_NORM_SLOTS];
+    float *norm_m[WUBU_MAX_NORM_SLOTS];
+    float *norm_v[WUBU_MAX_NORM_SLOTS];
     /* Muon states: the momentum per matrix (Newton-Schulz iteration) */
-    float *q_proj_m[WUBU_LAYERS];
-    float *k_proj_m[WUBU_LAYERS];
-    float *v_proj_m[WUBU_LAYERS];
-    float *o_proj_m[WUBU_LAYERS];
-    float *g_proj_m[WUBU_LAYERS];
-    float *gate_up_m[WUBU_LAYERS];
-    float *down_m[WUBU_LAYERS];
+    float *q_proj_m[WUBU_MAX_LAYERS];
+    float *k_proj_m[WUBU_MAX_LAYERS];
+    float *v_proj_m[WUBU_MAX_LAYERS];
+    float *o_proj_m[WUBU_MAX_LAYERS];
+    float *g_proj_m[WUBU_MAX_LAYERS];
+    float *gate_up_m[WUBU_MAX_LAYERS];
+    float *down_m[WUBU_MAX_LAYERS];
     /* the REAL backprop recorder (owned by the trainer; allocated on
      * first use, grown as the sequence grows) */
     struct wubu_bp_t *bp_rec;

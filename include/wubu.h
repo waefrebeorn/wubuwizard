@@ -26,7 +26,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* The released configuration (wubu_config.json). */
+/* The RUNTIME dims (the agnostic loader doctrine): the dimensional macros
+ * are DATA — set by wubu35_dims_probe/set at load time. wubu35_dims.h
+ * comes FIRST so its WUBU35_DIMS-backed macros win (WUBU_DIM =
+ * WUBU35_DIMS.dim etc). The block below is the DEFAULT (wubu-35m seed)
+ * geometry, used only when the runtime dims were not set yet. */
+#include "wubu35_dims.h"
+#ifndef WUBU35_DIMS_H
 #define WUBU_VOCAB       16384
 #define WUBU_DIM         448
 #define WUBU_LAYERS      12
@@ -42,6 +48,11 @@
 #define WUBU_CLIP        10.0f
 #define WUBU_EPS         1e-6f
 #define WUBU_SELECTORS   3   /* 12 / 4 */
+#endif
+/* struct pointer-array cap (runtime L <= 64; the struct holds POINTERS) */
+#ifndef WUBU_MAX_LAYERS
+#define WUBU_MAX_LAYERS 64
+#endif
 
 /* the exact released parameter count */
 #define WUBU_PARAMS      35072768
@@ -67,10 +78,10 @@ typedef struct {
 typedef struct {
     float *embedding;       /* [16384, 448] (tied with lm_head) */
     float *final_norm;      /* [448] */
-    wubu_block_t blocks[WUBU_LAYERS];
-    float *selectors[WUBU_SELECTORS];  /* [448] each (score weight) */
-    int    is_full[WUBU_LAYERS];       /* attention rhythm */
-    int    fire_sel[WUBU_LAYERS];     /* the residual-selector rhythm
+    wubu_block_t blocks[WUBU_MAX_LAYERS];
+    float *selectors[8];  /* [448] each (score weight) — runtime count */
+    int    is_full[WUBU_MAX_LAYERS];       /* attention rhythm */
+    int    fire_sel[WUBU_MAX_LAYERS];     /* the residual-selector rhythm
                                           (per-block like is_full: the
                                           growth operator shifts it) */
     int    n_layers;                   /* the ACTIVE layer count (the
