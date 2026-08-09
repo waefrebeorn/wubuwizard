@@ -104,9 +104,39 @@ wubu_diag_verdict_t wubu_diag_cycle(wubu_diag_loop_t *loop,
         for (int c = 0; c < 32; c++) {
             if (!wubu_prio_gate(loop->prio, (uint8_t)c)) { blocked = 1; break; }
         }
-        if (blocked) return WUBU_DIAG_REJECT;
+        if (blocked) {
+            /* the A2 audit: an early REJECT must still record the
+             * negative example (the graveyard is the queryable record
+             * of what the gate refused — invisible rejections were the
+             * bug the report tool found) */
+            wubu_fitness_cell_t cell;
+            memset(&cell, 0, sizeof(cell));
+            cell.batch = rec->batch;
+            cell.epoch = rec->epoch;
+            cell.fitness = rec->fitness;
+            cell.delta = rec->fitness - rec->prev_fitness;
+            cell.verdict = WUBU_DIAG_REJECT;
+            cell.cell_idx = 0xFF;
+            cell.graveyard = 1;
+            push_fitness_cell(loop, &cell, 1);
+            loop->n_rejected++;
+            return WUBU_DIAG_REJECT;
+        }
     }
-    if (wubu_amoeba_diagnose(loop->amoeba) != 0) return WUBU_DIAG_REJECT;
+    if (wubu_amoeba_diagnose(loop->amoeba) != 0) {
+        wubu_fitness_cell_t cell;
+        memset(&cell, 0, sizeof(cell));
+        cell.batch = rec->batch;
+        cell.epoch = rec->epoch;
+        cell.fitness = rec->fitness;
+        cell.delta = rec->fitness - rec->prev_fitness;
+        cell.verdict = WUBU_DIAG_REJECT;
+        cell.cell_idx = 0xFF;
+        cell.graveyard = 1;
+        push_fitness_cell(loop, &cell, 1);
+        loop->n_rejected++;
+        return WUBU_DIAG_REJECT;
+    }
     int mutated = wubu_amoeba_mutate(loop->amoeba);
     if (mutated <= 0) {
         /* the healthy band: no mutation, record stasis */
