@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "wubu_hive.h"
 #include "wubu_amoeba.h"
@@ -71,6 +72,7 @@ int main(int argc, char **argv)
 {
     int n_rounds = arg_int(argc, argv, "--rounds", 100);
     int ckpt_every = arg_int(argc, argv, "--ckpt", 10);
+    int round_delay_ms = arg_int(argc, argv, "--round-delay-ms", 0);
     const char *resume = arg_get(argc, argv, "--resume");
     const char *out_base = arg_get(argc, argv, "--out");
     if (!out_base) out_base = "/tmp/endurance";
@@ -215,6 +217,15 @@ int main(int argc, char **argv)
             e.skill_version = (uint32_t)loop.n_accepted;
             e.traj_id = (uint64_t)harness.step;
             wubu_events_append(&evrec, &e);
+        }
+
+        /* the A5 chaos hook: an optional per-round delay so the chaos
+         * test can SIGKILL mid-run (real wall-clock survival proof) */
+        if (round_delay_ms > 0) {
+            struct timespec ts;
+            ts.tv_sec = round_delay_ms / 1000;
+            ts.tv_nsec = (long)(round_delay_ms % 1000) * 1000000L;
+            nanosleep(&ts, NULL);
         }
 
         if (r % 5 == 0 || r == start_round) {
