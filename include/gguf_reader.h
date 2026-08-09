@@ -80,6 +80,7 @@ gguf_ctx* gguf_open(const char *path);
 // Buffer entire data blob in RAM for fast tensor reads
 // Call after gguf_open, before any gguf_read_tensor_f32 calls
 int gguf_buffer_data(gguf_ctx *ctx);
+int64_t gguf_tokenizer_token_count(gguf_ctx *ctx);  /* vocab size from the GGUF KV */
 
 // Calculate raw (quantized) byte size for a tensor type/element count
 int64_t gguf_raw_size(int ggml_type, int64_t n_elems);

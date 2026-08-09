@@ -111,16 +111,40 @@ static void build_byte_token_ids(wubu_tokenizer_t *tok);
 static void build_vocab_hash(wubu_tokenizer_t *tok);
 
 bool wubu_tokenizer_init(wubu_tokenizer_t *tok, const char *gguf_path) {
-    // Load pre-extracted tokenizer data from data/vocab.bin, data/merges.bin
-    (void)gguf_path; // We use pre-extracted files in data/ directory
+    // Load pre-extracted tokenizer data. The cache files are vocab-keyed
+    // (data/vocab_<N>.bin — each model family has its own vocab: Qwen3.5 =
+    // 248320, LFM2.5 = 128000, MiniCPM5 = 130560); the GGUF's own tokenizer
+    // count picks the right one, with data/vocab.bin as the fallback.
     if (!tok) return false;
     memset(tok, 0, sizeof(*tok));
     init_byte_encoder();
     tok->bos_id = -1; tok->eos_id = -1; tok->pad_id = -1;
     
+    char vpath[256], mpath[256];
+    int64_t model_vocab = -1;
+    if (gguf_path) {
+        gguf_ctx *g = gguf_open(gguf_path);
+        if (g) {
+            model_vocab = gguf_tokenizer_token_count(g);
+            gguf_close(g);
+        }
+    }
+    if (model_vocab > 0) {
+        snprintf(vpath, sizeof(vpath), "data/vocab_%lld.bin", (long long)model_vocab);
+        snprintf(mpath, sizeof(mpath), "data/merges_%lld.bin", (long long)model_vocab);
+    } else {
+        snprintf(vpath, sizeof(vpath), "data/vocab.bin");
+        snprintf(mpath, sizeof(mpath), "data/merges.bin");
+    }
+    
     // Load vocab
-    FILE *f = fopen("data/vocab.bin", "rb");
-    if (!f) { fprintf(stderr, "Can't open data/vocab.bin (run python/extract_tokenizer.py first)\n"); return false; }
+    FILE *f = fopen(vpath, "rb");
+    if (!f) {
+        /* fall back to the generic cache */
+        snprintf(vpath, sizeof(vpath), "data/vocab.bin");
+        f = fopen(vpath, "rb");
+    }
+    if (!f) { fprintf(stderr, "Can't open %s (run python/extract_tokenizer.py first)\n", vpath); return false; }
     
     uint32_t vs;
     if (fread(&vs, 4, 1, f) != 1 || vs == 0) { fclose(f); return false; }
@@ -151,7 +175,7 @@ bool wubu_tokenizer_init(wubu_tokenizer_t *tok, const char *gguf_path) {
     build_byte_token_ids(tok);
     
     // Load merges
-    f = fopen("data/merges.bin", "rb");
+    f = fopen(mpath, "rb");
     if (f) {
         uint32_t ms;
         fread(&ms, 4, 1, f);
@@ -161,7 +185,14 @@ bool wubu_tokenizer_init(wubu_tokenizer_t *tok, const char *gguf_path) {
             for (uint32_t mi = 0; mi < ms; mi++) {
                 uint32_t slen;
                 if (fread(&slen, 4, 1, f) != 1) break;
-                if (slen > 512) { fprintf(stderr,"Bad merge len %u at %u\n",slen,mi); break; }
+                if (slen > 512) {
+                    /* oversized BPE merge (rare but legal) — skip the entry,
+                     * keep the file position consistent (a bare break left
+                     * the stream mid-entry and the encode later crashed) */
+                    fprintf(stderr, "Skipping oversized merge %u (%u bytes)\n", mi, slen);
+                    fseek(f, (long)slen, SEEK_CUR);
+                    continue;
+                }
                 char *merge_str = (char *)malloc(slen + 1);
                 fread(merge_str, 1, slen, f);
                 merge_str[slen] = '\0';
@@ -172,6 +203,14 @@ bool wubu_tokenizer_init(wubu_tokenizer_t *tok, const char *gguf_path) {
                     int left_id = find_token_by_string(tok, (const uint8_t*)merge_str, (int)(space - merge_str));
                     int right_id = find_token_by_string(tok, (const uint8_t*)(space+1), (int)(slen - (space - merge_str) - 1));
                     
+                    /* combined left+right must fit the merge buffer — the
+                     * old code clamped mbl AFTER the memcpys, overflowing
+                     * mb for long merges (fortify abort). Skip them. */
+                    if ((int)(space - merge_str) + (int)(slen - (space - merge_str) - 1) > WUBU_TOKENIZER_MAX_TOKEN_BYTES - 1) {
+                        *space = ' ';
+                        free(merge_str);
+                        continue;
+                    }
                     uint8_t mb[WUBU_TOKENIZER_MAX_TOKEN_BYTES];
                     int mbl = (int)(space - merge_str) + (int)(slen - (space - merge_str) - 1);
                     if (mbl > WUBU_TOKENIZER_MAX_TOKEN_BYTES-1) mbl = WUBU_TOKENIZER_MAX_TOKEN_BYTES-1;

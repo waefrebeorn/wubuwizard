@@ -1091,6 +1091,57 @@ void gguf_close(gguf_ctx *ctx) {
     }
 }
 
+/* Count of tokenizer.ggml.tokens (the vocab size) by re-walking the KV
+ * section — the tokenizer needs the MODEL's vocab count to pick the right
+ * cache file (data/vocab_<N>.bin). Returns -1 if absent. */
+int64_t gguf_tokenizer_token_count(gguf_ctx *ctx) {
+    if (!ctx || !ctx->file) return -1;
+    fseek(ctx->file, 16, SEEK_SET);  /* magic(4) ver(4) n_tensors(8) n_kv(8) */
+    int64_t n_kv = 0;
+    if (fread(&n_kv, 8, 1, ctx->file) != 1) return -1;
+    for (int64_t ki = 0; ki < n_kv; ki++) {
+        uint64_t klen = 0;
+        if (fread(&klen, 8, 1, ctx->file) != 1) return -1;
+        char key[256];
+        if (klen >= sizeof(key)) { fseek(ctx->file, (long)klen, SEEK_CUR); continue; }
+        if (fread(key, 1, (size_t)klen, ctx->file) != klen) return -1;
+        key[klen] = 0;
+        int32_t vtype = 0;
+        if (fread(&vtype, 4, 1, ctx->file) != 1) return -1;
+        if (vtype == 9) {  /* array */
+            int32_t arr_type = 0; uint64_t arr_len = 0;
+            if (fread(&arr_type, 4, 1, ctx->file) != 1) return -1;
+            if (fread(&arr_len, 8, 1, ctx->file) != 1) return -1;
+            if (strcmp(key, "tokenizer.ggml.tokens") == 0 && arr_type == 8)
+                return (int64_t)arr_len;
+            if (arr_type == 8) {
+                for (uint64_t j = 0; j < arr_len; j++) {
+                    uint64_t slen = 0;
+                    if (fread(&slen, 8, 1, ctx->file) != 1) return -1;
+                    fseek(ctx->file, (long)slen, SEEK_CUR);
+                }
+            } else {
+                int elem_size = 4;
+                if (arr_type == 0 || arr_type == 1 || arr_type == 7) elem_size = 1;
+                else if (arr_type == 2 || arr_type == 3) elem_size = 2;
+                else if (arr_type == 10 || arr_type == 11 || arr_type == 12) elem_size = 8;
+                fseek(ctx->file, (long)(arr_len * (uint64_t)elem_size), SEEK_CUR);
+            }
+        } else if (vtype == 8) {  /* string */
+            uint64_t slen = 0;
+            if (fread(&slen, 8, 1, ctx->file) != 1) return -1;
+            fseek(ctx->file, (long)slen, SEEK_CUR);
+        } else {
+            int esz = 4;
+            if (vtype == 0 || vtype == 1 || vtype == 7) esz = 1;
+            else if (vtype == 2 || vtype == 3) esz = 2;
+            else if (vtype == 10 || vtype == 11 || vtype == 12) esz = 8;
+            fseek(ctx->file, esz, SEEK_CUR);
+        }
+    }
+    return -1;
+}
+
 // ========== Q2_K Dequant (84 bytes/block, 256 elems/block) ==========
 // Block layout: scales[16] + qs[64] + d[2](fp16) + dmin[2](fp16)
 static void dequantize_q2_K_row(const uint8_t *data, float *output, int64_t n_elems) {
