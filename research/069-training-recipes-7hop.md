@@ -48,6 +48,62 @@ provide — the 20.4%+14.1% top of the RLVR blend. Our own ancient-subsystem pac
 (168 syscall Q/A) + agentic pack (1392 convos) + the new deepseek-v4-pro-agent traces
 (155MB) mirror that role at 35M scale.
 
+## The non-Euclidean optimizer split (the user's research, 2026-08-09)
+The frontier recipe's Muon/NS5 orthogonalizes momentum in EUCLIDEAN space (Newton-
+Schulz on the matrix's flat Gram structure). Our body is NOT flat: the amoeba's
+hyperbolic cells (Poincaré GQA, Möbius layers, hyperbolic SSM blocks, hyperbolic
+output proj — src/wubu_mobius*, wubu_poincare_gqa, wubu_moe_hyperbolic, wubu_hyper)
+live on nested spheres where Euclidean orthogonalization is geometrically wrong
+(the geodesics curve; a flat-space step leaves the manifold).
+
+The user's research: **the non-Euclidean components take a NON-Muon optimization path**:
+- RSGD (src/rsgd.c — Riemannian SGD: retraction-based step on the Poincaré ball,
+  `rsgd_step(w, dw, n_vecs, dim, lr, R, clip)` — radius-aware, clipped)
+- the qlearner (src/qlearner.c — Q-learning the learning RATE from the loss signal,
+  `qlearner_step(ql, loss)` — the adaptive metabolism for the hyperbolic cells)
+- PID + TGT optimization (the user's own researched family — proportional-integral-
+  derivative control of the update trajectory; TGT = the target-state optimization)
+
+**KEY INSIGHT (user, 2026-08-09): "these optimizers work for you in EUCLIDEAN space
+too, if you use the OPTIMIZED SGD."** The RSGD/qlearner/PID/TGT family is not
+hyperbolic-only — with the optimized-SGD form (the retraction becomes ordinary
+gradient descent with the curvature-aware radius R -> inf), it is a general
+non-Muon alternative everywhere. Muon remains the flat-matrix champ; the TGT path is
+the ravine navigator for BOTH spaces.
+
+### The TGT odometer (the gravitational-pole physics — the AGI design)
+"TGT is designed as an ODOMETER to help you get INTO very large ravines and get OUT
+of it — a gravitational pole physics system."
+
+- **Odometer**: TGT tracks the optimizer's position along its trajectory (distance
+  traveled, direction, curvature) — not just the current gradient. It KNOWS where the
+  update has been, so it can tell "entering a ravine" (curvature rising, gradient
+  aligning) from "stuck in one" (velocity ~0 in a steep basin).
+- **Gravitational poles**: the loss landscape's deep basins act as mass centers. TGT
+  routes the update by POLAR coordinates around them — the existing wubu_gravity_t
+  (wubu_gravity_route(g, r_in, theta_in), grow/shrink cells) + wubu_orbits_t
+  (nested orbit write/read) ARE this machinery: cells live at (r, theta) around the
+  poles, the odometer integrates the trajectory in that polar frame.
+- **INTO a ravine**: when the pole's pull dominates (r shrinking toward the basin
+  center), TGT lets the update FALL — the momentum aligns with the ravine's axis
+  (the gravitational gradient descent into the valley).
+- **OUT of a ravine**: when the odometer detects the trap (loss flat but curvature
+  high — a saddle/ravine floor), the pole physics EJECTS: the update gets a
+  repulsive kick off the ravine axis (the anti-gravity escape), preventing the
+  plateau/dead-ravine stall.
+- **The AGI link**: this IS the amoeba metabolism — the loss landscape's ravines are
+  the spheres' basins; gravity routes cells (which sphere absorbs the next token's
+  mass), the odometer tells the colony whether to keep digging (absorb) or leave
+  (prune/reroute). The optimizer and the routing share the polar frame.
+
+STATUS: rsgd_step + qlearner_step are ONLY wired in the legacy trainers
+(tools/train_integrated.c, tools/train_gpu.c). The current wubu_backprop.c Muon/AdamW
+path gives EVERYTHING Euclidean Muon — correct today only because the S7 dense body is
+flat (no hyperbolic modules in the main forward yet). The moment the hyperbolic cells
+wire into the body, the optimizer must SPLIT: Muon for the Euclidean matrices, the
+RSGD/PID/TGT path for the non-Euclidean params. That split is the amoeba's dual
+metabolism — the flat skeleton Muons, the curved cells roll.
+
 ## Sources (persistent)
 - arXiv 2606.15007 (Nemotron 3 Ultra technical report)
 - https://huggingface.co/datasets/nvidia/Nemotron-RL-Ultra-Training-Blends (the blends)

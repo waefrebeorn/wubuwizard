@@ -14,7 +14,7 @@ TOK = os.environ.get("HF_READ_TOKEN") or os.environ.get("HF_TOKEN")
 def shard_download(repo, dst, budget_gb):
     os.makedirs(dst, exist_ok=True)
     files = sorted(f for f in list_repo_files(repo, repo_type="dataset", token=TOK)
-                   if f.endswith(".parquet"))
+                   if f.endswith((".parquet", ".jsonl")))
     got = 0.0
     n = 0
     for f in files:
