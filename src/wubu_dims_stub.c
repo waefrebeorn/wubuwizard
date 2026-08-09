@@ -1,7 +1,7 @@
 /*
  * wubu_dims_stub.c — stubs for the safetensors probe, so the byte-budget
- * test can link wubu35_dims.c WITHOUT the full safetensors reader (the
- * test uses wubu35_dims_default(), not the checkpoint probe).
+ * test can link wubu_runtime_dims.c WITHOUT the full safetensors reader (the
+ * test uses wubu_runtime_dims_default(), not the checkpoint probe).
  */
 #include "safetensors_reader.h"
 

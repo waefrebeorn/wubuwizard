@@ -2,7 +2,7 @@
 /*
  * wubu_kernel_budget.c -- byte-budget compiler for the kernel-layer model.
  *
- * Computes the slab layout from WUBU35_DIMS (probed) + the quant cascade
+ * Computes the slab layout from WUBU_RUNTIME_DIMS (probed) + the quant cascade
  * (wubu_kv_select). The layout is FIXED order so Styx paths are stable:
  *
  *   embedding        [vocab, dim]      weights
@@ -27,7 +27,7 @@
  * the kernel default. Both must forward-invariant.
  */
 #include "wubu_kernel_budget.h"
-#include "wubu.h"            /* WUBU35_DIMS + block shapes */
+#include "wubu.h"            /* WUBU_RUNTIME_DIMS + block shapes */
 #include "wubu_kv_select.h"   /* WUBU_KV_* */
 #include <stddef.h>
 

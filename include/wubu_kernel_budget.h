@@ -4,13 +4,13 @@
  * Theory/07: the kernel does NOT keep the 35M in F32 (202 MB resident).
  * It negotiates a quant cascade from the roofline (wubu_kv_select) and
  * carves ONE arena. This module computes the slab layout + total bytes
- * from the probed dims (WUBU35_DIMS) and the KV/weight precision choice.
+ * from the probed dims (WUBU_RUNTIME_DIMS) and the KV/weight precision choice.
  *
  * The budget is a list of (name, elems, prec, align) descriptors that
  * wubu_arena_push turns into aligned slabs. A Styx export walks the slab
  * table for path-addressable access.
  *
- * No third-party deps; only WUBU35_DIMS + wubu_kv_select + wubu_arena.
+ * No third-party deps; only WUBU_RUNTIME_DIMS + wubu_kv_select + wubu_arena.
  */
 #ifndef WUBU_KERNEL_BUDGET_H
 #define WUBU_KERNEL_BUDGET_H

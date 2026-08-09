@@ -17,9 +17,9 @@
 #include <stdlib.h>
 #include "wubu_arena.h"
 #include "wubu_kernel_budget.h"
-#include "wubu35_dims.h"          /* wubu35_dims_default + WUBU35_DIMS */
+#include "wubu_runtime_dims.h"          /* wubu_runtime_dims_default + WUBU_RUNTIME_DIMS */
 #include "wubu_kv_select.h"   /* WUBU_KV_F16/Q8 enum values */
-#include "wubu.h"        /* WUBU35_DIMS + WUBU_* macros */
+#include "wubu.h"        /* WUBU_RUNTIME_DIMS + WUBU_* macros */
 
 static int failures = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL: %s\n", m); failures++; } } while (0)
@@ -33,8 +33,8 @@ static size_t slab_padded_bytes(const wubu_slab_t *s) {
 
 int main(void)
 {
-    /* Populate WUBU35_DIMS from the released defaults (no checkpoint). */
-    wubu35_dims_default();
+    /* Populate WUBU_RUNTIME_DIMS from the released defaults (no checkpoint). */
+    wubu_runtime_dims_default();
 
     printf("=== test_wubu_kernel (Theory/07: byte budget) ===\n");
     printf("  dims: vocab=%d dim=%d layers=%d heads=%d kv_heads=%d ffn=%d ctx=%d\n",
