@@ -59,6 +59,22 @@ int main(int argc, char **argv) {
         if (!lfm2_forward(&m, emb, 1, feed_t, logits)) { fprintf(stderr, "lfm2: forward failed at step %d\n", step); break; }
         seq = realloc(seq, (T + 2) * sizeof(int));   /* room for the new token */
 
+        if (getenv("LFM2_TOPLOGITS") && step == 0) {
+            int top[5]; float tv[5];
+            for (int i = 0; i < 5; i++) { top[i] = -1; tv[i] = -1e30f; }
+            for (int i = 0; i < m.vocab_size; i++) {
+                for (int j = 0; j < 5; j++) {
+                    if (logits[i] > tv[j]) {
+                        for (int k = 4; k > j; k--) { top[k] = top[k-1]; tv[k] = tv[k-1]; }
+                        top[j] = i; tv[j] = logits[i]; break;
+                    }
+                }
+            }
+            fprintf(stderr, "TOP5: ");
+            for (int j = 0; j < 5; j++) fprintf(stderr, "%d:%.4f ", top[j], tv[j]);
+            fprintf(stderr, "\n");
+        }
+
         int nan = 0;
         for (int i = 0; i < m.vocab_size; i++) {
             float v = logits[i];

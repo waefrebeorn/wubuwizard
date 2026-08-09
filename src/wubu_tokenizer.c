@@ -381,11 +381,18 @@ bool wubu_tokenizer_init_from_gguf(wubu_tokenizer_t *tok, const char *gguf_path)
 
 // ========== Init from text files ==========
 static void build_byte_token_ids(wubu_tokenizer_t *tok) {
-    // Look up each byte's Latin-1 character in the vocab (matches merge table encoding).
-    // Fallback to GPT-2 byte encoder for control/special bytes not found in vocab lookup.
+    // Look up each byte's character in the vocab (matches merge table encoding).
+    // Convention 1: the byte AS the codepoint (Latin-1) — matches Llama/Qwen-style
+    //   tokenizers whose merges use the literal space and ASCII characters.
+    // Convention 2: the GPT-2 byte-level map (byte b -> U+0100+b) — matches
+    //   GPT-2-style tokenizers whose space is "Ġ" (U+0120) and whose byte
+    //   tokens are the U+0100-U+01FF chars (LFM2.5, etc.).
+    // Fallback: the Qwen3.6 byte-token ids for tokenizers with no byte tokens
+    //   in the vocab at all.
     for (int i = 0; i < 256; i++) {
         uint8_t utf8[4];
         int ulen;
+        int tid = -1;
         if (i < 0x80) {
             utf8[0] = (uint8_t)i;
             ulen = 1;
@@ -399,9 +406,23 @@ static void build_byte_token_ids(wubu_tokenizer_t *tok) {
             utf8[2] = 0x80 | (uint8_t)(i & 0x3F);
             ulen = 3;
         }
-        int tid = find_token_by_string(tok, utf8, ulen);
+        tid = find_token_by_string(tok, utf8, ulen);
         if (tid < 0) {
-            tid = gpt2_byte_encoder[i];  // GPT-2 byte encoding fallback
+            int cp = 0x100 + i;                 /* GPT-2 byte-level unicode */
+            if (cp < 0x800) {
+                utf8[0] = 0xC0 | (uint8_t)(cp >> 6);
+                utf8[1] = 0x80 | (uint8_t)(cp & 0x3F);
+                ulen = 2;
+            } else {
+                utf8[0] = 0xE0 | (uint8_t)(cp >> 12);
+                utf8[1] = 0x80 | (uint8_t)((cp >> 6) & 0x3F);
+                utf8[2] = 0x80 | (uint8_t)(cp & 0x3F);
+                ulen = 3;
+            }
+            tid = find_token_by_string(tok, utf8, ulen);
+        }
+        if (tid < 0) {
+            tid = gpt2_byte_encoder[i];  // Qwen3.6-style byte-token fallback
         }
         tok->byte_token_ids[i] = tid;
     }

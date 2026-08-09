@@ -130,10 +130,15 @@ bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits
                 fprintf(stderr, "DBG L%d FFN in rms=%.4f out rms=%.4f (ff_norm[0..3]=%.4g %.4g %.4g %.4g)\n",
                         l, sqrt(tis / ((size_t)T * d)), sqrt(fs / ((size_t)T * d)),
                         L->ffn_norm[0], L->ffn_norm[1], L->ffn_norm[2], L->ffn_norm[3]);
-                fprintf(stderr, "DBG L%d w1[0..3]=%.6g %.6g %.6g %.6g w2[0..3]=%.6g %.6g %.6g %.6g w3[0..3]=%.6g %.6g %.6g %.6g\n",
-                        l, L->w1[0], L->w1[1], L->w1[2], L->w1[3],
-                        L->w2[0], L->w2[1], L->w2[2], L->w2[3],
-                        L->w3[0], L->w3[1], L->w3[2], L->w3[3]);
+                if (L->w1) {
+                    fprintf(stderr, "DBG L%d w1[0..3]=%.6g %.6g %.6g %.6g w2[0..3]=%.6g %.6g %.6g %.6g w3[0..3]=%.6g %.6g %.6g %.6g\n",
+                            l, L->w1[0], L->w1[1], L->w1[2], L->w1[3],
+                            L->w2[0], L->w2[1], L->w2[2], L->w2[3],
+                            L->w3[0], L->w3[1], L->w3[2], L->w3[3]);
+                } else {
+                    fprintf(stderr, "DBG L%d quantized (w1_t=%d w2_t=%d w3_t=%d)\n",
+                            l, L->q_w1_t, L->q_w2_t, L->q_w3_t);
+                }
                 fprintf(stderr, "DBG L%d w2 ne=%lld w2_type=%d (embed_off=%lld q_embed_off=%lld)\n",
                         l, (long long)L->q_w2_ne, L->q_w2_t,
                         (long long)(m->embed ? -1 : (L->q_w2 ? (L->q_w2 - m->q_embed) : 0)),
