@@ -6,8 +6,6 @@
 #include "wubu.h"
 #include "wubu_train.h"
 #include "wubu_runtime_dims.h"
-extern long g_mm_gpu, g_mm_cpu;
-extern double g_mm_gpu_us;
 int main(int argc, char **argv) {
     wubu_runtime_dims_t d; memset(&d,0,sizeof(d));
     d.vocab=16384; d.dim=512; d.layers=12; d.heads=8; d.kv_heads=1;
@@ -25,7 +23,6 @@ int main(int argc, char **argv) {
     uint16_t tok[4096];
     for (int i=0;i<seq;i++) tok[i]=(uint16_t)((i*7)%16384);
     wubu_train_zero_grad(&tr); wubu_train_microbatch(&m,&tr,&b,tok,seq);
-    long g0=g_mm_gpu; double gus0=g_mm_gpu_us;
     int nsteps = argc > 2 ? atoi(argv[2]) : 5;
     struct timespec t0,t1;
     clock_gettime(CLOCK_MONOTONIC,&t0);
@@ -33,7 +30,6 @@ int main(int argc, char **argv) {
     for (int s=0;s<nsteps;s++){ wubu_train_zero_grad(&tr); loss=wubu_train_microbatch(&m,&tr,&b,tok,seq); }
     clock_gettime(CLOCK_MONOTONIC,&t1);
     double dt=(t1.tv_sec-t0.tv_sec)+(t1.tv_nsec-t0.tv_nsec)/1e9;
-    printf("%d steps %.2fs -> %.2fs/step | GPU mm %ld/step, %.1f ms | loss %.4f\n",
-           nsteps, dt, dt/nsteps, (g_mm_gpu-g0)/nsteps, (g_mm_gpu_us-gus0)/nsteps/1000, loss);
+    printf("%d steps %.2fs -> %.2fs/step | loss %.4f\n", nsteps, dt, dt/nsteps, loss);
     return 0;
 }

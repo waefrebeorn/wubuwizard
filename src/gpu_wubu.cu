@@ -61,6 +61,95 @@ extern "C" {
  * re-uploads on the next matmul */
 void gpu_wubu_mark_weights_dirty(void) { g_wgen++; }
 
+
+/* ── the elementwise training kernels (the wuburvc train_cuda pattern:
+ * the CPU elementwise loops in the backward are 82% of the step — sigm,
+ * norms, unrope, residual adds. These raw kernels move them to the GPU. */
+
+/* y[i] += x[i]  (the dan += dod residual-add; n = seq*D) */
+__global__ void k_elt_add(float *y, const float *x, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] += x[i];
+}
+
+/* the gated-silu backward: do[s,d] = t, dg[s,d] = t*o*(1-sg) with
+ * t = dx1[s,d]*sg, sg = sigmoid(g[s,d]). One thread per element. */
+__global__ void k_sigm_bwd(float *do_, float *dg,
+                           const float *dx1, const float *o, const float *g,
+                           int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float sg = 1.0f / (1.0f + __expf(-g[i]));
+        float t = dx1[i] * sg;
+        do_[i] = t;
+        dg[i] = t * o[i] * (1.0f - sg);
+    }
+}
+
+/* rms_norm backward: dx_out[i] = r*(dy[i]*w[i] - c*x[i]) with
+ * r = 1/sqrt(mean(x^2)+eps), c = r^3 * sum(dy*w*x)/n. One block per row
+ * (512 cols), grid-stride over the seq rows. */
+__global__ void k_rmsnorm_bwd(const float *x, const float *w, const float *dy,
+                              float *dx_out, float *dw_out,
+                              int n, int rows, float eps)
+{
+    int row = blockIdx.x;
+    if (row >= rows) return;
+    const float *xr = x + (size_t)row * n;
+    const float *wr = w;
+    const float *dyr = dy + (size_t)row * n;
+    float *dxr = dx_out + (size_t)row * n;
+    extern __shared__ float sm[];
+    float *sxx = sm, *sdot = sm + blockDim.x;
+    sxx[threadIdx.x] = 0; sdot[threadIdx.x] = 0;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        sxx[threadIdx.x] += xr[i] * xr[i];
+        sdot[threadIdx.x] += dyr[i] * wr[i] * xr[i];
+    }
+    __syncthreads();
+    for (int t = blockDim.x / 2; t > 0; t >>= 1) {
+        if (threadIdx.x < t) {
+            sxx[threadIdx.x] += sxx[threadIdx.x + t];
+            sdot[threadIdx.x] += sdot[threadIdx.x + t];
+        }
+        __syncthreads();
+    }
+    float r = 1.0f / sqrtf(sxx[0] / n + eps);
+    float c = r * r * r * sdot[0] / n;
+    __syncthreads();
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        float d = r * (dyr[i] * wr[i] - c * xr[i]);
+        dxr[i] = d;
+        if (dw_out) atomicAdd(&dw_out[i], d * xr[i]);
+    }
+}
+
+/* unrope_q: the inverse rotation (cos/sin tables), one thread per (s,h,d) */
+__global__ void k_unrope(float *dq, int seq, int heads, int dim, int rope_dim,
+                         const float *cos_tbl, const float *sin_tbl)
+{
+    int s = blockIdx.x;
+    int hwd = heads * dim;
+    int idx = blockIdx.y * blockDim.x + threadIdx.x;   /* h*d + d */
+    if (s >= seq || idx >= hwd) return;
+    int h = idx / dim;
+    int d = idx % dim;
+    int i = d;
+    if (i >= rope_dim) i = d - rope_dim;   /* the second half mirrors */
+    /* the same layout the CPU unrope uses */
+    float *row = dq + (size_t)s * hwd + (size_t)h * dim;
+    float c = cos_tbl[(size_t)s * rope_dim + i];
+    float si = sin_tbl[(size_t)s * rope_dim + i];
+    if (d < rope_dim) {
+        /* rot-half: a0 = row[d], a1 = row[d+hd]; un-rotate */
+        float a0 = row[d], a1 = row[d + dim / 2];
+        row[d] = c * a0 + si * a1;
+        row[d + dim / 2] = c * a1 - si * a0;
+    }
+}
+
 int gpu_wubu_init(void)
 {
     if (g_ready) return 1;
@@ -824,3 +913,100 @@ int gpu_wubu_attn_backward(float *dq, float *dk, float *dv,
 int gpu_wubu_attn_ready(void) { return g_ready; }
 
 }
+
+/* ── the elementwise API (the wuburvc train_cuda pattern): each returns
+ * 1 when the GPU did it, 0 when the caller must fall back to CPU. */
+
+int gpu_wubu_elt_add(float *y, const float *x, int n)
+{
+    if (!g_ready || n <= 0) return 0;
+    static float *d_y = NULL, *d_x = NULL; static size_t cap = 0;
+    if ((size_t)n > cap) {
+        if (d_y) { cudaFree(d_y); cudaFree(d_x); }
+        cudaMalloc(&d_y, (size_t)n * sizeof(float));
+        cudaMalloc(&d_x, (size_t)n * sizeof(float));
+        cap = (size_t)n;
+    }
+    if (!d_y || !d_x) return 0;
+    cudaMemcpy(d_x, x, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_y, y, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    k_elt_add<<<(n + 255) / 256, 256>>>(d_y, d_x, n);
+    cudaMemcpy(y, d_y, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost);
+    return 1;
+}
+
+int gpu_wubu_sigm_bwd(float *do_, float *dg,
+                      const float *dx1, const float *o, const float *g, int n)
+{
+    if (!g_ready || n <= 0) return 0;
+    static float *d_do = NULL, *d_dg = NULL, *d_dx1 = NULL, *d_o = NULL, *d_g = NULL;
+    static size_t cap = 0;
+    if ((size_t)n > cap) {
+        if (d_do) { cudaFree(d_do); cudaFree(d_dg); cudaFree(d_dx1); cudaFree(d_o); cudaFree(d_g); }
+        cudaMalloc(&d_do, (size_t)n * 4 * sizeof(float));
+        d_dg = d_do + (size_t)n; d_dx1 = d_do + 2 * (size_t)n; d_o = d_do + 3 * (size_t)n;
+        cudaMalloc(&d_g, (size_t)n * sizeof(float));
+        cap = (size_t)n;
+    }
+    if (!d_do || !d_g) return 0;
+    cudaMemcpy(d_dx1, dx1, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_o, o, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_g, g, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    k_sigm_bwd<<<(n + 255) / 256, 256>>>(d_do, d_dg, d_dx1, d_o, d_g, n);
+    cudaMemcpy(do_, d_do, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(dg, d_dg, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost);
+    return 1;
+}
+
+int gpu_wubu_rmsnorm_bwd(const float *x, const float *w, const float *dy,
+                         float *dx_out, float *dw_out, int n, int rows, float eps)
+{
+    if (!g_ready || n <= 0 || rows <= 0) return 0;
+    static float *d_x = NULL, *d_w = NULL, *d_dy = NULL, *d_dx = NULL, *d_dw = NULL;
+    static size_t cap = 0;
+    size_t need = (size_t)rows * n;
+    if (need > cap) {
+        if (d_x) { cudaFree(d_x); cudaFree(d_w); cudaFree(d_dy); cudaFree(d_dx); cudaFree(d_dw); }
+        cudaMalloc(&d_x, need * sizeof(float));
+        cudaMalloc(&d_w, (size_t)n * sizeof(float));
+        cudaMalloc(&d_dy, need * sizeof(float));
+        cudaMalloc(&d_dx, need * sizeof(float));
+        cudaMalloc(&d_dw, (size_t)n * sizeof(float));
+        cudaMemset(d_dw, 0, (size_t)n * sizeof(float));
+        cap = need;
+    }
+    if (!d_x || !d_w || !d_dy || !d_dx || !d_dw) return 0;
+    cudaMemcpy(d_x, x, need * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_w, w, (size_t)n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dy, dy, need * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemset(d_dw, 0, (size_t)n * sizeof(float));
+    k_rmsnorm_bwd<<<rows, 128, 2 * 128 * sizeof(float)>>>(d_x, d_w, d_dy, d_dx, d_dw, n, rows, eps);
+    cudaMemcpy(dx_out, d_dx, need * sizeof(float), cudaMemcpyDeviceToHost);
+    if (dw_out) cudaMemcpy(dw_out, d_dw, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost);
+    return 1;
+}
+
+int gpu_wubu_unrope(float *dq, int seq, int heads, int dim, int rope_dim,
+                    const float *cos_tbl, const float *sin_tbl)
+{
+    if (!g_ready || seq <= 0) return 0;
+    static float *d_dq = NULL, *d_cos = NULL, *d_sin = NULL;
+    static size_t cap = 0;
+    size_t need = (size_t)seq * heads * dim;
+    if (need > cap) {
+        if (d_dq) { cudaFree(d_dq); cudaFree(d_cos); cudaFree(d_sin); }
+        cudaMalloc(&d_dq, need * sizeof(float));
+        cudaMalloc(&d_cos, (size_t)seq * rope_dim * sizeof(float));
+        cudaMalloc(&d_sin, (size_t)seq * rope_dim * sizeof(float));
+        cap = need;
+    }
+    if (!d_dq || !d_cos || !d_sin) return 0;
+    cudaMemcpy(d_dq, dq, need * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_cos, cos_tbl, (size_t)seq * rope_dim * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sin, sin_tbl, (size_t)seq * rope_dim * sizeof(float), cudaMemcpyHostToDevice);
+    dim3 grid(seq, (heads * dim + 255) / 256);
+    k_unrope<<<grid, 256>>>(d_dq, seq, heads, dim, rope_dim, d_cos, d_sin);
+    cudaMemcpy(dq, d_dq, need * sizeof(float), cudaMemcpyDeviceToHost);
+    return 1;
+}
+

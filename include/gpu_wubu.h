@@ -60,6 +60,16 @@ int gpu_wubu_attn_backward(float *dq, float *dk, float *dv,
                             int seq, int heads, int dim,
                             int local_win, int is_full);
 
+
+/* the elementwise training kernels (the wuburvc train_cuda pattern).
+ * Each returns 1 when the GPU did the work, 0 for CPU fallback. */
+int gpu_wubu_elt_add(float *y, const float *x, int n);
+int gpu_wubu_sigm_bwd(float *do_, float *dg,
+                      const float *dx1, const float *o, const float *g, int n);
+int gpu_wubu_rmsnorm_bwd(const float *x, const float *w, const float *dy,
+                         float *dx_out, float *dw_out, int n, int rows, float eps);
+int gpu_wubu_unrope(float *dq, int seq, int heads, int dim, int rope_dim,
+                    const float *cos_tbl, const float *sin_tbl);
 #ifdef __cplusplus
 }
 #endif

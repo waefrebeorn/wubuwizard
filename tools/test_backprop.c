@@ -17,6 +17,7 @@
 #include "wubu.h"
 #include "wubu_train.h"
 #include "wubu_backprop.h"
+#include "wubu_runtime_dims.h"
 
 /* Weak GPU dispatch (same pattern as wubu_backprop.c): on boxes without
  * the CUDA backend these symbols are NULL and the FD perturb skips the
@@ -146,6 +147,20 @@ static int fd_check(wubu_model_t *m, wubu_buf_t *b, wubu_bp_t *bp,
 int main(void)
 {
     printf("=== test_backprop (the REAL backward pass + Muon, FD-verified) ===\n");
+
+    /* the test model is the 448 geometry (the legacy seed) — set the
+     * runtime dims to match BEFORE building (the agnostic doctrine:
+     * dims are data, the test says which geometry it exercises) */
+    wubu_runtime_dims_t d;
+    memset(&d, 0, sizeof(d));
+    d.vocab = 16384; d.dim = 448; d.layers = 12; d.heads = 7;
+    d.kv_heads = 1; d.head_dim = 64; d.rope_dim = 32;
+    d.ffn_dim = 1228; d.max_seq = 2048; d.local_win = 256;
+    d.full_every = 4; d.select_every = 4; d.selectors = 3;
+    d.clip = 10.0f; d.eps = 1e-6f; d.rope_theta = 10000.0f;
+    wubu_runtime_dims_set(&d);
+    printf("  geometry: dim=%d ffn=%d heads=%d (the 448 seed)\\n",
+           WUBU_DIM, WUBU_FFN_DIM, WUBU_HEADS);
 
     wubu_model_t m;
     if (make_model(&m) != 0) { printf("  FAIL: cannot build the random model\n"); return 1; }
