@@ -2069,4 +2069,25 @@ fitness + Lean + oracle gate, delegates through specialists, archives
 what improves, keeps the negative examples, and keeps running without
 a human restarting the loop.
 
+|- AN27 LFM2.5 ON THE WIZARD — TOKENIZER + DECODE (2026-08-09, the Distiller V1 toolset):
+the LFM2.5-2.6B-Q4_K_M loads, generates, and now runs FAST. (1) TOKENIZER FIX —
+the model is GPT-2 byte-level (space = U+0120 "Ġ", byte tokens = U+0100-U+01FF);
+build_byte_token_ids tried only Latin-1 and fell to the Qwen3.6 byte-token table,
+mapping every space to token 0 (a control token) — every multi-word prompt was
+garbage. Now tries Latin-1, then the GPT-2 unicode map (U+0100+i), then the Qwen
+fallback. 'Hello there' -> [35808, 912], decode-back round-trips exactly.
+(2) DECODE 3.6x (2.1 -> 7.6 tok/s on the Zen4 box): the lm_head dequantized all
+128K vocab rows to F32 per token (82% of decode) — now quantized_matmul_batched
+(q8(h) once + raw-blob vec-dots, ~11ms/step). The Q4_K dispatch used the generic
+dot while the AVX2 kernel existed unwired — wired it (and routed through the
+q4_K_vec_dot wrapper so the aarch64 CM4 gets the NEON kernel, which was also
+never dispatched). (3) F32 materialize verified: dequant is BIT-EXACT vs the
+blob (22M elems, max diff 0) and agrees with the vec-dot at 0.8% on every L0
+tensor (Q4_K + Q6_K); the FORCE_F32 greedy EOS-first vs quantized "( " flip is a
+near-tie inside the q8-activation noise, not a bug. (4) Makefile: -mno-avx512f
+(double-pumped Zen4), x86_64-guarded for the ARM cross-build. LFM2_TIMERS env =
+per-component decode profile (conv/attn/ffn/head). test_lfm 23/23, CUDA_HOME
+must be /usr/local/cuda-13.3. `wired` (tokenizer fix + head vec-dot + AVX2/NEON
+dispatch + timers, committed 37143be..608107e, pushed e56b816)
+
 ## WaefreBeorn Umbrella License v3.0
