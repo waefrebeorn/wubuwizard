@@ -45,6 +45,12 @@ typedef struct wubu_hive_block {
     struct wubu_hive_block *next; /* the chain */
 } wubu_hive_block_t;
 
+/* one freelist entry: a reusable (block, slot) pair */
+struct wubu_hive_free_entry {
+    wubu_hive_block_t *block;
+    size_t slot;
+};
+
 typedef struct {
     wubu_hive_block_t *head;      /* first block */
     wubu_hive_block_t *tail;      /* last block (append) */
@@ -52,7 +58,7 @@ typedef struct {
     size_t total_live;
     /* the freelist: a LIFO stack of (block, slot) entries. Erase pushes,
      * insert pops -- every erased slot is reusable, O(1). */
-    struct { wubu_hive_block_t *block; size_t slot; } *free_entries;
+    struct wubu_hive_free_entry *free_entries;
     size_t n_free, free_cap;
     /* stats */
     size_t allocs;                /* slots allocated */

@@ -52,8 +52,8 @@ static void free_entries_push(wubu_hive_t *h, wubu_hive_block_t *blk, size_t s)
 {
     if (h->n_free == h->free_cap) {
         size_t nc = h->free_cap ? h->free_cap * 2 : 16;
-        struct { wubu_hive_block_t *block; size_t slot; } *nf =
-            (void *)realloc(h->free_entries, nc * sizeof(*nf));
+        struct wubu_hive_free_entry *nf =
+            (struct wubu_hive_free_entry *)realloc(h->free_entries, nc * sizeof(*nf));
         if (!nf) return;
         h->free_entries = nf;
         h->free_cap = nc;

@@ -13,14 +13,46 @@
  * The hive IS the ecosystem: grow (mitosis), shrink (apoptosis),
  * specialize (curvature drift) recycle hive slots.
  *
- * C11. Depends on wubu_mobius (proven Poincaré ops) + wubu_hive.
+ * ADR-002: the colony struct is opaque (defined here, not the header).
+ * Reuses wubu_mobius (proven Poincaré ops) + wubu_hive (lifecycle) +
+ * topk_from_array (shared selection primitive, wubu_moe_hyperbolic.h).
+ * C11.
  */
 #include "wubu_ecosystem.h"
 #include "wubu_mobius.h"
+#include "wubu_hive.h"
+#include "wubu_moe_hyperbolic.h"   /* topk_from_array (shared) */
 
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+/* ---- the opaque colony (ADR-002: layout stays in the .c) ---- */
+
+/* One sphere in the colony (internal layout -- the header exposes only
+ * the opaque handle). The "expert core" is the set of params this ball
+ * contributes when it fires; the router only ever touches the fired
+ * balls' cores. */
+typedef struct {
+    float center[ECOSYSTEM_MAX_DIM];  /* ball center in the Poincaré ball */
+    float curvature;                  /* learnable c_k > 0 (1/R^2 form) */
+    uint64_t params;                  /* core param count (active-cost meter) */
+    uint64_t fire_count;              /* utilization for grow/shrink/specialize */
+    uint64_t last_fired_step;
+    int   slot;                       /* hive slot index (stable) */
+    bool  alive;
+} wubu_ecosystem_ball_t;
+
+struct wubu_ecosystem {
+    int n_balls;              /* live balls */
+    int k_active;             /* fired per input */
+    int dim;                  /* tangent dimension (runtime, revolver) */
+    uint64_t step;            /* tick counter (utilization window) */
+    uint64_t active_params;   /* sum of fired balls' params last forward */
+    uint64_t total_params;    /* sum over ALL balls (the huge-total) */
+    wubu_ecosystem_ball_t balls[ECOSYSTEM_MAX_BALLS];
+    wubu_hive_t hive;         /* the lifecycle: grow/shrink recycles slots */
+};
 
 /* ---- helpers ------------------------------------------------------ */
 
@@ -52,30 +84,23 @@ static float ball_potential(const wubu_ecosystem_ball_t *b,
     return d * d * b->curvature;
 }
 
-static int ball_cmp_desc(const void *a, const void *b) {
-    const struct { int idx; float w; } *A = a, *B = b;
-    return (A->w < B->w) - (A->w > B->w);
-}
-
 /* ---- colony lifecycle --------------------------------------------- */
 
-int wubu_ecosystem_init(wubu_ecosystem_t *eco, int n_balls,
-                        int k_active, int dim, uint64_t seed) {
-    if (!eco || n_balls < 2 || n_balls > ECOSYSTEM_MAX_BALLS ||
+wubu_ecosystem_t *wubu_ecosystem_init(int n_balls, int k_active,
+                                      int dim, uint64_t seed) {
+    if (n_balls < 2 || n_balls > ECOSYSTEM_MAX_BALLS ||
         k_active < 1 || k_active > n_balls || dim < 2 || dim > ECOSYSTEM_MAX_DIM)
-        return -1;
+        return NULL;
 
-    memset(eco, 0, sizeof(*eco));
+    wubu_ecosystem_t *eco = (wubu_ecosystem_t *)calloc(1, sizeof(*eco));
+    if (!eco) return NULL;
     rng_state = seed ? seed : 0xDEADBEEFCAFEBABEull;
 
     eco->n_balls = n_balls;
     eco->k_active = k_active;
     eco->dim = dim;
-    eco->step = 0;
-    eco->active_params = 0;
-    eco->total_params = 0;
 
-    if (wubu_hive_init(&eco->hive) != 0) return -1;
+    if (wubu_hive_init(&eco->hive) != 0) { free(eco); return NULL; }
 
     /* Seed the colony: centers spread on the ball (roughly orthogonal
      * random directions scaled to ~0.4/R), curvatures in [0.5, 2.0],
@@ -94,57 +119,66 @@ int wubu_ecosystem_init(wubu_ecosystem_t *eco, int n_balls,
         nrm = sqrtf(nrm) + 1e-6f;
         float scale = 0.35f * R / nrm;   /* keep centers inside the ball */
         for (int i = 0; i < dim; i++) b->center[i] *= scale;
-        /* small curvature-to-radius normalization: the well radius ~ R */
         b->params = (uint64_t)(7 * dim * dim) + 1;
         eco->total_params += b->params;
         b->alive = true;
         b->slot = k;
         wubu_hive_insert(&eco->hive, &eco->balls[k]);
     }
-    return 0;
+    return eco;
 }
 
 void wubu_ecosystem_free(wubu_ecosystem_t *eco) {
     if (!eco) return;
     wubu_hive_clear(&eco->hive);
-    memset(eco, 0, sizeof(*eco));
+    free(eco);
 }
 
 /* ---- physics router ------------------------------------------------ */
 
 int wubu_ecosystem_route(const wubu_ecosystem_t *eco, const float *x,
-                         int *out_idx, float *out_w) {
-    if (!eco || !x || !out_idx || !out_w) return -1;
+                         int k, int *out_idx, float *out_w) {
+    if (!eco || !x || !out_idx || !out_w || k < 1) return -1;
+    if (k > eco->k_active) k = eco->k_active;
 
     /* Potential wells: deeper well = smaller phi. Only LIVE balls rank;
      * dead (apoptosis) slots are skipped entirely. O(N) closed-form
      * potential evals -- cheaper than a learned router's softmax over
      * N experts with N*dim learned weights. */
-    struct { int idx; float w; } ranked[ECOSYSTEM_MAX_BALLS];
+    float wells[ECOSYSTEM_MAX_BALLS];
     int n_live = 0;
-    for (int k = 0; k < ECOSYSTEM_MAX_BALLS; k++) {
-        const wubu_ecosystem_ball_t *b = &eco->balls[k];
+    for (int s = 0; s < ECOSYSTEM_MAX_BALLS; s++) {
+        const wubu_ecosystem_ball_t *b = &eco->balls[s];
         if (!b->alive) continue;
-        ranked[n_live].idx = k;
-        ranked[n_live].w = -ball_potential(b, x, eco->dim);  /* deep well = high score */
+        wells[n_live] = -ball_potential(b, x, eco->dim);  /* deep well = high score */
         n_live++;
     }
-    if (n_live < eco->k_active) return -1;
+    if (n_live < k) return -1;
 
-    /* Top-K by well depth (no learned router -- pure physics). */
-    qsort(ranked, (size_t)n_live, sizeof(ranked[0]), ball_cmp_desc);
+    /* Top-K by well depth (no learned router -- pure physics). The
+     * selection primitive is shared with the Poincaré router. */
+    int idx[ECOSYSTEM_MAX_BALLS];
+    float val[ECOSYSTEM_MAX_BALLS];
+    topk_from_array(wells, n_live, k, idx, val);
 
     /* Softmax over the K well depths for the composition weights. */
-    float maxw = ranked[0].w;
+    float maxw = val[0];
     float sum = 0.0f;
-    for (int k = 0; k < eco->k_active; k++) {
-        float e = expf(ranked[k].w - maxw);
-        ranked[k].w = e;
+    for (int t = 0; t < k; t++) {
+        float e = expf(val[t] - maxw);
+        val[t] = e;
         sum += e;
     }
-    for (int k = 0; k < eco->k_active; k++) {
-        out_idx[k] = ranked[k].idx;
-        out_w[k] = ranked[k].w / (sum + 1e-30f);
+    /* topk_from_array works on the LIVE sub-array; map back to real
+     * ball indices via the skip walk. */
+    int live_seen = 0;
+    int real_idx[ECOSYSTEM_MAX_BALLS];
+    for (int s = 0; s < ECOSYSTEM_MAX_BALLS && live_seen < n_live; s++) {
+        if (eco->balls[s].alive) real_idx[live_seen++] = s;
+    }
+    for (int t = 0; t < k; t++) {
+        out_idx[t] = real_idx[idx[t]];
+        out_w[t] = val[t] / (sum + 1e-30f);
     }
     return 0;
 }
@@ -155,7 +189,7 @@ int wubu_ecosystem_forward(wubu_ecosystem_t *eco, const float *x, float *out) {
 
     int idx[ECOSYSTEM_MAX_BALLS];
     float w[ECOSYSTEM_MAX_BALLS];
-    if (wubu_ecosystem_route(eco, x, idx, w) != 0) return -1;
+    if (wubu_ecosystem_route(eco, x, eco->k_active, idx, w) != 0) return -1;
 
     /* Fired balls compose via Möbius addition of their lifted,
      * weight-scaled contributions, then project back to tangent. */
@@ -163,8 +197,8 @@ int wubu_ecosystem_forward(wubu_ecosystem_t *eco, const float *x, float *out) {
     memset(acc, 0, sizeof(acc));
     eco->active_params = 0;
 
-    for (int k = 0; k < eco->k_active; k++) {
-        wubu_ecosystem_ball_t *b = &eco->balls[idx[k]];
+    for (int t = 0; t < eco->k_active; t++) {
+        wubu_ecosystem_ball_t *b = &eco->balls[idx[t]];
         float R = 1.0f / sqrtf(b->curvature + 1e-6f);
         float lifted[ECOSYSTEM_MAX_DIM];
         float scaled[ECOSYSTEM_MAX_DIM];
@@ -173,7 +207,7 @@ int wubu_ecosystem_forward(wubu_ecosystem_t *eco, const float *x, float *out) {
         wubu_exp_map(x, dim, R, lifted);
         /* contribution = w_k ⊗ (lifted input, gyro-rotated toward center) */
         for (int i = 0; i < dim; i++) lifted[i] += 0.05f * b->center[i];
-        wubu_mobius_scalar_mul(w[k], lifted, dim, R, scaled);
+        wubu_mobius_scalar_mul(w[t], lifted, dim, R, scaled);
         wubu_mobius_add(acc, scaled, dim, R, tmp);
         memcpy(acc, tmp, (size_t)dim * sizeof(float));
 
@@ -196,6 +230,16 @@ uint64_t wubu_ecosystem_total_params(const wubu_ecosystem_t *eco) {
     return eco ? eco->total_params : 0;
 }
 
+int wubu_ecosystem_count(const wubu_ecosystem_t *eco) {
+    return eco ? eco->n_balls : 0;
+}
+int wubu_ecosystem_dim(const wubu_ecosystem_t *eco) {
+    return eco ? eco->dim : 0;
+}
+int wubu_ecosystem_k_active(const wubu_ecosystem_t *eco) {
+    return eco ? eco->k_active : 0;
+}
+
 /* ---- lifecycle: the hive IS the ecosystem -------------------------- */
 
 int wubu_ecosystem_grow(wubu_ecosystem_t *eco, int parent) {
@@ -210,7 +254,6 @@ int wubu_ecosystem_grow(wubu_ecosystem_t *eco, int parent) {
     for (int k = 0; k < ECOSYSTEM_MAX_BALLS; k++)
         if (!eco->balls[k].alive) { child = k; break; }
     if (child < 0) {
-        /* all slots live: n_balls is the count of used slots */
         if (eco->n_balls >= ECOSYSTEM_MAX_BALLS) return -1;
         child = eco->n_balls;
     }
@@ -265,7 +308,7 @@ int wubu_ecosystem_shrink(wubu_ecosystem_t *eco, int idx) {
 
 void wubu_ecosystem_specialize(wubu_ecosystem_t *eco, float drift) {
     if (!eco) return;
-    for (int k = 0; k < eco->n_balls; k++) {
+    for (int k = 0; k < ECOSYSTEM_MAX_BALLS; k++) {
         wubu_ecosystem_ball_t *b = &eco->balls[k];
         if (!b->alive) continue;
         b->curvature *= 1.0f + drift * rng_signed();
