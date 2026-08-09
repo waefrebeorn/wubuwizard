@@ -260,6 +260,7 @@ void quantized_matmul(const float *x,
     void q4_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q5_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q6_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq2_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
@@ -272,6 +273,7 @@ void quantized_matmul(const float *x,
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
+        case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:
             fprintf(stderr, "quantized_matmul: unsupported quant type %d\n", weight_type);
             if (q8_buf != stack_buf) free(q8_buf);
@@ -394,6 +396,7 @@ void quantized_matmul_from_q8(const void *q8_x,
     void q4_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q5_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q6_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq2_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
@@ -406,6 +409,7 @@ void quantized_matmul_from_q8(const void *q8_x,
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
+        case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:
             fprintf(stderr, "quantized_matmul_from_q8: unsupported quant type %d\n", weight_type);
             return;
@@ -487,6 +491,7 @@ void quantized_matmul_batched(const float *x,
     void q4_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q5_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q6_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq2_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
@@ -499,6 +504,7 @@ void quantized_matmul_batched(const float *x,
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
+        case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:
             fprintf(stderr, "quantized_matmul_batched: unsupported type %d\n", weight_type);
             if (q8_all != stack_buf) free(q8_all);
@@ -568,6 +574,7 @@ void quantized_matmul_subset(const float *x,
     void q4_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q5_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void q6_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     
     switch (weight_type) {
         case GGML_TYPE_Q4_K: dot_fn = (vec_dot_fn)q4_K_vec_dot; break;

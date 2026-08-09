@@ -1201,6 +1201,16 @@ cleanup_p:
 // GQA Layer Forward Pass
 // ============================================================
 
+/* Models without attn_q_norm/attn_k_norm tensors (MiniCPM5) get a plain
+ * L2-normalize: the RMSNorm with a ones-weight is the identity-weight case.
+ * (The load marks the weights optional; the forward must not deref NULL.) */
+static const float *gqa_qk_norm_ones(const float *w) {
+    static float ones[256];  /* max supported head dim (runtime GQA_HEAD_DIM ≤ 256) */
+    static int inited = 0;
+    if (!inited) { for (int i = 0; i < 256; i++) ones[i] = 1.0f; inited = 1; }
+    return w ? w : ones;
+}
+
 void wubu_gqa_forward(const float *x, int B, int T,
                       const gqa_layer_weights *w,
                       float *output,
@@ -1284,13 +1294,13 @@ void wubu_gqa_forward(const float *x, int B, int T,
             }
         }
     }
-    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, w->attn_q_norm_weight, 1e-6f, Q_norm);
+    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, gqa_qk_norm_ones(w->attn_q_norm_weight), 1e-6f, Q_norm);
     free(Q_only);
-    
+
     // K RMSNorm — K has [N, kv_dim] = [N, KV_HEADS * HEAD_DIM]
     // Data layout: K[(b*T+t)*kv_dim + h*HEAD_DIM + i]
     // RMSNorm sees [B, T*KV_HEADS, HEAD_DIM] same layout
-    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, w->attn_k_norm_weight, 1e-6f, K_norm);
+    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, gqa_qk_norm_ones(w->attn_k_norm_weight), 1e-6f, K_norm);
     
     // Step 4: IMRoPE (Interleaved MultiRoPE) with pre-computed theta table
     // Qwen3.6: rope.dimension_sections=[11,11,10,0], rope.dimension_count=64, rope.freq_base=10000000.0
@@ -1305,20 +1315,22 @@ void wubu_gqa_forward(const float *x, int B, int T,
     //
     // Optimization: pre-compute theta_i table (static, once) to eliminate powf() calls
     {
-        const int n_rot = 64;  // rope.dimension_count
+        const int n_rot = WUBU_DIMS.rope_head_dim > 0 ? WUBU_DIMS.rope_head_dim : 64;  /* rope.dimension_count (runtime) */
         const float freq_base = 10000000.0f;
-        const int q_rot_pairs = n_rot / 2;  // 32
+        const int q_rot_pairs = n_rot / 2;  /* 32 for Qwen3.6, 64 for MiniCPM5 */
         const char *rope_scale_env = getenv("ROPE_SCALE_FACTOR");
         const float scale_factor = rope_scale_env ? atof(rope_scale_env) : 1.0f;
         
         // Static pre-computed theta_i table (freq_base^{-2i/n_rot})
         // Computed once, reused across all forward calls
-        static float rope_theta[32];
+        static float rope_theta[64];
         static int rope_theta_ready = 0;
-        if (!rope_theta_ready) {
+        static int rope_theta_n = 0;
+        if (!rope_theta_ready || rope_theta_n != q_rot_pairs) {
             for (int i = 0; i < q_rot_pairs; i++)
                 rope_theta[i] = powf(freq_base, -2.0f * i / (float)n_rot);
             rope_theta_ready = 1;
+            rope_theta_n = q_rot_pairs;
         }
         
         for (int b = 0; b < B; b++) {
@@ -1662,9 +1674,9 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     float *Q_only = (float *)malloc(N * q_dim * sizeof(float));
     for (int s = 0; s < N; s++)
         memcpy(Q_only + s * q_dim, Q_full + s * q_dim * 2, q_dim * sizeof(float));
-    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, w->attn_q_norm_weight, 1e-6f, Q_norm);
+    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, gqa_qk_norm_ones(w->attn_q_norm_weight), 1e-6f, Q_norm);
     free(Q_only);
-    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, w->attn_k_norm_weight, 1e-6f, K_norm);
+    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, gqa_qk_norm_ones(w->attn_k_norm_weight), 1e-6f, K_norm);
     
     // Step 4: (RoPE skipped)
     

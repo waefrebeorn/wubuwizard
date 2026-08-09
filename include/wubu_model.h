@@ -33,6 +33,8 @@ typedef struct wubu_layer_t {
     const void *ffn_gate_q; int ffn_gate_type;
     const void *ffn_up_q;   int ffn_up_type;
     const void *ffn_down_q; int ffn_down_type;
+    int ffn_d_ff;                       /* FFN intermediate width (from ffn_up dims) */
+    struct wubu_dense_ffn *dense_ffn;   /* zero-copy dense SwiGLU (lazy) */
     
     // Layer norm (pre-attention for all layers)
     float *attn_norm_weight;    // [D_MODEL], RMSNorm
@@ -46,7 +48,7 @@ typedef struct wubu_layer_t {
 
 // Complete model
 #define GQA_MAX_CTX 524288  // max cached positions for KV cache (512k context)
-#define GQA_KV_DIM (GQA_KV_HEADS * GQA_HEAD_DIM)  // 512
+#define GQA_KV_DIM (GQA_KV_HEADS * GQA_HEAD_DIM)  // 512 (wubu_dims.h owns the runtime alias)
 
 // KV cache format: 0=F32, 1=F16 (halves memory at cost of conversion)
 #ifndef KV_CACHE_F16

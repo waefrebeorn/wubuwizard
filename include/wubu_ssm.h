@@ -12,22 +12,13 @@ extern "C" {
 // Qwen3.6-35B-A3B Gated Delta Net (SSM) Module
 // ============================================================
 
-// Hyperparameters (fixed for Qwen3.6-35B-A3B qwen35moe architecture)
-#define D_MODEL     2048   // hidden dimension
-#define D_INNER     4096   // SSM inner dimension (value_dim)
-#define SSM_K_HEADS 16     // SSM num_k_heads (ssm_n_group)
-#define SSM_V_HEADS 32     // SSM num_v_heads (ssm_dt_rank)
-#define SSM_D_STATE 128    // SSM state dimension (head_k_dim = head_v_dim)
-#define KEY_DIM     (SSM_D_STATE * SSM_K_HEADS)   // 2048
-#define VALUE_DIM   (SSM_D_STATE * SSM_V_HEADS)   // 4096
-#define CONV_DIM    (KEY_DIM * 2 + VALUE_DIM)     // 8192 = Q(2048)+K(2048)+V(4096)
-#define CONV_KERNEL 4      // conv1d kernel size
-#define DT_RANK     32     // ssm_time_step_rank
-
-// GQA hyperparameters
-#define GQA_Q_HEADS    16
-#define GQA_KV_HEADS   2
-#define GQA_HEAD_DIM   256
+// Model dims come from wubu_dims.h — the RUNTIME global set by the loader
+// from the checkpoint's own shapes (D_MODEL, VALUE_DIM, SSM_V_HEADS,
+// CONV_DIM, DT_RANK, GQA_* all alias WUBU_DIMS there). The compile-time
+// Qwen3.6 defaults used to live here; they are gone so a model loads at
+// its real dimensions (MiniCPM5: D=1536/16q/2kv/128, LFM2.5: D=2048/...,
+// Qwen3.5: D=1024/...).
+#include "wubu_dims.h"
 
 // RoPE parameters (from Qwen3.6-35B config.json)
 #define ROPE_THETA          10000000.0f  // rope_theta

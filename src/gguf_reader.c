@@ -1142,6 +1142,74 @@ int64_t gguf_tokenizer_token_count(gguf_ctx *ctx) {
     return -1;
 }
 
+/* Numeric KV value by key. Re-walks the KV section (numeric types only:
+ * u8/i8/u16/i16/u32/i32/f32/bool/u64/i64/f64). Returns def if absent. */
+int64_t gguf_read_kv_i64(gguf_ctx *ctx, const char *want, int64_t def) {
+    if (!ctx || !ctx->file) return def;
+    fseek(ctx->file, 16, SEEK_SET);
+    int64_t n_kv = 0;
+    if (fread(&n_kv, 8, 1, ctx->file) != 1) return def;
+    for (int64_t ki = 0; ki < n_kv; ki++) {
+        uint64_t klen = 0;
+        if (fread(&klen, 8, 1, ctx->file) != 1) return def;
+        char key[256];
+        if (klen >= sizeof(key)) { fseek(ctx->file, (long)klen, SEEK_CUR); continue; }
+        if (fread(key, 1, (size_t)klen, ctx->file) != klen) return def;
+        key[klen] = 0;
+        int32_t vtype = 0;
+        if (fread(&vtype, 4, 1, ctx->file) != 1) return def;
+        if (vtype == 9) {  /* array — int arrays return the FIRST element
+                            * (llama.cpp allows head_count_kv as a list) */
+            int32_t arr_type = 0; uint64_t arr_len = 0;
+            if (fread(&arr_type, 4, 1, ctx->file) != 1) return def;
+            if (fread(&arr_len, 8, 1, ctx->file) != 1) return def;
+            if (strcmp(key, want) == 0 && (arr_type == 4 || arr_type == 5) && arr_len > 0) {
+                int32_t x; if (fread(&x, 4, 1, ctx->file) == 1) return (int64_t)x;
+                return def;
+            }
+            if (arr_type == 8) {
+                for (uint64_t j = 0; j < arr_len; j++) {
+                    uint64_t slen = 0;
+                    if (fread(&slen, 8, 1, ctx->file) != 1) return def;
+                    fseek(ctx->file, (long)slen, SEEK_CUR);
+                }
+            } else {
+                int esz = 4;
+                if (arr_type == 0 || arr_type == 1 || arr_type == 7) esz = 1;
+                else if (arr_type == 2 || arr_type == 3) esz = 2;
+                else if (arr_type == 10 || arr_type == 11 || arr_type == 12) esz = 8;
+                fseek(ctx->file, (long)(arr_len * (uint64_t)esz), SEEK_CUR);
+            }
+            continue;
+        }
+        if (strcmp(key, want) == 0) {
+            int64_t v = def;
+            if (vtype == 0 || vtype == 1) { int8_t x; if (fread(&x, 1, 1, ctx->file) == 1) v = x; }
+            else if (vtype == 2 || vtype == 3) { int16_t x; if (fread(&x, 2, 1, ctx->file) == 1) v = x; }
+            else if (vtype == 4 || vtype == 5) { int32_t x; if (fread(&x, 4, 1, ctx->file) == 1) v = x; }
+            else if (vtype == 6) { float x; if (fread(&x, 4, 1, ctx->file) == 1) v = (int64_t)x; }
+            else if (vtype == 7) { uint8_t x; if (fread(&x, 1, 1, ctx->file) == 1) v = x; }
+            else if (vtype == 10 || vtype == 11 || vtype == 12) { int64_t x; if (fread(&x, 8, 1, ctx->file) == 1) v = x; }
+            return v;
+        }
+        /* skip the value */
+        if (vtype == 8) {
+            uint64_t slen = 0;
+            if (fread(&slen, 8, 1, ctx->file) != 1) return def;
+            fseek(ctx->file, (long)slen, SEEK_CUR);
+        } else if (vtype == 0 || vtype == 1 || vtype == 7) {
+            fseek(ctx->file, 1, SEEK_CUR);
+        } else if (vtype == 2 || vtype == 3) {
+            fseek(ctx->file, 2, SEEK_CUR);
+        } else if (vtype == 4 || vtype == 5 || vtype == 6) {
+            fseek(ctx->file, 4, SEEK_CUR);
+        } else {
+            fseek(ctx->file, 8, SEEK_CUR);
+        }
+    }
+    return def;
+}
+
 // ========== Q2_K Dequant (84 bytes/block, 256 elems/block) ==========
 // Block layout: scales[16] + qs[64] + d[2](fp16) + dmin[2](fp16)
 static void dequantize_q2_K_row(const uint8_t *data, float *output, int64_t n_elems) {

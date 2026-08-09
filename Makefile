@@ -25,7 +25,7 @@ CUDA_LIBDIR = $(shell if [ -d $(CUDA_HOME)/lib/x86_64-linux-gnu ]; then echo $(C
 WSL_LIB = /usr/lib/wsl/lib
 CFLAGS = -O3 -march=native -funroll-loops -fno-fast-math -ffp-contract=fast -ftree-vectorize -Wall -Wextra -Wno-unused-parameter -I include $(CUDA_INC) -fopenmp
 LDFLAGS = -lm -fopenmp -L$(CUDA_LIBDIR) -L$(WSL_LIB) -Wl,-rpath,$(WSL_LIB) -lcudart -lcublas -lpthread -lssl -lcrypto
-NVCC_FLAGS = -O3 -I include -arch=sm_89
+NVCC_FLAGS = -O3 -I include $(CUDA_INC) -arch=sm_89
 CUDA_INCS = $(CUDA_INC)
 CUDA_LIBS = -L$(CUDA_LIBDIR) -lcublas -lcudart
 CUDA_LIB = -L$(CUDA_LIBDIR) -lcudart
@@ -1859,8 +1859,8 @@ gen_text: tools/gen_text.c $(CPU_OBJ) src/wubu_tokenizer.o src/wubu_kernel_cuda.
 
 # CPU-only gen_text (recompiles wubu_model + wubu_moe without GPU_SUPPORT)
 gen_text_cpu: CFLAGS_FILTERED = $(filter-out -I$(CUDA_INC),$(CFLAGS))
-gen_text_cpu: src/wubu_model_cpu.o src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) src/wubu_tokenizer.o
-	$(CC) $(CFLAGS_FILTERED) -o $@ tools/gen_text.c src/wubu_model_cpu.o src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) src/wubu_tokenizer.o $(LDFLAGS)
+gen_text_cpu: src/wubu_model_cpu.o src/wubu_moe_cpu.o src/wubu_dense_ffn.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) src/wubu_tokenizer.o
+	$(CC) $(CFLAGS_FILTERED) -o $@ tools/gen_text.c src/wubu_model_cpu.o src/wubu_moe_cpu.o src/wubu_dense_ffn.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) src/wubu_tokenizer.o $(LDFLAGS)
 	@echo "gen_text_cpu built (CPU-only, no GPU support)"
 
 src/wubu_model_cpu.o: src/wubu_model.c include/wubu_model.h include/wubu_ssm.h include/wubu_moe.h include/gguf_reader.h

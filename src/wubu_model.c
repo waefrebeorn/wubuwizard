@@ -1,4 +1,5 @@
 #include "wubu_model.h"
+#include "wubu_dense_ffn.h"  /* dense SwiGLU FFN (zero-copy blob path) */
 #include "gguf_reader.h"
 #include "wubu_moe.h"   // wubu_moe_router_only for N64 pre-cache fill
 #include <stdio.h>
@@ -59,7 +60,125 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     // Allocate layers
     model->layers = (wubu_layer_t *)calloc(model->n_layers, sizeof(wubu_layer_t));
     if (!model->layers) { gguf_close(ctx); return false; }
-    
+
+    /* Runtime dims from the checkpoint's OWN config KV — every model runs
+     * at its real shape. The SSM side keeps the Qwen3.6 invariants (the
+     * Gated-DeltaNet port is Qwen3.6-specific; other architectures set the
+     * GQA side only and their SSM layers are handled per-arch). */
+    {
+        /* Architecture-prefixed config keys: llama.* (MiniCPM5), qwen35.*
+         * (Qwen3.5), lfm2.* (LFM2.5). Try each prefix; the first with an
+         * embedding_length wins. */
+        const char *pfxs[] = { "llama", "qwen35", "qwen36", "lfm2", NULL };
+        int64_t emb = 0, hc = 0, hckv = 0, kl = 0, rope = 0;
+        int64_t sd = 0, sk = 0, sv = 0, dt = 0;
+        char key[128];
+        for (int pi = 0; pfxs[pi] && emb == 0; pi++) {
+            snprintf(key, sizeof(key), "%s.embedding_length", pfxs[pi]);
+            emb = gguf_read_kv_i64(ctx, key, 0);
+            if (!emb) continue;
+            snprintf(key, sizeof(key), "%s.attention.head_count", pfxs[pi]);
+            hc = gguf_read_kv_i64(ctx, key, 0);
+            snprintf(key, sizeof(key), "%s.attention.head_count_kv", pfxs[pi]);
+            hckv = gguf_read_kv_i64(ctx, key, 0);   /* int arrays → first element */
+            snprintf(key, sizeof(key), "%s.attention.key_length", pfxs[pi]);
+            kl = gguf_read_kv_i64(ctx, key, 0);
+            snprintf(key, sizeof(key), "%s.rope.dimension_count", pfxs[pi]);
+            rope = gguf_read_kv_i64(ctx, key, 0);
+            /* SSM side (qwen35-style Gated-DeltaNet keys) */
+            snprintf(key, sizeof(key), "%s.ssm.state_size", pfxs[pi]);
+            sd = gguf_read_kv_i64(ctx, key, 0);
+            snprintf(key, sizeof(key), "%s.ssm.group_count", pfxs[pi]);
+            sk = gguf_read_kv_i64(ctx, key, 0);
+            snprintf(key, sizeof(key), "%s.ssm.inner_size", pfxs[pi]);
+            sv = gguf_read_kv_i64(ctx, key, 0);
+            snprintf(key, sizeof(key), "%s.ssm.time_step_rank", pfxs[pi]);
+            dt = gguf_read_kv_i64(ctx, key, 0);
+        }
+        if (emb > 0 && hc > 0) {
+            wubu_dims_t dd;
+            memset(&dd, 0, sizeof(dd));
+            dd.d_model      = (int)emb;
+            dd.gqa_q_heads  = (int)hc;
+            dd.gqa_kv_heads = (int)(hckv > 0 ? hckv : 1);
+            /* head dim: key_length KV, else the attn_q_norm tensor (LFM2.5
+             * has q_norm [64] and no key_length), else emb/heads */
+            dd.gqa_head_dim = (int)(kl > 0 ? kl : 0);
+            if (dd.gqa_head_dim <= 0) {
+                gguf_tensor_info *tqn = gguf_find_tensor(ctx, "blk.0.attn_q_norm.weight");
+                if (tqn && tqn->dims[0] > 0) dd.gqa_head_dim = (int)tqn->dims[0];
+            }
+            if (dd.gqa_head_dim <= 0 && hc > 0) dd.gqa_head_dim = (int)(emb / hc);
+            dd.gqa_kv_dim   = dd.gqa_kv_heads * dd.gqa_head_dim;
+            dd.rope_head_dim = (int)(rope > 0 ? rope : 64);
+            /* SSM (Gated-DeltaNet): real values when present, else the
+             * Qwen3.6 defaults (128/16/4096/32) */
+            dd.ssm_d_state  = (int)(sd > 0 ? sd : 128);
+            dd.ssm_k_heads  = (int)(sk > 0 ? sk : 16);
+            dd.value_dim    = (int)(sv > 0 ? sv : dd.ssm_d_state * 32);
+            dd.key_dim      = dd.ssm_d_state * dd.ssm_k_heads;
+            dd.ssm_v_heads  = dd.ssm_d_state > 0 ? dd.value_dim / dd.ssm_d_state : 32;
+            dd.conv_kernel  = 4;
+            dd.dt_rank      = (int)(dt > 0 ? dt : 32);
+            dd.conv_dim     = 2 * dd.key_dim + dd.value_dim;
+            /* ── tensor ground truth ──
+             * The config KV can disagree with the actual tensors:
+             *  - LFM2.5 head_count_kv is a PER-LAYER array with 0s on the
+             *    shortconv layers (first element = 0 → wrong fallback);
+             *    the attn_k tensor says kv_dim=512 (8 heads × 64).
+             *  - Qwen3.5's ssm config describes the full model (conv 6144)
+             *    while the 0.8B's fused attn_qkv is 3×D=3072 → key=value=
+             *    conv/3. */
+            for (int gl = 0; gl < model->n_layers; gl++) {
+                char tn[128];
+                snprintf(tn, sizeof(tn), "blk.%d.attn_q.weight", gl);
+                gguf_tensor_info *tq = gguf_find_tensor(ctx, tn);
+                if (tq && tq->dims[1] > 0) {
+                    int64_t q_dim = tq->dims[1];
+                    snprintf(tn, sizeof(tn), "blk.%d.attn_k.weight", gl);
+                    gguf_tensor_info *tk = gguf_find_tensor(ctx, tn);
+                    int64_t kv_dim = tk ? tk->dims[1] : 0;
+                    if (dd.gqa_head_dim > 0 && q_dim % dd.gqa_head_dim == 0) {
+                        dd.gqa_q_heads  = (int)(q_dim / dd.gqa_head_dim);
+                        if (kv_dim > 0 && kv_dim % dd.gqa_head_dim == 0) {
+                            dd.gqa_kv_heads = (int)(kv_dim / dd.gqa_head_dim);
+                            dd.gqa_kv_dim   = (int)kv_dim;
+                        }
+                    }
+                    break;
+                }
+            }
+            {
+                gguf_tensor_info *tqkv = gguf_find_tensor(ctx, "blk.0.attn_qkv.weight");
+                if (tqkv && tqkv->dims[1] > 0) {
+                    int64_t conv = tqkv->dims[1];
+                    if (2 * dd.key_dim + dd.value_dim != conv && conv % 3 == 0) {
+                        dd.key_dim    = (int)(conv / 3);
+                        dd.value_dim  = (int)(conv / 3);
+                        dd.ssm_k_heads = dd.ssm_d_state > 0 ? dd.key_dim / dd.ssm_d_state : 0;
+                        dd.ssm_v_heads = dd.ssm_d_state > 0 ? dd.value_dim / dd.ssm_d_state : 0;
+                    }
+                    dd.conv_dim = (int)conv;
+                    fprintf(stderr, "  [dims] attn_qkv ne=%lld dims=%lld,%lld,%lld,%lld conv(d1)=%lld\n",
+                            (long long)tqkv->dims[0] * tqkv->dims[1],
+                            (long long)tqkv->dims[0], (long long)tqkv->dims[1],
+                            (long long)tqkv->dims[2], (long long)tqkv->dims[3],
+                            (long long)conv);
+                } else {
+                    fprintf(stderr, "  [dims] no blk.0 attn_qkv (conv override skipped)\n");
+                }
+            }
+            wubu_dims_set(&dd);
+            printf("  Runtime dims: D=%d GQA=%dx%d hd=%d kv=%d rope=%d SSM(k=%d s=%d v=%d dt=%d)\n",
+                   dd.d_model, dd.gqa_q_heads, dd.gqa_kv_heads,
+                   dd.gqa_head_dim, dd.gqa_kv_dim, dd.rope_head_dim,
+                   dd.ssm_k_heads, dd.ssm_d_state, dd.ssm_v_heads, dd.dt_rank);
+        } else {
+            wubu_dims_default();
+            printf("  Runtime dims: legacy defaults (no config KV)\n");
+        }
+    }
+
     printf("Allocating %d layers...\n", model->n_layers);
     
     // Load layer norms and attention weights
@@ -260,7 +379,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     gguf_tensor_info *t_emb0 = gguf_find_tensor(ctx, "token_embd.weight");
     int model_vocab = t_emb0 && t_emb0->dims[1] > 0 ? (int)t_emb0->dims[1] : 0;
     char emb_path[256];
-    snprintf(emb_path, sizeof(emb_path), "data/embeddings_%d.bin.raw", model_vocab);
+    snprintf(emb_path, sizeof(emb_path), "data/embeddings_%d_%d.bin.raw", model_vocab, D_MODEL);
     FILE *emb_f = fopen(emb_path, "rb");
     if (emb_f && model_vocab > 0) {
         fseek(emb_f, 0, SEEK_END);
@@ -408,7 +527,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             if (t && blob) { layer->ffn_gate_q = blob + t->data_offset; layer->ffn_gate_type = t->ggml_type; }
             snprintf(name, sizeof(name), "blk.%d.ffn_up.weight", l);
             t = gguf_find_tensor(ctx, name);
-            if (t && blob) { layer->ffn_up_q = blob + t->data_offset; layer->ffn_up_type = t->ggml_type; }
+            if (t && blob) { layer->ffn_up_q = blob + t->data_offset; layer->ffn_up_type = t->ggml_type; layer->ffn_d_ff = (int)t->dims[1]; }
             snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", l);
             t = gguf_find_tensor(ctx, name);
             if (t && blob) { layer->ffn_down_q = blob + t->data_offset; layer->ffn_down_type = t->ggml_type; }
@@ -553,6 +672,7 @@ void wubu_model_free(wubu_model_t *model) {
             free(layer->gqa.attn_q_norm_weight);
             free(layer->gqa.attn_k_norm_weight);
         }
+        if (layer->dense_ffn) wubu_dense_ffn_free(layer->dense_ffn);
     }
     free(model->layers);
     free(model->norm_weight);
@@ -865,6 +985,23 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
 #ifdef GPU_SUPPORT
             layer->moe.gpu_ctx = NULL;  // reset after use
 #endif
+        } else if (layer->ffn_gate_q && layer->ffn_up_q && layer->ffn_down_q && layer->ffn_d_ff > 0) {
+            // Dense SwiGLU FFN (Qwen3.5 / MiniCPM5 / LFM2.5-family GGUFs) —
+            // zero-copy quantized path on the mmap'd blob pointers.
+            if (!layer->dense_ffn) {
+                layer->dense_ffn = wubu_dense_ffn_create(
+                    layer->ffn_gate_q, layer->ffn_gate_type,
+                    layer->ffn_up_q, layer->ffn_up_type,
+                    layer->ffn_down_q, layer->ffn_down_type,
+                    D_MODEL, layer->ffn_d_ff);
+            }
+            if (layer->dense_ffn) {
+                #pragma omp parallel for if(N > 4)
+                for (int s = 0; s < N; s++)
+                    wubu_dense_ffn_forward(layer->dense_ffn, normed2 + s * D_MODEL, ffn_out + s * D_MODEL);
+            } else {
+                memcpy(ffn_out, normed2, N * D_MODEL * sizeof(float));
+            }
         } else if (model->enable_moe && model->gguf_ctx &&
                    (model->moe_max_layers == 0 || l < model->moe_max_layers)) {
             // Fallback: F32 dequant path

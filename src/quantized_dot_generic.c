@@ -607,6 +607,51 @@ void q4_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
     ggml_vec_dot_q4_K_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
 #endif
 }
+
+// ========================================================================
+// Q8_0 × Q8_0 vec_dot — the Qwen3.5 toolset models are Q8_0-quantized;
+// the dispatch previously had NO Q8_0 case, so every Qwen3.5 matmul
+// no-oped and the Q/K/V buffers stayed uninitialized (NaN forward).
+// Block: [d: fp16][qs: 32 × int8] = 34 bytes.
+// ========================================================================
+void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    const int nb = n / 32;
+    const uint8_t *w = (const uint8_t *)vx;   /* Q8_0 weights */
+    const uint8_t *x = (const uint8_t *)vy;   /* Q8_0 activations */
+#ifdef __AVX2__
+    __m256 acc = _mm256_setzero_ps();
+    for (int i = 0; i < nb; i++) {
+        float d0 = fp16_to_fp32(*(const uint16_t *)(w + i * 34));
+        float d1 = fp16_to_fp32(*(const uint16_t *)(x + i * 34));
+        __m256i x_i = _mm256_loadu_si256((const __m256i *)(w + i * 34 + 2));
+        __m256i y_i = _mm256_loadu_si256((const __m256i *)(x + i * 34 + 2));
+        __m256i xs = _mm256_sign_epi8(x_i, x_i);          /* |x| (u8) */
+        __m256i ys = _mm256_sign_epi8(y_i, x_i);          /* y·sign(x) (s8) */
+        __m256i p16 = _mm256_maddubs_epi16(xs, ys);       /* x·y pairs → s16 */
+        __m256i p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
+        __m256i s32 = _mm256_hadd_epi32(p32, p32);
+        s32 = _mm256_hadd_epi32(s32, s32);
+        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * d1), _mm256_cvtepi32_ps(s32), acc);
+    }
+    __m128 acc0 = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
+    acc0 = _mm_add_ps(acc0, _mm_movehl_ps(acc0, acc0));
+    acc0 = _mm_add_ss(acc0, _mm_shuffle_ps(acc0, acc0, 1));
+    *s += _mm_cvtss_f32(acc0);
+#else
+    float acc = 0.0f;
+    for (int i = 0; i < nb; i++) {
+        float d0 = fp16_to_fp32(*(const uint16_t *)(w + i * 34));
+        float d1 = fp16_to_fp32(*(const uint16_t *)(x + i * 34));
+        const int8_t *qw = (const int8_t *)(w + i * 34 + 2);
+        const int8_t *qx = (const int8_t *)(x + i * 34 + 2);
+        int sum = 0;
+        for (int j = 0; j < 32; j++) sum += (int)qw[j] * (int)qx[j];
+        acc += d0 * d1 * (float)sum;
+    }
+    *s += acc;
+#endif
+}
 void q5_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
 #ifdef __AVX2__
     ggml_vec_dot_q5_K_q8_K_avx2(n, s, bs, vx, bx, vy, by, nrc);

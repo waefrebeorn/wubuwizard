@@ -92,16 +92,16 @@ void wubu_dims_default(void);
  *   D_MODEL, VALUE_DIM, SSM_V_HEADS, CONV_DIM(=2*KEY_DIM+VALUE_DIM),
  *   GQA_Q_HEADS, GQA_KV_HEADS, GQA_HEAD_DIM, GQA_KV_DIM.
  */
-#define SSM_D_STATE   128
-#define SSM_K_HEADS   16
+#define SSM_D_STATE   WUBU_DIMS.ssm_d_state   /* runtime: 128 Qwen3.6, 128 Qwen3.5 */
+#define SSM_K_HEADS   WUBU_DIMS.ssm_k_heads   /* runtime: 16 Qwen3.6, 8 Qwen3.5 */
 #define DT_RANK       WUBU_DIMS.dt_rank   /* runtime: Qwen3.5=16, Qwen3.6=32 */
 #define CONV_KERNEL   4
-#define KEY_DIM       (SSM_D_STATE * SSM_K_HEADS)   /* 2048, invariant */
+#define KEY_DIM       WUBU_DIMS.key_dim   /* runtime: d_state × k_heads */
 
 #define D_MODEL       WUBU_DIMS.d_model
 #define VALUE_DIM     WUBU_DIMS.value_dim
 #define SSM_V_HEADS   WUBU_DIMS.ssm_v_heads
-#define CONV_DIM      (KEY_DIM * 2 + VALUE_DIM)     /* varies via VALUE_DIM */
+#define CONV_DIM      WUBU_DIMS.conv_dim  /* runtime: 2×key + value */
 #define GQA_Q_HEADS   WUBU_DIMS.gqa_q_heads
 #define GQA_KV_HEADS  WUBU_DIMS.gqa_kv_heads
 #define GQA_HEAD_DIM  WUBU_DIMS.gqa_head_dim

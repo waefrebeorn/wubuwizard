@@ -82,6 +82,12 @@ gguf_ctx* gguf_open(const char *path);
 int gguf_buffer_data(gguf_ctx *ctx);
 int64_t gguf_tokenizer_token_count(gguf_ctx *ctx);  /* vocab size from the GGUF KV */
 
+/* Numeric KV value by key (i32/f32/u64/i64/f64), default if absent. The
+ * reader normally skips KV values; this re-walks the KV section like
+ * gguf_tokenizer_token_count. Used by the loader to read the model's
+ * runtime dims (embedding_length, head_count, rope.*, ...). */
+int64_t gguf_read_kv_i64(gguf_ctx *ctx, const char *want, int64_t def);
+
 // Calculate raw (quantized) byte size for a tensor type/element count
 int64_t gguf_raw_size(int ggml_type, int64_t n_elems);
 
