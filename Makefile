@@ -512,44 +512,43 @@ src/dequant_iq2_xxs.o: src/dequant_iq2_xxs.c include/gguf_reader.h
 
 # Test binaries
 
-test_chunked_ssm: tools/test_chunked_ssm.c src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ))
+test_chunked_ssm: tools/test_chunked_ssm.c src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ) src/wubu_dense_ffn.o)
 	$(CC) $(CFLAGS) -o $@ tools/test_chunked_ssm.c src/wubu_moe_cpu.o $(filter-out src/wubu_moe.o src/wubu_model.o,$(CORE_OBJ)) $(LDFLAGS)
 
-test_decode_path: tools/test_decode_path.c $(MODEL_OBJ)
+test_decode_path: tools/test_decode_path.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_nested_ssm: tools/test_nested_ssm.c $(CORE_OBJ)
+test_nested_ssm: tools/test_nested_ssm.c $(CORE_OBJ) src/wubu_dense_ffn.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+test_nested_ssm_backward: tools/test_nested_ssm_backward.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_nested_ssm_backward: tools/test_nested_ssm_backward.c $(CORE_OBJ)
+
+test_poincare_gqa: tools/test_poincare_gqa.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-
-test_poincare_gqa: tools/test_poincare_gqa.c $(CORE_OBJ)
+test_poincare_kv_cache: tools/test_poincare_kv_cache.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_poincare_kv_cache: tools/test_poincare_kv_cache.c $(CORE_OBJ)
+test_pga_backward: tools/test_pga_backward.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_pga_backward: tools/test_pga_backward.c $(CORE_OBJ)
+test_mobius_linear: tools/test_mobius_linear.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_mobius_linear: tools/test_mobius_linear.c $(CORE_OBJ)
+test_hyperbolic_output_proj: tools/test_hyperbolic_output_proj.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_hyperbolic_output_proj: tools/test_hyperbolic_output_proj.c $(CORE_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-test_gpu_layers: tools/test_gpu_layers.c $(CORE_OBJ) $(CUDA_OBJ) src/bench.o
+test_gpu_layers: tools/test_gpu_layers.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ) src/bench.o
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 test_gyrate: tools/test_gyrate.c src/wubu_mobius.o src/wubu_mobius_gyrate.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_poincare_router_backward: tools/test_poincare_router_backward.c $(CORE_OBJ) src/wubu_moe_hyperbolic_backward.o
+test_poincare_router_backward: tools/test_poincare_router_backward.c $(CORE_OBJ) src/wubu_dense_ffn.o src/wubu_moe_hyperbolic_backward.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_nested_moe_router_backward: tools/test_nested_moe_router_backward.c $(CORE_OBJ) src/wubu_moe_hyperbolic_backward.o
+test_nested_moe_router_backward: tools/test_nested_moe_router_backward.c $(CORE_OBJ) src/wubu_dense_ffn.o src/wubu_moe_hyperbolic_backward.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # ---- New Colonel-model unit tests ----
@@ -672,7 +671,7 @@ test_kv_hierarchy: tools/test_kv_hierarchy.c src/wubu_kv_hierarchy.o src/wubu_mo
 	$(CC) $(CFLAGS) -I include -o $@ tools/test_kv_hierarchy.c src/wubu_kv_hierarchy.o src/wubu_mobius.o src/wubu_kv_semantic_router.o src/wubu_kv_shrink.o src/wubu_kvfs.o $(LDFLAGS)
 	./test_kv_hierarchy
 
-test_backend_dispatch: tools/test_backend_dispatch.c $(MODEL_OBJ)
+test_backend_dispatch: tools/test_backend_dispatch.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./test_backend_dispatch
 
@@ -751,7 +750,7 @@ test_lora: tools/test_lora.c src/wubu_lora.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./$@
 
-test_model_adapter: tools/test_model_adapter.c src/wubu_model_adapter.o $(CORE_OBJ)
+test_model_adapter: tools/test_model_adapter.c src/wubu_model_adapter.o $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./$@
 
@@ -764,27 +763,27 @@ gen_fixture_safetensors_model: tools/gen_fixture_safetensors_model.c
 gen_fixture_btl3_lora: tools/gen_fixture_btl3_lora.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-test_st_bridge: tools/test_st_bridge.c $(MODEL_OBJ) gen_fixture_safetensors_model
+test_st_bridge: tools/test_st_bridge.c $(MODEL_OBJ) src/wubu_dense_ffn.o gen_fixture_safetensors_model
 	$(CC) $(CFLAGS) -o $@ tools/test_st_bridge.c $(MODEL_OBJ) $(LDFLAGS)
 	./gen_fixture_safetensors_model
 	./$@
 
-test_universal_weight: tools/test_universal_weight.c $(MODEL_OBJ)
+test_universal_weight: tools/test_universal_weight.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ tools/test_universal_weight.c $(MODEL_OBJ) $(LDFLAGS)
 	@echo "== universal weight descriptor vs real model-mixed.gguf =="
 	./$@ models/wubu/model-mixed.gguf
 
-test_wubu_graph: tools/test_wubu_graph.c $(MODEL_OBJ)
+test_wubu_graph: tools/test_wubu_graph.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ tools/test_wubu_graph.c $(MODEL_OBJ) $(LDFLAGS)
 	./$@
 
-test_btl3_lora: tools/test_btl3_lora.c $(MODEL_OBJ) gen_fixture_safetensors_model gen_fixture_btl3_lora
+test_btl3_lora: tools/test_btl3_lora.c $(MODEL_OBJ) src/wubu_dense_ffn.o gen_fixture_safetensors_model gen_fixture_btl3_lora
 	$(CC) $(CFLAGS) -o $@ tools/test_btl3_lora.c $(MODEL_OBJ) $(LDFLAGS)
 	./gen_fixture_safetensors_model
 	./gen_fixture_btl3_lora
 	./$@
 
-test_real_load: tools/test_real_load.c src/wubu_model_adapter.o $(MODEL_OBJ)
+test_real_load: tools/test_real_load.c src/wubu_model_adapter.o $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./$@
 
@@ -875,13 +874,13 @@ test_role_load: tools/test_role_load.c src/wubu_gguf_names.o src/gguf_reader.o s
 # P1 gate (COHESIVE_DIRECTION.md Step 2+4): canonical wubu1_block_t +
 # lossless bridge from the loaded layer struct (config-as-data header
 # validated, every GQA layer converts with identity weight pointers).
-test_wubu1_block: tools/test_wubu1_block.c $(CORE_OBJ) src/wubu1_block_bridge.o
+test_wubu1_block: tools/test_wubu1_block.c $(CORE_OBJ) src/wubu_dense_ffn.o src/wubu1_block_bridge.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./test_wubu1_block models/wubu/model-mixed.gguf
 
 # P2 gate (COHESIVE_DIRECTION.md Step 3): role-tagged .st v3 header —
 # per-tensor role + quant + declared dims (header-as-data, not bare blob).
-test_st_v3: tools/test_st_v3.c $(CORE_OBJ)
+test_st_v3: tools/test_st_v3.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./test_st_v3 models/wubu/model-mixed.gguf
 
@@ -955,7 +954,7 @@ test_model_config: tools/test_model_config.c src/wubu_model_adapter.o
 test_tokenizer: tools/test_tokenizer.c src/wubu_tokenizer.o src/gguf_reader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_model: tools/test_model.c $(MODEL_OBJ)
+test_model: tools/test_model.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # ── Agent tool gauntlet (4 Colonel models × 3 tools, EDR fan-out) ──────────
@@ -978,7 +977,7 @@ test_gauntlet: tools/agent_gauntlet/agent_gauntlet.c tools/agent_gauntlet/test_g
 
 # Verify the principled GDN chunkwise-parallel recurrence vs the sequential
 # scalar reference (must match to ~1e-2 at every chunk size C).
-test_gdn_chunk: tools/agent_gauntlet/test_gdn_chunk.c $(MODEL_OBJ)
+test_gdn_chunk: tools/agent_gauntlet/test_gdn_chunk.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 	./$@
 
@@ -1210,7 +1209,7 @@ test_tandem_gamebud: tools/test_tandem_gamebud.c src/wubu_hwcaps.o src/wubu_ramb
 	./$@
 
 # doc "hwaccel": wubu_model_wire_hwaccel() wires the real HW stack into a model
-test_model_hwaccel: tools/test_model_hwaccel.c $(CORE_OBJ) src/wubu_tokenizer.o src/wubu_tokenizer_hf.o
+test_model_hwaccel: tools/test_model_hwaccel.c $(CORE_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o
 	$(CXX) $(CFLAGS) -DWUBU_ENABLE_CUDA -I include -pthread -o $@ $^ -lm -L$(CUDA_LIBDIR) -lcudart -lstdc++
 	./$@
 
@@ -1842,16 +1841,16 @@ test_kvcache_quant: tools/test_kvcache_quant.c $(CPU_OBJ)
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm -fopenmp
 	./$@
 
-test_moe: tools/test_moe.c $(CORE_OBJ)
+test_moe: tools/test_moe.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_moe_hyperbolic: tools/test_moe_hyperbolic.c $(CORE_OBJ)
+test_moe_hyperbolic: tools/test_moe_hyperbolic.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_full_moe: tools/test_full_moe.c $(MODEL_OBJ)
+test_full_moe: tools/test_full_moe.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_rope_t2: tools/test_rope_t2.c $(MODEL_OBJ)
+test_rope_t2: tools/test_rope_t2.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 gen_text: tools/gen_text.c $(CPU_OBJ) src/wubu_tokenizer.o src/wubu_kernel_cuda.o
@@ -1870,35 +1869,35 @@ src/wubu_model_cpu.o: src/wubu_model.c include/wubu_model.h include/wubu_ssm.h i
 src/wubu_moe_cpu.o: src/wubu_moe.c include/wubu_moe.h include/wubu_ssm.h
 	$(CC) $(CFLAGS) -o $@ -c $<
 
-run_bos: tools/run_bos.c $(MODEL_OBJ)
+run_bos: tools/run_bos.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ tools/run_bos.c $(MODEL_OBJ) $(LDFLAGS)
 
 # Debug build (gdb/ASAN). Compiles gen_text + model objects with -g -O0,
 # no GPU_SUPPORT, single-file objects (no _cpu variant clash).
 gen_text_dbg: CFLAGS_DBG = -g -O0 -I include $(CUDA_INC) -fopenmp -Wall
-gen_text_dbg: tools/gen_text.c $(MODEL_OBJ)
+gen_text_dbg: tools/gen_text.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS_DBG) -o $@ $< $(MODEL_OBJ) src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(LDFLAGS)
 
 gen_text_asan: CFLAGS_ASAN = -g -O1 -fsanitize=address -I include $(CUDA_INC) -fopenmp
-gen_text_asan: tools/gen_text.c $(MODEL_OBJ)
+gen_text_asan: tools/gen_text.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS_ASAN) -o $@ $< $(MODEL_OBJ) src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(LDFLAGS)
 
 # Probe: load real Qwen3.6-27B (MAX_LAYERS=1) and print layer-0 weight
 # pointers + state buffers, to diagnose SSM forward crashes.
-test_probe_qwen: tools/test_probe_qwen.c $(MODEL_OBJ)
+test_probe_qwen: tools/test_probe_qwen.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $< $(MODEL_OBJ) src/wubu_tokenizer.o $(LDFLAGS)
 
 # Verify the ds4-ssd MoE decode bank pages real KAT experts from the source
 # checkpoint shards (no sidecar copy).
-test_kat_decode_bank: tools/test_kat_decode_bank.c $(MODEL_OBJ)
+test_kat_decode_bank: tools/test_kat_decode_bank.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -I include -o $@ $< $(MODEL_OBJ) src/wubu_tokenizer.o $(LDFLAGS)
 
 # ASAN variant for pinning SSM-forward heap bugs.
 test_probe_qwen_asan: CFLAGS_ASAN = -O1 -g -fsanitize=address -mavx2 -mfma -I include $(CUDA_INC) -fopenmp
-test_probe_qwen_asan: tools/test_probe_qwen.c $(MODEL_OBJ) src/wubu_tokenizer.o
+test_probe_qwen_asan: tools/test_probe_qwen.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o
 	$(CC) $(CFLAGS_ASAN) -o $@ $< $(MODEL_OBJ) src/wubu_tokenizer.o $(LDFLAGS)
 
-gen_text_mtp: tools/gen_text_mtp.c $(MODEL_OBJ) src/wubu_tokenizer.o
+gen_text_mtp: tools/gen_text_mtp.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o
 	$(CC) $(CFLAGS) -o $@ $(filter %.c %.o,$^) $(LDFLAGS)
 
 # GPU-enabled kernel_backends (recompiled with WUBU_ENABLE_CUDA so the
@@ -1913,7 +1912,7 @@ GPU_OBJ_NODUP = src/wubu_model_gpu.o src/wubu_gpu_weight_cache.o src/gpu_quant_m
 
 # gen_text_gpu: link CORE_OBJ but replace wubu_kernel_backends.o with GPU version
 # that has CUDA probe enabled. Also adds CUDA kernels + GPU weight cache.
-gen_text_gpu: tools/gen_text.c $(filter-out src/wubu_kernel_backends.o,$(CORE_OBJ)) src/wubu_kernel_backends_gpu.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(CUDA_OBJ) $(GPU_OBJ_NODUP)
+gen_text_gpu: tools/gen_text.c $(filter-out src/wubu_kernel_backends.o,$(CORE_OBJ) src/wubu_dense_ffn.o) src/wubu_kernel_backends_gpu.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(CUDA_OBJ) $(GPU_OBJ_NODUP)
 	$(CXX) $(CFLAGS) -DGPU_SUPPORT -DWUBU_ENABLE_CUDA -o $@ tools/gen_text.c $(filter-out src/wubu_kernel_backends.o,$(CORE_OBJ)) src/wubu_kernel_backends_gpu.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(CUDA_OBJ) $(GPU_OBJ_NODUP) $(LDFLAGS) -L$(CUDA_LIBDIR) -lcublas -lcudart
 
 test_tok_debug: tools/test_tok_debug.c src/wubu_tokenizer.o
@@ -1925,53 +1924,53 @@ ref_dumper: tools/ref_dumper.cpp
 ref_dumper_mtp: tools/ref_dumper_mtp.cpp
 	$(CXX) $(CFLAGS) -std=c++17 -I $(HOME)/llama.cpp/include -I $(HOME)/llama.cpp/src -I $(HOME)/llama.cpp/ggml/include -o $@ $^ $(LDFLAGS) $(HOME)/llama.cpp/build/bin/libllama.so $(HOME)/llama.cpp/build/bin/libggml.so $(HOME)/llama.cpp/build/bin/libggml-cpu.so $(HOME)/llama.cpp/build/bin/libggml-base.so -Wl,-rpath,$(HOME)/llama.cpp/build/bin
 
-test_quantized_matmul: tools/test_quantized_matmul.c $(CORE_OBJ)
+test_quantized_matmul: tools/test_quantized_matmul.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_vec_dot_types: tools/test_vec_dot_types.c $(CORE_OBJ)
+test_vec_dot_types: tools/test_vec_dot_types.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_iq_dot: tools/test_iq_dot.c $(CORE_OBJ)
+test_iq_dot: tools/test_iq_dot.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-load_model: tools/load_model_layer.c $(CORE_OBJ)
+load_model: tools/load_model_layer.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_gpu: tools/test_gpu.c $(CORE_OBJ) $(CUDA_OBJ)
+test_gpu: tools/test_gpu.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-bench_e2e: tools/bench_e2e.c src/bench.o $(CORE_OBJ) $(CUDA_OBJ)
+bench_e2e: tools/bench_e2e.c src/bench.o $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-test_parallel_scan: tools/test_parallel_scan.c $(CORE_OBJ) $(CUDA_OBJ)
+test_parallel_scan: tools/test_parallel_scan.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-test_fused: tools/test_fused.c $(CORE_OBJ) $(CUDA_OBJ)
+test_fused: tools/test_fused.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-test_fused_vs_old: tools/test_fused_vs_old.c $(CORE_OBJ) $(CUDA_OBJ)
+test_fused_vs_old: tools/test_fused_vs_old.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 debug_beta_layout: tools/debug_beta_layout.c src/gguf_reader.o src/dequant_iq2_xxs.o src/cuda_kernels.o
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-verify_phase26: tools/verify_phase26_fusions.c $(CORE_OBJ) $(CUDA_OBJ)
+verify_phase26: tools/verify_phase26_fusions.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-train_integrated: tools/train_integrated.c $(MODEL_OBJ) src/wubu_tokenizer.o $(CUDA_OBJ) src/bench.o $(GPU_OBJ)
+train_integrated: tools/train_integrated.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o $(CUDA_OBJ) src/bench.o $(GPU_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-infer_text: tools/infer_text.c $(MODEL_OBJ) src/wubu_tokenizer.o src/bench.o $(CUDA_OBJ)
+infer_text: tools/infer_text.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o src/bench.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-infer_text_gpu: tools/infer_text_gpu.c $(MODEL_OBJ) src/wubu_tokenizer.o src/bench.o $(CUDA_OBJ) $(GPU_OBJ)
+infer_text_gpu: tools/infer_text_gpu.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o src/bench.o $(CUDA_OBJ) $(GPU_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-test_cuda_kernels: tools/test_cuda_kernels.c $(CORE_OBJ) $(CUDA_OBJ)
+test_cuda_kernels: tools/test_cuda_kernels.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 # Compare our logits vs llama.cpp
-compare_logits: tools/compare_logits.c $(MODEL_OBJ) src/wubu_tokenizer.o
+compare_logits: tools/compare_logits.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o
 	g++ -std=c++11 -O2 -I include -I /home/wubu/llama.cpp/include -I /home/wubu/llama.cpp/ggml/include \
 		-o $@ $^ \
 		-L /home/wubu/llama.cpp/build/bin -lllama -lggml-base -lggml-cpu -lggml \
@@ -1990,38 +1989,38 @@ train_stub: tools/train_stub.c
 	$(CC) -O0 -g -Wall -Wextra -Wno-unused-parameter -I include -fopenmp -o $@ $< -lm -fopenmp
 
 # Inference engines
-infer_moe: tools/infer_moe.c $(CORE_OBJ)
+infer_moe: tools/infer_moe.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-infer_moe_lazy: tools/infer_moe_lazy.c $(CORE_OBJ)
+infer_moe_lazy: tools/infer_moe_lazy.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-infer_unified: tools/infer_unified.c $(MODEL_OBJ)
+infer_unified: tools/infer_unified.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-infer_vision: tools/infer_vision.c $(CORE_OBJ)
+infer_vision: tools/infer_vision.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-infer_vision_text: tools/infer_vision_text.c $(MODEL_OBJ)
+infer_vision_text: tools/infer_vision_text.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_vision_real: tools/test_vision_real.c $(MODEL_OBJ) $(CUDA_OBJ) $(GPU_OBJ)
+test_vision_real: tools/test_vision_real.c $(MODEL_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ) $(GPU_OBJ)
 	$(CXX) $(CFLAGS) -DGPU_SUPPORT -o $@ tools/test_vision_real.c $(MODEL_OBJ) $(CUDA_OBJ) $(GPU_OBJ) $(LDFLAGS) -L$(CUDA_LIBDIR) -lcublas -lcudart
 	@echo "test_vision_real built (GPU vision + text)"
 
-infer_vision_text_gpu: tools/infer_vision_text_gpu_nvcc.o $(MODEL_OBJ) $(CUDA_OBJ) src/cuda_vision.o $(GPU_OBJ)
+infer_vision_text_gpu: tools/infer_vision_text_gpu_nvcc.o $(MODEL_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ) src/cuda_vision.o $(GPU_OBJ)
 	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lcublas -lcudart -lstdc++
 
 tools/infer_vision_text_gpu_nvcc.o: tools/infer_vision_text_gpu.cu include/cuda_vision.h include/wubu_vision.h
 	$(NVCC) $(NVCC_FLAGS) -DWUBU_ENABLE_CUDA -c -o $@ $<
 
-infer_poincare: tools/infer_poincare.c src/bench.o $(CORE_OBJ) $(CUDA_OBJ)
+infer_poincare: tools/infer_poincare.c src/bench.o $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-tailslayer: tools/tailslayer.c $(MODEL_OBJ) src/wubu_tokenizer.o src/bench.o $(CUDA_OBJ)
+tailslayer: tools/tailslayer.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o src/bench.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-infer_vision_gpu: tools/infer_vision_gpu.o $(CORE_OBJ) src/cuda_vision.o
+infer_vision_gpu: tools/infer_vision_gpu.o $(CORE_OBJ) src/wubu_dense_ffn.o src/cuda_vision.o
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 tools/infer_vision_gpu.o: tools/infer_vision_gpu.cu include/cuda_vision.h
@@ -2030,35 +2029,35 @@ tools/infer_vision_gpu.o: tools/infer_vision_gpu.cu include/cuda_vision.h
 src/cuda_vision.o: src/cuda_vision.cu include/cuda_vision.h include/wubu_vision.h
 	$(NVCC) $(NVCC_FLAGS) -DWUBU_ENABLE_CUDA -c -o $@ $<
 
-test_256k: tools/test_256k.c $(CORE_OBJ)
+test_256k: tools/test_256k.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_256k_context: tools/test_256k_context.c $(CORE_OBJ)
+test_256k_context: tools/test_256k_context.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_256k_forward: tools/test_256k_forward.c $(MODEL_OBJ) gen_fixture_safetensors_model
+test_256k_forward: tools/test_256k_forward.c $(MODEL_OBJ) src/wubu_dense_ffn.o gen_fixture_safetensors_model
 	$(CC) $(CFLAGS) -o $@ tools/test_256k_forward.c $(MODEL_OBJ) $(LDFLAGS)
 	./gen_fixture_safetensors_model
 	./$@
 
 # Chunked 256K prefill proof: builds the binary; run explicitly (heavy 256K).
-test_256k_chunked: tools/test_256k_chunked.c $(MODEL_OBJ) gen_fixture_safetensors_model
+test_256k_chunked: tools/test_256k_chunked.c $(MODEL_OBJ) src/wubu_dense_ffn.o gen_fixture_safetensors_model
 	$(CC) $(CFLAGS) -o $@ tools/test_256k_chunked.c $(MODEL_OBJ) $(LDFLAGS)
 	./gen_fixture_safetensors_model
 
-test_kv_cache: tools/test_kv_cache.c $(CORE_OBJ) $(CUDA_OBJ)
+test_kv_cache: tools/test_kv_cache.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 tokenize_corpus: tools/tokenize_corpus.c src/wubu_tokenizer.o src/gguf_reader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-train_real: tools/train_real.c $(MODEL_OBJ) src/wubu_tokenizer.o
+train_real: tools/train_real.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-train_backprop: tools/train_backprop.c $(MODEL_OBJ) src/wubu_tokenizer.o
+train_backprop: tools/train_backprop.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-train_gpu: tools/train_gpu.c src/bench.o $(MODEL_OBJ) $(CUDA_OBJ) src/wubu_tokenizer.o $(GPU_OBJ)
+train_gpu: tools/train_gpu.c src/bench.o $(MODEL_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ) src/wubu_tokenizer.o $(GPU_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 dump_mmproj: tools/dump_mmproj.c src/gguf_reader.o
@@ -2076,10 +2075,10 @@ verify_dequant: tools/verify_dequant.c src/gguf_reader.o
 test_iq2_dequant: tools/test_iq2_dequant.c src/gguf_reader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_dequant: tools/test_dequant.c $(MODEL_OBJ)
+test_dequant: tools/test_dequant.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-check_forward: tools/check_forward.c $(MODEL_OBJ) src/wubu_tokenizer.o
+check_forward: tools/check_forward.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_iq2_xxs_dot: tools/test_iq2_xxs_dot.c src/gguf_reader.o src/dequant_iq2_xxs.o src/wubu_moe.o
@@ -2266,7 +2265,7 @@ test_nested_ssm_run: test_nested_ssm
 test_poincare_gqa_run: test_poincare_gqa
 	./test_poincare_gqa
 
-test_tst: tools/test_tst.c $(CORE_OBJ)
+test_tst: tools/test_tst.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_tst_run: test_tst
@@ -2281,42 +2280,42 @@ bench_e2e_run: bench_e2e
 train_stub_run: train_stub
 	./train_stub
 
-test_regression: tools/test_regression.c $(MODEL_OBJ) src/wubu_tokenizer.o $(CUDA_OBJ)
+test_regression: tools/test_regression.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_tokenizer.o $(CUDA_OBJ)
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
-test_gpu_poincare: tools/test_gpu_poincare.c $(CORE_OBJ) $(CUDA_OBJ) src/bench.o
+test_gpu_poincare: tools/test_gpu_poincare.c $(CORE_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ) src/bench.o
 	$(CC) $(CFLAGS) $(CUDA_INC) -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lstdc++
 
 test_rsgd: tools/test_rsgd.c $(RSGD_OBJ) src/gguf_reader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_backward: tools/test_backward.c $(CORE_OBJ)
+test_backward: tools/test_backward.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_bwd_model: tools/test_bwd_model.c $(MODEL_OBJ)
+test_bwd_model: tools/test_bwd_model.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_backward_simple: tools/test_backward_simple.c $(CORE_OBJ)
+test_backward_simple: tools/test_backward_simple.c $(CORE_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # CPU timing + hedged spec tests (from tailslayer pattern)
 test_cpu_timing: tools/test_cpu_timing.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lpthread
 
-check_weights: tools/check_weights.c $(MODEL_OBJ)
+check_weights: tools/check_weights.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-check_ssm_a: tools/check_ssm_a.c $(MODEL_OBJ)
+check_ssm_a: tools/check_ssm_a.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # Gemma 4 12B test binaries
-test_gemma4: tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o
+test_gemma4: tools/test_gemma4.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_gemma4_model.o
 	$(CC) $(CFLAGS) -o $@ tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o $(LDFLAGS)
 
-test_gemma4_gpu: tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o src/gpu_gemma4.o src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/cuda_kernels.o
+test_gemma4_gpu: tools/test_gemma4.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_gemma4_model.o src/gpu_gemma4.o src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/cuda_kernels.o
 	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o src/gpu_gemma4.o src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/cuda_kernels.o $(LDFLAGS) -L$(CUDA_LIBDIR) -lcublas -lcudart -lstdc++
 
-gen_text_gemma4: tools/gen_text_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o
+gen_text_gemma4: tools/gen_text_gemma4.c $(MODEL_OBJ) src/wubu_dense_ffn.o src/wubu_gemma4_model.o
 	$(CC) $(CFLAGS) -o $@ tools/gen_text_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o $(LDFLAGS)
 
 clean:
