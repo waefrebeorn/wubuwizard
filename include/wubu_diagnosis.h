@@ -138,4 +138,9 @@ int wubu_diag_collect_grads(wubu_diag_loop_t *loop,
 void wubu_diag_loss_surface(wubu_diag_record_t *rec,
                             const float *loss_hist, int hist_n);
 
+/* L9: save the loop's ledger + graveyard to an archive file (the
+ * hive walk reads it; the Brain's memory becomes visible + versionable
+ * to the Body). */
+int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path);
+
 #endif

@@ -432,13 +432,19 @@ int main(int argc, char **argv)
     if (save_checkpoint(&m, out_path) == 0)
         printf("final checkpoint -> %s\n", out_path);
 
-    /* the closed loop teardown: report the colony's vitals */
+    /* the closed loop teardown: report the colony's vitals + archive
+     * the fitness ledger (the hive walk reads the archive) */
     {
         char stats[256];
         wubu_diag_stats(&diag_loop, stats, sizeof(stats));
         printf("  closed loop: %s\n", stats);
         printf("  closed loop: hive live cells %zu (fitness archive)\n",
                wubu_hive_live(&diag_tissue));
+        char arch[640];
+        snprintf(arch, sizeof(arch), "%s.hive", out_path);
+        if (wubu_diag_save(&diag_loop, arch) == 0)
+            printf("  closed loop: archive -> %s (wubu_hive_walk %s --accepted)\n",
+                   arch, arch);
         wubu_diag_loop_free(&diag_loop);
         wubu_amoeba_free(&diag_amoeba);
         wubu_moe2_free(&diag_agents);

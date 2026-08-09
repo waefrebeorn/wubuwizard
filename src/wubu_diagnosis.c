@@ -226,3 +226,35 @@ void wubu_diag_loss_surface(wubu_diag_record_t *rec,
                        ? 0.001f : 0.005f * (float)rec->loss_ema;
     rec->plateau = fabsf(rec->slope) < thresh ? 1 : 0;
 }
+
+/* ── the archive: the hive walk reads this ─────────────────────── */
+
+/* the on-disk header (matches tools/wubu_hive_walk.c) */
+typedef struct {
+    uint32_t magic;          /* 0xD1A60001 */
+    uint32_t ledger_n;
+    uint32_t grave_n;
+    uint64_t batch;
+} hive_archive_hdr_t;
+
+/* L9: save the loop's ledger + graveyard to an archive file (the
+ * Brain's memory becomes visible + versionable to the Body). */
+int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path)
+{
+    if (!loop || !path) return -1;
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    hive_archive_hdr_t hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = 0xD1A60001u;
+    hdr.ledger_n = (uint32_t)loop->ledger_n;
+    hdr.grave_n = (uint32_t)loop->grave_n;
+    hdr.batch = loop->batch;
+    fwrite(&hdr, sizeof(hdr), 1, f);
+    if (loop->ledger_n > 0)
+        fwrite(loop->ledger, sizeof(wubu_fitness_cell_t), loop->ledger_n, f);
+    if (loop->grave_n > 0)
+        fwrite(loop->graveyard, sizeof(wubu_fitness_cell_t), loop->grave_n, f);
+    fclose(f);
+    return 0;
+}
