@@ -157,6 +157,10 @@ int wubu_model_random_init(wubu_model_t *m)
 {
     if (!m) return -1;
     memset(m, 0, sizeof(*m));
+    /* the runtime dims must be live BEFORE any allocation (the amoeba
+     * doctrine: dims are data). Use the aligned WuBu1 geometry default
+     * unless a probe already set it. */
+    if (WUBU35_DIMS.dim == 0) wubu35_dims_default();
     unsigned seed = (unsigned)(time(NULL) ^ (uintptr_t)m);
     float *embedding = malloc_f((size_t)WUBU_VOCAB * WUBU_DIM * sizeof(float));
     float *final_norm = calloc_f((size_t)WUBU_DIM);

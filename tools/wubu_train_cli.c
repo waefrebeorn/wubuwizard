@@ -22,6 +22,19 @@
 #include "wubu_grow.h"
 #include "wubu_plateau.h"
 
+/* FTZ + DAZ: flush denormals (from wuburvc's CPU research — the softmax/
+ * exp/backprop tails create subnormals; denormal FP ops are ~100x slower
+ * on x86). Sets MXCSR bits 15 (FTZ) + 6 (DAZ). */
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+static void flush_denormals(void)
+{
+    _mm_setcsr(_mm_getcsr() | (1u << 15) | (1u << 6));
+}
+#else
+static void flush_denormals(void) {}
+#endif
+
 static const char *arg_get(int argc, char **argv, const char *name,
                            const char *def)
 {
@@ -225,6 +238,7 @@ int main(int argc, char **argv)
     int grow_check = arg_int(argc, argv, "--grow-check", 0);
     int base_layers = arg_int(argc, argv, "--base-layers", 0);
     int init_random = arg_has(argc, argv, "--init-random");
+    flush_denormals();   /* the wuburvc CPU speed trick (MXCSR FTZ+DAZ) */
 
     wubu_model_t m;
     if (resume) {
