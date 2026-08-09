@@ -1080,6 +1080,10 @@ test_skillcell: tools/test_skillcell.c src/wubu_skillcell.o src/wubu_hive.o
 test_toolreg: tools/test_toolreg.c src/wubu_toolreg.o src/wubu_trajcell.o src/wubu_hive.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_blueprint: tools/test_blueprint.c src/wubu_blueprint.o src/wubu_contracts.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
