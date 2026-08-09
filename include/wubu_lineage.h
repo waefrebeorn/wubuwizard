@@ -35,7 +35,7 @@ typedef struct {
 } wubu_lineage_t;
 
 /* the lineage registry state */
-typedef struct {
+typedef struct wubu_lineage_tracker {
     wubu_lineage_t *lines;    /* [cap] */
     int  n, cap;
     int  extinction_window;   /* stagnant-for this many -> pressure */

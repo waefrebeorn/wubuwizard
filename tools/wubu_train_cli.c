@@ -27,6 +27,8 @@
 #include "wubu_moe2.h"
 #include "wubu_selfimprove.h"
 #include "wubu_rsi.h"
+#include "wubu_lineage.h"
+#include "wubu_contracts.h"
 
 /* FTZ + DAZ: flush denormals (from wuburvc's CPU research — the softmax/
  * exp/backprop tails create subnormals; denormal FP ops are ~100x slower
@@ -260,7 +262,11 @@ int main(int argc, char **argv)
     int seq = arg_int(argc, argv, "--seq", 128);
     int ckpt_every = arg_int(argc, argv, "--ckpt", 10);
     int grow_check = arg_int(argc, argv, "--grow-check", 0);
-    int diag_every = arg_int(argc, argv, "--diag-every", 50);
+    /* Phase 1: the closed loop is the DEFAULT — every batch emits a
+     * Diagnosis cell. --diag-every 1 = full mutate-gate per batch;
+     * larger values still RECORD every batch (only the mutation cycle
+     * is gated by the interval). There is no silent path. */
+    int diag_every = arg_int(argc, argv, "--diag-every", 1);
     int base_layers = arg_int(argc, argv, "--base-layers", 0);
     int init_random = arg_has(argc, argv, "--init-random");
     flush_denormals();   /* the wuburvc CPU speed trick (MXCSR FTZ+DAZ) */
@@ -360,6 +366,15 @@ int main(int argc, char **argv)
      * mutation engine, not a parallel system). */
     wubu_selfimprove_t si;
     wubu_selfimprove_init(&si, &diag_tissue);
+    /* Phase 1: the lineage tracker + the runtime contracts are part
+     * of the gate (a mutation survives only through fitness + prover +
+     * contracts + lineage pressure). */
+    wubu_lineage_tracker_t lineage;
+    wubu_lineage_init(&lineage, 64, 8, 0.2f);
+    wubu_contracts_t contracts;
+    wubu_contracts_init(&contracts, &diag_tissue);
+    diag_loop.lineage = &lineage;
+    diag_loop.contracts = &contracts;
     for (int step = 1; step <= max_steps; step++) {
         if (pos + seq > corpus_n) pos = 0;   /* epoch wrap */
         for (int i = 0; i < seq; i++) win[i] = corpus[pos + i];
@@ -386,7 +401,13 @@ int main(int argc, char **argv)
             rec.loss = loss;
             rec.loss_ema = (float)loss_ema;
             rec.fitness = (float)loss_ema;
-            rec.prev_fitness = (float)loss_ema;   /* filled by the cycle */
+            /* the PRE-mutation fitness: the previous batch's ema (the
+             * current ema was just pushed to loss_hist[hist_n-1], so
+             * the previous is [hist_n-2]; the gate compares held-out
+             * AFTER the mutation to this — the delta is the real
+             * improvement/regression) */
+            rec.prev_fitness = (float)(hist_n > 1
+                ? loss_hist[hist_n - 2] : loss_hist[hist_n > 0 ? hist_n - 1 : 0]);
             rec.n_experts = MOE2_N_EXPERTS;
             rec.grad_norm_mean = (float)(tr.grad_norm_sum /
                                          (tr.micro_steps > 0 ? tr.micro_steps : 1));
@@ -441,6 +462,24 @@ int main(int argc, char **argv)
         }
         if (step % 5 == 0 || step == 1)
             printf("  step %4d: loss %.4f (ema %.4f)\n", step, loss, loss_ema);
+        /* Phase 1: the finite guard — every step the model must be
+         * finite (NaN/Inf = a silent corruption the colony cannot
+         * diagnose; abort before the next batch). */
+        {
+            const float *emb = m.embedding;
+            int bad = 0;
+            if (emb) {
+                for (int i = 0; i < WUBU_VOCAB * WUBU_DIM && !bad; i += 4096) {
+                    size_t n = (size_t)(WUBU_VOCAB * WUBU_DIM - i < 4096
+                                            ? WUBU_VOCAB * WUBU_DIM - i : 4096);
+                    if (!wubu_contracts_finite(emb + i, n)) bad = 1;
+                }
+            }
+            if (bad) {
+                printf("  FATAL: the model went non-finite at step %d — aborting\n", step);
+                break;
+            }
+        }
         if (step % ckpt_every == 0) {
             char ck[512];
             snprintf(ck, sizeof(ck), "%s-%04d.st", out_path, step);
@@ -462,6 +501,11 @@ int main(int argc, char **argv)
         char sistats[256];
         wubu_selfimprove_stats(&si, sistats, sizeof(sistats));
         printf("  selfimprove: %s\n", sistats);
+        char lstats[256], cstats[256];
+        wubu_lineage_stats(&lineage, lstats, sizeof(lstats));
+        wubu_contracts_stats(&contracts, cstats, sizeof(cstats));
+        printf("  lineage: %s\n", lstats);
+        printf("  contracts: %s\n", cstats);
         printf("  closed loop: hive live cells %zu (fitness archive)\n",
                wubu_hive_live(&diag_tissue));
         char arch[640];

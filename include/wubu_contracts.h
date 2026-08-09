@@ -44,7 +44,7 @@ typedef struct {
 } wubu_contract_t;
 
 /* the contract registry state */
-typedef struct {
+typedef struct wubu_contracts {
     wubu_hive_t *tissue;
     wubu_contract_t list[8];  /* the enforced set (bounded) */
     int  n;

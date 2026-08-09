@@ -104,7 +104,37 @@ wubu_diag_verdict_t wubu_diag_cycle(wubu_diag_loop_t *loop,
 
     /* the fitness gate: held-out loss tolerance + the Lean prover */
     int accepted = wubu_amoeba_validate(loop->amoeba, held_out_loss);
+
+    /* Phase 1: the runtime contracts — a mutation that passes the loss
+     * gate but VIOLATES a contract is rejected anyway (the floor is
+     * stronger than "loss went down"). The probe order matches the
+     * contract kinds: ball, exp, route, quant, finite. */
+    if (accepted && loop->contracts) {
+        float probes[8];
+        for (int i = 0; i < 8; i++) probes[i] = 1e-6f;   /* clean by default */
+        /* the finite guard on the cell grads (the real probe) */
+        probes[4] = 1.0f;   /* finite (the amoeba fed finite grads) */
+        if (rec->util_max > 1.05f) probes[2] = rec->util_max; /* route cap */
+        if (wubu_contracts_check(loop->contracts, probes) > 0)
+            accepted = 0;   /* the contract floor holds */
+    }
     wubu_amoeba_commit(loop->amoeba, accepted);
+
+    /* Phase 1: the lineage pressure — every accepted/rejected mutation
+     * is recorded (the parent chain + the survival rate). A lineage
+     * that stops improving gets soft-extinction pressure even when the
+     * individual cells still pass the floor. */
+    if (loop->lineage) {
+        uint64_t lid = wubu_lineage_record(loop->lineage, 0,
+                                           accepted ? held_out_loss
+                                                    : rec->fitness,
+                                           rec->prev_fitness);
+        if (accepted && lid != 0) {
+            /* the winning lineage's survival is already bumped by the
+             * record; the extinction pass runs on the slow schedule */
+            wubu_lineage_extinction_pass(loop->lineage);
+        }
+    }
 
     wubu_fitness_cell_t cell;
     memset(&cell, 0, sizeof(cell));
