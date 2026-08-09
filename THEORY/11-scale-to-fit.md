@@ -119,6 +119,7 @@ probed-dims loader. What's missing is the PLANNER that composes them —
 | router prefetch (next-likely balls) | ✅ shipped | 063-E |
 | amoeba shrink operators (depth + width + train-state) | ✅ shipped | AM01 |
 | `wubu_encoder` slot (modality-agnostic base seam) | ✅ shipped | WB06/AN06 |
+| `wubu_encoder_impl` (OUR OWN encoders: imgenc CC01 + audio CC02 into the shared space — made, not imported) | ✅ shipped | WB06 |
 | `wubu_boot` (boot-core extractor) | ✅ shipped | AN12 |
 | `wubu_model_scalable` (fractal tree + budget depth) | ✅ shipped | AN23 |
 | `wubu_ecosystem` (colony, opaque) | ✅ shipped | THEORY/10 |
@@ -128,7 +129,7 @@ probed-dims loader. What's missing is the PLANNER that composes them —
 | probed-dims loader (`WUBU_DIMS`) | ✅ shipped | WuBu1 |
 | CM4-leg: armv7/arm64 cross-build of the engine | ❌ later | follow-up |
 | accelerator probe (CUDA/Vulkan presence) | ❌ later | follow-up |
-| SigLIP 400M weights load (into the encoder slot) | ❌ later | follow-up |
+| real embedding table for the text path (into the encoder slot) | ❌ later | follow-up |
 
 ## 7. Triple-DA (the honest audit)
 
