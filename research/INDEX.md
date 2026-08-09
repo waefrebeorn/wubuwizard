@@ -224,7 +224,7 @@ the next halvings on top of shipped B01/B02/A01/A02.
 - P17 Layer-stream resume (streaming load) .................. `wired` (D04)
 - P18 Hug-page KV pool (arena) .............................. `wired` (wubu_hugepage, ties O02) (ties O02)
 - P19 Weak-symbol CUDA stub (link-clean) .................... `wired`
-- P20 Trace/span operator hook (DA-3) ........................ `open` (wubu_selfimprove does NOT exist — DA 2026-08-04 survey)
+- P20 Trace/span operator hook (DA-3) ........................ `wired` (wubu_selfimprove: the trace/span writes INTO the hive; the RSI mutation engine — gate/LADDER/bounded-delta/experience — is what the amoeba calls; test_selfimprove PASSES) (driver: tools/test_selfimprove.c)
 
 
 ## Theme Q-T: 2026 KV-cache / test-time-compute research sweep (fresh gaps)
@@ -2022,5 +2022,25 @@ Status: `open` = not yet in engine; `wired` = implemented+tested.
 |- AN26-5 THE VHF CANVAS (research/066-vhf-canvas-encoder.md — the user's prior art: "my vhf encoder is i think previously made research that helps this encoder space work"): the latent space is a COORDINATE-ADDRESSABLE FIELD — the VHF encoder (AUDIO/wubusynth, "solved video and audio in one morning" Mar 2026) shaped the latent like the VGA canvas: 525 lines, video in visible lines + audio in HBI columns, per-cell quaternion+amplitude, decoded by coordinate sampling with positional encoding (implicit neural field). C11 realization: wubu_canvas (grid of quaternion+amplitude cells, bilinear field decode, PE projection) — one canvas, all modalities at coordinates, exactly the KV-FS shape (paths are coordinates). `wired` (test_canvas PASS: continuity near<far, video vs audio distinct in one field, ASan clean)
 |- AN26-4 THE USER SPACE IS THE TRAINING DATA (research/065-user-space-training-7hop.md — the user's directive: "the regular user files that the humans have already built... every user is training at every time"): wubu_userfs bridges real user files into the KV namespace — text (paragraph-group CHUNKED: arXiv:2603.06976 nDCG 0.459 vs 0.244) + WAV (RIFF/PCM ours) -> shared embedding FILES (a file IS a mount region); /kv/user/meta usage ledger = the IMPLICIT FEEDBACK stream (arXiv:2606.20482 reward 55%->64%); incremental (name+size in INDEX — unchanged skips, changed re-trains, new trains). Letta benchmark: the filesystem beats memory tools (74% vs 68.5% LoCoMo). `wired` (test_userfs PASS, ASan clean)
 |- AN26-3 SCALE-TO-FIT RUNTIME COMPANIONS (research/063 E+F — the 7-hop mandate's second half): ON-CHIP MEASURE (OHQ: measure, don't assume — wubu_scale_measure runs a per-precision GEMV microbenchmark and returns the fastest cascade the silicon sustains; measured F16 on this host) + ROUTER PREFETCH (PROBE/PRP: wubu_ecosystem_prefetch warms the next-likely balls by fire_count during the current token's compute — slow storage (CM4 SD 0.9GB/s) hides behind compute). `wired` (wubu_scale_measure + wubu_ecosystem_prefetch + tests PASS, ASan clean)
+
+## The AGI colony (2026-08-09 — the closed control system, ALL wired + tested)
+The standing loop is the PRIMARY runtime path (not a side script): every
+batch -> Diagnosis -> hive fitness cells (the ONLY recorder) -> amoeba
+mutate -> validate (loss tol + Lean prover + the oracle's survival) ->
+archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
+- AN27 THE CLOSED CONTROL LOOP `wired` (include/wubu_diagnosis.h + src/wubu_diagnosis.c — batch Diagnosis, hive fitness cells with provenance, mutate gate, archive/graveyard; wired into the REAL trainer via --diag-every; test_diagnosis PASSES incl. the recovery path)
+- AN28 THE HIVE WALK `wired` (tools/wubu_hive_walk.c + wubu_diag_save — the agent's introspection: lineage + graveyard queryable; "show me the last 32 cells that improved loss")
+- AN29 THE SPECIALIST-CELL ORCHESTRATOR `wired` (wubu_orch_* in wubu_agi — goal decomposer spawns 4 lens cells code/math/tool/critique, judge merges by argmax confidence, critique VETO; test_orch PASSES)
+- AN30 THE RLHF ORACLE `wired` (include/wubu_pref.h + src/wubu_pref.c — Bradley-Terry pairs FROM the hive mutations, per-cell survival credit assignment 0.5->1.0; test_pref PASSES)
+- AN31 THE LIVE COLONEL `wired` (include/wubu_colonel.h + src/wubu_colonel.c — the Brain->Body channel: 9P capability trust boundary at enqueue, priority pull + backoff, durable checkpoints; test_colonel PASSES)
+- AN32 SELF-CRITIQUE + RECOVERY `wired` (wubu_diag_recover — failed generations -> graveyard + shrink pressure + immediate mutation cycle; covered by test_diagnosis)
+- AN33 THE RSI MUTATION ENGINE `wired` (include/wubu_selfimprove.h + src/wubu_selfimprove.c — P20's trace/span operator writing INTO the hive + gate/LADDER/bounded-delta proposals the amoeba calls; test_selfimprove PASSES)
+- AN34 GRADIENT-HEALTH TELEMETRY `wired` (src/wubu_train.c — the grad_norm_sum/micro_steps telemetry was DEAD; now accumulates the per-layer grad norm mean per microbatch, the diagnose input)
+
+The win condition: the colony finishes a batch, diagnoses its own
+performance into the hive, proposes + validates mutations under the
+fitness + Lean + oracle gate, delegates through specialists, archives
+what improves, keeps the negative examples, and keeps running without
+a human restarting the loop.
 
 ## WaefreBeorn Umbrella License v3.0
