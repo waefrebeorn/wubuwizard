@@ -1098,6 +1098,10 @@ test_harness_file: tools/test_harness_file.c src/wubu_harness_file.o src/wubu_tr
 test_skill_train: tools/test_skill_train.c src/wubu_skill_train.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_colonel_effect: tools/test_colonel_effect.c src/wubu_colonel.o src/wubu_toolreg.o src/wubu_trajcell.o src/wubu_hive.o src/wubu_agentic_os.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
