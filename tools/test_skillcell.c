@@ -66,6 +66,31 @@ int main(void)
     printf("  stats: %s\n", stats);
     if (sk.n_accepted != 3) FAIL("acceptance count wrong");
 
+    /* 5. the DA skill persistence (K7/K8): the accepted skills save +
+     * load round-trip — the nightly gate caught the resume losing the
+     * skill store, this test pins the fix */
+    const char *spath = "/tmp/skill_roundtrip.bin";
+    remove(spath);
+    long bw = wubu_skill_save(&sk, spath);
+    printf("  persistence: %ld bytes written\n", bw);
+    if (bw <= 0) FAIL("the skill save failed");
+    wubu_skill_tracker_t sk2;
+    wubu_hive_t tissue2;
+    wubu_hive_init(&tissue2);
+    wubu_skill_init(&sk2, &tissue2);
+    int restored = wubu_skill_load(&sk2, spath);
+    printf("  persistence: %d skills restored (accepted %d, pruned 1)\n",
+           restored, (int)sk2.n_accepted);
+    if (restored != 2) FAIL("the round-trip lost skills (%d)", restored);
+    /* the restored skills MATCH (a fresh tracker finds them — the
+     * surviving skills are goal 42 lens 0 and goal 42 lens 1; the
+     * goal-99 draft was pruned) */
+    int64_t m2 = wubu_skill_match(&sk2, 42, 0, 0.2f);
+    if (m2 < 0) FAIL("the restored goal-42 lens-0 skill does not match");
+    int64_t m3 = wubu_skill_match(&sk2, 42, 1, 0.2f);
+    if (m3 < 0) FAIL("the restored goal-42 lens-1 skill does not match");
+    remove(spath);
+
     printf("=== ALL SKILLCELL TESTS PASSED (the colony learns skills) ===\n");
     return 0;
 }

@@ -52,14 +52,17 @@ static const char *arg_get(int argc, char **argv, const char *name)
     return NULL;
 }
 
-/* save the endurance state (the hive + prio sidecars at BASE.hive/.prio) */
+/* save the endurance state (the hive + prio + SKILL sidecars at
+ * BASE.hive/.prio/.skills) */
 static void endurance_save(const wubu_diag_loop_t *loop,
                            const wubu_priority_store_t *prio,
+                           const wubu_skill_tracker_t *skills,
                            const char *base)
 {
-    char h[640], p[640];
+    char h[640], p[640], s[640];
     snprintf(h, sizeof(h), "%s.hive", base);
     snprintf(p, sizeof(p), "%s.prio", base);
+    snprintf(s, sizeof(s), "%s.skills", base);
     if (wubu_diag_save(loop, h) == 0)
         printf("  [endurance] state -> %s.hive/.prio\n", base);
     static char pbuf[8192];
@@ -68,6 +71,9 @@ static void endurance_save(const wubu_diag_loop_t *loop,
         FILE *pf = fopen(p, "wb");
         if (pf) { fwrite(pbuf, 1, (size_t)pn, pf); fclose(pf); }
     }
+    /* the DA skill persistence (K7): the learned skills ride along —
+     * without this the resume re-learned from zero */
+    wubu_skill_save(skills, s);
 }
 
 int main(int argc, char **argv)
@@ -171,6 +177,17 @@ int main(int argc, char **argv)
             fclose(pf);
             int pr = wubu_prio_load(&prio, pbuf, pn);
             if (pr > 0) printf("  [endurance] resumed %d priority cells\n", pr);
+        }
+        /* the DA skill persistence (K8): restore the LEARNED skills —
+         * the nightly gate caught the resume re-learning from zero */
+        {
+            char s[640];
+            snprintf(s, sizeof(s), "%s.skills", resume);
+            int k = wubu_skill_load(&skills, s);
+            if (k > 0)
+                printf("  [endurance] resumed %d learned skills\n", k);
+            else
+                printf("  [endurance] WARNING: no skills to resume (%d)\n", k);
         }
     }
 
@@ -319,11 +336,11 @@ int main(int argc, char **argv)
         }
         /* 4. the checkpoint: a kill resumes from THIS round */
         if (r % ckpt_every == 0)
-            endurance_save(&loop, &prio, out_base);
+            endurance_save(&loop, &prio, &skills, out_base);
     }
 
     /* the final state: the whole history is the sidecars (replayable) */
-    endurance_save(&loop, &prio, out_base);
+    endurance_save(&loop, &prio, &skills, out_base);
     wubu_events_close(&evrec);
     char lst[256], mds[256], hs[256];
     wubu_lineage_stats(&lineage, lst, sizeof(lst));

@@ -39,6 +39,9 @@
 | **Policy recorder** (AN52) | every metadiag policy change is a versioned meta-cell with the reason code (1=loss rising 2=suite failing 3=relax) | `make test_metadiag` (6 policy meta-cells recorded) |
 | **Lineage merge** (AN53) | two `.hive` archives merge (each with its own priority evidence): union + better-fitness + the protected override + graveyards union | `make test_hive_merge` (3 cells, protected survives, 2 rejections preserved) |
 | **Body handoff** (AN54) | `docs/BODY-PILLAR-HANDOFF.md` — the frozen Brain→Body message set + cap semantics; unblocks the WuBuOS executor | doc + `make test_colonel_effect` as the reference chain |
+| **Chaos upgraded** (AN56) | suite-continuity assert + the A2 double-kill drill (kill during sidecar writes) | `tools/chaos_kill_resume.sh` — 3 kills → resumed suite 0.836, 847 events 0 violations; 4 rapid kills → 1378 events, no torn sidecars |
+| **Skill persistence** (AN57) | the learned skills ride a `.skills` sidecar (K7/K8) — the nightly gate caught the resume re-learning from zero | resume restores 233 skills, the replay boundary divergence GONE; `make test_skillcell` |
+| **Nightly gate** (AN58) | fixed budget + one forced resume + published artifacts | `tools/test_colony_nightly.sh` — 60s smoke PASSED (0 violations, suite 0.836, replay agrees) |
 
 ## Verified this wave (2026-08-09 — acceleration + build integrity)
 

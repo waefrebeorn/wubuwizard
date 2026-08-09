@@ -72,6 +72,18 @@ void wubu_skill_use(wubu_skill_tracker_t *sk, int64_t cell_idx);
 int wubu_skill_prune(wubu_skill_tracker_t *sk, uint64_t min_uses,
                      float min_fitness);
 
+/* K7: the DA skill persistence (2026-08-09 — the nightly gate caught
+ * the resume losing the skill store: the .hive/.prio saved the fitness
+ * ledger + priority evidence but the LEARNED SKILLS were memory-only,
+ * so a resumed run re-learned from zero). Save the accepted skills to
+ * a sidecar (the same atomic tmp+fsync+rename pattern). Returns bytes
+ * written or -1. */
+long wubu_skill_save(const wubu_skill_tracker_t *sk, const char *path);
+
+/* K8: load the accepted skills back into the tracker (the resume).
+ * Returns the count restored or -1. */
+int wubu_skill_load(wubu_skill_tracker_t *sk, const char *path);
+
 /* K7: the tracker stats. */
 void wubu_skill_stats(const wubu_skill_tracker_t *sk, char *buf, size_t cap);
 

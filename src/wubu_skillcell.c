@@ -153,3 +153,74 @@ void wubu_skill_stats(const wubu_skill_tracker_t *sk, char *buf, size_t cap)
              (unsigned long long)sk->n_pruned,
              sk->next_version);
 }
+
+/* the collect context for the save (the accepted skills) */
+typedef struct {
+    wubu_skill_t list[256];
+    int n;
+} skill_save_ctx_t;
+
+static int skill_save_cb(void *ptr, void *user)
+{
+    skill_save_ctx_t *ctx = (skill_save_ctx_t *)user;
+    wubu_skill_t *cell = (wubu_skill_t *)ptr;
+    if (cell->draft) return 0;   /* only the accepted skills persist */
+    if (ctx->n < 256) ctx->list[ctx->n++] = *cell;
+    return 0;
+}
+
+long wubu_skill_save(const wubu_skill_tracker_t *sk, const char *path)
+{
+    if (!sk || !sk->tissue || !path) return -1;
+    skill_save_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    wubu_hive_foreach(sk->tissue, skill_save_cb, &ctx);
+    /* the atomic tmp+fsync+rename (the DA crash-consistency pattern) */
+    char tmp[640];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return -1;
+    uint32_t magic = 0x5A4B4C31u;   /* 'ZKLS' the skill-store magic */
+    uint32_t n = (uint32_t)ctx.n;
+    int ok = 1;
+    if (fwrite(&magic, sizeof(magic), 1, f) != 1) ok = 0;
+    if (fwrite(&n, sizeof(n), 1, f) != 1) ok = 0;
+    if (ok && n > 0 &&
+        fwrite(ctx.list, sizeof(wubu_skill_t), n, f) != (size_t)n) ok = 0;
+    if (fflush(f) != 0) ok = 0;
+    if (fsync(fileno(f)) != 0) ok = 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) { remove(tmp); return -1; }
+    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
+    return (long)(8 + (long)n * (long)sizeof(wubu_skill_t));
+}
+
+int wubu_skill_load(wubu_skill_tracker_t *sk, const char *path)
+{
+    if (!sk || !sk->tissue || !path) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    uint32_t magic = 0, n = 0;
+    if (fread(&magic, sizeof(magic), 1, f) != 1 || magic != 0x5A4B4C31u) {
+        fclose(f); return -1;
+    }
+    if (fread(&n, sizeof(n), 1, f) != 1 || n > 256) { fclose(f); return -1; }
+    wubu_skill_t list[256];
+    if (n > 0 && fread(list, sizeof(wubu_skill_t), n, f) != (size_t)n) {
+        fclose(f); return -1;   /* truncated — refuse */
+    }
+    fclose(f);
+    /* re-insert the accepted skills into the hive (a fresh tracker:
+     * the resume rebuilds the colony's learned artifacts) */
+    for (uint32_t i = 0; i < n; i++) {
+        wubu_skill_t *cell = (wubu_skill_t *)calloc(1, sizeof(wubu_skill_t));
+        if (!cell) return (int)i;
+        *cell = list[i];
+        cell->draft = 0;   /* accepted (the save only wrote accepted) */
+        wubu_hive_insert(sk->tissue, cell);
+        sk->n_accepted++;
+        if (cell->version >= sk->next_version)
+            sk->next_version = cell->version + 1;
+    }
+    return (int)n;
+}
