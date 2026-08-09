@@ -1,9 +1,25 @@
 # AN28 — Qwen3.5-0.8B hybrid (Gated DeltaNet + Gated Attention) on the wizard
 
-2026-08-09. The Distiller V1 toolset model `Qwen3.5-0.8B-Q8_0.gguf` does NOT
-yet load: the lfm2 engine is LFM2.5-specific (conv-GQA). This doc decodes the
-architecture from the actual GGUF tensors + prior art so the adapter can be
-built without further archaeology.
+2026-08-09. STATUS: **WIRED** — loads + generates + top-1 parity with the
+V1's llama.cpp on the wubu_model (universal engine, NOT the lfm2 — the
+lfm2 is LFM2.5-specific conv-GQA). Verified: `Hello` → top1 id=11 (`,`)
+identical to the reference; runtime dims D=1024 GQA=8x2 hd=256 kv=512
+SSM(k=16 s=128 v=16 dt=16); 18 GDN layers + 6 gated-attn layers; forward
+fully finite. Bugs fixed along the way (commit 084d7c5):
+1. gen_text embedding file was hardcoded to the qwen36 path (both prefill
+   AND decode loop) → wrong-vocab rows → zeros → RMSNorm(0) = all-NaN.
+   Now `data/embeddings_<vocab>_<d>.bin.raw`.
+2. `quantized_matmul_from_q8` dispatched Q8_0 weights to q8_0_vec_dot,
+   which expects Q8_0-format activations (34-byte blocks) but callers pass
+   a Q8_K buffer (292-byte) → garbage scales. Q8_0 now takes the
+   dequant-SGEMM path (same as IQ/Q2/Q3).
+3. GQA head count: `attn_q` columns are the Q+gate FUSED pair (2·hc·hd) —
+   q_dim/plain_hd inferred 16 heads and the Q_full matmul read past the
+   4096-col weight. True q_dim = `attn_output`'s input dim (2048 → 8 heads
+   × 256). The loader now derives q_heads from attn_output.
+4. Makefile: `wubu_dense_ffn.o` was missing from CORE_OBJ.
+Remaining: logit-level exactness beyond top-1 (near-tie reorder of ids
+0/13 from Q8 activation quantization — acceptable).
 
 ## The model (from the GGUF, 24 layers, d=1024)
 

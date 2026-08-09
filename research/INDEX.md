@@ -2104,11 +2104,12 @@ dispatch + timers, committed 37143be..608107e, pushed e56b816)
 MiniCPM5-1B-Q4_K_M `wired` — loads + generates + TOP-1 parity with the V1's
 llama.cpp (token 5 fim_prefix for "Hello"); per-head q/k norms OPTIONAL
 (LOAD_SILENT). 140M-TinyLLama-Mini-Cinder.F16 `wired` — standard LLaMA/MQA,
-loads + generates. Qwen3.5-0.8B-Q8_0 `open` — hybrid GatedDeltaNet + Gated
-Attention, 17 hybrid + 6 pure-attn layers, fused attn_qkv[6d] + attn_gate +
-ssm_* — full arch decoded in research/AN28-qwen35-hybrid.md (gated-attn:
-q_and_gate 2*d_out chunk -> sigmoid gate elementwise; GDN: in_proj_qkv +
-conv1d + delta rule; wizard's wubu_ssm already models the family). FastSAM
+loads + generates. Qwen3.5-0.8B-Q8_0 `wired` — hybrid GatedDeltaNet + Gated
+Attention, 18 GDN + 6 gated-attn layers — LOADS + GENERATES + TOP-1 parity
+with the V1's llama.cpp (id 11 "," for "Hello"); four bugs fixed (embed
+file path x2, from_q8 Q8_0-vs-Q8_K activation format, GQA q_heads from
+fused attn_q via attn_output, Makefile wubu_dense_ffn.o) — see
+research/AN28-qwen35-hybrid.md. FastSAM
 `open` (vision, separate domain). lfm2_gen repetition penalty (default 1.0
 log-space) breaks the LFM2.5's greedy loops.
 
