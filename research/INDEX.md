@@ -2036,6 +2036,12 @@ archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
 - AN32 SELF-CRITIQUE + RECOVERY `wired` (wubu_diag_recover — failed generations -> graveyard + shrink pressure + immediate mutation cycle; covered by test_diagnosis)
 - AN33 THE RSI MUTATION ENGINE `wired` (include/wubu_selfimprove.h + src/wubu_selfimprove.c — P20's trace/span operator writing INTO the hive + gate/LADDER/bounded-delta proposals the amoeba calls; test_selfimprove PASSES)
 - AN34 GRADIENT-HEALTH TELEMETRY `wired` (src/wubu_train.c — the grad_norm_sum/micro_steps telemetry was DEAD; now accumulates the per-layer grad norm mean per microbatch, the diagnose input)
+- AN35 LINEAGE-AWARE FITNESS + EXTINCTION `wired` (include/wubu_lineage.h + src/wubu_lineage.c — parent chains + compact lineage hash, multi-gen survival as fitness, SOFT EXTINCTION for stagnant lineages, near-miss cousins kept; test_lineage PASSES)
+- AN36 VERIFIED TOOL-TRAJECTORY CELLS `wired` (include/wubu_trajcell.h + src/wubu_trajcell.c — every tool trajectory is a typed hive cell (goal/steps/outcome/cost/hash/provenance); similar-goal queries bias specialist spawning; failed + high-partial-credit trajectories are MUTATION SEEDS; test_trajcell PASSES)
+- AN37 DUAL-TIMESCALE DIAGNOSE `wired` (include/wubu_metadiag.h + src/wubu_metadiag.c — fast per-batch local signals + slow scheduled colony-state META-CELL in the hive; the slow path adjusts the mutation rate + fitness floor for the next window; test_metadiag PASSES)
+- AN38 CAPABILITY-GATED SPECIALIST SPAWNING `wired` (include/wubu_capgate.h + src/wubu_capgate.c — headroom/tool/verifier/redundancy checks before ANY specialist insert; DECOMPOSE/FALLBACK/DENY verdicts; capability GAPS are first-class hive cells the slow diagnose reads as training goals; test_capgate PASSES)
+- AN39 RUNTIME CONTRACTS `wired` (include/wubu_contracts.h + src/wubu_contracts.c — the Lean floor in runtime form: ball closure/exp identity/routing cap/quant bound/finite guard; loss-improving but contract-violating mutations are REJECTED; the set expands via versioned hive meta-cells; test_contracts PASSES)
+
 
 The win condition: the colony finishes a batch, diagnoses its own
 performance into the hive, proposes + validates mutations under the
