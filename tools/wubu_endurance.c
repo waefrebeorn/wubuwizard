@@ -219,10 +219,15 @@ int main(int argc, char **argv)
         /* 2. the metadiag: the suite score is first-class fitness */
         wubu_fast_signal_t sig;
         memset(&sig, 0, sizeof(sig));
-        sig.loss = 10.0f - (float)loop.n_accepted * 0.05f;  /* improving */
+        {
+            float l = 10.0f - 5.0f * (score - 0.55f);
+            if (l > 10.0f) l = 10.0f;
+            sig.loss = l;              /* the same suite-driven loss */
+        }
         sig.task_score = score;
         sig.util_mean = 0.5f;
         sig.grad_norm = 0.4f;
+        sig.soft_fitness = res.soft_fitness;   /* A4: the resource health */
         if (wubu_metadiag_fast(&md, &sig))
             wubu_metadiag_slow(&md);
 
@@ -317,15 +322,30 @@ int main(int argc, char **argv)
             nanosleep(&ts, NULL);
         }
 
-        /* A6: the resource ledger window (every 50 rounds — the RSS +
-         * CPU + throughput -> soft fitness, a metadiag input) */
+        /* A6/A3: the resource ledger window (every 50 rounds — the RSS +
+         * CPU + throughput -> soft fitness, a metadiag input; every 200
+         * rounds the snapshot becomes a HIVE META-CELL so the walk can
+         * see the resource history, not just the live counters) */
         if (r % 50 == 0) {
             wubu_res_update(&res, 50);
-            if (r % 200 == 0)
+            if (r % 200 == 0) {
                 printf("  [res] rss=%llu KB cpu=%.1fs thr=%.0f ev/s "
                        "soft=%.2f\n",
                        (unsigned long long)res.rss_kb, res.cpu_sec,
                        res.throughput, res.soft_fitness);
+                /* A3: the resource ledger CELL (a hive meta-cell the
+                 * walk + report can read) */
+                wubu_res_cell_t *rc = (wubu_res_cell_t *)
+                    calloc(1, sizeof(wubu_res_cell_t));
+                if (rc) {
+                    rc->batch = (uint64_t)r;
+                    rc->rss_kb = res.rss_kb;
+                    rc->cpu_sec = res.cpu_sec;
+                    rc->throughput = res.throughput;
+                    rc->soft_fitness = res.soft_fitness;
+                    wubu_hive_insert(&tissue, rc);
+                }
+            }
         }
 
         if (r % 5 == 0 || r == start_round) {

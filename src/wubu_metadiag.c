@@ -35,6 +35,17 @@ int wubu_metadiag_fast(wubu_metadiag_t *md, const wubu_fast_signal_t *s)
     if (s->task_score > 0.0f)
         md->task_ema = (md->task_ema == 0.0f) ? s->task_score
                         : 0.9f * md->task_ema + 0.1f * s->task_score;
+    /* A4: the RESOURCE soft fitness — a mutation that wins loss but
+     * blows RSS or stalls throughput is a hidden regression. Keep the
+     * EMA and record the LOWEST recent value (the slow path consults
+     * it: sustained resource stress -> the colony gets more aggressive
+     * about fixing it, even when the loss is improving). */
+    if (s->soft_fitness > 0.0f) {
+        md->res_ema = (md->res_ema == 0.0f) ? s->soft_fitness
+                       : 0.9f * md->res_ema + 0.1f * s->soft_fitness;
+        if (md->res_ema < md->res_min || md->res_min == 0.0f)
+            md->res_min = md->res_ema;
+    }
     /* push the loss into the rolling window */
     if (md->win_n >= md->win_cap) {
         memmove(md->window, md->window + 1,
@@ -105,22 +116,40 @@ int wubu_metadiag_slow(wubu_metadiag_t *md)
         /* the PATIENCE WINDOW (the early-stopping standard): a single
          * flat snapshot is noise — the policy holds only after
          * stasis_window consecutive flat slow passes. A real trend in
-         * either direction resets the counter immediately. */
-        md->stasis_patience++;
-        if (md->stasis_patience >= md->stasis_window) {
-            reason = 0;   /* confirmed stasis: hold the policy */
-            /* keep the counter pinned (it stays in stasis until a
-             * real trend shows) */
-            md->stasis_patience = md->stasis_window;
+         * either direction resets the counter immediately. A4: SUSTAINED
+         * RESOURCE STRESS breaks stasis too — a blown memory budget is
+         * a real problem even when the loss is perfectly flat. */
+        int res_stress = (md->res_min > 0.0f && md->res_min < 0.5f);
+        if (res_stress) {
+            md->stasis_patience = 0;
+            md->mutation_rate += md->lr_scale * 0.5f;
+            md->fitness_floor -= md->lr_scale * 0.2f;
+            reason = 4;   /* resource stress */
         } else {
-            reason = 0;   /* too early to tell — hold this pass too */
+            md->stasis_patience++;
+            if (md->stasis_patience >= md->stasis_window) {
+                reason = 0;   /* confirmed stasis: hold the policy */
+                /* keep the counter pinned (it stays in stasis until a
+                 * real trend shows) */
+                md->stasis_patience = md->stasis_window;
+            } else {
+                reason = 0;   /* too early to tell — hold this pass too */
+            }
         }
     } else {
         md->stasis_patience = 0;   /* a real trend broke the stasis */
-        if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
+        /* A4: sustained RESOURCE STRESS (soft fitness < 0.5) is a
+         * first-class aggression trigger too — a mutation that wins
+         * loss but blows the memory budget or stalls throughput must
+         * be fixed, even when the loss looks fine */
+        int res_stress = (md->res_min > 0.0f && md->res_min < 0.5f);
+        if (trend > 0 || res_stress ||
+            (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
             md->mutation_rate += md->lr_scale * 0.5f;
             md->fitness_floor -= md->lr_scale * 0.2f;
-            reason = (trend > 0) ? 1 : 2;   /* 1 = loss rising, 2 = suite failing */
+            reason = (trend > 0) ? 1 : (res_stress ? 4 : 2);
+            /* 4 = resource stress (a new reason code: the colony got
+             * aggressive because the resources are tight) */
         } else {
             md->mutation_rate -= md->lr_scale * 0.3f;
             md->fitness_floor += md->lr_scale * 0.1f;

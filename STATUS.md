@@ -42,6 +42,7 @@
 | **Chaos upgraded** (AN56) | suite-continuity assert + the A2 double-kill drill (kill during sidecar writes) | `tools/chaos_kill_resume.sh` — 3 kills → resumed suite 0.836, 847 events 0 violations; 4 rapid kills → 1378 events, no torn sidecars |
 | **Skill persistence** (AN57) | the learned skills ride a `.skills` sidecar (K7/K8) — the nightly gate caught the resume re-learning from zero | resume restores 233 skills, the replay boundary divergence GONE; `make test_skillcell` |
 | **Nightly gate** (AN58) | fixed budget + one forced resume + published artifacts | `tools/test_colony_nightly.sh` — 60s smoke PASSED (0 violations, suite 0.836, replay agrees) |
+| **Resource cells** (AN59) | per-200-round RSS/CPU/throughput hive meta-cells + the metadiag soft-fitness trigger (reason 4 fires on resource stress even with fine loss) | `test_metadiag` (stress + fine loss → rate 0.60); live: rss 14.6MB soft 1.00 |
 
 ## Verified this wave (2026-08-09 — acceleration + build integrity)
 

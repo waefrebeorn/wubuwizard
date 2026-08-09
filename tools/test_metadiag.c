@@ -99,6 +99,28 @@ int main(void)
            (unsigned long long)(md.n_policy_changes + md2.n_policy_changes + md3.n_policy_changes));
     if (md3.n_policy_changes < 1) FAIL("the policy change was not recorded");
 
+    /* 7. A4: the RESOURCE soft fitness — a mutation that wins loss but
+     * blows the budget triggers the aggression (reason 4) even when
+     * the loss is fine */
+    wubu_metadiag_t md4;
+    wubu_hive_t tissue4;
+    wubu_hive_init(&tissue4);
+    wubu_metadiag_init(&md4, &tissue4, 10, 64, 0.1f);
+    for (int i = 0; i < 20; i++) {
+        wubu_fast_signal_t s;
+        memset(&s, 0, sizeof(s));
+        s.loss = 9.0f;            /* FINE loss (flat) */
+        s.task_score = 0.9f;      /* suite healthy */
+        s.soft_fitness = 0.2f;    /* but the RESOURCES are blown */
+        if (wubu_metadiag_fast(&md4, &s)) wubu_metadiag_slow(&md4);
+    }
+    float r4, f4;
+    wubu_metadiag_state(&md4, &r4, &f4);
+    printf("  resource stress + fine loss: rate=%.2f (aggressive despite "
+           "healthy loss)\n", r4);
+    if (r4 <= 0.5f) FAIL("the resource stress did not raise the rate");
+    if (md4.res_min > 0.3f) FAIL("the resource EMA did not record the stress");
+
     char stats[256];
     wubu_metadiag_stats(&md, stats, sizeof(stats));
     printf("  stats: %s\n", stats);

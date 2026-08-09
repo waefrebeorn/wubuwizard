@@ -34,6 +34,10 @@ typedef struct {
     float task_score;       /* Phase 3: the harness suite score
                                (the first-class fitness signal — the
                                colony cannot pass by loss alone) */
+    float soft_fitness;     /* A4: the RESOURCE soft fitness (0..1 —
+                               the wubu_resources ledger; a mutation
+                               that blows RSS or stalls throughput gets
+                               penalized even when the loss improves) */
 } wubu_fast_signal_t;
 
 /* the slow-path colony-state meta-cell (the summary written into the
@@ -68,6 +72,8 @@ typedef struct {
                                   early-stopping patience window —
                                   a single flat snapshot is noise) */
     int      stasis_window;    /* the patience threshold (default 3) */
+    float    res_ema;          /* A4: the resource soft-fitness EMA */
+    float    res_min;          /* A4: the lowest recent soft fitness */
 } wubu_metadiag_t;
 
 /* M1: init. */

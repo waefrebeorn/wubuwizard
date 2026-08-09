@@ -37,4 +37,15 @@ void wubu_res_update(wubu_res_t *r, uint64_t events_since_last);
 /* R3: set the memory budget (the soft fitness uses it). */
 void wubu_res_set_budget(wubu_res_t *r, uint64_t budget_kb);
 
+/* A3: the RESOURCE LEDGER CELL — a hive meta-cell snapshot (the walk
+ * + the report can read the resource history, not just the live
+ * counters). The runner inserts one every N rounds. */
+typedef struct {
+    uint64_t batch;        /* when the snapshot was taken */
+    uint64_t rss_kb;       /* the RSS then */
+    double   cpu_sec;      /* the cumulative CPU then */
+    double   throughput;   /* the events/sec then */
+    float    soft_fitness; /* the resource health then (0..1) */
+} wubu_res_cell_t;
+
 #endif

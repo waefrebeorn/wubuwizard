@@ -2060,6 +2060,8 @@ archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
 - AN56 CHAOS KILL+RESUME UPGRADED `wired` (tools/chaos_kill_resume.sh — SIGKILL at random rounds + the SUITE-CONTINUITY assert (final suite must stay at the learned ~0.8, not reset to ~0.51) + the A2 DOUBLE-KILL drill: 4 rapid SIGKILLs during sidecar writes -> 1378 events, 0 violations, no torn .hive/.prio (the atomic tmp+fsync+rename save + the group-commit tear tolerance). PROVEN: 3 kills -> resumed suite 0.836)
 - AN57 SKILL-STORE PERSISTENCE `wired` (include/wubu_skillcell.h K7/K8: wubu_skill_save/load — the LEARNED skills ride the .skills sidecar; the nightly gate CAUGHT the resume re-learning from zero (the .hive/.prio saved the ledger + evidence but the skills were memory-only). Resume now restores 233 learned skills + the replay boundary divergence is GONE. test_skillcell pins the round-trip)
 - AN58 NIGHTLY COLONY GATE `wired` (tools/test_colony_nightly.sh — fixed wall-clock budget + ONE forced resume + published artifacts to colony-runs/nightly-<ts>/; asserts zero contract violations, the suite at the LEARNED level, .hive/.prio/.events/.skills present, report + replay post-mortem run. The 60s smoke PASSED; the 30-60min nightly job uses the same path)
+- AN59 RESOURCE LEDGER CELL + SOFT FITNESS `wired` (A3/A4: wubu_res_cell_t hive meta-cells — per-200-round RSS/CPU/throughput snapshots the walk can read; the metadiag's fast signal carries soft_fitness, and SUSTAINED RESOURCE STRESS (soft < 0.5) is a first-class aggression trigger — reason code 4 fires even when the loss is flat + the suite is healthy. test_metadiag: resource stress + fine loss -> rate 0.60)
+
 
 
 
