@@ -104,7 +104,17 @@ int gpu_wubu_matmul(float *y, const float *w, const float *x,
     if (!d_x || !d_y) return 0;
     float *d_wu = wc_get(w, nw * sizeof(float));
     if (!d_wu) return 0;
-    cudaMemcpy(d_x, x, nx * sizeof(float), cudaMemcpyHostToDevice);
+    /* THE STREAM FIX (the acceleration): the synchronous cudaMemcpy
+     * round-trips serialized the CPU<->GPU pipeline (241 syncs/step ->
+     * the step spent ~92% waiting). Use a per-call CUDA stream: the
+     * H2D x upload, the cublas kernel and the D2H y download all queue
+     * on ONE stream and the cublasHandle carries it, so the copies
+     * overlap the compute and the CPU only blocks at the final sync.
+     * The weights stay resident via wc_get (re-upload only on g_wgen
+     * bump, the optimizer's weight update). */
+    static cudaStream_t g_stream = NULL;
+    if (!g_stream) cudaStreamCreate(&g_stream);
+    cudaMemcpyAsync(d_x, x, nx * sizeof(float), cudaMemcpyHostToDevice, g_stream);
     /* The caller's CPU loop is out[s,o] = sum_i w[o,i] * x[s,i] where w
      * is stored [out,in] row-major (w[o*in+i]) -- i.e. out = x @ w^T.
      * cuBLAS: C^T = B^T @ A^T ; we need C = x @ w^T so:
@@ -112,9 +122,11 @@ int gpu_wubu_matmul(float *y, const float *w, const float *x,
      *   B=x (lda=in), C=y -- the DA check (gpu_matmul_check) proves this
      *   matches the CPU loop to <1e-4. */
     float alpha = 1.0f, beta = 0.0f;
+    cublasSetStream(g_cublas, g_stream);
     cublasSgemm(g_cublas, CUBLAS_OP_T, CUBLAS_OP_N,
                 N, M, K, &alpha, d_wu, K, d_x, K, &beta, d_y, N);
-    cudaMemcpy(y, d_y, ny * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(y, d_y, ny * sizeof(float), cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);   /* the one sync per matmul */
     return 1;
 }
 
@@ -146,13 +158,17 @@ int gpu_wubu_matmul_tx(float *y, const float *a, const float *b,
         cudaMalloc(&d_y, ny * sizeof(float)); cap_y = ny;
     }
     if (!d_a || !d_b || !d_y) return 0;
-    cudaMemcpy(d_a, a, na * sizeof(float), cudaMemcpyHostToDevice);
+    static cudaStream_t g_stream = NULL;
+    if (!g_stream) cudaStreamCreate(&g_stream);
+    cudaMemcpyAsync(d_a, a, na * sizeof(float), cudaMemcpyHostToDevice, g_stream);
     float *d_bu = wc_get(b, nb * sizeof(float));
     if (!d_bu) return 0;
     float alpha = 1.0f, beta = 0.0f;
+    cublasSetStream(g_cublas, g_stream);
     cublasSgemm(g_cublas, CUBLAS_OP_N, CUBLAS_OP_T,
                 N, M, K, &alpha, d_bu, N, d_a, M, &beta, d_y, N);
-    cudaMemcpy(y, d_y, ny * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(y, d_y, ny * sizeof(float), cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
     return 1;
 }
 
@@ -182,14 +198,18 @@ int gpu_wubu_matmul_nt(float *y, const float *w, const float *x,
     if (!d_x || !d_y) return 0;
     float *d_wu = wc_get(w, nw * sizeof(float));
     if (!d_wu) return 0;
-    cudaMemcpy(d_x, x, nx * sizeof(float), cudaMemcpyHostToDevice);
+    static cudaStream_t g_stream = NULL;
+    if (!g_stream) cudaStreamCreate(&g_stream);
+    cudaMemcpyAsync(d_x, x, nx * sizeof(float), cudaMemcpyHostToDevice, g_stream);
     /* x row-major [M,K] lda=K == col-major [K,M]; w row-major [K,N]
      * lda=N == col-major [N,K]; y row-major [M,N] lda=N == [N,M].
      * C[N,M] = op(A)[N,K] @ op(B)[K,M] with op(A)=N, op(B)=N. */
     float alpha = 1.0f, beta = 0.0f;
+    cublasSetStream(g_cublas, g_stream);
     cublasSgemm(g_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
                 N, M, K, &alpha, d_wu, N, d_x, K, &beta, d_y, N);
-    cudaMemcpy(y, d_y, ny * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(y, d_y, ny * sizeof(float), cudaMemcpyDeviceToHost, g_stream);
+    cudaStreamSynchronize(g_stream);
     return 1;
 }
 

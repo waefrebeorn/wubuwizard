@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 static float *calloc_f(size_t n)
 {
@@ -152,8 +153,16 @@ float wubu_train_microbatch(wubu_model_t *m, wubu_train_t *tr,
 {
     if (!m || !tr || !b || !tokens || n_tokens < 2) return 0;
     if (ensure_bp(tr, (int)n_tokens) != 0) return 0;
+    struct timespec _t0, _t1;
+    clock_gettime(CLOCK_MONOTONIC, &_t0);
     float loss = wubu_bp_forward(m, b, tr->bp_rec, tokens, (int)n_tokens);
+    clock_gettime(CLOCK_MONOTONIC, &_t1);
+    double _df = (_t1.tv_sec-_t0.tv_sec)+(_t1.tv_nsec-_t0.tv_nsec)/1e9;
+    clock_gettime(CLOCK_MONOTONIC, &_t0);
     wubu_bp_backward(m, b, tr->bp_rec, tr, tokens, (int)n_tokens);
+    clock_gettime(CLOCK_MONOTONIC, &_t1);
+    double _db = (_t1.tv_sec-_t0.tv_sec)+(_t1.tv_nsec-_t0.tv_nsec)/1e9;
+    (void)_df; (void)_db;
     return loss;
 }
 
