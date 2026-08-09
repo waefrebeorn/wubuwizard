@@ -172,10 +172,27 @@ static void mm(float *out, const float *w, const float *x,
         (long)seq * out_n * in_n >= GPU_MIN_FLOP &&
         gpu_wubu_matmul(out, w, x, seq, out_n, in_n))
         return;
+    /* the rows are independent — OpenMP over seq (the cpu_attn_loop
+     * pattern). The inner loops stay sequential for cache + FMA ILP.
+     * The o-loop uses TWO independent accumulators (the wuburvc ILP
+     * trick: 2 FMA chains hide latency; -ffp-contract=fast fuses). */
+#pragma omp parallel for schedule(static)
     for (int s = 0; s < seq; s++) {
         const float *xs = x + (size_t)s * in_n;
         float *os = out + (size_t)s * out_n;
-        for (int o = 0; o < out_n; o++) {
+        for (int o = 0; o + 1 < out_n; o += 2) {
+            float acc0 = 0, acc1 = 0;
+            const float *wr0 = w + (size_t)o * in_n;
+            const float *wr1 = wr0 + in_n;
+            for (int i = 0; i < in_n; i++) {
+                acc0 += wr0[i] * xs[i];
+                acc1 += wr1[i] * xs[i];
+            }
+            os[o] = acc0;
+            os[o + 1] = acc1;
+        }
+        if (out_n & 1) {
+            int o = out_n - 1;
             float acc = 0;
             const float *wr = w + (size_t)o * in_n;
             for (int i = 0; i < in_n; i++) acc += wr[i] * xs[i];
@@ -636,6 +653,7 @@ static void mm_t(float *acc, const float *w, const float *x,
         (long)seq * out_w * in_w >= GPU_MIN_FLOP &&
         gpu_wubu_matmul_nt(acc, w, x, seq, in_w, out_w))
         return;
+#pragma omp parallel for schedule(static)
     for (int s = 0; s < seq; s++) {
         const float *xs = x + (size_t)s * out_w;
         float *as = acc + (size_t)s * in_w;
@@ -656,6 +674,8 @@ static void wg_t(float *wg, const float *dy, const float *inp,
         (long)seq * out_w * in_w >= GPU_MIN_FLOP &&
         gpu_wubu_matmul_tx(wg, dy, inp, out_w, in_w, seq))
         return;
+    /* each weight row accumulates independently — OpenMP over out_w */
+#pragma omp parallel for schedule(static)
     for (int o = 0; o < out_w; o++) {
         float *wr = wg + (size_t)o * in_w;
         for (int i = 0; i < in_w; i++) {

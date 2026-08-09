@@ -23,7 +23,7 @@ CUDA_HOME = $(shell d=$(NVCC); d=$${d%/*}; d=$${d%/*}; echo $$d)
 CUDA_INC = -I$(CUDA_HOME)/include
 CUDA_LIBDIR = $(shell if [ -d $(CUDA_HOME)/lib/x86_64-linux-gnu ]; then echo $(CUDA_HOME)/lib/x86_64-linux-gnu; else echo $(CUDA_HOME)/lib64; fi)
 WSL_LIB = /usr/lib/wsl/lib
-CFLAGS = -O3 -march=native -funroll-loops -fno-fast-math -ftree-vectorize -Wall -Wextra -Wno-unused-parameter -I include $(CUDA_INC) -fopenmp
+CFLAGS = -O3 -march=native -funroll-loops -fno-fast-math -ffp-contract=fast -ftree-vectorize -Wall -Wextra -Wno-unused-parameter -I include $(CUDA_INC) -fopenmp
 LDFLAGS = -lm -fopenmp -L$(CUDA_LIBDIR) -L$(WSL_LIB) -Wl,-rpath,$(WSL_LIB) -lcudart -lcublas -lpthread -lssl -lcrypto
 NVCC_FLAGS = -O3 -I include -arch=sm_89
 CUDA_INCS = $(CUDA_INC)
