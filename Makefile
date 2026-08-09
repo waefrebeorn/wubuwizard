@@ -1104,7 +1104,7 @@ test_colonel_effect: tools/test_colonel_effect.c src/wubu_colonel.o src/wubu_too
 test_hive_merge: tools/test_hive_merge.c src/wubu_hive_merge.o src/wubu_diagnosis.o src/wubu_priority_store.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_lineage.o src/wubu_contracts.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-wubu_endurance: tools/wubu_endurance.c src/wubu_hive.o src/wubu_amoeba.o src/wubu_moe2.o src/wubu_diagnosis.o src/wubu_lineage.o src/wubu_contracts.o src/wubu_priority_store.o src/wubu_harness.o src/wubu_trajcell.o src/wubu_loopguard.o src/wubu_metadiag.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_events.o
+wubu_endurance: tools/wubu_endurance.c src/wubu_hive.o src/wubu_amoeba.o src/wubu_moe2.o src/wubu_diagnosis.o src/wubu_lineage.o src/wubu_contracts.o src/wubu_priority_store.o src/wubu_harness.o src/wubu_trajcell.o src/wubu_loopguard.o src/wubu_metadiag.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_events.o src/wubu_resources.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_skill_train_real: tools/test_skill_train_real.c src/wubu_train.o src/wubu_skill_train.o src/wubu_backprop.o src/wubu_moe2.o src/wubu_runtime_dims.o src/wubu.o src/wubu_grow.o src/wubu_plateau.o src/safetensors_reader.o src/wubu_dequant_nf4.o

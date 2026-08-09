@@ -36,6 +36,7 @@
 #include "wubu_harness.h"
 #include "wubu_metadiag.h"
 #include "wubu_events.h"
+#include "wubu_resources.h"
 
 static int arg_int(int argc, char **argv, const char *name, int dflt)
 {
@@ -118,6 +119,12 @@ int main(int argc, char **argv)
         printf("  [endurance] WARNING: cannot open %s (events off)\n", evpath);
     else
         printf("  [endurance] recording events -> %s\n", evpath);
+
+    /* A6: the resource ledger — per-window RSS/CPU/throughput feeds
+     * the metadiag as SOFT fitness (a mutation that blows memory gets
+     * penalized, not just the loss) */
+    wubu_res_t res;
+    wubu_res_snapshot(&res);
 
     /* the resume: the colony's history comes back from the sidecars */
     int start_round = 1;
@@ -226,6 +233,17 @@ int main(int argc, char **argv)
             ts.tv_sec = round_delay_ms / 1000;
             ts.tv_nsec = (long)(round_delay_ms % 1000) * 1000000L;
             nanosleep(&ts, NULL);
+        }
+
+        /* A6: the resource ledger window (every 50 rounds — the RSS +
+         * CPU + throughput -> soft fitness, a metadiag input) */
+        if (r % 50 == 0) {
+            wubu_res_update(&res, 50);
+            if (r % 200 == 0)
+                printf("  [res] rss=%llu KB cpu=%.1fs thr=%.0f ev/s "
+                       "soft=%.2f\n",
+                       (unsigned long long)res.rss_kb, res.cpu_sec,
+                       res.throughput, res.soft_fitness);
         }
 
         if (r % 5 == 0 || r == start_round) {
