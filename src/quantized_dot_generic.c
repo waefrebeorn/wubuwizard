@@ -598,8 +598,55 @@ void ggml_vec_dot_q6_K_q8_K_generic(int n, float * GGML_RESTRICT s, size_t bs, c
 // ========================================================================
 // Wrapper functions — auto-select SSE or generic
 // ========================================================================
+#if defined(__aarch64__)
+#include <arm_neon.h>
+static void ggml_vec_dot_q4_K_q8_K_neon(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
+    (void)bs; (void)bx; (void)by; (void)nrc;
+    const block_q4_K *x = (const block_q4_K *)vx;
+    const block_q8_K *y = (const block_q8_K *)vy;
+    const int nb = n / QK_K;
+    float sumf = 0;
+    for (int i = 0; i < nb; ++i) {
+        uint32_t utmp[4];
+        memcpy(utmp, x[i].scales, 12);
+        utmp[3] = ((utmp[2] >> 4) & 0x0f0f0f0f) | (((utmp[1] >> 6) & 0x03030303) << 4);
+        const uint32_t uaux = utmp[1] & 0x3f3f3f3f;
+        utmp[1] = (utmp[2] & 0x0f0f0f0f) | (((utmp[0] >> 6) & 0x03030303) << 4);
+        utmp[2] = uaux;
+        utmp[0] &= 0x3f3f3f3f;
+        const uint8_t *scales = (const uint8_t *)&utmp[0];
+        const uint8_t *mins   = (const uint8_t *)&utmp[2];
+        int sumi = 0;
+        for (int j = 0; j < QK_K/16; ++j) sumi += y[i].bsums[j] * mins[j/2];
+        int32x4_t acc0 = vdupq_n_s32(0), acc1 = vdupq_n_s32(0);
+        const uint8_t *q4 = x[i].qs;
+        const int8_t *q8 = y[i].qs;
+        const uint8x8_t mask = vdup_n_u8(0x0F);
+        for (int j = 0; j < 8; ++j) {
+            int32_t sub = 0;
+            for (int l = 0; l < 32; l += 16) {
+                uint8x8_t q4v = vld1_u8(q4); q4 += 8;
+                int8x8_t lo = vreinterpret_s8_u8(vand_u8(q4v, mask));
+                int8x8_t hi = vreinterpret_s8_u8(vshr_n_u8(q4v, 4));
+                int8x8_t a1 = vld1_s8(q8); q8 += 8;
+                int8x8_t a2 = vld1_s8(q8); q8 += 8;
+                sub += (int32_t)vaddlvq_s16(vmull_s8(lo, a1))
+                     + (int32_t)vaddlvq_s16(vmull_s8(hi, a2));
+            }
+            if (j < 4) acc0[j] = scales[j] * sub;
+            else       acc1[j-4] = scales[j] * sub;
+        }
+        const float d = GGML_CPU_FP16_TO_FP32(x[i].d) * y[i].d;
+        const float dmin = GGML_CPU_FP16_TO_FP32(x[i].dmin) * y[i].d;
+        sumf += d * (float)(vaddvq_s32(acc0) + vaddvq_s32(acc1)) - dmin * (float)sumi;
+    }
+    *s = sumf;
+}
+#endif
 void q4_K_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
-#ifdef __AVX2__
+#if defined(__aarch64__)
+    ggml_vec_dot_q4_K_q8_K_neon(n, s, bs, vx, bx, vy, by, nrc);
+#elif defined(__AVX2__)
     ggml_vec_dot_q4_K_q8_K_avx2(n, s, bs, vx, bx, vy, by, nrc);
 #elif defined(__SSSE3__)
     ggml_vec_dot_q4_K_q8_K_sse(n, s, bs, vx, bx, vy, by, nrc);
@@ -638,6 +685,19 @@ void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
     acc0 = _mm_add_ps(acc0, _mm_movehl_ps(acc0, acc0));
     acc0 = _mm_add_ss(acc0, _mm_shuffle_ps(acc0, acc0, 1));
     *s += _mm_cvtss_f32(acc0);
+#elif defined(__aarch64__)
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    for (int i = 0; i < nb; i++) {
+        float d0 = fp16_to_fp32(*(const uint16_t *)(w + i * 34));
+        float d1 = fp16_to_fp32(*(const uint16_t *)(x + i * 34));
+        const int8_t *qw = (const int8_t *)(w + i * 34 + 2);
+        const int8_t *qx = (const int8_t *)(x + i * 34 + 2);
+        int32x4_t sum = vdupq_n_s32(0);
+        for (int j = 0; j < 32; j += 8)
+            sum = vpadalq_s16(sum, vmull_s8(vld1_s8(qw + j), vld1_s8(qx + j)));
+        acc = vmlaq_n_f32(acc, vcvtq_f32_s32(sum), d0 * d1);
+    }
+    *s += vaddvq_f32(acc);
 #else
     float acc = 0.0f;
     for (int i = 0; i < nb; i++) {
