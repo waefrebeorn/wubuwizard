@@ -489,6 +489,98 @@ void wubu_sd_matmul_q(const void *x, int xf16, const void *W, int wtype,
     const int nblk = (K + 31) / 32;
     const int nblk_full = K / 32;
 #if defined(__AVX2__) && defined(__FMA__)
+    if (N <= 8) {
+        /* small-N path (e.g. VAE conv_out C->3): vectorize over k, one ymm
+         * acc per output column — the j-block loop never fires for N<8 and
+         * the scalar tail would cost ~20x more. 2 rows in flight. */
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < M - 1; i += 2) {
+            const char *x0c = (const char *)x + (size_t)i * K * esz;
+            const char *x1c = (const char *)x + (size_t)(i + 1) * K * esz;
+            float *y0 = y + (size_t)i * N;
+            float *y1 = y + (size_t)(i + 1) * N;
+            __m256 acc[16];
+            for (int a = 0; a < 16; a++) acc[a] = _mm256_setzero_ps();
+            if (wtype == 1) {  /* F16 */
+                const uint16_t *wr[8];
+                for (int j = 0; j < N; j++) wr[j] = (const uint16_t *)W + (size_t)j * K;
+                int k = 0;
+                for (; k + 8 <= K; k += 8) {
+                    __m256 xv0 = xf16
+                        ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(x0c + (size_t)k * 2)))
+                        : _mm256_loadu_ps((const float *)(x0c + (size_t)k * 4));
+                    __m256 xv1 = xf16
+                        ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(x1c + (size_t)k * 2)))
+                        : _mm256_loadu_ps((const float *)(x1c + (size_t)k * 4));
+                    for (int j = 0; j < N; j++) {
+                        __m256 wv = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(wr[j] + k)));
+                        acc[j]     = _mm256_fmadd_ps(xv0, wv, acc[j]);
+                        acc[8 + j] = _mm256_fmadd_ps(xv1, wv, acc[8 + j]);
+                    }
+                }
+                for (; k < K; k++) {
+                    float xv0 = xf16 ? wubu_sd_f16_to_f32(((const uint16_t *)x0c)[k])
+                                     : ((const float *)x0c)[k];
+                    float xv1 = xf16 ? wubu_sd_f16_to_f32(((const uint16_t *)x1c)[k])
+                                     : ((const float *)x1c)[k];
+                    for (int j = 0; j < N; j++) {
+                        float wv = wubu_sd_f16_to_f32(wr[j][k]);
+                        acc[j] = _mm256_add_ps(acc[j], _mm256_set1_ps(xv0 * wv));
+                        acc[8 + j] = _mm256_add_ps(acc[8 + j], _mm256_set1_ps(xv1 * wv));
+                    }
+                }
+            } else {  /* Q4_0 */
+                const uint8_t *wq[8];
+                for (int j = 0; j < N; j++) wq[j] = (const uint8_t *)W + (size_t)j * nblk * 18;
+                for (int kb = 0; kb < nblk_full; kb++) {
+                    for (int j = 0; j < N; j++) {
+                        __m256 w[4];
+                        sd_dequant_block_q40(wq[j] + (size_t)kb * 18, w);
+                        for (int s = 0; s < 4; s++) {
+                            __m256 xv0 = xf16
+                                ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(x0c + (size_t)(kb * 32 + s * 8) * 2)))
+                                : _mm256_loadu_ps((const float *)(x0c + (size_t)(kb * 32 + s * 8) * 4));
+                            __m256 xv1 = xf16
+                                ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(x1c + (size_t)(kb * 32 + s * 8) * 2)))
+                                : _mm256_loadu_ps((const float *)(x1c + (size_t)(kb * 32 + s * 8) * 4));
+                            acc[j]     = _mm256_fmadd_ps(xv0, w[s], acc[j]);
+                            acc[8 + j] = _mm256_fmadd_ps(xv1, w[s], acc[8 + j]);
+                        }
+                    }
+                }
+                for (int k = nblk_full * 32; k < K; k++) {
+                    float xv0 = xf16 ? wubu_sd_f16_to_f32(((const uint16_t *)x0c)[k])
+                                     : ((const float *)x0c)[k];
+                    float xv1 = xf16 ? wubu_sd_f16_to_f32(((const uint16_t *)x1c)[k])
+                                     : ((const float *)x1c)[k];
+                    for (int j = 0; j < N; j++) {
+                        int kb = k / 32, l = k % 32;
+                        const uint8_t *blk = wq[j] + (size_t)kb * 18;
+                        float d = wubu_sd_f16_to_f32(*(const uint16_t *)blk);
+                        const uint8_t *qs = blk + 2;
+                        int8_t q = (l < 16) ? (int8_t)(qs[l] & 0x0F) - 8
+                                            : (int8_t)(qs[l - 16] >> 4) - 8;
+                        acc[j] = _mm256_add_ps(acc[j], _mm256_set1_ps(xv0 * ((float)q * d)));
+                        acc[8 + j] = _mm256_add_ps(acc[8 + j], _mm256_set1_ps(xv1 * ((float)q * d)));
+                    }
+                }
+            }
+            for (int j = 0; j < N; j++) {
+                float t0[8], t1[8];
+                _mm256_storeu_ps(t0, acc[j]);
+                _mm256_storeu_ps(t1, acc[8 + j]);
+                y0[j] = t0[0] + t0[1] + t0[2] + t0[3] + t0[4] + t0[5] + t0[6] + t0[7];
+                y1[j] = t1[0] + t1[1] + t1[2] + t1[3] + t1[4] + t1[5] + t1[6] + t1[7];
+            }
+        }
+        for (int i = M - (M & 1); i < M; i++) {
+            const char *xr = (const char *)x + (size_t)i * K * esz;
+            float *yr = y + (size_t)i * N;
+            for (int j = 0; j < N; j++)
+                yr[j] = sd_dot_col(xr, xf16, K, W, wtype, j, nblk);
+        }
+        return;
+    }
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < M - 1; i += 2) {
         const char *x0c = (const char *)x + (size_t)i * K * esz;
@@ -631,7 +723,12 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
      * y[co][p] = sum_k W[co][k] * xcol[k][p] is exactly wubu_sd_linear_q
      * with x = xcol^T [T*W_out][K], W = raw [K][C_out]. */
     const int K = C_in * KH * KW;
-    const int T = 8;
+    /* Adaptive tile rows: keep the F16 xcol tile (T*W_out*K*2B) under ~12MB
+     * so the GEMM's x re-reads stay in L3 (16MB here). The 512x512 VAE
+     * tiles at T=8 were 18.9MB (DRAM re-reads); small convs keep T=8 for
+     * GEMM efficiency (larger M per call). */
+    int T = 8;
+    if ((size_t)T * W_out_ * K * 2 > (12u << 20)) T = 4;
     /* Dequant the conv weight ONCE for all tiles (F16 scratch, per-call).
      * The im2col's K-order matches the weight's raw [K][C_out] layout:
      * k = ci*KH*KW + kw*KH + kh (kh innermost). */

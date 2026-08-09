@@ -47,6 +47,23 @@ Status legend: **DONE** (measured, in the tree) / **TODO** (queued) /
 11. **Kernel specialization per (k, stride)** — 3×3 s1 vs 1×1 vs s2 paths.
     PARTIAL: 1×1 goes through the same im2col; TODO to shortcut 1×1 (proj_in/
     out, skip convs) as a plain GEMM without xcol.
+11a. **Small-N GEMM path (N<=8)** — DONE (2026-08-09): the VAE conv_out
+    (C128->3) fell entirely into the scalar j-tail (262144 rows x scalar
+    dots = 2.07s). A k-vectorized path (one ymm acc per output col, 2 rows
+    in flight) cut it to ~0.3-0.8s (3-6x). Same F16/Q4_0/xf16 dispatch.
+11b. **3x8 register block** — MEASURED WORSE (6.9s vs 5.0s step): 24 accs +
+    dequant temps exceed 32 ymm -> spills. The 2x8 is the register-file
+    sweet spot on AVX2. REJECTED.
+11c. **Adaptive conv tile rows (T=4 when T*W_out*K*2 > 12MB)** — the 512x512
+    VAE xcol tiles at T=8 were 18.9MB (over L3 16MB, DRAM re-reads); T=4
+    fits L3. MEASURED ~neutral (within run noise); kept because the UNet's
+    small convs keep T=8 and the big VAE convs don't lose.
+11d. **VAE hot-spot profile** (SD_VAE_TIMING=1): the up.1.upsample conv
+    (512x512 C256, 309 GFLOP, compute-bound) = 6.4s and up.2.upsample
+    (256x256 C512) = 5.0s dominate; conv_out C->3 was the scalar-tail bug.
+    The upsample convs are FMA-pipe-bound (cvtph convert overhead ~62% of
+    the FP pipe at 2x8). TODO: pre-convert x to F32 once (halves xv cvtph)
+    or an F16-FMA path if hardware had it — Zen4 has none.
 12. **GEMM packing (L2-friendly B)** — pack the raw W bytes per (k-chunk,
     j-block) into contiguous scratch. Raw-byte copy, not dequant; only helps
     after 5. TODO. [salykova gemm-cpu; XNNPACK packing]

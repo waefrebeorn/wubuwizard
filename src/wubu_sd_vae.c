@@ -18,6 +18,7 @@
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+#include <time.h>
 
 #define VAE_PREFIX "first_stage_model.decoder"
 
@@ -66,12 +67,18 @@ static int vae_conv_q(wubu_sd_vae_t *v, const char *wname, const char *bname,
                       const float *x, int C_in, int H, int W,
                       int C_out, int KH, int KW, int stride,
                       int pad_h, int pad_w, float *y) {
+    double t0 = 0;
+    if (getenv("SD_VAE_TIMING")) t0 = (double)clock() / CLOCKS_PER_SEC;
     vae_raw_t w = vae_get_raw(v, wname);
     if (!w.found) return -1;
     float *b = bname ? vae_get_f32(v, bname) : NULL;
     wubu_sd_conv2d_q(x, 1, C_in, H, W, w.ptr, w.type, b, C_out, KH, KW,
                      stride, pad_h, pad_w, y, NULL, NULL);
     free(b);
+    if (getenv("SD_VAE_TIMING"))
+        fprintf(stderr, "  [vae-conv] %s %dx%d C%d->%d k%dx%d s%d: %.3fs\n",
+                wname, W, H, C_in, C_out, KH, KW, stride,
+                (double)clock() / CLOCKS_PER_SEC - t0);
     return 0;
 }
 
