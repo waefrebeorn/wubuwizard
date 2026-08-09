@@ -112,8 +112,13 @@ probed-dims loader. What's missing is the PLANNER that composes them —
 
 | Piece | Status | Owner |
 |---|---|---|
-| `wubu_scale` planner (probe → plan) | ❌ NEW — this doc specs it | this run |
-| `test_scale_to_fit` gate (5 invariants × 5 tiers) | ❌ NEW | this run |
+| `wubu_scale` planner (probe → plan) | ✅ shipped | THEORY/11 |
+| `test_scale_to_fit` gate (5 invariants × 5 tiers) | ✅ shipped | THEORY/11 |
+| bandwidth/energy/devices/adaptive axes | ✅ shipped | research/063 |
+| `wubu_scale_measure` (on-chip cascade calibration) | ✅ shipped | 063-F |
+| router prefetch (next-likely balls) | ✅ shipped | 063-E |
+| amoeba shrink operators (depth + width + train-state) | ✅ shipped | AM01 |
+| `wubu_encoder` slot (modality-agnostic base seam) | ✅ shipped | WB06/AN06 |
 | `wubu_boot` (boot-core extractor) | ✅ shipped | AN12 |
 | `wubu_model_scalable` (fractal tree + budget depth) | ✅ shipped | AN23 |
 | `wubu_ecosystem` (colony, opaque) | ✅ shipped | THEORY/10 |
@@ -123,6 +128,7 @@ probed-dims loader. What's missing is the PLANNER that composes them —
 | probed-dims loader (`WUBU_DIMS`) | ✅ shipped | WuBu1 |
 | CM4-leg: armv7/arm64 cross-build of the engine | ❌ later | follow-up |
 | accelerator probe (CUDA/Vulkan presence) | ❌ later | follow-up |
+| SigLIP 400M weights load (into the encoder slot) | ❌ later | follow-up |
 
 ## 7. Triple-DA (the honest audit)
 
