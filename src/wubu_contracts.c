@@ -17,11 +17,14 @@ int wubu_contracts_init(wubu_contracts_t *ct, wubu_hive_t *tissue)
     ct->next_version = 1;
     /* the default enforced set (the Lean-backed floor in runtime form):
      * ball closure (eps 1e-3), exp identity (1e-4), routing cap (1.0
-     * = the expert load fraction), quant error (1e-2), finite guard */
-    wubu_contract_kind_t kinds[5] = {
-        WUBU_CT_BALL, WUBU_CT_EXP, WUBU_CT_ROUTE, WUBU_CT_QUANT, WUBU_CT_FINITE };
-    float bounds[5] = { 1e-3f, 1e-4f, 1.0f, 1e-2f, 0.0f };
-    for (int i = 0; i < 5; i++) {
+     * = the expert load fraction), quant error (1e-2), finite guard,
+     * + the G38 OPERATIONAL pack: skill-store size (<=64 cells),
+     * max specialists live (<=8), max tool fails/min (<=10) */
+    wubu_contract_kind_t kinds[8] = {
+        WUBU_CT_BALL, WUBU_CT_EXP, WUBU_CT_ROUTE, WUBU_CT_QUANT, WUBU_CT_FINITE,
+        WUBU_CT_SKILLS, WUBU_CT_SPECIALISTS, WUBU_CT_TOOLFAILS };
+    float bounds[8] = { 1e-3f, 1e-4f, 1.0f, 1e-2f, 0.0f, 64.0f, 8.0f, 10.0f };
+    for (int i = 0; i < 8; i++) {
         ct->list[ct->n].version = ct->next_version++;
         ct->list[ct->n].kind = kinds[i];
         ct->list[ct->n].bound = bounds[i];
@@ -72,6 +75,18 @@ int wubu_contracts_check(wubu_contracts_t *ct, const float *probes)
             /* the probe is 1 = finite, 0 = NaN/Inf found */
             if (v < 0.5f) violations++;
             break;
+        case WUBU_CT_SKILLS:
+            /* the skill-store size (the probe is the current count) */
+            if (v > c->bound) violations++;
+            break;
+        case WUBU_CT_SPECIALISTS:
+            /* the specialists live (the probe is the current count) */
+            if (v > c->bound) violations++;
+            break;
+        case WUBU_CT_TOOLFAILS:
+            /* the tool fails/min (the probe is the current rate) */
+            if (v > c->bound) violations++;
+            break;
         default:
             break;
         }
@@ -83,7 +98,25 @@ int wubu_contracts_check(wubu_contracts_t *ct, const float *probes)
 uint32_t wubu_contracts_add(wubu_contracts_t *ct, wubu_contract_kind_t kind,
                             float bound, uint64_t batch)
 {
-    if (!ct || ct->n >= 8) return 0;
+    if (!ct) return 0;
+    /* the kind already enforced -> a versioned bound UPDATE (the
+     * expansion tightens/relaxes an existing contract in place; the
+     * enforced set stays bounded) */
+    for (int i = 0; i < ct->n; i++) {
+        if (ct->list[i].kind == kind) {
+            wubu_contract_t *c = &ct->list[i];
+            c->version = ct->next_version++;
+            c->bound = bound;
+            c->enabled = 1;
+            c->batch = batch;
+            if (ct->tissue) {
+                wubu_contract_t *copy = (wubu_contract_t *)calloc(1, sizeof(wubu_contract_t));
+                if (copy) { *copy = *c; wubu_hive_insert(ct->tissue, copy); }
+            }
+            return c->version;
+        }
+    }
+    if (ct->n >= 8) return 0;   /* a genuinely NEW kind needs room */
     wubu_contract_t *c = &ct->list[ct->n++];
     c->version = ct->next_version++;
     c->kind = kind;

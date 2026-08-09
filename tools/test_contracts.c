@@ -66,6 +66,19 @@ int main(void)
     printf("  stats: %s\n", stats);
     if (ct.n_violations == 0) FAIL("violations not counted");
 
+    /* 5. the G38 OPERATIONAL pack: the skill-store size, specialists
+     * live, and tool fails/min contracts fire on overruns */
+    float probes[8] = { 0.0f, 0.0f, 0.5f, 0.0f, 1.0f,   /* the math set */
+                        65.0f, 9.0f, 11.0f };            /* the pack: ALL over */
+    int g38v = wubu_contracts_check(&ct, probes);
+    printf("  G38 pack: skills=65 spec=9 fails=11 -> %d violations "
+           "(3 expected)\n", g38v);
+    if (g38v < 3) FAIL("the operational pack did not fire (%d)", g38v);
+    /* the same set UNDER the bounds passes (the current baseline) */
+    float ok[8] = { 0.0f, 0.0f, 0.5f, 0.0f, 1.0f, 32.0f, 4.0f, 2.0f };
+    if (wubu_contracts_check(&ct, ok) != 0)
+        FAIL("the in-bounds operational set violated");
+
     printf("=== ALL CONTRACTS TESTS PASSED (the floor is runtime) ===\n");
     return 0;
 }

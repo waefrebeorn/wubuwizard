@@ -31,7 +31,12 @@ typedef enum {
     WUBU_CT_EXP = 1,         /* exp identity: exp(a+b) ~ exp(a)*exp(b) */
     WUBU_CT_ROUTE = 2,       /* routing capacity: expert load <= cap */
     WUBU_CT_QUANT = 3,       /* quant error bound: |dq(x)-x| <= eps */
-    WUBU_CT_FINITE = 4       /* the everything-finite guard (no NaN/Inf) */
+    WUBU_CT_FINITE = 4,      /* the everything-finite guard (no NaN/Inf) */
+    /* the G38 OPERATIONAL PACK (stateful — the probes carry the
+     * current usage, the bound is the ceiling) */
+    WUBU_CT_SKILLS = 5,      /* skill-store size bound (cells) */
+    WUBU_CT_SPECIALISTS = 6, /* max specialists live (cells) */
+    WUBU_CT_TOOLFAILS = 7    /* max tool fails/min (the throttle floor) */
 } wubu_contract_kind_t;
 
 /* one contract (a versioned hive meta-cell) */
