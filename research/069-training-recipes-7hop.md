@@ -104,6 +104,34 @@ wire into the body, the optimizer must SPLIT: Muon for the Euclidean matrices, t
 RSGD/PID/TGT path for the non-Euclidean params. That split is the amoeba's dual
 metabolism — the flat skeleton Muons, the curved cells roll.
 
+## The amoeba-agnostic doctrine (user, 2026-08-09 — the operating rule)
+"If we design everything to be more agnostic and more like amoeba and use
+our math properly, we will be able to AGI-optimize this for speed as well
+as solve a lot of our issues. We should always be doing this. We never need
+the quantization if we save our load — we can operate within the space."
+
+- **Agnostic = dims are data.** Every module reads its geometry from the
+  runtime WUBU35_DIMS (set by the loader's probe), never from compile-time
+  448/1228/12 constants. The loader loads a checkpoint EXACTLY at its true
+  geometry — no zero-padding, no dual paths, no name-guessing.
+- **Amoeba = the geometry split.** The flat (Euclidean) skeleton Muons;
+  the curved (hyperbolic/Poincaré) cells roll with RSGD; the qlearner
+  Q-learns the LR; the TGT odometer tracks the trajectory in polar
+  coordinates around the loss-landscape poles (ravine-in / ravine-out).
+- **The math = our own.** Opaque structs, dispatch tables, the hyperbolic
+  sphere body — every piece is ours, so every piece can be re-optimized.
+- **No quantization needed** when load/save operates in the intrinsic
+  space: an exact load preserves the geometry, so the model never has to
+  be shoehorned into quantized blocks. (The quant kernels remain for
+  when a checkpoint IS quantized — the loader dequants per type.)
+- **The speed win**: agnostic design means the SAME module set runs
+  every geometry — a 35M model and a 4B model share the code path; the
+  optimizer dispatch picks the right update rule per parameter class, so
+  nothing wastes FLOPs on the wrong geometry.
+
+This is the standing rule for ALL future work: agnostic + amoeba + our
+math first, then speed.
+
 ## Sources (persistent)
 - arXiv 2606.15007 (Nemotron 3 Ultra technical report)
 - https://huggingface.co/datasets/nvidia/Nemotron-RL-Ultra-Training-Blends (the blends)
