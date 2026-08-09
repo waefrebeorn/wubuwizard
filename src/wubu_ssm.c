@@ -334,19 +334,12 @@ void wubu_ssm_forward(const float *x, int B, int T,
                 w->attn_gate_weight_q, w->attn_gate_weight_type,
                 D_MODEL, VALUE_DIM, 0, N, z_all);
         } else {
-            // Decode (N=1): quantize once, reuse for both projections
-            const int n_q8_blocks = (D_MODEL + QK_K - 1) / QK_K;
-            const int q8_buf_size = n_q8_blocks * 292;
-            uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
-            if (!ssm_q8_buf) { fprintf(stderr, "SSM forward: q8 alloc failed\n"); goto cleanup; }
-            quantize_row_q8_K(x, (block_q8_K *)ssm_q8_buf, D_MODEL);
-            quantized_matmul_from_q8(ssm_q8_buf,
-                w->attn_qkv_weight_q, w->attn_qkv_weight_type,
-                D_MODEL, C, 0, qkv_all);
-            quantized_matmul_from_q8(ssm_q8_buf,
-                w->attn_gate_weight_q, w->attn_gate_weight_type,
-                D_MODEL, VALUE_DIM, 0, z_all);
-            free(ssm_q8_buf);
+            // Decode (N=1): one activation quant in the format the weights
+            // need (Q8_0 for Q8_0 weights — llama.cpp mul_mat semantics)
+            quantized_matmul_dual(x,
+                w->attn_qkv_weight_q, w->attn_qkv_weight_type, C, qkv_all,
+                w->attn_gate_weight_q, w->attn_gate_weight_type, VALUE_DIM, z_all,
+                D_MODEL);
         }
     if (dd) {
         FILE *f = fopen("/tmp/dbg_qkv_out.bin", "wb");
@@ -721,22 +714,15 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
     // === Steps 1-11: Same as wubu_ssm_forward ===
     // (Steps 1-10 are identical, just compute)
     
-    // Step 1+2: Fused QKV + gate projection via single Q8_K quantization
-    const int n_q8_blocks = (D_MODEL + QK_K - 1) / QK_K;
-    const int q8_buf_size = n_q8_blocks * 292;
-    uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
-    if (!ssm_q8_buf) { fprintf(stderr, "SSM save: q8 alloc failed\n"); goto cleanup_save; }
+    // Step 1+2: Fused QKV + gate projection via one activation quant
+    // (Q8_0 for Q8_0 weights — llama.cpp mul_mat semantics)
     for (int s = 0; s < N; s++) {
         const float *x_s = x + s * D_MODEL;
-        quantize_row_q8_K(x_s, (block_q8_K *)ssm_q8_buf, D_MODEL);
-        quantized_matmul_from_q8(ssm_q8_buf,
-            w->attn_qkv_weight_q, w->attn_qkv_weight_type,
-            D_MODEL, C, 0, qkv_all + s * C);
-        quantized_matmul_from_q8(ssm_q8_buf,
-            w->attn_gate_weight_q, w->attn_gate_weight_type,
-            D_MODEL, VALUE_DIM, 0, z_all + s * VALUE_DIM);
+        quantized_matmul_dual(x_s,
+            w->attn_qkv_weight_q, w->attn_qkv_weight_type, C, qkv_all + s * C,
+            w->attn_gate_weight_q, w->attn_gate_weight_type, VALUE_DIM, z_all + s * VALUE_DIM,
+            D_MODEL);
     }
-    free(ssm_q8_buf);
     
     // Step 3: beta/alpha projections
     for (int s = 0; s < N; s++) {
@@ -958,28 +944,15 @@ void wubu_poincare_ssm_forward(const float *x, int B, int T,
     
     // ========== Steps 1-8: IDENTICAL to Euclidean ==========
     
-    // Step 1+2: Fused QKV + gate projection via single Q8_K quantization
-    // Both projections use the same input x[s], so quantize once and reuse
-    const int n_q8_blocks = (D_MODEL + QK_K - 1) / QK_K;
-    const int q8_buf_size = n_q8_blocks * 292;  // Q8K_BLOCK_SIZE
-    uint8_t *ssm_q8_buf = (uint8_t *)malloc(q8_buf_size);
-    block_q8_K *ssm_q8 = (block_q8_K *)ssm_q8_buf;
-    if (!ssm_q8_buf) { fprintf(stderr, "SSM forward: q8 alloc failed\n"); goto cleanup_p; }
-    
+    // Step 1+2: Fused QKV + gate projection via one activation quant
+    // (Q8_0 for Q8_0 weights — llama.cpp mul_mat semantics)
     for (int s = 0; s < N; s++) {
         const float *x_s = x + s * D_MODEL;
-        // Quantize once
-        quantize_row_q8_K(x_s, ssm_q8, D_MODEL);
-        
-        // Reuse for both projections
-        quantized_matmul_from_q8(ssm_q8_buf,
-            w->attn_qkv_weight_q, w->attn_qkv_weight_type,
-            D_MODEL, C, 0, qkv_all + s * C);
-        quantized_matmul_from_q8(ssm_q8_buf,
-            w->attn_gate_weight_q, w->attn_gate_weight_type,
-            D_MODEL, VALUE_DIM, 0, z_all + s * VALUE_DIM);
+        quantized_matmul_dual(x_s,
+            w->attn_qkv_weight_q, w->attn_qkv_weight_type, C, qkv_all + s * C,
+            w->attn_gate_weight_q, w->attn_gate_weight_type, VALUE_DIM, z_all + s * VALUE_DIM,
+            D_MODEL);
     }
-    free(ssm_q8_buf);
     
     // Step 3: beta/alpha projections
     for (int s = 0; s < N; s++) {

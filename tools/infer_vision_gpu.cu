@@ -4,6 +4,7 @@
  * Patch embedding kept on CPU (minor cost compared to linear layers).
  */
 #include "wubu_vision.h"
+#include "wubu_vision_encoder.h"
 #include "cuda_vision.h"
 #include "gguf_reader.h"
 #include <cuda_runtime.h>

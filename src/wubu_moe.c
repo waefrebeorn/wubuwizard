@@ -586,16 +586,13 @@ void wubu_moe_forward(const float *x, int B, int T,
             float shared_act[SHARED_D_FF];
             
             // ---- Shared expert (sequential per token) ----
-            // Quantize x_s once, reuse Q8 for gate+up projections
+            // One activation quant in the format the weights need
+            // (Q8_0 for Q8_0 weights — llama.cpp mul_mat semantics)
             if (w->ffn_gate_shexp_q) {
-                uint8_t shexp_q8_buf[4096];
-                quantize_row_q8_K(x_s, (block_q8_K *)shexp_q8_buf, D_MODEL);
-                quantized_matmul_from_q8(shexp_q8_buf,
-                    w->ffn_gate_shexp_q, w->ffn_gate_shexp_q_type,
-                    D_MODEL, SHARED_D_FF, 0, shared_gate);
-                quantized_matmul_from_q8(shexp_q8_buf,
-                    w->ffn_up_shexp_q, w->ffn_up_shexp_q_type,
-                    D_MODEL, SHARED_D_FF, 0, shared_up);
+                quantized_matmul_dual(x_s,
+                    w->ffn_gate_shexp_q, w->ffn_gate_shexp_q_type, SHARED_D_FF, shared_gate,
+                    w->ffn_up_shexp_q, w->ffn_up_shexp_q_type, SHARED_D_FF, shared_up,
+                    D_MODEL);
                 for (int j = 0; j < SHARED_D_FF; j++) {
                     float g = shared_gate[j];
                     shared_act[j] = (g < -80.0f ? 0.0f : g / (1.0f + expf(-g))) * shared_up[j];
@@ -679,14 +676,10 @@ void wubu_moe_forward(const float *x, int B, int T,
                                     mtp_iq_cache_fill(slot, w, e);
                                 }
                                 // Use original vec_dot path against cached raw quantized bytes
-                                uint8_t exp_q8_buf[4096];
-                                quantize_row_q8_K(x_s, (block_q8_K *)exp_q8_buf, D_MODEL);
-                                quantized_matmul_from_q8(exp_q8_buf,
-                                    slot->gate_q, slot->gate_type,
-                                    D_MODEL, D_FF, 0, gate_out);
-                                quantized_matmul_from_q8(exp_q8_buf,
-                                    slot->up_q, slot->up_type,
-                                    D_MODEL, D_FF, 0, up_out);
+                                quantized_matmul_dual(x_s,
+                                    slot->gate_q, slot->gate_type, D_FF, gate_out,
+                                    slot->up_q, slot->up_type, D_FF, up_out,
+                                    D_MODEL);
                                 for (int j = 0; j < D_FF; j++) {
                                     float g = gate_out[j];
                                     act[j] = (g < -80.0f ? 0.0f : g / (1.0f + expf(-g))) * up_out[j];
@@ -704,15 +697,11 @@ void wubu_moe_forward(const float *x, int B, int T,
                             const uint8_t *up_q   = w->ffn_up_exps_q   + (int64_t)e * up_bytes;
                             const uint8_t *down_q = w->ffn_down_exps_q + (int64_t)e * down_bytes;
                             
-                            // Quantize x_s once, reuse for gate+up
-                            uint8_t exp_q8_buf[4096];
-                            quantize_row_q8_K(x_s, (block_q8_K *)exp_q8_buf, D_MODEL);
-                            quantized_matmul_from_q8(exp_q8_buf,
-                                gate_q, w->ffn_gate_exps_q_type,
-                                D_MODEL, D_FF, 0, gate_out);
-                            quantized_matmul_from_q8(exp_q8_buf,
-                                up_q, w->ffn_up_exps_q_type,
-                                D_MODEL, D_FF, 0, up_out);
+                            // One activation quant in the format the weights need
+                            quantized_matmul_dual(x_s,
+                                gate_q, w->ffn_gate_exps_q_type, D_FF, gate_out,
+                                up_q, w->ffn_up_exps_q_type, D_FF, up_out,
+                                D_MODEL);
                             
                             for (int j = 0; j < D_FF; j++) {
                                 float g = gate_out[j];

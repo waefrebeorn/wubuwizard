@@ -8,6 +8,7 @@
  */
 #include "wubu_model.h"
 #include "wubu_vision.h"
+#include "wubu_vision_encoder.h"
 #include "cuda_vision.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>

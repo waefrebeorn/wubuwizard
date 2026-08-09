@@ -3,6 +3,7 @@
  * Loads mmproj GGUF, processes image, outputs embeddings.
  */
 #include "wubu_vision.h"
+#include "wubu_vision_encoder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

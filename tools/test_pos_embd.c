@@ -2,6 +2,7 @@
  * test_pos_embd.c — dump vision position embedding to find NaN source
  */
 #include "wubu_vision.h"
+#include "wubu_vision_encoder.h"
 #include <stdio.h>
 
 int main(int argc, char **argv) {

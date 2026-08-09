@@ -186,6 +186,7 @@ tools/agent_gauntlet/download_colonels.out
 # model weights (canonical copies on HF WaefreBeorn/WuBu-35M; tensor store rebuilds)
 /models/wubu/*.safetensors
 /models/wubu/model-mixed.gguf
+/models/*.gguf
 fixture*.safetensors
 # personal agent profile (mind palace) — not part of the repo
 /.hermes/
@@ -202,3 +203,4 @@ wubu_replay
 wubu_report
 wubu_timeseries
 wubu_qwen35_probe
+logit_probe

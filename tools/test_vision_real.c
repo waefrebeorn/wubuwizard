@@ -3,6 +3,7 @@
  * Loads raw float pixels from file, runs vision encoder.
  */
 #include "wubu_vision.h"
+#include "wubu_vision_encoder.h"
 #include "wubu_model.h"
 #include <stdio.h>
 #include <stdlib.h>

@@ -28,6 +28,10 @@ static float fp16_to_fp32(uint16_t v) {
     return ldexpf(1.0f + (float)mant / 1024.0f, exp - 15) * (sign ? -1.0f : 1.0f);
 }
 
+static float fp32_from_bits(uint32_t bits) {
+    float f; memcpy(&f, &bits, 4); return f;
+}
+
 #pragma pack(push, 1)
 typedef struct { uint16_t d; uint16_t dmin; uint8_t scales[K_SCALE_SIZE]; uint8_t qs[QK_K/2]; } block_q4_K;
 typedef struct { uint16_t d; uint16_t dmin; uint8_t scales[K_SCALE_SIZE]; uint8_t qh[QK_K/8]; uint8_t qs[QK_K/2]; } block_q5_K;
@@ -68,6 +72,52 @@ void quantize_row_q8_K(const float *x, block_q8_K *y, int64_t k) {
         }
         y[i].d = -max_val / 127.0f;
         x += QK_K;
+    }
+}
+
+// ========================================================================
+// Q8_0 activation quantizer — llama.cpp reference-exact
+// (ggml-quants.c quantize_row_q8_0_ref): per-32-elem block,
+//   d = amax / 127  (stored fp16),  qs[j] = roundf(x[j] / d)
+// 34-byte blocks. This is the format llama.cpp's mul_mat feeds to
+// ggml_vec_dot_q8_0_q8_0 when the weight is Q8_0 — matching it is what
+// makes the wizard's logits agree with the oracle beyond top-1.
+// ========================================================================
+void quantize_row_q8_0(const float *x, block_q8_0 *y, int64_t k) {
+    if (k % 32 != 0) {
+        /* Non-32-divisible dim: zero the buffer so a misrouted dot degrades
+         * to zeros instead of reading garbage (same guard as Q8_K). */
+        memset(y, 0, (size_t)((k + 31) / 32) * sizeof(block_q8_0));
+        return;
+    }
+    const int64_t nb = k / 32;
+    for (int64_t i = 0; i < nb; i++) {
+        float amax = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            float ax = fabsf(x[i * 32 + j]);
+            if (ax > amax) amax = ax;
+        }
+        const float d = amax / 127.0f;
+        const float id = d ? 1.0f / d : 0.0f;
+        /* fp16 store — bit-exact GGML_FP32_TO_FP16 (the ggml-impl.h
+         * RNE bit-trick): base = (|f| * 2^112) * 2^-110, bias-adjusted
+         * half-ulp add, then extract exp/mantissa fields. */
+        const float scale_to_inf = 0x1.0p+112f;
+        const float scale_to_zero = 0x1.0p-110f;
+        float base = (fabsf(d) * scale_to_inf) * scale_to_zero;
+        uint32_t w; memcpy(&w, &d, 4);
+        const uint32_t shl1_w = w + w;
+        const uint32_t sign = w & UINT32_C(0x80000000);
+        uint32_t bias = shl1_w & UINT32_C(0xFF000000);
+        if (bias < UINT32_C(0x71000000)) bias = UINT32_C(0x71000000);
+        base = fp32_from_bits((bias >> 1) + UINT32_C(0x07800000)) + base;
+        uint32_t bits; memcpy(&bits, &base, 4);
+        const uint32_t exp_bits = (bits >> 13) & UINT32_C(0x00007C00);
+        const uint32_t mantissa_bits = bits & UINT32_C(0x00000FFF);
+        const uint32_t nonsign = exp_bits + mantissa_bits;
+        y[i].d = (uint16_t)((sign >> 16) | (shl1_w > UINT32_C(0xFF000000) ? UINT16_C(0x7E00) : nonsign));
+        for (int j = 0; j < 32; j++)
+            y[i].qs[j] = (int8_t)roundf(x[i * 32 + j] * id);
     }
 }
 
@@ -676,10 +726,15 @@ void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
         __m256i xs = _mm256_sign_epi8(x_i, x_i);          /* |x| (u8) */
         __m256i ys = _mm256_sign_epi8(y_i, x_i);          /* y·sign(x) (s8) */
         __m256i p16 = _mm256_maddubs_epi16(xs, ys);       /* x·y pairs → s16 */
+        /* 8 int32 lanes, each = 4 products (llama.cpp sum_i16_pairs_float) */
         __m256i p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
-        __m256i s32 = _mm256_hadd_epi32(p32, p32);
-        s32 = _mm256_hadd_epi32(s32, s32);
-        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * d1), _mm256_cvtepi32_ps(s32), acc);
+        /* NO horizontal hadd here — accumulate the 8 partial lanes across
+         * blocks (llama.cpp mul_sum_i8_pairs_float + fmadd), single hsum at
+         * the end. A double hadd + hsum8 over-counts by 4x (each lane holds
+         * a half-sum, then the final add sums 4 copies of each half) — that
+         * scale error is invisible to top-1 but flips near-tie logits. */
+        __m256 q = _mm256_cvtepi32_ps(p32);
+        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * d1), q, acc);
     }
     __m128 acc0 = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
     acc0 = _mm_add_ps(acc0, _mm_movehl_ps(acc0, acc0));

@@ -173,37 +173,24 @@ void quantized_matmul(const float *x,
         return;
     }
     
-    // Handle Q8_0: dequant on-the-fly, SGEMM
-    // Block size 32: d(half) [2] + qs[32] = 34 bytes per 32 elements
+    // Handle Q8_0: llama.cpp mul_mat semantics — quantize the activation to
+    // Q8_0 (34-byte blocks, amax/127, roundf — bit-exact quantize_row_q8_0),
+    // then q8_0_vec_dot (int32 per-block sum, fp16 d0*d1, fp32 accumulate).
+    // The old dequant-SGEMM here was MORE accurate than the oracle but not
+    // EQUAL: different rounding flips near-tie logits (the 0/13 swap).
     if (weight_type == GGML_TYPE_Q8_0) {
         const int64_t BLK = 32, BLK_BYTES = 34;
         int64_t n_blocks_per_col = (n_rows + BLK - 1) / BLK;
         int64_t stride = (col_stride_bytes > 0) ? col_stride_bytes : n_blocks_per_col * BLK_BYTES;
+        block_q8_0 *q8a = (block_q8_0 *)malloc((size_t)n_blocks_per_col * sizeof(block_q8_0));
+        if (!q8a) { fprintf(stderr, "quantized_matmul: q8_0 alloc failed\n"); return; }
+        quantize_row_q8_0(x, q8a, n_rows);
         #pragma omp parallel for if(n_cols > 8)
         for (int64_t j = 0; j < n_cols; j++) {
-            const uint8_t *wj = (const uint8_t *)W + j * stride;
-            float sum = 0.0f;
-            for (int64_t b = 0; b < n_blocks_per_col; b++) {
-                const uint8_t *blk = wj + b * BLK_BYTES;
-                uint16_t d_bits; memcpy(&d_bits, blk, 2);
-                // F16 to F32
-                uint32_t sign = (d_bits >> 15) & 1;
-                uint32_t exp  = (d_bits >> 10) & 0x1F;
-                uint32_t mant = d_bits & 0x03FF;
-                uint32_t f32;
-                if (exp == 0) f32 = (sign << 31) | ((uint32_t)(127 - 15 + 1) << 23) | (mant << 13);
-                else if (exp == 31) f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-                else f32 = (sign << 31) | ((uint32_t)(127 - 15 + exp) << 23) | (mant << 13);
-                float d; memcpy(&d, &f32, 4);
-                const int8_t *qs = (const int8_t *)(blk + 2);
-                int64_t remaining = n_rows - b * BLK;
-                if (remaining > BLK) remaining = BLK;
-                for (int64_t l = 0; l < remaining; l++) {
-                    sum += x[b * BLK + l] * (d * (float)qs[l]);
-                }
-            }
-            y[j] = sum;
+            const void *w_col = (const uint8_t *)W + j * stride;
+            q8_0_vec_dot((int)n_rows, &y[j], 0, w_col, 0, q8a, 0, 1);
         }
+        free(q8a);
         return;
     }
     
@@ -455,6 +442,99 @@ void quantized_matmul_from_q8(const void *q8_x,
     }
 }
 
+
+// ========================================================================
+// Q8_0-activation quantized matmul (decode N=1 fast path)
+// q8_0_x: pre-quantized Q8_0 buffer (from quantize_row_q8_0, 34-byte blocks)
+// W: quantized weight; weight_type: GGML_TYPE for W (Q8_0 supported;
+//   other types fall back to the Q8_K dequant-SGEMM path via from_q8)
+// ========================================================================
+void quantized_matmul_from_q8_0(const void *q8_0_x,
+                                const void *W, int weight_type,
+                                int64_t n_rows, int64_t n_cols,
+                                int64_t col_stride_bytes,
+                                float *y) {
+    if (weight_type != GGML_TYPE_Q8_0) {
+        fprintf(stderr, "quantized_matmul_from_q8_0: weight type %d (only Q8_0 supported)\n", weight_type);
+        return;
+    }
+    const int64_t BLK = 32, BLK_BYTES = 34;
+    int64_t n_blocks_per_col = (n_rows + BLK - 1) / BLK;
+    int64_t col_stride = (col_stride_bytes > 0) ? col_stride_bytes : (n_blocks_per_col * BLK_BYTES);
+    #pragma omp parallel for if(n_cols > 8)
+    for (int64_t j = 0; j < n_cols; j++) {
+        const void *w_col = (const uint8_t *)W + j * col_stride;
+        q8_0_vec_dot((int)n_rows, &y[j], 0, w_col, 0, q8_0_x, 0, 1);
+    }
+}
+
+// ========================================================================
+// Activation-format-dispatching quantized matmul (decode N=1 fast path).
+// llama.cpp's mul_mat quantizes the activation to the WEIGHT's vec_dot
+// type: Q8_0 weights -> Q8_0 activations (34-byte blocks), Q4_K/Q6_K/...
+// -> Q8_K activations (292-byte blocks). Quantizing a Q8_0 weight's
+// activation to Q8_K changes the rounding and flips near-tie logits.
+// Callers that previously hardcoded quantize_row_q8_K + from_q8 should
+// call this instead — it picks the format per weight type.
+// ========================================================================
+void quantized_matmul_act(const float *x,
+                          const void *W, int weight_type,
+                          int64_t n_rows, int64_t n_cols,
+                          int64_t col_stride_bytes,
+                          float *y) {
+    if (weight_type == GGML_TYPE_Q8_0) {
+        int64_t n_blk = (n_rows + 31) / 32;
+        block_q8_0 *q8a = (block_q8_0 *)malloc((size_t)n_blk * sizeof(block_q8_0));
+        if (!q8a) { fprintf(stderr, "quantized_matmul_act: q8_0 alloc failed\n"); return; }
+        quantize_row_q8_0(x, q8a, n_rows);
+        quantized_matmul_from_q8_0(q8a, W, weight_type, n_rows, n_cols,
+                                   col_stride_bytes, y);
+        free(q8a);
+        return;
+    }
+    int64_t n_q8_blocks = (n_rows + QK_K - 1) / QK_K;
+    block_q8_K *q8 = (block_q8_K *)malloc((size_t)n_q8_blocks * sizeof(block_q8_K));
+    if (!q8) { fprintf(stderr, "quantized_matmul_act: q8_K alloc failed\n"); return; }
+    quantize_row_q8_K(x, q8, n_rows);
+    quantized_matmul_from_q8(q8, W, weight_type, n_rows, n_cols,
+                             col_stride_bytes, y);
+    free(q8);
+}
+
+// ========================================================================
+// Two projections from ONE activation (the SSM decode pattern: attn_qkv +
+// attn_gate from the same x). Quantizes the activation ONCE in the format
+// the weights need (Q8_0 for Q8_0 weights, Q8_K otherwise) and runs both
+// projections. If the two weight types differ, falls back to per-call
+// quantized_matmul_act (always correct).
+// ========================================================================
+void quantized_matmul_dual(const float *x,
+                           const void *W1, int t1, int64_t c1, float *y1,
+                           const void *W2, int t2, int64_t c2, float *y2,
+                           int64_t n_rows) {
+    if (t1 == t2) {
+        if (t1 == GGML_TYPE_Q8_0) {
+            int64_t n_blk = (n_rows + 31) / 32;
+            block_q8_0 *q = (block_q8_0 *)malloc((size_t)n_blk * sizeof(block_q8_0));
+            if (!q) { fprintf(stderr, "quantized_matmul_dual: q8_0 alloc failed\n"); return; }
+            quantize_row_q8_0(x, q, n_rows);
+            quantized_matmul_from_q8_0(q, W1, t1, n_rows, c1, 0, y1);
+            quantized_matmul_from_q8_0(q, W2, t2, n_rows, c2, 0, y2);
+            free(q);
+            return;
+        }
+        int64_t n_q8_blocks = (n_rows + QK_K - 1) / QK_K;
+        block_q8_K *q = (block_q8_K *)malloc((size_t)n_q8_blocks * sizeof(block_q8_K));
+        if (!q) { fprintf(stderr, "quantized_matmul_dual: q8_K alloc failed\n"); return; }
+        quantize_row_q8_K(x, q, n_rows);
+        quantized_matmul_from_q8(q, W1, t1, n_rows, c1, 0, y1);
+        quantized_matmul_from_q8(q, W2, t2, n_rows, c2, 0, y2);
+        free(q);
+        return;
+    }
+    quantized_matmul_act(x, W1, t1, n_rows, c1, 0, y1);
+    quantized_matmul_act(x, W2, t2, n_rows, c2, 0, y2);
+}
 
 // ========================================================================
 // Batched quantized matmul: N input vectors through the same weight.

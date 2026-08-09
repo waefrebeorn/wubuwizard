@@ -139,8 +139,26 @@ typedef struct {
     int16_t bsums[16];       // sum of quants in groups of 16
 } block_q8_K;
 
+// Block struct for Q8_0 (32 elements) — 34 bytes, llama.cpp layout
+typedef struct {
+    uint16_t d;              // delta (scale, fp16)
+    int8_t   qs[32];         // quants (32 int8 values)
+} block_q8_0;
+
 // Quantize F32 values to Q8_K blocks (k must be multiple of 256)
 void quantize_row_q8_K(const float *x, block_q8_K *y, int64_t k);
+
+// Quantize F32 values to Q8_0 blocks (k must be multiple of 32) —
+// llama.cpp reference-exact: d = amax/127 (fp16), qs = roundf(x/d).
+// The Q8_0×Q8_0 vec-dot path needs activations in THIS format to match
+// the oracle bit-for-bit; Q8_K-quantized activations give different
+// rounding and flip near-tie logits.
+void quantize_row_q8_0(const float *x, block_q8_0 *y, int64_t k);
+
+// Q8_0 × Q8_0 vec-dot: int32 per-block sum, fp16 d0*d1, fp32 accumulate.
+// vx = Q8_0 weights, vy = Q8_0 activations (34-byte blocks).
+void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx,
+                  const void *vy, size_t by, int nrc);
 
 // Generic Q8_K-based quantized matmul
 void quantized_matmul(const float *x,
@@ -155,6 +173,31 @@ void quantized_matmul_from_q8(const void *q8_x,
                               int64_t n_rows, int64_t n_cols,
                               int64_t col_stride_bytes,
                               float *y);
+
+// Quantized matmul with pre-quantized Q8_0 input (34-byte blocks) —
+// Q8_0 weights ONLY. The llama.cpp-exact Q8_0×Q8_0 path.
+void quantized_matmul_from_q8_0(const void *q8_0_x,
+                                const void *W, int weight_type,
+                                int64_t n_rows, int64_t n_cols,
+                                int64_t col_stride_bytes,
+                                float *y);
+
+// Activation-format-dispatching matmul: quantizes x in the format the
+// weight needs (Q8_0 for Q8_0 weights, Q8_K otherwise) — llama.cpp
+// mul_mat semantics. Use instead of hardcoded Q8_K + from_q8.
+void quantized_matmul_act(const float *x,
+                          const void *W, int weight_type,
+                          int64_t n_rows, int64_t n_cols,
+                          int64_t col_stride_bytes,
+                          float *y);
+
+// Two projections from ONE activation (SSM decode: attn_qkv + attn_gate).
+// Quantizes once in the format the weights need; falls back per-call if
+// the two weight types differ.
+void quantized_matmul_dual(const float *x,
+                           const void *W1, int t1, int64_t c1, float *y1,
+                           const void *W2, int t2, int64_t c2, float *y2,
+                           int64_t n_rows);
 
 // Batched quantized matmul: N input vectors through same weight
 // Weight data read ONCE from RAM, shared across all N tokens
