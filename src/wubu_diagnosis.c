@@ -153,3 +153,76 @@ void wubu_diag_loop_free(wubu_diag_loop_t *loop)
     free(loop->cell_grads);
     memset(loop, 0, sizeof(*loop));
 }
+
+/* ── the real-signal bridge: the trainer's actual gradients ────── */
+
+/* one matrix's grad norm (the Frobenius norm of the accumulator) */
+static float mat_grad_norm(const float *g, size_t n)
+{
+    if (!g) return 0.0f;
+    double s = 0;
+    for (size_t i = 0; i < n; i++) s += (double)g[i] * (double)g[i];
+    return (float)sqrt(s / (double)(n > 0 ? n : 1));
+}
+
+/* the per-layer mean grad norm over the 7 matrices (q/k/v/o/g + ffn) */
+static float layer_grad_health(const float **g7, const size_t *sizes7,
+                               int dim, int ffn_dim, int kv_width)
+{
+    double sum = 0;
+    int k = 0;
+    const size_t d2 = (size_t)dim * dim;
+    const size_t dk = (size_t)dim * kv_width;
+    const size_t gu = (size_t)dim * 2 * ffn_dim;
+    const size_t fd = (size_t)ffn_dim * dim;
+    size_t sz[7] = { d2, dk, dk, d2, d2, gu, fd };
+    for (int i = 0; i < 7; i++) {
+        if (g7[i]) { sum += mat_grad_norm(g7[i], sz[i]); k++; }
+    }
+    return k ? (float)(sum / k) : 0.0f;
+}
+
+int wubu_diag_collect_grads(wubu_diag_loop_t *loop,
+                            const void *train, int n_layers, int dim,
+                            int ffn_dim, int kv_width, int head_width)
+{
+    if (!loop || !train) return -1;
+    /* the bridge needs the REAL wubu_train_t layout (the opaque struct
+     * is in wubu_train.h; this module deliberately avoids pulling it
+     * into the public header — the collector is the seam) */
+    typedef struct {
+        float *q_proj_g[64], *k_proj_g[64], *v_proj_g[64], *o_proj_g[64];
+        float *g_proj_g[64], *gate_up_g[64], *down_g[64];
+    } train_grads_t;
+    const train_grads_t *tr = (const train_grads_t *)train;
+    (void)head_width;
+    int cells = n_layers > 0 ? n_layers : 1;
+    if (cells > loop->n_cells_alloc) cells = loop->n_cells_alloc;
+    for (int l = 0; l < cells; l++) {
+        const float *g7[7] = { tr->q_proj_g[l], tr->k_proj_g[l], tr->v_proj_g[l],
+                               tr->o_proj_g[l], tr->g_proj_g[l],
+                               tr->gate_up_g[l], tr->down_g[l] };
+        loop->cell_grads[l] = layer_grad_health(g7, NULL, dim, ffn_dim, kv_width);
+    }
+    return cells;
+}
+
+void wubu_diag_loss_surface(wubu_diag_record_t *rec,
+                            const float *loss_hist, int hist_n)
+{
+    if (!rec || !loss_hist || hist_n < 2) return;
+    /* the slope: the last-8 linear fit (the same window the plateau
+     * detector uses) */
+    int win = hist_n < 8 ? hist_n : 8;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (int i = 0; i < win; i++) {
+        double x = (double)i, y = (double)loss_hist[hist_n - win + i];
+        sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    double den = (double)win * sxx - sx * sx;
+    rec->slope = (float)((den != 0.0)
+                             ? ((double)win * sxy - sx * sy) / den : 0.0);
+    float thresh = 0.001f > 0.005f * (float)rec->loss_ema
+                       ? 0.001f : 0.005f * (float)rec->loss_ema;
+    rec->plateau = fabsf(rec->slope) < thresh ? 1 : 0;
+}

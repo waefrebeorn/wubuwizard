@@ -21,6 +21,10 @@
 #include "wubu_train.h"
 #include "wubu_grow.h"
 #include "wubu_plateau.h"
+#include "wubu_diagnosis.h"
+#include "wubu_hive.h"
+#include "wubu_amoeba.h"
+#include "wubu_moe2.h"
 
 /* FTZ + DAZ: flush denormals (from wuburvc's CPU research — the softmax/
  * exp/backprop tails create subnormals; denormal FP ops are ~100x slower
@@ -254,6 +258,7 @@ int main(int argc, char **argv)
     int seq = arg_int(argc, argv, "--seq", 128);
     int ckpt_every = arg_int(argc, argv, "--ckpt", 10);
     int grow_check = arg_int(argc, argv, "--grow-check", 0);
+    int diag_every = arg_int(argc, argv, "--diag-every", 50);
     int base_layers = arg_int(argc, argv, "--base-layers", 0);
     int init_random = arg_has(argc, argv, "--init-random");
     flush_denormals();   /* the wuburvc CPU speed trick (MXCSR FTZ+DAZ) */
@@ -326,6 +331,27 @@ int main(int argc, char **argv)
     double loss_ema = -1;
     float loss_hist[64];
     int hist_n = 0;
+
+    /* the CLOSED CONTROL LOOP (the user directive: the colony is a
+     * self-modifying AGI, not an inference engine): every batch ->
+     * structured Diagnosis -> hive fitness cells -> amoeba mutate ->
+     * validate (loss tol + prover) -> archive/graveyard. The organs
+     * live for the run; the hive is the ONLY fitness recorder. */
+    wubu_hive_t diag_tissue;
+    wubu_amoeba_t diag_amoeba;
+    wubu_moe2_t diag_agents;
+    wubu_diag_loop_t diag_loop;
+    wubu_hive_init(&diag_tissue);
+    wubu_moe2_init(&diag_agents, 42);
+    wubu_amoeba_cfg_t acfg;
+    memset(&acfg, 0, sizeof(acfg));
+    acfg.grow_util = 0.7; acfg.grow_grad = 0.3;
+    acfg.shrink_util = 0.02; acfg.shrink_grad = 0.1;
+    acfg.entropy_min = 0.05; acfg.loss_tol = 0.05;
+    acfg.split_eps = 0.01; acfg.max_cells = 8; acfg.min_cells = 2;
+    wubu_amoeba_init(&diag_amoeba, &acfg, &diag_tissue, &diag_agents);
+    wubu_diag_loop_init(&diag_loop, &diag_tissue, &diag_amoeba,
+                        &diag_agents, 256, 128);
     for (int step = 1; step <= max_steps; step++) {
         if (pos + seq > corpus_n) pos = 0;   /* epoch wrap */
         for (int i = 0; i < seq; i++) win[i] = corpus[pos + i];
@@ -341,6 +367,31 @@ int main(int argc, char **argv)
             loss_hist[63] = (float)loss_ema;
         } else {
             loss_hist[hist_n++] = (float)loss_ema;
+        }
+        /* the closed loop: every batch -> Diagnosis -> hive fitness
+         * cell; the mutation cycle runs every diag_every batches */
+        {
+            wubu_diag_record_t rec;
+            memset(&rec, 0, sizeof(rec));
+            rec.batch = (uint64_t)step;
+            rec.epoch = 1;
+            rec.loss = loss;
+            rec.loss_ema = (float)loss_ema;
+            rec.fitness = (float)loss_ema;
+            rec.prev_fitness = (float)loss_ema;   /* filled by the cycle */
+            rec.n_experts = MOE2_N_EXPERTS;
+            rec.grad_norm_mean = (float)(tr.grad_norm_sum /
+                                         (tr.micro_steps > 0 ? tr.micro_steps : 1));
+            wubu_diag_loss_surface(&rec, loss_hist, hist_n);
+            wubu_diag_collect_grads(&diag_loop, &tr, m.n_layers,
+                                    WUBU_DIM, WUBU_FFN_DIM,
+                                    WUBU_KV_HEADS * WUBU_HEAD_DIM,
+                                    WUBU_HEADS * WUBU_HEAD_DIM);
+            if (diag_every > 0 && step % diag_every == 0) {
+                wubu_diag_cycle(&diag_loop, &rec, (float)loss_ema);
+            } else {
+                wubu_diag_record(&diag_loop, &rec);
+            }
         }
         if (grow_check > 0 && step % grow_check == 0) {
             if (hist_n >= 32 && m.n_layers < WUBU_LAYERS &&
@@ -380,6 +431,19 @@ int main(int argc, char **argv)
     }
     if (save_checkpoint(&m, out_path) == 0)
         printf("final checkpoint -> %s\n", out_path);
+
+    /* the closed loop teardown: report the colony's vitals */
+    {
+        char stats[256];
+        wubu_diag_stats(&diag_loop, stats, sizeof(stats));
+        printf("  closed loop: %s\n", stats);
+        printf("  closed loop: hive live cells %zu (fitness archive)\n",
+               wubu_hive_live(&diag_tissue));
+        wubu_diag_loop_free(&diag_loop);
+        wubu_amoeba_free(&diag_amoeba);
+        wubu_moe2_free(&diag_agents);
+        wubu_hive_clear(&diag_tissue);
+    }
 
     wubu_train_free(&tr);
     wubu_free(&m, &b);

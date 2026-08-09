@@ -121,4 +121,21 @@ void wubu_diag_stats(const wubu_diag_loop_t *loop, char *buf, size_t cap);
 /* L6: free the loop's own allocations (NOT the organs). */
 void wubu_diag_loop_free(wubu_diag_loop_t *loop);
 
+/* L7: collect the per-cell gradient health from the REAL trainer's
+ * accumulators (wubu_train_t). The colony cells map to the layer
+ * groups: cell i gets the mean grad norm of layer i's matrices
+ * (q/k/v/o/g projections + gate_up/down). Fills loop->cell_grads
+ * and returns the number of cells measured. This is what closes the
+ * loop with REAL training signal (not a toy task). */
+int wubu_diag_collect_grads(wubu_diag_loop_t *loop,
+                            const void *train, int n_layers, int dim,
+                            int ffn_dim, int kv_width, int head_width);
+
+/* L8: compute the loss surface (ema slope + plateau) from a loss
+ * history window — the trainer feeds the ema array; this fills the
+ * record's slope/plateau fields. The same adaptive threshold as the
+ * CLI's plateau detector (abs floor OR 0.5% of the loss). */
+void wubu_diag_loss_surface(wubu_diag_record_t *rec,
+                            const float *loss_hist, int hist_n);
+
 #endif
