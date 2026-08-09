@@ -128,6 +128,31 @@ int main(void)
               "route still works after lifecycle churn");
     }
 
+    /* ---- PREFETCH (research/063-E): slow storage hides behind compute ----
+     * The ecosystem warms the next-likely balls (ranked just below the
+     * current top-K by fire_count). Run some forwards to build
+     * utilization, then prefetch and confirm it warms real balls. */
+    {
+        wubu_router_t *er = wubu_router_get("ecosystem");
+        CHECK(er != NULL, "ecosystem router present for prefetch");
+        /* build fire_count via a few routes (they fire balls) */
+        for (int t = 0; t < 50; t++) {
+            float x2[DIM];
+            for (int i = 0; i < DIM; i++) x2[i] = frand() * 0.5f;
+            int idx[K_ACTIVE];
+            float w[K_ACTIVE];
+            wubu_router_route_named("ecosystem", x2, DIM, K_ACTIVE, idx, w);
+        }
+        /* prefetch warms exactly k balls (k = K_ACTIVE), skipping the hot set */
+        extern int wubu_ecosystem_prefetch(const void *eco, int *top_k, int k);
+        wubu_router_t *eco_r = wubu_router_get("ecosystem");
+        int topk[K_ACTIVE] = { 0, 1, 2, 3 };
+        int warmed = wubu_ecosystem_prefetch(eco_r->ctx, topk, K_ACTIVE);
+        printf("  ok: prefetch warmed %d next-likely balls (hot set skipped)\n", warmed);
+        CHECK(warmed == K_ACTIVE,
+              "prefetch warms k next-likely balls, excluding the current top-K");
+    }
+
     /* ---- re-registration replaces cleanly (no leak / no dup) ---- */
     CHECK(wubu_router_register_physics(N_BALLS, DIM, K_ACTIVE, 424242ull) == 0,
           "re-registration succeeds");

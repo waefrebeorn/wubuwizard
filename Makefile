@@ -2079,7 +2079,7 @@ src/wubu_ecosystem.o: src/wubu_ecosystem.c include/wubu_ecosystem.h include/wubu
 # THE ROUTER SLOT (Revolver): one vtable, any physics registers.
 # wubu_moe.o (+ its quantized-matmul chain) is linked so the
 # engine-wiring probe proves the slot drives a real MoE forward.
-test_router: tools/test_router.c src/wubu_router.o src/wubu_router_physics.o src/wubu_scale.o src/wubu_ecosystem.o src/wubu_mobius.o src/wubu_hive.o src/gguf_reader.o src/wubu_moe_hyperbolic.o src/wubu_gravity.o src/wubu_moe.o src/quantized_matmul.o src/quantized_dot_generic.o src/dequant_iq2_xxs.o
+test_router: tools/test_router.c src/wubu_router.o src/wubu_router_physics.o src/wubu_scale.o src/wubu_mem_budget.o src/wubu_hwcaps.o src/wubu_ecosystem.o src/wubu_mobius.o src/wubu_hive.o src/gguf_reader.o src/wubu_moe_hyperbolic.o src/wubu_gravity.o src/wubu_moe.o src/quantized_matmul.o src/quantized_dot_generic.o src/dequant_iq2_xxs.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
 

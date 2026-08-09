@@ -316,3 +316,48 @@ void wubu_ecosystem_specialize(wubu_ecosystem_t *eco, float drift) {
         if (b->curvature > 3.0f) b->curvature = 3.0f;
     }
 }
+
+/* ---- prefetch: slow storage hides behind compute (research/063-E) ---- */
+
+/* The next-likely balls are the ones ranked just below the current
+ * top-K with the highest fire_count (utilization): they have been
+ * firing and are likely to fire again. Touching their params warms
+ * the dequant cache so the next token's top-K misses nothing. */
+int wubu_ecosystem_prefetch(wubu_ecosystem_t *eco, int *top_k, int k) {
+    if (!eco || !top_k || k < 0) return -1;
+    if (k == 0) return 0;
+
+    /* Mark the current top-K so we don't prefetch what's already hot. */
+    uint8_t hot[ECOSYSTEM_MAX_BALLS];
+    memset(hot, 0, sizeof(hot));
+    for (int i = 0; i < k; i++)
+        if (top_k[i] >= 0 && top_k[i] < ECOSYSTEM_MAX_BALLS)
+            hot[top_k[i]] = 1;
+
+    /* The next-likely candidates: alive, not hot, highest fire_count. */
+    int cand[ECOSYSTEM_MAX_BALLS];
+    int n_cand = 0;
+    for (int s = 0; s < ECOSYSTEM_MAX_BALLS; s++) {
+        const wubu_ecosystem_ball_t *b = &eco->balls[s];
+        if (!b->alive || hot[s]) continue;
+        cand[n_cand++] = s;
+    }
+    /* partial selection sort: top-k by fire_count */
+    int warmed = 0;
+    for (int pick = 0; pick < k && n_cand > 0; pick++) {
+        int best = 0;
+        for (int i = 1; i < n_cand; i++)
+            if (eco->balls[cand[i]].fire_count >
+                eco->balls[cand[best]].fire_count)
+                best = i;
+        int b = cand[best];
+        /* warm: touch the params (a real memory touch, cache-line wide) */
+        wubu_ecosystem_ball_t *wb = &eco->balls[b];
+        volatile float sum = 0.0f;
+        for (int i = 0; i < eco->dim; i += 16) sum += wb->center[i];
+        (void)sum;
+        warmed++;
+        cand[best] = cand[--n_cand];
+    }
+    return warmed;
+}

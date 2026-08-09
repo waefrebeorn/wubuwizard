@@ -83,6 +83,13 @@ int wubu_ecosystem_shrink(wubu_ecosystem_t *eco, int idx);
 /* SPECIATE: drift curvatures apart (ecological niches). */
 void wubu_ecosystem_specialize(wubu_ecosystem_t *eco, float drift);
 
+/* PREFETCH (research/063-E, PROBE): warm the dequant cache for the
+ * balls ranked just below the current top-K -- the next-likely balls.
+ * The fire_count utilization already tells us who they are. Call this
+ * DURING the current token's compute so slow storage (a CM4's SD card)
+ * hides behind it: the next token's top-K is already in cache. */
+int wubu_ecosystem_prefetch(wubu_ecosystem_t *eco, int *top_k, int k);
+
 /* Free all colony resources (hive blocks). */
 void wubu_ecosystem_free(wubu_ecosystem_t *eco);
 
