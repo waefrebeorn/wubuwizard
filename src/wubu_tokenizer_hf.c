@@ -104,14 +104,30 @@ static void j_skip(J *j) {
     j_ws(j);
     if (j->p >= j->end) return;
     char c = *j->p;
-    if (c == '"') { j_str(j); return; }
+    if (c == '"') {
+        /* skip the quoted string WITHOUT allocating (j_str mallocs —
+         * discarding its result leaked 13×64B per load; fixed 2026-08-09) */
+        j->p++;
+        for (; j->p < j->end; j->p++) {
+            if (*j->p == '\\') { if (j->p + 1 < j->end) j->p++; continue; }
+            if (*j->p == '"') { j->p++; break; }
+        }
+        return;
+    }
     if (c == '{' || c == '[') {
         char open = c, close = (c == '{') ? '}' : ']';
         int depth = 0;
         for (;;) {
             if (j->p >= j->end) break;
             char d = *j->p;
-            if (d == '"') { j_str(j); }
+            if (d == '"') {
+                /* same non-allocating string skip (leak #2) */
+                j->p++;
+                for (; j->p < j->end; j->p++) {
+                    if (*j->p == '\\') { if (j->p + 1 < j->end) j->p++; continue; }
+                    if (*j->p == '"') { j->p++; break; }
+                }
+            }
             else if (d == open) { depth++; j->p++; }
             else if (d == close) { depth--; j->p++; if (depth == 0) break; }
             else j->p++;

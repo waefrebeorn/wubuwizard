@@ -103,34 +103,6 @@ int wubu_model_init(wubu_model_t *m, float *embedding, float *final_norm,
  * rows and first chk_cols columns. The pad rows/cols are dead (zero input
  * → zero activation) but keep every quant block (QK_K=256) tileable.
  * See Theory/08 (Aligned Rewrite). */
-static float *load_tensor_aligned(st_ctx *r, const char *name,
-                                  size_t out_rows, size_t out_cols,
-                                  size_t chk_rows, size_t chk_cols)
-{
-    const st_tensor_info *info = st_find_tensor(r, name);
-    if (!info) { fprintf(stderr, "wubu: missing %s\n", name); return NULL; }
-    float *buf = (float *)calloc(out_rows * out_cols, sizeof(float));
-    if (!buf) return NULL;
-    /* validate: checkpoint must have chk_rows × chk_cols elements */
-    if ((size_t)info->n_elems != chk_rows * chk_cols) {
-        fprintf(stderr, "wubu: %s shape mismatch: have %lld, want %zu×%zu\n",
-                name, (long long)info->n_elems, chk_rows, chk_cols);
-        free(buf); return NULL;
-    }
-    float *tmp = (float *)malloc(chk_rows * chk_cols * sizeof(float));
-    if (!tmp) { free(buf); return NULL; }
-    int got = st_read_tensor_f32(r, info, tmp, (int64_t)(chk_rows * chk_cols));
-    if (got < 0) got = 0;
-    for (size_t row = 0; row < chk_rows; row++) {
-        const float *src = tmp + row * chk_cols;
-        float *dst = buf + row * out_cols;
-        memcpy(dst, src, chk_cols * sizeof(float));
-        /* pad cols [chk_cols, out_cols) are zero (calloc) */
-    }
-    /* pad rows [chk_rows, out_rows) are zero (calloc) */
-    free(tmp);
-    return buf;
-}
 
 /* Original loader for tensors whose dimensions are already aligned (norms,
    gate_up where chk_cols == out_cols). */
@@ -159,14 +131,42 @@ static float *load_tensor(st_ctx *r, const char *name, size_t expect_elems)
 int wubu_load(wubu_model_t *m, const char *path)
 {
     if (!m || !path) return -1;
+
+    /* THE REVOLVER DOCTRINE (Theory/06): the loader is self-describing.
+     * Probe the checkpoint's own geometry and set the runtime dims to
+     * the checkpoint's REAL dims BEFORE reading tensors. The old
+     * behavior required every caller to do the probe dance and crashed
+     * with "expected 0" otherwise (a pre-existing bug family:
+     * test_wubu_train, wubu_train_cli, wubu_live_learn, test_diag
+     * oracle 7, test_wubu...).
+     *
+     * The probe reads the file's true geometry (vocab/dim/heads/ffn
+     * from the actual tensors). We set those REAL dims — not an
+     * aligned override — so the file loads EXACTLY as it is: agnostic,
+     * no zero-padding, no dual path. New WuBu1 checkpoints are born
+     * aligned (512) so real == aligned for them; a legacy 448 seed
+     * loads at 448 exactly. */
+    {
+        wubu35_dims_t d;
+        if (wubu35_dims_probe(path, &d) == 0) {
+            /* the probe's ckpt_* fields hold the file's unaligned
+             * truth; the top-level fields may hold an aligned override
+             * (Theory/08). For an agnostic exact load, use the truth. */
+            if (d.ckpt_dim > 0)      { d.dim      = d.ckpt_dim;      }
+            if (d.ckpt_ffn_dim > 0)  { d.ffn_dim  = d.ckpt_ffn_dim;  }
+            if (d.ckpt_head_dim > 0) { d.head_dim = d.ckpt_head_dim; }
+            if (d.ckpt_heads > 0)    { d.heads    = d.ckpt_heads;    }
+            if (d.ckpt_kv_heads > 0) { d.kv_heads = d.ckpt_kv_heads; }
+            wubu35_dims_set(&d);
+        }
+    }
+
     st_ctx *r = st_open(path);
     if (!r) return -1;
 
-    /* Theory/08: the aligned geometry is the canonical design. A new
-     * checkpoint (trained from scratch with aligned dims) has tensors
-     * that are ALREADY aligned — load_tensor validates exact sizes.
-     * The zero-padding compat path (ckpt_* → aligned) is kept only for
-     * loading legacy checkpoints (seed-sft2.safetensors at 448-dim). */
+    /* The runtime dims were set from the checkpoint's REAL geometry
+     * above (agnostic exact load — no zero-padding, no dual path).
+     * Every expect-size below is exactly the file's size. */
     int q_out = WUBU_HEADS * WUBU_HEAD_DIM;
 
     float *embedding = load_tensor(r, "embedding.weight", (size_t)WUBU_VOCAB * WUBU_DIM);
@@ -184,13 +184,12 @@ int wubu_load(wubu_model_t *m, const char *path)
         active_layers = i + 1;
     }
     if (active_layers == 0) { st_close(r); return -1; }
-    if (active_layers == 1) active_layers = WUBU_LAYERS;
     int ok = 1;
     for (int i = 0; i < active_layers && ok; i++) {
         wubu_block_t *blk = &blocks[i];
-        /* All weight matrices are [out, in] row-major. The aligned engine
-         * has out=aligned, in=aligned, but the checkpoint has out=ckpt,
-         * in=ckpt_dim. load_tensor_aligned zero-pads the difference. */
+        /* All weight matrices are [out, in] row-major; the runtime
+         * dims were set from the checkpoint's real geometry, so the
+         * expect-sizes are exact (agnostic loader, no padding). */
         snprintf(name, sizeof(name), "layers.%d.attn.q_proj.weight", i);
         blk->q_proj   = load_tensor(r, name, (size_t)q_out * WUBU_DIM);
         snprintf(name, sizeof(name), "layers.%d.attn.k_proj.weight", i);

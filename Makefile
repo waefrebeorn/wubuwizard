@@ -683,6 +683,15 @@ src/wubu_sd_vae.o: src/wubu_sd_vae.c include/wubu_sd_vae.h include/wubu_sd_ops.h
 src/wubu_sd_ops.o: src/wubu_sd_ops.c include/wubu_sd_ops.h include/gguf_reader.h
 	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_ops.c
 
+# AN21/22 Phase 8 gate: THE MODEL TRAINS ON THE FILESYSTEM —
+# files -> batches -> coherence reward -> amoeba grow (wubu_fs_trainer).
+test_fs_trainer: tools/test_fs_trainer.c src/wubu_fs_trainer.o src/wubu_fs_dataset.o src/wubu_kv_embedding.o src/wubu_grow_kv.o src/wubu_coherence_reward.o src/wubu_kvfs.o src/wubu.o src/wubu35_dims.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_train.o src/wubu_backprop.o src/wubu_tokenizer_hf.o
+	$(CC) $(CFLAGS) -I include -fopenmp -o $@ $^ -lm
+	./$@
+
+src/wubu_fs_trainer.o: src/wubu_fs_trainer.c include/wubu_fs_trainer.h include/wubu_fs_dataset.h include/wubu_kv_embedding.h include/wubu_grow_kv.h include/wubu_train.h
+	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_fs_trainer.c
+
 test_ops: tools/test_ops.c src/wubu_ops.o
 	$(CC) $(CFLAGS) -I include -I tools/include -o $@ tools/test_ops.c src/wubu_ops.o -lm
 	./test_ops
@@ -1006,8 +1015,8 @@ test_ngram: tools/test_ngram.c src/wubu_ngram.o
 
 # G04: Hive data structure test (linked fixed blocks + skipfield + freelist)
 test_hive: tools/test_hive.c src/wubu_hive.o $(CPU_OBJ)
-test_diag: tools/test_diag.c src/wubu_diag.o src/wubu_hive.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
-	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
+test_diag: tools/test_diag.c src/wubu_diag.o src/wubu_hive.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu35_dims.o gpu_wubu.o
+	$(CC) $(CFLAGS) -I include -fopenmp -o $@ $^ -lm $(CUDA_LIBS)
 	./$@
 test_gravity: tools/test_gravity.c src/wubu_gravity.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
@@ -1474,20 +1483,20 @@ wubu_pond2tok: tools/wubu_pond2tok.c src/wubu_tokenizer_hf.o
 gpu_wubu.o: src/gpu_wubu.cu
 	nvcc -O2 -c src/gpu_wubu.cu -o $@ -Xcompiler -fPIC
 
-wubu_train: tools/wubu_train_cli.c src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o
+wubu_train: tools/wubu_train_cli.c src/wubu35_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 
-wubu_live_learn: tools/wubu_live_learn.c src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_tokenizer_hf.o gpu_wubu.o
+wubu_live_learn: tools/wubu_live_learn.c src/wubu35_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_tokenizer_hf.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 
-wubu_boot: tools/wubu_boot.c src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_bi.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/safetensors_writer.o src/wubu_tensor_store.o src/gguf_reader.o gpu_wubu.o
+wubu_boot: tools/wubu_boot.c src/wubu35_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_bi.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/safetensors_writer.o src/wubu_tensor_store.o src/gguf_reader.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 
 # the GPU-accelerated trainer: same CLI, weak-linked cuBLAS dispatch.
-wubu_train_gpu: tools/wubu_train_cli.c src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o
+wubu_train_gpu: tools/wubu_train_cli.c src/wubu35_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm -L/usr/local/cuda-13.1/lib64 -lcublas -lcudart -Wl,-rpath,/usr/local/cuda-13.1/lib64
 
-test_wubu_save: tools/test_wubu_save.c src/wubu.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/safetensors_writer.o src/wubu_save.o
+test_wubu_save: tools/test_wubu_save.c src/wubu35_dims.o src/wubu.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/safetensors_writer.o src/wubu_save.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@ models/wubu/model.safetensors
 
@@ -1503,21 +1512,21 @@ test_moe2: tools/test_moe2.c src/wubu_moe2.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
 
-wubu_cli: tools/wubu_cli.c src/wubu.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_tokenizer_hf.o src/wubu_dequant_nf4.o gpu_wubu.o
+wubu_cli: tools/wubu_cli.c src/wubu35_dims.o src/wubu.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_tokenizer_hf.o src/wubu_dequant_nf4.o gpu_wubu.o
 	$(CC) $(CFLAGS) -DWUBU_TOOL_VERSION=\"$(WUBU_VERSION)\" -I include -o $@ $^ -lm $(CUDA_LIBS)
 
-test_wubu: tools/test_wubu.c src/wubu.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
+test_wubu: tools/test_wubu.c src/wubu35_dims.o src/wubu.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 	./$@ models/wubu/model.safetensors
 
-test_wubu_train: tools/test_wubu_train.c src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
+test_wubu_train: tools/test_wubu_train.c src/wubu35_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 	./$@ models/wubu/model.safetensors
 
 src/wubu_backprop.o: include/wubu_backprop.h include/wubu_train.h include/wubu.h
 src/wubu_train.o: include/wubu_train.h include/wubu.h include/wubu_backprop.h
 
-test_backprop: tools/test_backprop.c src/wubu_backprop.o src/wubu.o src/wubu_train.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
+test_backprop: tools/test_backprop.c src/wubu_backprop.o src/wubu35_dims.o src/wubu.o src/wubu_train.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o gpu_wubu.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 	./$@
 

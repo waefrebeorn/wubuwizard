@@ -1053,8 +1053,8 @@ static float *norm_slot_weight(wubu_model_t *m, int slot, int *size)
         switch (k) {
             case 0: *size = D; return blk->attn_norm;
             case 1: *size = D; return blk->ffn_norm;
-            case 2: *size = 64; return blk->q_norm;
-            default:*size = 64; return blk->k_norm;
+            case 2: *size = WUBU_HEAD_DIM; return blk->q_norm;  /* per-head */
+            default:*size = WUBU_HEAD_DIM; return blk->k_norm;  /* per-head */
         }
     }
     if (slot == 4 * L) { *size = D; return m->final_norm; }
@@ -1129,15 +1129,15 @@ int wubu_bp_muon_step(wubu_model_t *m, wubu_train_t *tr,
     if (cfg->grad_clip > 0 && (!skip || strcmp(skip, "clip") != 0)) {
         double n2 = 0;
         for (int i = 0; i < m->n_layers; i++) {
-            n2 += dot_grad(tr->q_proj_g[i], 448 * 448);
-            n2 += dot_grad(tr->k_proj_g[i], 448 * 64);
-            n2 += dot_grad(tr->v_proj_g[i], 448 * 64);
-            n2 += dot_grad(tr->o_proj_g[i], 448 * 448);
-            n2 += dot_grad(tr->g_proj_g[i], 448 * 448);
-            n2 += dot_grad(tr->gate_up_g[i], 448 * 2456);
-            n2 += dot_grad(tr->down_g[i], 1228 * 448);
+            n2 += dot_grad(tr->q_proj_g[i], WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM));
+            n2 += dot_grad(tr->k_proj_g[i], WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
+            n2 += dot_grad(tr->v_proj_g[i], WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM));
+            n2 += dot_grad(tr->o_proj_g[i], WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM));
+            n2 += dot_grad(tr->g_proj_g[i], WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM));
+            n2 += dot_grad(tr->gate_up_g[i], WUBU_DIM * (2 * WUBU_FFN_DIM));
+            n2 += dot_grad(tr->down_g[i], WUBU_FFN_DIM * WUBU_DIM);
         }
-        n2 += dot_grad(tr->emb_g, 16384 * 448);
+        n2 += dot_grad(tr->emb_g, WUBU_VOCAB * WUBU_DIM);
         for (int i = 0; i < WUBU_NORM_SLOTS; i++) {
             int sz = 0;
             (void)norm_slot_weight(m, i, &sz);
@@ -1147,15 +1147,15 @@ int wubu_bp_muon_step(wubu_model_t *m, wubu_train_t *tr,
         if (gn > cfg->grad_clip) {
             float s = cfg->grad_clip / gn;
             for (int i = 0; i < m->n_layers; i++) {
-                scale_grad(tr->q_proj_g[i], 448 * 448, s);
-                scale_grad(tr->k_proj_g[i], 448 * 64, s);
-                scale_grad(tr->v_proj_g[i], 448 * 64, s);
-                scale_grad(tr->o_proj_g[i], 448 * 448, s);
-                scale_grad(tr->g_proj_g[i], 448 * 448, s);
-                scale_grad(tr->gate_up_g[i], 448 * 2456, s);
-                scale_grad(tr->down_g[i], 1228 * 448, s);
+                scale_grad(tr->q_proj_g[i], WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM), s);
+                scale_grad(tr->k_proj_g[i], WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM), s);
+                scale_grad(tr->v_proj_g[i], WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM), s);
+                scale_grad(tr->o_proj_g[i], WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM), s);
+                scale_grad(tr->g_proj_g[i], WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM), s);
+                scale_grad(tr->gate_up_g[i], WUBU_DIM * (2 * WUBU_FFN_DIM), s);
+                scale_grad(tr->down_g[i], WUBU_FFN_DIM * WUBU_DIM, s);
             }
-            scale_grad(tr->emb_g, 16384 * 448, s);
+            scale_grad(tr->emb_g, WUBU_VOCAB * WUBU_DIM, s);
             for (int i = 0; i < WUBU_NORM_SLOTS; i++) {
                 int sz = 0;
                 (void)norm_slot_weight(m, i, &sz);
@@ -1167,21 +1167,30 @@ int wubu_bp_muon_step(wubu_model_t *m, wubu_train_t *tr,
     /* Muon group: the 2D hidden matrices */
     if (!skip || strcmp(skip, "muon") != 0) {
     {
-        size_t max_cells = 448 * 2456;               /* gate_up */
-        size_t max_sq = 448 * 448;                   /* the NS A/B mats */
-        float *scratch = (float *)malloc((2 * max_sq + 2 * max_cells) * sizeof(float));
+        size_t max_cells = (size_t)WUBU_DIM * (2 * WUBU_FFN_DIM);  /* gate_up */
+        size_t max_sq = (size_t)WUBU_DIM * WUBU_DIM;               /* NS A/B mats */
+        size_t max_fd = (size_t)WUBU_FFN_DIM * WUBU_DIM;           /* down */
+        size_t scratch_n = 2 * max_sq + 2 * max_cells + max_fd;
+        float *scratch = (float *)malloc(scratch_n * sizeof(float));
         float *look = scratch + 2 * max_sq;
         float *trans = look + max_cells;
         if (!scratch) return -1;
         for (int i = 0; i < m->n_layers; i++) {
             wubu_block_t *blk = &m->blocks[i];
-            muon_matrix(blk->q_proj,  tr->q_proj_g[i],  tr->q_proj_m[i],  448, 448,  mu_lr, wd, mu, scratch, look, trans);
-            muon_matrix(blk->k_proj,  tr->k_proj_g[i],  tr->k_proj_m[i],  448, 64,   mu_lr, wd, mu, scratch, look, trans);
-            muon_matrix(blk->v_proj,  tr->v_proj_g[i],  tr->v_proj_m[i],  448, 64,   mu_lr, wd, mu, scratch, look, trans);
-            muon_matrix(blk->o_proj,  tr->o_proj_g[i],  tr->o_proj_m[i],  448, 448,  mu_lr, wd, mu, scratch, look, trans);
-            muon_matrix(blk->g_proj,  tr->g_proj_g[i],  tr->g_proj_m[i],  448, 448,  mu_lr, wd, mu, scratch, look, trans);
-            muon_matrix(blk->gate_up, tr->gate_up_g[i], tr->gate_up_m[i], 448, 2456, mu_lr, wd, mu, scratch, look, trans);
-            muon_matrix(blk->down,    tr->down_g[i],    tr->down_m[i],    1228, 448, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->q_proj,  tr->q_proj_g[i],  tr->q_proj_m[i],
+                        WUBU_DIM, WUBU_HEADS * WUBU_HEAD_DIM, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->k_proj,  tr->k_proj_g[i],  tr->k_proj_m[i],
+                        WUBU_DIM, WUBU_KV_HEADS * WUBU_HEAD_DIM, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->v_proj,  tr->v_proj_g[i],  tr->v_proj_m[i],
+                        WUBU_DIM, WUBU_KV_HEADS * WUBU_HEAD_DIM, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->o_proj,  tr->o_proj_g[i],  tr->o_proj_m[i],
+                        WUBU_DIM, WUBU_HEADS * WUBU_HEAD_DIM, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->g_proj,  tr->g_proj_g[i],  tr->g_proj_m[i],
+                        WUBU_DIM, WUBU_HEADS * WUBU_HEAD_DIM, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->gate_up, tr->gate_up_g[i], tr->gate_up_m[i],
+                        WUBU_DIM, 2 * WUBU_FFN_DIM, mu_lr, wd, mu, scratch, look, trans);
+            muon_matrix(blk->down,    tr->down_g[i],    tr->down_m[i],
+                        WUBU_FFN_DIM, WUBU_DIM, mu_lr, wd, mu, scratch, look, trans);
         }
         free(scratch);
     }
@@ -1190,7 +1199,7 @@ int wubu_bp_muon_step(wubu_model_t *m, wubu_train_t *tr,
     /* AdamW group: the embedding, the norms, the selectors */
     if (!skip || strcmp(skip, "adam") != 0) {
     adamw_update(m->embedding, tr->emb_g, tr->emb_m, tr->emb_v,
-                 16384 * 448, ad_lr, wd, step);
+                 WUBU_VOCAB * WUBU_DIM, ad_lr, wd, step);
     for (int i = 0; i < WUBU_NORM_SLOTS; i++) {
         int sz = 0;
         float *w = norm_slot_weight(m, i, &sz);

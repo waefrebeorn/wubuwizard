@@ -30,20 +30,27 @@ int wubu_train_init(wubu_train_t *tr, const wubu_model_t *m)
     if (!tr || !m) return -1;
     memset(tr, 0, sizeof(*tr));
     for (int i = 0; i < WUBU_LAYERS; i++) {
-        tr->q_proj_g[i] = calloc_f(448 * 448);
-        tr->k_proj_g[i] = calloc_f(448 * 64);
-        tr->v_proj_g[i] = calloc_f(448 * 64);
-        tr->o_proj_g[i] = calloc_f(448 * 448);
-        tr->g_proj_g[i] = calloc_f(448 * 448);
-        tr->gate_up_g[i] = calloc_f(448 * 2456);
-        tr->down_g[i] = calloc_f(1228 * 448);
-        tr->q_proj_m[i] = calloc_f(448 * 448);
-        tr->k_proj_m[i] = calloc_f(448 * 64);
-        tr->v_proj_m[i] = calloc_f(448 * 64);
-        tr->o_proj_m[i] = calloc_f(448 * 448);
-        tr->g_proj_m[i] = calloc_f(448 * 448);
-        tr->gate_up_m[i] = calloc_f(448 * 2456);
-        tr->down_m[i] = calloc_f(1228 * 448);
+        /* runtime geometry (the revolver): buffer sizes follow the
+         * model's ACTUAL dims, not the old compile-time 448 (the
+         * hardcoded 448/64/1228/2456/16384 were a pre-existing bug:
+         * any model with different dims crashed in backprop) */
+        const size_t hd = WUBU_HEADS * WUBU_HEAD_DIM;        /* q/o/g */
+        const size_t khd = WUBU_KV_HEADS * WUBU_HEAD_DIM;    /* k/v */
+        const size_t d = WUBU_DIM, f = WUBU_FFN_DIM;
+        tr->q_proj_g[i] = calloc_f(d * hd);
+        tr->k_proj_g[i] = calloc_f(d * khd);
+        tr->v_proj_g[i] = calloc_f(d * khd);
+        tr->o_proj_g[i] = calloc_f(d * hd);
+        tr->g_proj_g[i] = calloc_f(d * hd);
+        tr->gate_up_g[i] = calloc_f(d * (2 * f));
+        tr->down_g[i] = calloc_f(f * d);
+        tr->q_proj_m[i] = calloc_f(d * hd);
+        tr->k_proj_m[i] = calloc_f(d * khd);
+        tr->v_proj_m[i] = calloc_f(d * khd);
+        tr->o_proj_m[i] = calloc_f(d * hd);
+        tr->g_proj_m[i] = calloc_f(d * hd);
+        tr->gate_up_m[i] = calloc_f(d * (2 * f));
+        tr->down_m[i] = calloc_f(f * d);
         if (!tr->q_proj_g[i] || !tr->k_proj_g[i] || !tr->v_proj_g[i] ||
             !tr->o_proj_g[i] || !tr->g_proj_g[i] || !tr->gate_up_g[i] ||
             !tr->down_g[i] || !tr->q_proj_m[i] || !tr->k_proj_m[i] ||
@@ -53,14 +60,19 @@ int wubu_train_init(wubu_train_t *tr, const wubu_model_t *m)
             return -1;
         }
     }
-    tr->emb_g = calloc_f(16384 * 448);
-    tr->emb_m = calloc_f(16384 * 448);
-    tr->emb_v = calloc_f(16384 * 448);
+    tr->emb_g = calloc_f(WUBU_VOCAB * WUBU_DIM);
+    tr->emb_m = calloc_f(WUBU_VOCAB * WUBU_DIM);
+    tr->emb_v = calloc_f(WUBU_VOCAB * WUBU_DIM);
     if (!tr->emb_g || !tr->emb_m || !tr->emb_v) { wubu_train_free(tr); return -1; }
     /* the 1-D AdamW slots: the per-layer norms, the final norm, the
-     * selectors (sizes per the WUBU_NORM_SLOTS layout) */
+     * selectors (sizes per the WUBU_NORM_SLOTS layout).
+     * q_norm/k_norm are PER-HEAD norms -> WUBU_HEAD_DIM floats (NOT
+     * rope_dim — that's the partial-rotation width, a different
+     * concept; a pre-existing bug under-allocated them and corrupted
+     * the heap on any model where rope_dim != head_dim). */
     for (int i = 0; i < WUBU_NORM_SLOTS; i++) {
-        int sz = (i % 4 == 2 || i % 4 == 3) && (i < 4 * WUBU_LAYERS) ? 64 : 448;
+        int sz = (i % 4 == 2 || i % 4 == 3) && (i < 4 * WUBU_LAYERS)
+                 ? WUBU_HEAD_DIM : WUBU_DIM;
         tr->norm_g[i] = calloc_f((size_t)sz);
         tr->norm_m[i] = calloc_f((size_t)sz);
         tr->norm_v[i] = calloc_f((size_t)sz);
@@ -99,17 +111,18 @@ int wubu_train_zero_grad(wubu_train_t *tr)
 {
     if (!tr) return -1;
     for (int i = 0; i < WUBU_LAYERS; i++) {
-        memset(tr->q_proj_g[i], 0, 448 * 448 * sizeof(float));
-        memset(tr->k_proj_g[i], 0, 448 * 64 * sizeof(float));
-        memset(tr->v_proj_g[i], 0, 448 * 64 * sizeof(float));
-        memset(tr->o_proj_g[i], 0, 448 * 448 * sizeof(float));
-        memset(tr->g_proj_g[i], 0, 448 * 448 * sizeof(float));
-        memset(tr->gate_up_g[i], 0, 448 * 2456 * sizeof(float));
-        memset(tr->down_g[i], 0, 1228 * 448 * sizeof(float));
+        memset(tr->q_proj_g[i], 0, WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM) * sizeof(float));
+        memset(tr->k_proj_g[i], 0, WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM) * sizeof(float));
+        memset(tr->v_proj_g[i], 0, WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM) * sizeof(float));
+        memset(tr->o_proj_g[i], 0, WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM) * sizeof(float));
+        memset(tr->g_proj_g[i], 0, WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM) * sizeof(float));
+        memset(tr->gate_up_g[i], 0, WUBU_DIM * (2 * WUBU_FFN_DIM) * sizeof(float));
+        memset(tr->down_g[i], 0, WUBU_FFN_DIM * WUBU_DIM * sizeof(float));
     }
-    memset(tr->emb_g, 0, 16384 * 448 * sizeof(float));
+    memset(tr->emb_g, 0, WUBU_VOCAB * WUBU_DIM * sizeof(float));
     for (int i = 0; i < WUBU_NORM_SLOTS; i++) {
-        int sz = (i % 4 == 2 || i % 4 == 3) && (i < 4 * WUBU_LAYERS) ? 64 : 448;
+        int sz = (i % 4 == 2 || i % 4 == 3) && (i < 4 * WUBU_LAYERS)
+                 ? WUBU_HEAD_DIM : WUBU_DIM;
         memset(tr->norm_g[i], 0, (size_t)sz * sizeof(float));
     }
     tr->micro_steps = 0;

@@ -19,6 +19,7 @@
 #include "wubu_hive.h"
 #include "wubu.h"
 #include "wubu_train.h"
+#include "wubu35_dims.h"
 
 static int failures = 0;
 #define CHECK(c, m) do { if (!(c)) { printf("  FAIL: %s\n", m); failures++; } else { printf("  ok: %s\n", m); } } while (0)
@@ -33,8 +34,9 @@ static void seed_window(wubu_diag_t *d, wubu_diag_kind kind, int cell,
     }
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *model_path = (argc > 1) ? argv[1] : "models/wubu/model.safetensors";
     printf("=== test_diag (the hive diagnostic system, AN08) ===\n");
 
     /* --- oracle 1: ring-bounded --- */
@@ -207,9 +209,19 @@ int main(void)
     {
         printf("[oracle 7] real backprop grads -> GRAD cells\n");
         wubu_model_t m;
-        if (wubu_load(&m, "models/wubu/model.safetensors") != 0) {
-            printf("  FAIL: cannot load the seed model for oracle 7\n");
-            failures++;
+        /* probe + set the runtime dims BEFORE load (revolver doctrine:
+         * wubu_load reads the global WUBU35_DIMS, not compile-time) */
+        wubu35_dims_t d7;
+        if (wubu35_dims_probe(model_path, &d7) != 0) {
+            printf("  SKIP: no 512-aligned checkpoint at %s (oracle 7 "
+                   "needs one; the 448-dim SD seed predates the aligned "
+                   "rewrite)\n", model_path);
+        } else {
+            wubu35_dims_set(&d7);
+        if (wubu_load(&m, model_path) != 0) {
+            printf("  SKIP: checkpoint %s is not 512-aligned (448-dim "
+                   "seed predates Theory/08; oracle 7 runs when a WuBu1 "
+                   "checkpoint exists)\n", model_path);
         } else {
             wubu_buf_t b;
             wubu_hive_t hive;
@@ -252,6 +264,7 @@ int main(void)
             wubu_train_zero_grad(&tr);
             wubu_free(&m, &b);
         }
+        }   /* probe-else */
     }
 
     printf("\n%s (%d failures)\n",

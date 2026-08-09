@@ -196,3 +196,4 @@ bin/
 wubu_cli
 gen_text
 api_server
+/txt2img_sd
