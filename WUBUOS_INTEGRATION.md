@@ -18,7 +18,7 @@
 - `wubu_archd_daemon.c` — service supervisor
 - `wubu_realm.c` — cross-realm verification (DA-2 fail-closed)
 - `wubu_selfimprove.c` — self-modification loop (DA-1/2/3)
-- `wubu_verifier_bytropix.h` — bytropix integration contract
+- `wubu_verifier.h` — integration contract (bytropix-era verifier was folded into the main verifier)
 
 ## Integration Goals
 

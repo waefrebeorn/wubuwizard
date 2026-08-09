@@ -39,6 +39,23 @@ training, the research ledger, and the math vault. The **Body** half is
 | `MATH/lean/` | Lean-verified theorems (MobiusAdd, Poincaré ball, etc.) |
 | `tests/` (tools/test_*.c) | Test drivers, one per subsystem |
 
+## Branches (the 2-branch reality — 2026-08-09 consolidation)
+
+The repo was consolidated from 7 branches to 2. Do not create more:
+
+| Branch | Purpose |
+|---|---|
+| `wubu-integration` | **THE trunk** (GitHub default). ALL work flows here. |
+| `lfm25-adapter` | The LFM/Distiller agent's branch. Leave it alone. |
+
+- Work on local `unified`, push to `origin/wubu-integration`
+  (`git push origin unified:wubu-integration`). Fetch + rebase before
+  pushing — the other agent pushes to the same branch.
+- Retired branches are preserved as archive tags
+  (`archive/retired-*`) — see `docs/BRANCH-AUDIT-2026-08-09.md` for
+  the no-code-lost audit and recovery commands.
+- The old bytropix brand is GONE. The repo is wubuwizard.
+
 ## Build & test (the two commands that matter)
 
 ```bash

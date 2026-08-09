@@ -1,6 +1,6 @@
-# Research Papers — WuBuText AI
+# Research Papers — WuBu
 
-> **Location:** `/home/wubu/bytropix/THEORY/papers/`
+> **Location:** `THEORY/papers/` (in this repo)
 > **Total:** 30 papers (all arxiv abstracts as markdown)
 > **Last updated:** 2026-05-25
 
@@ -67,7 +67,7 @@
 | 25 | **DFT-WuBu** | 31KB | DFT-enhanced WuBu: spectral decomposition + hyperbolic geometry |
 | 26 | **DCT-WuBu** | 20KB | DCT-enhanced WuBu: discrete cosine transform integration |
 
-These live at `~/bytropix/ENCODERS/hash-mind/` — the WuBu Mind JAX implementations (WuBuMindJAX*.py, WuBuNest_Trainer.py 200KB, wubu_nesting_impl.py), plus C port at `~/bytropix/ENCODERS/hash-mind/c/`.
+These live at `ENCODERS/hash-mind/ (in this repo)` — the WuBu Mind JAX implementations (WuBuMindJAX*.py, WuBuNest_Trainer.py 200KB, wubu_nesting_impl.py), plus C port at `ENCODERS/hash-mind/ (in this repo)c/`.
 
 ## Runnable Math Proofs (`THEORY/math_viz/`)
 
@@ -81,7 +81,7 @@ These live at `~/bytropix/ENCODERS/hash-mind/` — the WuBu Mind JAX implementat
 | `06_symplectic_optimizer.py` | Symplectic integration of RSGD in T(H^n) | Same |
 | `07_lean_certificate.py` | Lean formal certificate generator | Same |
 
-All live at `~/bytropix/THEORY/math_viz/` — Python + Lean dual-proven theorems.
+All live at `THEORY/math_viz/` (in this repo) — Python + Lean dual-proven theorems.
 
 ## Systems Reference: Tailslayer (5 files — hedged reads / speculative execution)
 
