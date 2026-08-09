@@ -93,6 +93,32 @@ int main(int argc, char **argv)
                corr < -0.3 ? "tasks improve WITH loss — the colony works"
                : corr > 0.3 ? "tasks IMPROVE as loss WORSEENS — decoupled"
                : "no clear coupling");
+        /* the DA statistical fix (2026-08-09): the LEVELS correlation
+         * is inflated when both series are autocorrelated (the classic
+         * spurious-regression problem — Afyouni 2019 effective-dof,
+         * Granger/Newbold). The research-convergent check: correlate
+         * the FIRST DIFFERENCES (the changes co-move, not the levels).
+         * A real coupling survives differencing; a shared-trend
+         * artifact does not. */
+        double dl = 0, ds = 0, dls = 0, dss = 0, dll = 0;
+        int dn = 0;
+        for (int i = 1; i < n; i++) {
+            double dloss = ev[i].loss - ev[i-1].loss;
+            double dsu = ev[i].suite_score - ev[i-1].suite_score;
+            dl += dloss; ds += dsu; dn++;
+        }
+        dl /= dn; ds /= dn;
+        for (int i = 1; i < n; i++) {
+            double dloss = ev[i].loss - ev[i-1].loss - dl;
+            double dsu = ev[i].suite_score - ev[i-1].suite_score - ds;
+            dls += dloss * dsu; dss += dsu * dsu; dll += dloss * dloss;
+        }
+        double dcorr = (dss > 0 && dll > 0) ? dls / (sqrt(dss) * sqrt(dll)) : 0.0;
+        printf("corr(first-diff) = %.3f  (%s)\n", dcorr,
+               dcorr < -0.3 ? "the CHANGES co-move — a real coupling"
+               : dcorr > 0.3 ? "the changes co-move the WRONG way"
+               : "the levels-correlation is a shared-trend artifact "
+                 "(the changes do not co-move)");
         /* the first/last window comparison */
         int w = n > 20 ? n / 5 : n / 2;
         double s1 = 0, s2 = 0;

@@ -45,11 +45,18 @@ typedef struct {
     FILE *f;
     uint64_t n_written;
     char     path[512];
+    int      batch_pending;   /* events buffered since the last fsync */
+    int      batch_size;      /* fsync every N events (group commit) */
 } wubu_events_t;
 
 /* E1: open the recorder (append mode — a resume continues the stream).
+ * batch_size > 1 uses GROUP COMMIT (the DB WAL standard: one fsync per
+ * batch instead of per event — the naive per-event fsync is 5ms+ per
+ * write; SQLite/Postgres batch exactly this way). A kill loses at most
+ * batch_size trailing events (acceptable: the .hive/.prio sidecars are
+ * the authoritative state; the events are the telemetry).
  * Returns 0 on success. */
-int wubu_events_open(wubu_events_t *ev, const char *path);
+int wubu_events_open_batch(wubu_events_t *ev, const char *path, int batch_size);
 
 /* E2: append one event (a JSON line) + fsync (a kill loses nothing).
  * Returns 0 on success. */

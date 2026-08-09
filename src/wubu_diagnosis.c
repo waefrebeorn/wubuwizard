@@ -318,7 +318,16 @@ typedef struct {
 int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path)
 {
     if (!loop || !path) return -1;
-    FILE *f = fopen(path, "wb");
+    /* THE DA CRASH-CONSISTENCY FIX (2026-08-09, verified by research:
+     * write temp + fsync + rename + fsync dir is the universal atomic
+     * checkpoint pattern — 0xkiire crash-consistency + arXiv
+     * 2511.18323). The old direct fopen(path,"wb") write meant a
+     * SIGKILL mid-save left a HALF-WRITTEN .hive that the resume
+     * loaded as garbage (wrong magic, corrupt cells). The chaos test
+     * passed only because kills landed between saves. */
+    char tmp[640];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
     if (!f) return -1;
     hive_archive_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
@@ -326,12 +335,22 @@ int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path)
     hdr.ledger_n = (uint32_t)loop->ledger_n;
     hdr.grave_n = (uint32_t)loop->grave_n;
     hdr.batch = loop->batch;
-    fwrite(&hdr, sizeof(hdr), 1, f);
-    if (loop->ledger_n > 0)
-        fwrite(loop->ledger, sizeof(wubu_fitness_cell_t), loop->ledger_n, f);
-    if (loop->grave_n > 0)
-        fwrite(loop->graveyard, sizeof(wubu_fitness_cell_t), loop->grave_n, f);
-    fclose(f);
+    int ok = 1;
+    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) ok = 0;
+    if (ok && loop->ledger_n > 0 &&
+        fwrite(loop->ledger, sizeof(wubu_fitness_cell_t), loop->ledger_n, f)
+        != (size_t)loop->ledger_n) ok = 0;
+    if (ok && loop->grave_n > 0 &&
+        fwrite(loop->graveyard, sizeof(wubu_fitness_cell_t), loop->grave_n, f)
+        != (size_t)loop->grave_n) ok = 0;
+    if (fflush(f) != 0) ok = 0;
+    if (fsync(fileno(f)) != 0) ok = 0;   /* the data is on disk */
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) { remove(tmp); return -1; }
+    if (rename(tmp, path) != 0) { remove(tmp); return -1; }
+    /* fsync the DIRECTORY so the rename itself is durable */
+    int dfd = open(".", O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) { (void)fsync(dfd); close(dfd); }
     return 0;
 }
 
@@ -364,8 +383,14 @@ int wubu_diag_load(wubu_diag_loop_t *loop, const char *path)
         loop->graveyard = ng;
         loop->grave_cap = (int)gn;
     }
-    if (ln > 0) fread(loop->ledger, sizeof(wubu_fitness_cell_t), ln, f);
-    if (gn > 0) fread(loop->graveyard, sizeof(wubu_fitness_cell_t), gn, f);
+    if (ln > 0) {
+        size_t got_l = fread(loop->ledger, sizeof(wubu_fitness_cell_t), ln, f);
+        if (got_l != ln) { fclose(f); return -1; }
+    }
+    if (gn > 0) {
+        size_t got_g = fread(loop->graveyard, sizeof(wubu_fitness_cell_t), gn, f);
+        if (got_g != gn) { fclose(f); return -1; }
+    }
     fclose(f);
     loop->ledger_n = (int)ln;
     loop->grave_n = (int)gn;

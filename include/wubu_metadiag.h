@@ -63,6 +63,11 @@ typedef struct {
     float   lr_scale;          /* how much the slow path moves things */
     float   task_ema;          /* Phase 3: the running suite-score EMA */
     uint64_t n_policy_changes; /* AN47 #8: policy-change meta-cells */
+    int      stasis_patience;  /* DA fix: consecutive flat-trend slow
+                                  passes before the policy HOLDS (the
+                                  early-stopping patience window —
+                                  a single flat snapshot is noise) */
+    int      stasis_window;    /* the patience threshold (default 3) */
 } wubu_metadiag_t;
 
 /* M1: init. */

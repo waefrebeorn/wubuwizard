@@ -19,6 +19,7 @@ int wubu_metadiag_init(wubu_metadiag_t *md, wubu_hive_t *tissue,
     md->lr_scale = lr_scale > 0 ? lr_scale : 0.1f;
     md->mutation_rate = 0.5f;
     md->fitness_floor = 0.0f;
+    md->stasis_window = 3;   /* the patience: hold after 3 flat slow passes */
     md->window = (float *)calloc((size_t)md->win_cap, sizeof(float));
     if (!md->window) return -1;
     return 0;
@@ -101,15 +102,30 @@ int wubu_metadiag_slow(wubu_metadiag_t *md)
     for (int i = 0; i < md->win_n; i++) scale += fabsf(md->window[i]);
     scale /= (float)(md->win_n > 0 ? md->win_n : 1);
     if (fabsf(trend) < 1e-3f * scale) {
-        reason = 0;   /* stasis: hold the policy */
-    } else if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
-        md->mutation_rate += md->lr_scale * 0.5f;
-        md->fitness_floor -= md->lr_scale * 0.2f;
-        reason = (trend > 0) ? 1 : 2;   /* 1 = loss rising, 2 = suite failing */
+        /* the PATIENCE WINDOW (the early-stopping standard): a single
+         * flat snapshot is noise — the policy holds only after
+         * stasis_window consecutive flat slow passes. A real trend in
+         * either direction resets the counter immediately. */
+        md->stasis_patience++;
+        if (md->stasis_patience >= md->stasis_window) {
+            reason = 0;   /* confirmed stasis: hold the policy */
+            /* keep the counter pinned (it stays in stasis until a
+             * real trend shows) */
+            md->stasis_patience = md->stasis_window;
+        } else {
+            reason = 0;   /* too early to tell — hold this pass too */
+        }
     } else {
-        md->mutation_rate -= md->lr_scale * 0.3f;
-        md->fitness_floor += md->lr_scale * 0.1f;
-        reason = 3;                     /* 3 = improving, relax */
+        md->stasis_patience = 0;   /* a real trend broke the stasis */
+        if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
+            md->mutation_rate += md->lr_scale * 0.5f;
+            md->fitness_floor -= md->lr_scale * 0.2f;
+            reason = (trend > 0) ? 1 : 2;   /* 1 = loss rising, 2 = suite failing */
+        } else {
+            md->mutation_rate -= md->lr_scale * 0.3f;
+            md->fitness_floor += md->lr_scale * 0.1f;
+            reason = 3;                     /* 3 = improving, relax */
+        }
     }
     if (md->mutation_rate < 0.1f) md->mutation_rate = 0.1f;
     if (md->mutation_rate > 1.0f) md->mutation_rate = 1.0f;

@@ -8,14 +8,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-int wubu_events_open(wubu_events_t *ev, const char *path)
+int wubu_events_open_batch(wubu_events_t *ev, const char *path, int batch_size)
 {
     if (!ev || !path) return -1;
     memset(ev, 0, sizeof(*ev));
     ev->f = fopen(path, "a");   /* append: a resume continues the stream */
     if (!ev->f) return -1;
     snprintf(ev->path, sizeof(ev->path), "%s", path);
+    ev->batch_size = batch_size > 1 ? batch_size : 1;
     return 0;
+}
+
+int wubu_events_open(wubu_events_t *ev, const char *path)
+{
+    return wubu_events_open_batch(ev, path, 1);   /* the safe default */
 }
 
 int wubu_events_append(wubu_events_t *ev, const wubu_event_t *e)
@@ -34,9 +40,16 @@ int wubu_events_append(wubu_events_t *ev, const wubu_event_t *e)
             (unsigned long long)e->n_contract_violations,
             e->cell_idx, (double)e->prio_fisher, e->skill_version,
             (unsigned long long)e->traj_id);
-    fflush(ev->f);
-    fsync(fileno(ev->f));   /* a kill loses nothing */
     ev->n_written++;
+    /* the GROUP COMMIT (the DB WAL standard — one fsync per batch, not
+     * per event: the naive per-event fsync costs ~5ms each and the
+     * multi-hour run emits thousands of events) */
+    ev->batch_pending++;
+    if (ev->batch_pending >= ev->batch_size) {
+        fflush(ev->f);
+        fsync(fileno(ev->f));
+        ev->batch_pending = 0;
+    }
     return 0;
 }
 

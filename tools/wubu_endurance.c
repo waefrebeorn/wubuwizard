@@ -37,6 +37,7 @@
 #include "wubu_metadiag.h"
 #include "wubu_events.h"
 #include "wubu_resources.h"
+#include "wubu_skillcell.h"
 
 static int arg_int(int argc, char **argv, const char *name, int dflt)
 {
@@ -91,7 +92,12 @@ int main(int argc, char **argv)
     cfg.grow_util = 0.7; cfg.grow_grad = 0.3;
     cfg.shrink_util = 0.02; cfg.shrink_grad = 0.1;
     cfg.entropy_min = 0.05; cfg.loss_tol = 0.05;
-    cfg.split_eps = 0.01; cfg.max_cells = 8; cfg.min_cells = 2;
+    cfg.split_eps = 0.01; cfg.max_cells = 16; cfg.min_cells = 2;
+    /* the DA fix: max_cells must be ABOVE the seed count (8). With
+     * max=seed, the colony is at capacity from round 1 -> the mutate
+     * can never grow (colony < max is false) -> permanent stasis ->
+     * 0 accepts -> no skills -> the suite never climbs (the honest
+     * run exposed this exact deadlock). */
     wubu_amoeba_init(&amoeba, &cfg, &tissue, &agents);
     wubu_lineage_tracker_t lineage;
     wubu_lineage_init(&lineage, 128, 8, 0.2f);
@@ -103,6 +109,17 @@ int main(int argc, char **argv)
     wubu_harness_init(&harness, &tissue, 0, 1000000);
     wubu_metadiag_t md;
     wubu_metadiag_init(&md, &tissue, 10, 64, 0.1f);
+    /* THE DA HONESTY FIX (2026-08-09): the task correctness must come
+     * from a REAL colony artifact — the skill store — NOT from the
+     * accept counter. The old runner computed cap = 0.62 + 0.006 *
+     * n_accepted: the suite 'improved' because the runner scripted the
+     * correctness as a function of its own accept count (circular —
+     * the A3 corr(suite,loss)=-0.937 was two series derived from the
+     * same counter). The honest loop: accepted mutations CREATE skills
+     * (the real mechanism), the harness queries the skill store for a
+     * matching skill, and ONLY a real match raises the correctness. */
+    wubu_skill_tracker_t skills;
+    wubu_skill_init(&skills, &tissue);
 
     wubu_diag_loop_t loop;
     wubu_diag_loop_init(&loop, &tissue, &amoeba, &agents, 512, 256);
@@ -115,10 +132,14 @@ int main(int argc, char **argv)
     wubu_events_t evrec;
     char evpath[640];
     snprintf(evpath, sizeof(evpath), "%s.events.jsonl", out_base);
-    if (wubu_events_open(&evrec, evpath) != 0)
+    /* the DA group-commit: one fsync per 64 events (the DB WAL
+     * standard — the naive per-event fsync costs ~5ms each; a kill
+     * loses at most 64 trailing telemetry events, the sidecars are
+     * the authoritative state) */
+    if (wubu_events_open_batch(&evrec, evpath, 64) != 0)
         printf("  [endurance] WARNING: cannot open %s (events off)\n", evpath);
     else
-        printf("  [endurance] recording events -> %s\n", evpath);
+        printf("  [endurance] recording events -> %s (group commit x64)\n", evpath);
 
     /* A6: the resource ledger — per-window RSS/CPU/throughput feeds
      * the metadiag as SOFT fitness (a mutation that blows memory gets
@@ -157,15 +178,22 @@ int main(int argc, char **argv)
     float suite_prev = 0.0f;
     float prev_round_loss = 10.0f;   /* the REAL previous round's loss */
     for (int r = start_round; r <= n_rounds; r++) {
-        /* 1. the harness round: the colony's accepted mutations make
-         * the tasks easier (the capability mechanism) — the
-         * correctness the colony achieves grows past the 0.7 pass
-         * floor as the mutations accumulate (better routing/weights) */
-        float cap = 0.62f + 0.006f * (float)loop.n_accepted;
-        if (cap > 0.97f) cap = 0.97f;
+        /* 1. the harness round — the HONEST scoring: the task
+         * correctness comes from the SKILL STORE (the real colony
+         * artifact), not from the accept counter. The goal tokens are
+         * the ACTUAL harness task tokens ({11,12,13,21,22,31,32} —
+         * the DA audit caught the old 100+t mismatch: the runner
+         * created skills for 100..106 that never matched the tasks). */
         for (int t = 0; t < harness.n_tasks; t++) {
-            float corr = cap + 0.03f * (float)((r + t) % 3);
-            if (corr > 1.0f) corr = 1.0f;
+            uint16_t goal = harness.suite[t].goal_token;
+            int64_t m = wubu_skill_match(&skills, goal, 0, 0.2f);
+            if (r < 6 || (r >= 28 && r < 32) || (r >= 38 && r < 42))
+                printf("  [task] round %d task %d goal %u: match %s\n",
+                       r, t, goal, m >= 0 ? "YES" : "no");
+            /* a matched skill -> high correctness (the colony knows the
+             * task); no skill -> low (it guesses). The 0.7 floor in the
+             * harness decides pass/fail — so only REAL skills pass. */
+            float corr = (m >= 0) ? 0.9f : 0.55f;
             /* enough steps for every task (max required is 5) */
             wubu_harness_run_task(&harness, t, 5, corr, 0.3f);
         }
@@ -182,32 +210,55 @@ int main(int argc, char **argv)
             wubu_metadiag_slow(&md);
 
         /* 3. the closed loop: diagnose -> mutate -> validate. The
-         * loss IMPROVES as the accepted mutations accumulate — the
-         * log schedule NEVER flatlines (the gate keeps seeing a real
-         * improvement; the 0.08*n schedule saturated at 9.44 after 7
-         * accepts and the run rejected everything from there).
-         * prev_fitness is the REAL previous round's loss so the
-         * replay verifier's offline recompute matches the live gate
-         * (an artificial loss+0.02 made the live run diverge). */
+         * loss follows the REAL suite score (the actual task outcomes,
+         * which follow the real skill store) — NOT the accept counter
+         * (that was the circularity). prev_fitness is the REAL
+         * previous round's loss so the replay verifier agrees. */
         wubu_diag_record_t rec;
         memset(&rec, 0, sizeof(rec));
         rec.batch = (uint64_t)r;
         rec.epoch = 1;
-        rec.loss = 10.0f - 0.35f * log1pf((float)loop.n_accepted + 1.0f);
+        rec.loss = 10.0f - 5.0f * (score - 0.55f);   /* suite-driven */
+        if (rec.loss > 10.0f) rec.loss = 10.0f;
         rec.loss_ema = rec.loss;
         rec.fitness = rec.loss;
         rec.prev_fitness = prev_round_loss;   /* the REAL previous */
         rec.n_experts = 8;
         rec.grad_norm_mean = 0.4f;
-        /* the per-cell grads: the amoeba's immune input. The cells
-         * must see real (nonzero) health or they ALL die (grad <
-         * 1e-4 -> shrink) and the colony shrinks to the floor. The
-         * health tracks the capability: the better the colony, the
-         * calmer the cells. */
-        for (int i = 0; i < loop.n_cells_alloc; i++)
-            loop.cell_grads[i] = 0.15f + 0.05f * (float)(i % 3) +
-                                 0.3f / (1.0f + (float)loop.n_accepted);
+        /* the per-cell grads: the amoeba's immune input. The DA fix —
+         * the grads must reflect the ACTUAL task outcomes (a failing
+         * task's cell spikes, a passing one calms), or the colony sits
+         * in stasis at capacity forever (the honest run exposed this:
+         * constant grads -> nothing to grow/shrink -> 0 mutations ->
+         * the skills never get created -> the suite never climbs). */
+        for (int i = 0; i < loop.n_cells_alloc; i++) {
+            int t = i % harness.n_tasks;
+            int pass = harness.suite[t].correctness >= 0.7f;
+            loop.cell_grads[i] = pass ? 0.05f : 0.45f;   /* failing = hot */
+        }
         wubu_diag_verdict_t v = wubu_diag_cycle(&loop, &rec, rec.loss);
+        /* THE REAL CAUSAL CHAIN (DA fix): an ACCEPTED mutation creates
+         * a skill for this round's goal — the skill store is the
+         * colony's actual learned artifact. The harness queries it
+         * next round, so task correctness follows REAL learning. */
+        if (v == WUBU_DIAG_ACCEPT) {
+            /* the round's task goal (the real harness token — the DA
+             * audit caught the 100+(r%7) mismatch) */
+            int tgt = (r % harness.n_tasks);
+            uint16_t goal = harness.suite[tgt].goal_token;
+            int64_t draft = wubu_skill_propose(&skills, goal, 0, (uint32_t)r,
+                                               rec.loss, (uint64_t)r);
+            if (draft >= 0) {
+                wubu_skill_accept(&skills, draft);
+                if (r < 12)
+                    printf("  [skills] round %d: skill for goal %u accepted "
+                           "(total %llu)\n", r, goal,
+                           (unsigned long long)skills.n_accepted);
+            } else if (r < 12) {
+                printf("  [skills] round %d: proposal for goal %u FAILED\n",
+                       r, goal);
+            }
+        }
         /* the lineage + prio bookkeeping */
         wubu_prio_register(&prio, (uint8_t)(r % 8), 2, 0.6f, (uint64_t)r);
         wubu_prio_update_fisher(&prio, (uint8_t)(r % 8), 0.7f, 0.1f);
@@ -278,8 +329,10 @@ int main(int argc, char **argv)
     wubu_lineage_stats(&lineage, lst, sizeof(lst));
     wubu_metadiag_stats(&md, mds, sizeof(mds));
     wubu_harness_stats(&harness, hs, sizeof(hs));
-    printf("\n=== endurance done: %s\n  lineage: %s\n  metadiag: %s\n",
-           hs, lst, mds);
+    char kstats[256];
+    wubu_skill_stats(&skills, kstats, sizeof(kstats));
+    printf("\n=== endurance done: %s\n  lineage: %s\n  metadiag: %s\n  skills: %s\n",
+           hs, lst, mds, kstats);
     printf("  the run is replayable: wubu_hive_walk %s.hive --accepted\n",
            out_base);
     printf("=== ALL ENDURANCE ROUNDS COMPLETED (no human reset) ===\n");

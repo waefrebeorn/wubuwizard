@@ -90,11 +90,18 @@ int wubu_amoeba_diagnose(wubu_amoeba_t *am)
     if (!am || !am->tissue) return -1;
     int n = 0;
     double mean_grad = 0;
-    /* pass 1: count + mean grad (the hive's foreach jumps skips) */
+    /* pass 1: count + mean grad — the DA type-check: the amoeba's OWN
+     * cells only (the shared tissue holds skills/traj/fitness/meta
+     * cells whose grad_norm offset is garbage) */
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
             if (blk->skip[s] == 0) {
+                void *p = blk->slots[s];
+                int is_mine = 0;
+                for (int i = 0; i < am->cfg.max_cells; i++)
+                    if (p == (void *)&am->cells[i]) { is_mine = 1; break; }
+                if (!is_mine) continue;
                 wubu_amoeba_cell_t *c =
                     (wubu_amoeba_cell_t *)blk->slots[s];
                 c->utilization = 0;
@@ -109,11 +116,16 @@ int wubu_amoeba_diagnose(wubu_amoeba_t *am)
     am->vitals.n_grow = 0;
     am->vitals.n_shrink = 0;
     am->vitals.n_stasis = 0;
-    /* pass 2: classify every live cell */
+    /* pass 2: classify every LIVE AMOEBA cell (the same type-check) */
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
             if (blk->skip[s] == 0) {
+                void *p = blk->slots[s];
+                int is_mine = 0;
+                for (int i = 0; i < am->cfg.max_cells; i++)
+                    if (p == (void *)&am->cells[i]) { is_mine = 1; break; }
+                if (!is_mine) continue;
                 wubu_amoeba_cell_t *c =
                     (wubu_amoeba_cell_t *)blk->slots[s];
                 c->loss_delta = loss_delta_approx(c->grad_norm, mean_grad);
@@ -233,44 +245,62 @@ int wubu_amoeba_mutate(wubu_amoeba_t *am)
     int n = 0;
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
-        for (size_t s = 0; s < blk->cap; s++)
-            if (blk->skip[s] == 0) {
-                wubu_amoeba_cell_t *c =
-                    (wubu_amoeba_cell_t *)blk->slots[s];
-                mean_grad += c->grad_norm;
-                n++;
-            }
+        for (size_t s = 0; s < blk->cap; s++) {
+            if (blk->skip[s]) continue;
+            void *p = blk->slots[s];
+            /* the DA type-check: the mean is over the amoeba's OWN
+             * cells only (the shared tissue holds skills/traj/fitness/
+             * meta cells whose grad_norm offset is garbage) */
+            int is_mine = 0;
+            for (int i = 0; i < am->cfg.max_cells; i++)
+                if (p == (void *)&am->cells[i]) { is_mine = 1; break; }
+            if (!is_mine) continue;
+            wubu_amoeba_cell_t *c = (wubu_amoeba_cell_t *)p;
+            mean_grad += c->grad_norm;
+            n++;
+        }
     }
     if (n == 0) return 0;
     mean_grad /= (double)n;
 
-    /* collect the actions first (the hive changes under us) */
+    /* collect the actions first (the hive changes under us). THE DA
+     * TYPE-CONFUSION FIX: only the amoeba's OWN registry cells may be
+     * classified (grow/die). The shared tissue also holds skill cells
+     * (the endurance runner), traj cells (the harness), fitness cells
+     * (the diag ledger), and meta-cells (the metadiag) — reading
+     * grad_norm at their offsets gives garbage, and cells that LOOKED
+     * dead were erased from the hive (the run's skills vanished: the
+     * same shared-tissue bug class as the max_cells contract). */
     wubu_amoeba_cell_t *to_grow[64], *to_shrink[64];
     int ng = 0, ns = 0;
     int colony = amoeba_live_cells(am);   /* the amoeba's own count */
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
-            if (blk->skip[s] == 0) {
-                wubu_amoeba_cell_t *c =
-                    (wubu_amoeba_cell_t *)blk->slots[s];
-                /* grow: grad >> mean (the cell is overworked); only up
-                 * to the ceiling (the COLONY ceiling, not the whole
-                 * hive) */
-                int grow = c->grad_norm >
-                           am->cfg.grow_grad * mean_grad &&
-                           colony < am->cfg.max_cells;
-                /* die: grad << mean OR below the absolute floor (the
-                 * cell is dead weight); only down to the floor. The
-                 * absolute floor catches the all-dead colony: when
-                 * every grad is ~0 the relative test can't fire. */
-                int die  = (c->grad_norm <
-                            am->cfg.shrink_grad * mean_grad ||
-                            c->grad_norm < 1e-4) &&
-                           colony > am->cfg.min_cells;
-                if (grow && ng < 16) to_grow[ng++] = c;
-                else if (die && ns < 16) to_shrink[ns++] = c;
-            }
+            if (blk->skip[s]) continue;
+            void *p = blk->slots[s];
+            /* the type check: is this one of the amoeba's cells? */
+            int is_mine = 0;
+            for (int i = 0; i < am->cfg.max_cells; i++)
+                if (p == (void *)&am->cells[i]) { is_mine = 1; break; }
+            if (!is_mine) continue;   /* not the amoeba's — skip */
+            wubu_amoeba_cell_t *c = (wubu_amoeba_cell_t *)p;
+            /* grow: grad >> mean (the cell is overworked); only up
+             * to the ceiling (the COLONY ceiling, not the whole
+             * hive) */
+            int grow = c->grad_norm >
+                       am->cfg.grow_grad * mean_grad &&
+                       colony < am->cfg.max_cells;
+            /* die: grad << mean OR below the absolute floor (the
+             * cell is dead weight); only down to the floor. The
+             * absolute floor catches the all-dead colony: when
+             * every grad is ~0 the relative test can't fire. */
+            int die  = (c->grad_norm <
+                        am->cfg.shrink_grad * mean_grad ||
+                        c->grad_norm < 1e-4) &&
+                       colony > am->cfg.min_cells;
+            if (grow && ng < 16) to_grow[ng++] = c;
+            else if (die && ns < 16) to_shrink[ns++] = c;
         }
     }
     /* grow first (the colony extends), then shrink (it retracts) */
