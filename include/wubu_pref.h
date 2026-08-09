@@ -1,63 +1,79 @@
 /*
- * wubu_pref.h -- preference-optimization frontier (Theme IQ). C11.
- * SimPO/CPO/IPO/RE-PO/AlphaPO losses + the alignment infra: margins,
- * length-bias correction, pair weighting, dedup, mixing, aggregation,
- * noise robustness, token-level, caches, early stopping, staleness.
+ * wubu_pref.h -- the RLHF ORACLE (the user directive #4: "give the
+ * oracle teeth"). The loop ends with 'RLHF oracle -> repeat'; this
+ * module makes the oracle real:
+ *
+ *   - preference pairs generated FROM the hive cells that just
+ *     mutated (accepted vs rejected = preferred vs dispreferred)
+ *   - a small ONLINE preference model: a per-cell survival score
+ *     updated by the pairwise comparisons (the Bradley-Terry update)
+ *   - credit assignment flows back into cell fitness: successful
+ *     mutation lineages get higher survival probability
+ *
+ * Pure C11, opaque, no third party. The preference model is another
+ * specialized cell type in the colony (a thin cell that learns which
+ * mutation lineages survive).
  */
 #ifndef WUBU_PREF_H
 #define WUBU_PREF_H
 
 #include <stdint.h>
+#include <stddef.h>
 
-/* IQ01: SimPO -- reference-free, length-normalized average log-prob. */
-float wubu_pref_simpo(float logp_win, float logp_lose,
-                      int len_win, int len_lose, float beta, float gamma);
+/* one preference pair: the accepted (preferred) vs the rejected
+ * (dispreferred) hive outcome. The pairs come from the diagnosis
+ * archive (the ledger vs the graveyard). */
+typedef struct {
+    uint64_t batch;          /* provenance */
+    float    win_fitness;    /* the preferred outcome's fitness */
+    float    lose_fitness;   /* the dispreferred outcome's fitness */
+    uint8_t  cell_idx;       /* which cell the pair concerns */
+    uint8_t  lens;           /* the specialist lens (0xFF = whole colony) */
+    uint8_t  won;            /* 1 = this cell's lineage WON (fitness
+                                improved), 0 = it LOST */
+} wubu_pref_pair_t;
 
-/* IQ03: IPO -- squared-error preference loss. */
-float wubu_pref_ipo(float logp_win, float logp_lose, float beta, float tau);
+/* the online preference model state */
+typedef struct {
+    /* the per-cell survival scores (the Bradley-Terry logits) */
+    float *survival;          /* [n_cells] */
+    int    n_cells;
+    /* the pairing history (the recent pairs) */
+    wubu_pref_pair_t *pairs;
+    int    pairs_n, pairs_cap;
+    /* the learning rate (the oracle's teeth) */
+    float  lr;
+    /* telemetry */
+    uint64_t updates;         /* preference updates applied */
+    uint64_t flips;           /* times the oracle changed a survival */
+} wubu_pref_t;
 
-/* IQ08: length-bias-corrected reward (normalized by the length^alpha). */
-float wubu_pref_len_norm(float logp, int len, float alpha);
+/* P1: init the preference model. n_cells = the colony size. */
+int wubu_pref_init(wubu_pref_t *pf, int n_cells, int pairs_cap, float lr);
 
-/* IQ06: margin-aware pair sampling score (prefer informative pairs). */
-float wubu_pref_margin_score(float logp_win, float logp_lose, float margin);
+/* P2: build a preference pair from a mutation outcome (the accepted
+ * mutation is preferred over the rejected one — from the SAME hive
+ * lineage). won = 1 if this cell's lineage improved (the accepted
+ * side), 0 if it lost (the rejected side). Returns 0 on success. */
+int wubu_pref_pair_from_outcome(wubu_pref_t *pf, uint64_t batch,
+                                float win_fitness, float lose_fitness,
+                                uint8_t cell_idx, uint8_t lens,
+                                uint8_t won);
 
-/* IQ10: pair-difficulty weight (easy pairs down-weighted). */
-float wubu_pref_difficulty_weight(float gap);
+/* P3: apply the preference update (the Bradley-Terry logit update):
+ * the winner's survival += lr*(1-p), the loser's survival -= lr*p
+ * with p = sigmoid(win - lose). This is the credit assignment: the
+ * successful lineage's cells get higher survival probability. */
+int wubu_pref_update(wubu_pref_t *pf);
 
-/* IQ11: reward accuracy -- the preference-vs-generation alignment. */
-float wubu_pref_accuracy(const float *win_scores, const float *lose_scores,
-                         int n);
+/* P4: read a cell's survival score (the mutation gate uses this:
+ * mutations with higher lineage survival are more likely to pass). */
+float wubu_pref_survival(const wubu_pref_t *pf, int cell_idx);
 
-/* IQ12: preference-pair dedup (near-duplicate suppression). */
-int wubu_pref_dedup(const float **keys, int n, int d, const float *new_key,
-                    float tol);
+/* P5: the oracle telemetry. */
+void wubu_pref_stats(const wubu_pref_t *pf, char *buf, size_t cap);
 
-/* IQ13: offline/online mixing coefficient (static + live feedback). */
-float wubu_pref_mix(float offline_w, int online_steps, int total);
-
-/* IQ14: annotator consensus -> one pair (mean with disagreement flag). */
-int wubu_pref_consensus(const float *votes, int n, float *out, float *spread);
-
-/* IQ15: margin anneal (linear from start to end). */
-float wubu_pref_margin_schedule(float start, float end, float t);
-
-/* IQ16: noise-robust preference loss (sigmoid soften). */
-float wubu_pref_noise_loss(float logit, float eps);
-
-/* IQ17: token-level reward accumulation (per-token win/lose logits). */
-float wubu_pref_token_reward(const float *tok_win, const float *tok_lose,
-                             int n);
-
-/* IQ19: preference gradient cache (reuse pair contributions). */
-typedef struct { float key; float contrib; int valid; } wubu_pref_cache_t;
-float wubu_pref_cache_get(wubu_pref_cache_t *c, float key, float fallback);
-void  wubu_pref_cache_put(wubu_pref_cache_t *c, float key, float contrib);
-
-/* IQ20: early stopping gate by reward accuracy. */
-int wubu_pref_early_stop(float acc, float th, int patience, int *stale);
-
-/* IQ22: pair staleness weight (age decay). */
-float wubu_pref_staleness(float age, float half_life);
+/* P6: free. */
+void wubu_pref_free(wubu_pref_t *pf);
 
 #endif
