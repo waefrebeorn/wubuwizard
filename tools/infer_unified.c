@@ -133,10 +133,10 @@ int main(int argc, char **argv) {
         if (layer->is_ssm) {
             float *ssm_state = model.ssm_states + l * SSM_V_HEADS * SSM_D_STATE * SSM_D_STATE;
             float *conv_state = model.conv_states + l * (CONV_KERNEL - 1) * CONV_DIM;
-            wubu_ssm_forward(normed, B, T, &layer->ssm, ssm_state, conv_state, attn_out, NULL, NULL);
+            wubu_ssm_forward(normed, B, T, &layer->ssm, ssm_state, conv_state, attn_out, NULL, NULL, NULL);
             total_ssm += now_sec() - t_a;
         } else {
-            wubu_gqa_forward(normed, B, T, &layer->gqa, D_MODEL, attn_out, NULL, NULL, 0, NULL, NULL, layer->gqa.head_dim, layer->gqa.q_heads, layer->gqa.kv_heads);
+            wubu_gqa_forward(normed, B, T, &layer->gqa, attn_out, NULL, NULL, 0, NULL, NULL);
             total_gqa += now_sec() - t_a;
         }
 
@@ -165,8 +165,8 @@ int main(int argc, char **argv) {
         int n_unique = 0;
 
         if (moe_q[l].has_moe) {
-            if (wubu_moe_load_layer(ctx, l, &layer->moe, D_MODEL, D_FF, N_EXPERTS)) {
-                wubu_moe_forward(normed2, B, T, &layer->moe, ffn_out, NULL, N_ACTIVE_EXPTS, N_EXPERTS, D_MODEL, D_FF);
+            if (wubu_moe_load_layer(ctx, l, &layer->moe)) {
+                wubu_moe_forward(normed2, B, T, &layer->moe, ffn_out, NULL);
                 wubu_moe_free_layer(&layer->moe);
             } else {
                 memcpy(ffn_out, normed2, N * D_MODEL * sizeof(float));

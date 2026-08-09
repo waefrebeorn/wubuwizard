@@ -483,7 +483,7 @@ int main(int argc, char **argv) {
                     mc->ed[u]=de+(int64_t)eid*D_FF*D_MODEL;
                 }
                 mw.ffn_gate_exps=ge;mw.ffn_up_exps=ue;mw.ffn_down_exps=de;
-                wubu_moe_forward(n2,B,fwd_T,&mw,ffn_out, NULL, N_ACTIVE_EXPTS, N_EXPERTS, D_MODEL, D_FF);
+                wubu_moe_forward(n2,B,fwd_T,&mw,ffn_out, NULL);
                 cudaMemcpyAsync(d_np,ffn_out,fwd_N*D_MODEL*sizeof(float),cudaMemcpyHostToDevice,stream);
             } else {
                 memcpy(saved_ffn_out+l*N*D_MODEL,saved_normed2+l*N*D_MODEL,fwd_N*D_MODEL*sizeof(float));

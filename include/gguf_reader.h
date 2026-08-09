@@ -168,6 +168,9 @@ const uint64_t *gguf_get_iq1s_grid(void);
 // Returns the number of bytes read, or 0 on error.
 int gguf_read_raw_tensor(gguf_ctx *ctx, gguf_tensor_info *tensor, void *output);
 
+// Float16 → Float32 (exported for wubu_weight.c and dequant paths)
+float gguf_f16_to_f32(uint16_t h);
+
 #ifdef __cplusplus
 }
 #endif

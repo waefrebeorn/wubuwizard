@@ -14,6 +14,7 @@
 
 #include "wubu_ssm.h"
 #include "wubu_poincare_gqa.h"
+#include "gguf_reader.h"   /* GGML_TYPE_F32 for F32-blob aliasing */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +78,18 @@ int main(void) {
         return 1;
     }
 
+    /* Current GQA forward reads the quantized-blob fields; for F32-only
+     * test weights, alias the _q pointer to the F32 buffer with type F32
+     * so quantized_matmul_batched takes its F32 path. */
+    w.attn_q_weight_q = (const uint8_t *)w.attn_q_weight;
+    w.attn_q_weight_type = GGML_TYPE_F32;
+    w.attn_k_weight_q = (const uint8_t *)w.attn_k_weight;
+    w.attn_k_weight_type = GGML_TYPE_F32;
+    w.attn_v_weight_q = (const uint8_t *)w.attn_v_weight;
+    w.attn_v_weight_type = GGML_TYPE_F32;
+    w.attn_output_weight_q = (const uint8_t *)w.attn_output_weight;
+    w.attn_output_weight_type = GGML_TYPE_F32;
+
     // Initialize weights with small values
     float q_scale = 0.01f;
     float k_scale = 0.01f;
@@ -108,8 +121,8 @@ int main(void) {
     // ========== Run Euclidean GQA ==========
     printf("\nRunning Euclidean GQA...\n");
     memset(output_euclidean, 0, N * D_MODEL * sizeof(float));
-    wubu_gqa_forward(x, B, T, &w, D_MODEL, output_euclidean,
-                      NULL, NULL, 0, NULL, NULL, w.head_dim, w.q_heads, w.kv_heads);
+    wubu_gqa_forward(x, B, T, &w, output_euclidean,
+                      NULL, NULL, 0, NULL, NULL);
 
     // Check Euclidean output for NaN (informational only)
     int euclidean_nan = 0;

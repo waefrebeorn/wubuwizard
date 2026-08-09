@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <immintrin.h>  // AVX2/FMA intrinsics (l2_norm, rms_norm, conv1d)
 
 /* ---- Global shared with wubu_ssm.c ---- */
 float g_ssm_l2_eps = 1e-6f;
@@ -79,6 +80,8 @@ void wubu_silu_backward(int n, const float *x, const float *y,
  * ============================================================ */
 void wubu_l2_norm(int B, int T, int n_heads, int d,
                   const float *x, float eps, float *out) {
+    // x: [B, T, n_heads, d]
+    // out: [B, T, n_heads, d]
     int seq_len = B * T;
     #pragma omp parallel for collapse(2) if(seq_len * n_heads > 100)
     for (int s = 0; s < seq_len; s++) {
@@ -86,25 +89,75 @@ void wubu_l2_norm(int B, int T, int n_heads, int d,
             const float *inp = x + (s * n_heads + h) * d;
             float *oup = out + (s * n_heads + h) * d;
             float sum_sq = 0.0f;
+#ifdef __AVX2__
+            __m256 acc = _mm256_setzero_ps();
+            int i;
+            for (i = 0; i <= d - 8; i += 8) {
+                __m256 v = _mm256_loadu_ps(inp + i);
+                acc = _mm256_fmadd_ps(v, v, acc);
+            }
+            __m128 lo = _mm256_castps256_ps128(acc);
+            __m128 hi = _mm256_extractf128_ps(acc, 1);
+            lo = _mm_add_ps(lo, hi);
+            lo = _mm_hadd_ps(lo, lo);
+            lo = _mm_hadd_ps(lo, lo);
+            sum_sq = _mm_cvtss_f32(lo);
+            for (; i < d; i++) sum_sq += inp[i] * inp[i];
+#else
             for (int i = 0; i < d; i++) sum_sq += inp[i] * inp[i];
+#endif
             float scale = 1.0f / sqrtf(sum_sq + eps);
+#ifdef __AVX2__
+            __m256 v_scale = _mm256_set1_ps(scale);
+            for (int i = 0; i <= d - 8; i += 8)
+                _mm256_storeu_ps(oup + i, _mm256_mul_ps(_mm256_loadu_ps(inp + i), v_scale));
+            for (int i = (d / 8) * 8; i < d; i++) oup[i] = inp[i] * scale;
+#else
             for (int i = 0; i < d; i++) oup[i] = inp[i] * scale;
+#endif
         }
     }
 }
 
 void wubu_rms_norm(int B, int T, int d,
-                   const float *x, const float *weight, float eps, float *out) {
+                   const float *x, const float *weight,
+                   float eps, float *out) {
+    // x: [B, T, d]
+    // weight: [d]
+    // out: [B, T, d]
     int seq_len = B * T;
     #pragma omp parallel for if(seq_len > 10)
     for (int s = 0; s < seq_len; s++) {
         const float *inp = x + s * d;
         float *oup = out + s * d;
         float sum_sq = 0.0f;
+#ifdef __AVX2__
+        __m256 acc = _mm256_setzero_ps();
+        int i;
+        for (i = 0; i <= d - 8; i += 8) {
+            __m256 v = _mm256_loadu_ps(inp + i);
+            acc = _mm256_fmadd_ps(v, v, acc);
+        }
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        sum_sq = _mm_cvtss_f32(lo);
+        for (; i < d; i++) sum_sq += inp[i] * inp[i];
+#else
         for (int i = 0; i < d; i++) sum_sq += inp[i] * inp[i];
+#endif
         float rms = sqrtf(sum_sq / d + eps);
         float scale = 1.0f / rms;
+#ifdef __AVX2__
+        __m256 v_scale = _mm256_set1_ps(scale);
+        for (int i = 0; i <= d - 8; i += 8)
+            _mm256_storeu_ps(oup + i, _mm256_mul_ps(_mm256_mul_ps(_mm256_loadu_ps(inp + i), v_scale), _mm256_loadu_ps(weight + i)));
+        for (int i = (d / 8) * 8; i < d; i++) oup[i] = inp[i] * scale * weight[i];
+#else
         for (int i = 0; i < d; i++) oup[i] = inp[i] * scale * weight[i];
+#endif
     }
 }
 
@@ -117,14 +170,19 @@ void wubu_l2_norm_backward(int B, int T, int n_heads, int d,
             const float *inp = x + (s * n_heads + h) * d;
             const float *do_h = d_out + (s * n_heads + h) * d;
             float *dx = d_x + (s * n_heads + h) * d;
+            
             double sum_sq = 0.0;
             for (int i = 0; i < d; i++) sum_sq += (double)inp[i] * (double)inp[i];
-            float norm = sqrtf((float)sum_sq + eps);
+            float norm = sqrtf(sum_sq + eps);
             float n3 = norm * norm * norm;
+            
+            // d_i = (do_i / norm) - (x_i / n³) * sum_j (do_j * x_j)
             double dot = 0.0;
             for (int j = 0; j < d; j++) dot += (double)do_h[j] * (double)inp[j];
-            for (int i = 0; i < d; i++)
+            
+            for (int i = 0; i < d; i++) {
                 dx[i] += (float)((double)do_h[i] / norm - (double)inp[i] * dot / n3);
+            }
         }
     }
 }
@@ -150,105 +208,6 @@ void wubu_rms_norm_backward(int B, int T, int d,
     }
 }
 
-/* ============================================================
- * SSM backward primitives (extracted during ADR-002 Strangler Fig
- * but the definitions never landed in wubu_ops.c — only the
- * silu/l2_norm backward pair made it. These were the missing third.)
- * ============================================================ */
-
-void wubu_ssm_backward_output_proj(
-    const float *delta_out,
-    const float *d_output,
-    const float *ssm_out_weight,
-    float *d_delta_out,
-    float *d_ssm_out_weight,
-    int N)
-{
-    for (int s = 0; s < N; s++) {
-        for (int i = 0; i < VALUE_DIM; i++) {
-            double sum = 0.0;
-            for (int j = 0; j < WUBU_DIMS.d_model; j++)
-                sum += (double)d_output[s * WUBU_DIMS.d_model + j] *
-                       (double)ssm_out_weight[i * WUBU_DIMS.d_model + j];
-            d_delta_out[s * VALUE_DIM + i] += (float)sum;
-        }
-    }
-    if (d_ssm_out_weight) {
-        for (int i = 0; i < VALUE_DIM; i++) {
-            for (int j = 0; j < WUBU_DIMS.d_model; j++) {
-                double sum = 0.0;
-                for (int s = 0; s < N; s++)
-                    sum += (double)delta_out[s * VALUE_DIM + i] *
-                           (double)d_output[s * WUBU_DIMS.d_model + j];
-                d_ssm_out_weight[i * WUBU_DIMS.d_model + j] += (float)sum;
-            }
-        }
-    }
-}
-
-void wubu_ssm_backward_gated_norm(
-    const float *x,
-    const float *z_silu,
-    const float *d_out,
-    const float *norm_w,
-    float *d_x,
-    float *d_z_silu,
-    int B, int T)
-{
-    const int N = B * T;
-    const int d = SSM_D_STATE;
-    const int n_heads = SSM_V_HEADS;
-    #pragma omp parallel for collapse(2) if(N * n_heads > 100)
-    for (int s = 0; s < N; s++) {
-        for (int h = 0; h < n_heads; h++) {
-            const float *x_h  = x + (s * n_heads + h) * d;
-            const float *z_h  = z_silu + (s * n_heads + h) * d;
-            const float *do_h = d_out + (s * n_heads + h) * d;
-            float *dx_h  = d_x + (s * n_heads + h) * d;
-            float *dz_h  = d_z_silu + (s * n_heads + h) * d;
-
-            double sum_sq = 0.0;
-            for (int i = 0; i < d; i++) sum_sq += (double)x_h[i] * (double)x_h[i];
-            float rms = sqrtf((float)(sum_sq / d) + 1e-6f);
-            float scale = 1.0f / rms;
-            float scale3 = scale * scale * scale;
-            double inner = 0.0;
-            for (int j = 0; j < d; j++)
-                inner += (double)do_h[j] * (double)x_h[j] *
-                         (double)norm_w[j] * (double)z_h[j];
-
-            for (int i = 0; i < d; i++) {
-                float grad = do_h[i] * norm_w[i] * scale * z_h[i];
-                grad -= (scale3 / d) * x_h[i] * (float)inner;
-                dx_h[i] += grad;
-                dz_h[i] += do_h[i] * x_h[i] * norm_w[i] * scale;
-            }
-        }
-    }
-}
-
-void wubu_ssm_backward_gated_norm_weight(
-    const float *x, const float *z_silu,
-    const float *d_out,
-    float *d_norm_weight, int B, int T)
-{
-    if (!d_norm_weight) return;
-    const int N = B * T;
-    const int d = SSM_D_STATE;
-    const int n_vh = SSM_V_HEADS;
-    for (int s = 0; s < N; s++) {
-        for (int h = 0; h < n_vh; h++) {
-            const float *x_h  = x + (s * n_vh + h) * d;
-            const float *z_h  = z_silu + (s * n_vh + h) * d;
-            const float *do_h = d_out + (s * n_vh + h) * d;
-            double sum_sq = 0.0;
-            for (int i = 0; i < d; i++) sum_sq += (double)x_h[i] * (double)x_h[i];
-            float scale = 1.0f / sqrtf((float)(sum_sq / d) + 1e-6f);
-            for (int i = 0; i < d; i++)
-                d_norm_weight[i] += do_h[i] * x_h[i] * scale * z_h[i];
-        }
-    }
-}
 
 /* ============================================================
  * 1D Convolution (depthwise, causal)
@@ -256,9 +215,16 @@ void wubu_ssm_backward_gated_norm_weight(
 void wubu_conv1d(int B, int T, int C, int k,
                  const float *input, const float *kernel,
                  float *output) {
-    #pragma omp parallel for collapse(2) if((int64_t)B * T * C * k > 100000)
+    if (B <= 0 || T <= 0 || C <= 0 || k <= 0) return;
+    // input: [B, T+k-1, C] — already padded with k-1 zeros at start
+    // kernel: [k, C]
+    // output: [B, T, C]
+    #pragma omp parallel for collapse(2) if(B * T * C * k > 100000)
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
+            // AVX2 conv1d disabled: kernel[ki + c*k] is per-channel.
+            // Broadcasting one channel's kernel to all 8 vector channels
+            // produces wrong output. Sequential path always used.
             for (int c = 0; c < C; c++) {
                 float sum = 0.0f;
                 for (int ki = 0; ki < k; ki++) {

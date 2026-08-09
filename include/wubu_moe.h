@@ -16,7 +16,7 @@ extern "C" {
 #define SHARED_D_FF     512   // shared expert intermediate dimension
 
 // MoE weights for one layer
-typedef struct {
+typedef struct moe_weights_t {
     // Router
     float *ffn_gate_inp;      // [D_MODEL, N_EXPERTS] = [2048, 256] — router weight
     

@@ -36,7 +36,7 @@ static void test_moe_router(gguf_ctx *ctx, int max_T) {
         float *scores = (float *)malloc(N * N_EXPERTS * sizeof(float));
         
         double t0 = now_sec();
-        wubu_moe_router(x, 1, T, gate_inp, scores, N_EXPERTS, D_MODEL);
+        wubu_moe_router(x, 1, T, gate_inp, scores);
         double t = now_sec() - t0;
         
         double tok_s = T / t;

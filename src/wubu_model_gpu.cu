@@ -9,7 +9,8 @@
  *   Quantized mode (future): keep Q5_K on GPU, dequant-on-fly kernel
  */
 #include "wubu_model.h"
-#include "wubu_backend.h"   /* backend vtable install on GPU init/free */
+#include "wubu_backend.h"
+#include "wubu_dims.h"
 #include "cuda_kernels.h"
 #include "bench.h"
 #include "gguf_reader.h"
@@ -219,19 +220,19 @@ int wubu_model_gpu_init(wubu_model_t *model, int max_ctx, int chunk_sz) {
     if (!gpu) return 0;
 
     // Copy model dimensions to GPU context
-    gpu->d_model = model->d_model;
-    gpu->d_inner = model->d_inner;
-    gpu->key_dim = model->key_dim;
-    gpu->conv_dim = model->conv_dim;
-    gpu->conv_kernel = model->conv_kernel;
-    gpu->dt_rank = model->dt_rank;
-    gpu->ssm_k_heads = model->ssm_k_heads;
-    gpu->ssm_v_heads = model->ssm_v_heads;
-    gpu->ssm_d_state = model->ssm_d_state;
-    gpu->gqa_q_heads = model->gqa_q_heads;
-    gpu->gqa_kv_heads = model->gqa_kv_heads;
-    gpu->gqa_head_dim = model->gqa_head_dim;
-    gpu->rotary_dim = model->rotary_dim;
+    gpu->d_model = WUBU_DIMS.d_model;
+    gpu->d_inner = WUBU_DIMS.value_dim;
+    gpu->key_dim = WUBU_DIMS.key_dim;
+    gpu->conv_dim = WUBU_DIMS.conv_dim;
+    gpu->conv_kernel = WUBU_DIMS.conv_kernel;
+    gpu->dt_rank = WUBU_DIMS.dt_rank;
+    gpu->ssm_k_heads = WUBU_DIMS.ssm_k_heads;
+    gpu->ssm_v_heads = WUBU_DIMS.ssm_v_heads;
+    gpu->ssm_d_state = WUBU_DIMS.ssm_d_state;
+    gpu->gqa_q_heads = WUBU_DIMS.gqa_q_heads;
+    gpu->gqa_kv_heads = WUBU_DIMS.gqa_kv_heads;
+    gpu->gqa_head_dim = WUBU_DIMS.gqa_head_dim;
+    gpu->rotary_dim = WUBU_DIMS.rope_head_dim;
     gpu->vocab_size = model->vocab_size;
 
     // CUDA context

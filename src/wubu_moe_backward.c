@@ -25,39 +25,38 @@ static inline float silu_deriv(float x, float silu_x) {
     return silu_x + sig * (1.0f - silu_x);
 }
 
-// Recompute router: scores -> softmax -> top-k with normalized weights
+// Recompute router: logits -> softmax -> top-k with normalized weights
 static void moe_router_backward_prep(const float *x, int B, int T,
                                      const float *gate_inp,
                                      float *softmax_out,
                                      int *topk_indices,
-                                     float *topk_weights,
-                                     int n_experts, int n_active_experts, int d_model)
+                                     float *topk_weights)
 {
     int N = B * T;
-    float *logits = (float *)malloc(N * n_experts * sizeof(float));
+    float *logits = (float *)malloc(N * N_EXPERTS * sizeof(float));
     if (!logits) return;
 
-    wubu_moe_router(x, B, T, gate_inp, logits, n_experts, d_model);
+    wubu_moe_router(x, B, T, gate_inp, logits);
 
     for (int s = 0; s < N; s++) {
-        float *logit_s = logits + s * n_experts;
-        float *score_s = softmax_out + s * n_experts;
+        float *logit_s = logits + s * N_EXPERTS;
+        float *score_s = softmax_out + s * N_EXPERTS;
         float max_s = logit_s[0];
-        for (int e = 1; e < n_experts; e++)
+        for (int e = 1; e < N_EXPERTS; e++)
             if (logit_s[e] > max_s) max_s = logit_s[e];
         float sum_exp = 0.0f;
-        for (int e = 0; e < n_experts; e++)
+        for (int e = 0; e < N_EXPERTS; e++)
             sum_exp += expf(logit_s[e] - max_s);
         float inv_sum = 1.0f / (sum_exp + 1e-30f);
-        for (int e = 0; e < n_experts; e++)
+        for (int e = 0; e < N_EXPERTS; e++)
             score_s[e] = expf(logit_s[e] - max_s) * inv_sum;
 
-        int *ind_s = topk_indices + s * n_active_experts;
-        float *wt_s = topk_weights + s * n_active_experts;
-        for (int k = 0; k < n_active_experts; k++) {
+        int *ind_s = topk_indices + s * N_ACTIVE_EXPTS;
+        float *wt_s = topk_weights + s * N_ACTIVE_EXPTS;
+        for (int k = 0; k < N_ACTIVE_EXPTS; k++) {
             int best = -1;
             float best_v = -1e30f;
-            for (int e = 0; e < n_experts; e++) {
+            for (int e = 0; e < N_EXPERTS; e++) {
                 bool used = false;
                 for (int pk = 0; pk < k; pk++)
                     if (ind_s[pk] == e) { used = true; break; }
@@ -67,10 +66,10 @@ static void moe_router_backward_prep(const float *x, int B, int T,
             wt_s[k] = best_v;
         }
         float sum_w = 0.0f;
-        for (int k = 0; k < n_active_experts; k++) sum_w += wt_s[k];
+        for (int k = 0; k < N_ACTIVE_EXPTS; k++) sum_w += wt_s[k];
         if (sum_w > 1e-30f) {
             float inv = 1.0f / sum_w;
-            for (int k = 0; k < n_active_experts; k++) wt_s[k] *= inv;
+            for (int k = 0; k < N_ACTIVE_EXPTS; k++) wt_s[k] *= inv;
         }
     }
     free(logits);
@@ -201,12 +200,25 @@ static void moe_shared_backward(
 // Public API matching wubu_moe.h signature
 // ========================================================================
 void wubu_moe_backward(const float *d_output, int B, int T,
-                       const float *x,
+                       const float *normed2,
                        const moe_weights_t *w,
-                       float *d_x,
-                       int *selected_experts,
-                       int n_active_experts, int n_experts, int d_model, int d_ff)
+                       float *d_normed2,
+                       float *d_gate_inp,
+                       float *d_gate_exps,
+                       float *d_up_exps,
+                       float *d_down_exps,
+                       float *d_gate_shexp,
+                       float *d_up_shexp,
+                       float *d_down_shexp)
 {
+    const int n_experts = N_EXPERTS;
+    const int n_active_experts = N_ACTIVE_EXPTS;
+    const int d_model = D_MODEL;
+    const int d_ff = D_FF;
+    float *x = (float *)normed2;
+    float *d_x = d_normed2;
+    int *selected_experts = NULL;
+
     if (!w || !w->loaded) {
         // No weights loaded: identity backward
         int N = B * T;
@@ -221,24 +233,24 @@ void wubu_moe_backward(const float *d_output, int B, int T,
     int N = B * T;
 
     float *softmax_vals = (float *)malloc(N * n_experts * sizeof(float));
-    int *topk_indices = selected_experts; // Use caller-provided array
-    float *topk_weights = (float *)malloc(N * n_active_experts * sizeof(float));
+    int *topk_indices = (int *)malloc((size_t)N * n_active_experts * sizeof(int));
+    selected_experts = topk_indices; // recomputed here
+    float *topk_weights = (float *)malloc((size_t)N * n_active_experts * sizeof(float));
     float *expert_temp = (float *)malloc(d_ff * 3 * sizeof(float));
-    int d_ff_shared = (d_ff * 512) / 2048; // Scale SHARED_D_FF ratio
+    int d_ff_shared = SHARED_D_FF;
     float *shared_temp = (float *)malloc(d_ff_shared * 3 * sizeof(float));
     float *d_shared_act_buf = (float *)malloc(d_ff_shared * sizeof(float));
 
-    if (!softmax_vals || !topk_weights || !expert_temp ||
+    if (!softmax_vals || !topk_indices || !topk_weights || !expert_temp ||
         !shared_temp || !d_shared_act_buf) {
         memcpy(d_x, d_output, N * d_model * sizeof(float));
         goto cleanup;
     }
 
-    // Recompute router if gate_inp available and not pre-computed
-    if (has_router && selected_experts) {
+    // Recompute router if gate_inp available
+    if (has_router) {
         moe_router_backward_prep(x, B, T, w->ffn_gate_inp,
-                                 softmax_vals, topk_indices, topk_weights,
-                                 n_experts, n_active_experts, d_model);
+                                 softmax_vals, topk_indices, topk_weights);
     }
 
     memset(d_x, 0, N * d_model * sizeof(float));
@@ -254,7 +266,7 @@ void wubu_moe_backward(const float *d_output, int B, int T,
         // ===== SHARED EXPERT BACKWARD =====
         if (has_shared) {
             moe_shared_backward(x_s, d_out_s, w,
-                                w->ffn_gate_shexp, w->ffn_up_shexp, w->ffn_down_shexp,
+                                d_gate_shexp, d_up_shexp, d_down_shexp,
                                 d_x_s,
                                 shared_temp, d_shared_act_buf,
                                 d_model, d_ff_shared);
@@ -320,11 +332,10 @@ void wubu_moe_backward(const float *d_output, int B, int T,
             for (int e = 0; e < n_experts; e++)
                 d_score[e] = scores_s[e] * (d_softmax[e] - s_dot_ds);
 
-            if (w->ffn_gate_inp) {
+            if (d_gate_inp && w->ffn_gate_inp) {
                 for (int e = 0; e < n_experts; e++)
                     for (int p = 0; p < d_model; p++)
-                        // Note: gradient to router weights not returned in this API
-                        (void)0; // d_gate_inp not in this signature
+                        d_gate_inp[p * n_experts + e] += d_score[e] * x_s[p];
             }
             for (int p = 0; p < d_model; p++) {
                 double sum = 0.0;
@@ -333,7 +344,7 @@ void wubu_moe_backward(const float *d_output, int B, int T,
                 d_x_s[p] += (float)sum;
             }
 
-            // Expert backward
+            // Expert backward (weight grads into caller buffers)
             float d_expert_scratch[2048]; // max D_MODEL
             for (int k = 0; k < n_active_experts; k++) {
                 int e = ind_s[k];
@@ -344,9 +355,12 @@ void wubu_moe_backward(const float *d_output, int B, int T,
                 const float *down_w = w->ffn_down_exps  + (int64_t)e * d_ff * d_model;
                 for (int j = 0; j < d_model; j++)
                     d_expert_scratch[j] = d_out_s[j] * wgt;
+                float *d_gw = d_gate_exps ? d_gate_exps + (int64_t)e * d_model * d_ff : NULL;
+                float *d_uw = d_up_exps   ? d_up_exps   + (int64_t)e * d_model * d_ff : NULL;
+                float *d_dw = d_down_exps ? d_down_exps + (int64_t)e * d_ff * d_model : NULL;
                 moe_expert_backward(x_s, gate_w, up_w, down_w,
                                    d_expert_scratch, expert_temp,
-                                   NULL, NULL, NULL, d_x_s,
+                                   d_gw, d_uw, d_dw, d_x_s,
                                    d_model, d_ff);
             }
         }
@@ -360,6 +374,7 @@ void wubu_moe_backward(const float *d_output, int B, int T,
 
 cleanup:
     free(softmax_vals);
+    free(topk_indices);
     free(topk_weights);
     free(expert_temp);
     free(shared_temp);

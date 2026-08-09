@@ -564,8 +564,8 @@ static void read_str(FILE *f, char *buf, int max_len) {
     if (len > (uint64_t)n) fseek(f, len - n, SEEK_CUR);
 }
 
-// Float16 → Float32
-static float f16_to_f32(uint16_t h) {
+// Float16 → Float32 (exported: wubu_weight.c and dequant paths use it)
+float gguf_f16_to_f32(uint16_t h) {
     uint32_t sign = (h >> 15) & 1;
     uint32_t exp  = (h >> 10) & 0x1F;
     uint32_t mant = h & 0x03FF;
@@ -715,8 +715,8 @@ static void dequantize_q5_K_row(const uint8_t *data, float *output, int64_t n_el
         uint16_t d_bits, dmin_bits;
         memcpy(&d_bits, block, 2);
         memcpy(&dmin_bits, block + 2, 2);
-        float d = f16_to_f32(d_bits);
-        float dmin = f16_to_f32(dmin_bits);
+        float d = gguf_f16_to_f32(d_bits);
+        float dmin = gguf_f16_to_f32(dmin_bits);
         
         const uint8_t *scales = block + 4;  // 12 bytes — 6-bit scales (get_scale_min_k4)
         const uint8_t *qh = block + 16;     // 32 bytes — 256 high bits, 1 per element
@@ -783,7 +783,7 @@ void dequantize_iq4_xs_row(const uint8_t *data, float *output, int64_t n_elems) 
         const uint8_t *block = data + b * 136;
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         uint16_t scales_h;
         memcpy(&scales_h, block + 2, 2);
@@ -828,7 +828,7 @@ void dequantize_q6_K_row(const uint8_t *data, float *output, int64_t n_elems) {
         // Extract d (float16 at the end of the block)
         uint16_t d_bits;
         memcpy(&d_bits, block + 208, 2);  // d is at offset 208 (128+64+16)
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         const uint8_t *ql = block;         // 128 bytes: low 4 bits of quant
         const uint8_t *qh = block + 128;   // 64 bytes: high 2 bits
@@ -895,14 +895,14 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
             for (int64_t i = 0; i < n_elems; i++) {
                 uint16_t h;
                 memcpy(&h, src + i * 2, 2);
-                output[i] = f16_to_f32(h);
+                output[i] = gguf_f16_to_f32(h);
             }
         } else {
             fseek(ctx->file, tensor_pos, SEEK_SET);
             for (int64_t i = 0; i < n_elems; i++) {
                 uint16_t h;
                 if (fread(&h, 2, 1, ctx->file) != 1) return (int)i;
-                output[i] = f16_to_f32(h);
+                output[i] = gguf_f16_to_f32(h);
             }
         }
         return (int)n_elems;
@@ -942,7 +942,7 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
         for (int64_t b = 0; b < q8_blocks; b++) {
             uint16_t d_bits;
             memcpy(&d_bits, src + b * 34, 2);
-            float d = f16_to_f32(d_bits);
+            float d = gguf_f16_to_f32(d_bits);
             const int8_t *qs = (const int8_t *)(src + b * 34 + 2);
             for (int j = 0; j < 32 && b * 32 + j < n_elems; j++)
                 output[b * 32 + j] = d * (float)qs[j];
@@ -1074,8 +1074,8 @@ static void dequantize_q2_K_row(const uint8_t *data, float *output, int64_t n_el
     int nb = (int)((n_elems + 255) / 256);
     for (int i = 0; i < nb; i++) {
         const uint8_t *b = data + i * 84;
-        float d = f16_to_f32(*(const uint16_t*)(b + 80));
-        float min = f16_to_f32(*(const uint16_t*)(b + 82));
+        float d = gguf_f16_to_f32(*(const uint16_t*)(b + 80));
+        float min = gguf_f16_to_f32(*(const uint16_t*)(b + 82));
         const uint8_t *sc = b;
         const uint8_t *q = b + 16;
         int is = 0;
@@ -1106,7 +1106,7 @@ static void dequantize_q3_K_row(const uint8_t *data, float *output, int64_t n_el
     
     for (int i = 0; i < nb; i++) {
         const uint8_t *b = data + i * 110;
-        float d_all = f16_to_f32(*(const uint16_t*)(b + 108));
+        float d_all = gguf_f16_to_f32(*(const uint16_t*)(b + 108));
         const uint8_t *q = b + 32;
         const uint8_t *hm = b;
         
@@ -1151,7 +1151,7 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
             for (int64_t i = 0; i < n_elems; i++) {
                 uint16_t h;
                 memcpy(&h, data + i * 2, 2);
-                output[i] = f16_to_f32(h);
+                output[i] = gguf_f16_to_f32(h);
             }
             break;
         }
@@ -1162,7 +1162,7 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
             for (int64_t b = 0; b < n_blocks; b++) {
                 uint16_t d_bits;
                 memcpy(&d_bits, data + b * 34, 2);
-                float d = f16_to_f32(d_bits);
+                float d = gguf_f16_to_f32(d_bits);
                 const int8_t *qs = (const int8_t *)(data + b * 34 + 2);
                 for (int j = 0; j < 32 && b * 32 + j < n_elems; j++)
                     output[b * 32 + j] = d * (float)qs[j];
@@ -1282,8 +1282,8 @@ static void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_el
         uint16_t d_bits, dmin_bits;
         memcpy(&d_bits, block, 2);
         memcpy(&dmin_bits, block + 2, 2);
-        float d = f16_to_f32(d_bits);
-        float dmin = f16_to_f32(dmin_bits);
+        float d = gguf_f16_to_f32(d_bits);
+        float dmin = gguf_f16_to_f32(dmin_bits);
         
         const uint8_t *scales = block + 4;  // 12 bytes
         const uint8_t *qs = block + 16;     // qs starts after d+dmin+scales (no qh in Q4_K)
@@ -1425,7 +1425,7 @@ void dequantize_iq2_xxs_row(const uint8_t *data, float *output, int64_t n_elems)
         const uint8_t *block = data + b * IQ2_XXS_BLOCK_SIZE;
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         const uint16_t *qs16 = (const uint16_t *)(block + 2);
         for (int ib32 = 0; ib32 < QK_K/32; ib32++) {
             memcpy(aux32, qs16 + 4*ib32, 2*sizeof(uint32_t));
@@ -1474,7 +1474,7 @@ void dequantize_iq2_s_row(const uint8_t *data, float *output, int64_t n_elems) {
         
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         const uint8_t *qs = block + 2;        // 64 bytes
         const uint8_t *qh = block + 66;       // 8 bytes
@@ -1533,7 +1533,7 @@ void dequantize_iq3_xxs_row(const uint8_t *data, float *output, int64_t n_elems)
         
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         const uint8_t *qs = block + 2;              // 64 bytes grid indices
         const uint8_t *scales_and_signs = qs + 64;  // 32 bytes
@@ -1593,7 +1593,7 @@ void dequantize_iq3_s_row(const uint8_t *data, float *output, int64_t n_elems) {
         
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         const uint8_t *qs = block + 2;              // 64 bytes
         const uint8_t *qh = block + 66;              // 8 bytes
@@ -1662,7 +1662,7 @@ void dequantize_iq1_s_row(const uint8_t *data, float *output, int64_t n_elems) {
         const uint8_t *block = data + b * IQ1_S_BLOCK_SIZE;
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         const uint8_t *qs = block + 2;
         const uint16_t *qh = (const uint16_t *)(block + 34);
@@ -1705,7 +1705,7 @@ void dequantize_iq1_m_row(const uint8_t *data, float *output, int64_t n_elems) {
         // Global fp16 scale from high nibbles of 4 scale uint16_ts
         uint16_t scale_bits = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) |
                               ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
-        float d = f16_to_f32(scale_bits);
+        float d = gguf_f16_to_f32(scale_bits);
         
         float *y = output + b * QK_K;
         

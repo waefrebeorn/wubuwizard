@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
         
         // Run Euclidean SSM
         printf("\nRunning Euclidean SSM forward...\n");
-        wubu_ssm_forward(x, B, T, &w, ssm_state, conv_state, output, NULL, NULL);
+        wubu_ssm_forward(x, B, T, &w, ssm_state, conv_state, output, NULL, NULL, NULL);
         
         float min_v = 1e30f, max_v = -1e30f;
         for (int i = 0; i < B * T * D_MODEL; i++) {
@@ -253,7 +253,7 @@ int main(int argc, char **argv) {
         float *output = (float *)malloc(B * T * D_MODEL * sizeof(float));
         
         printf("\nRunning GQA forward...\n");
-        wubu_gqa_forward(x, B, T, &w, D_MODEL, output, NULL, NULL, 0, NULL, NULL, w.head_dim, w.q_heads, w.kv_heads);
+        wubu_gqa_forward(x, B, T, &w, output, NULL, NULL, 0, NULL, NULL);
         
         float min_v = 1e30f, max_v = -1e30f;
         for (int i = 0; i < B * T * D_MODEL; i++) {

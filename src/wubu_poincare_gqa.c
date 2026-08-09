@@ -20,12 +20,14 @@ static void gqa_dequant_t(const uint8_t *raw, int rows, int cols, int dtype, flo
         }
 }
 
-/* Materialize lazy BF16 GQA proj matrices to F32 (once). Forward expects
- * [D_MODEL, proj_dim] (transposed from the file's [proj_dim, D_MODEL]). */
+/* Materialize quantized GQA proj matrices to F32 (once). The engine's
+ * forward uses the raw quantized blob (attn_*_weight_q) directly; this
+ * helper exists for tooling that needs plain F32 buffers. Dequant layout
+ * matches quantized_matmul_batched's [D_MODEL, proj_dim] convention. */
 void wubu_gqa_ensure_f32(gqa_layer_weights *w, int d_model) {
-    if (!w || w->lazy_f32_done) return;
-    int q_dim = w->q_heads * w->head_dim;
-    int kv_dim = w->kv_heads * w->head_dim;
+    if (!w) return;
+    int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;
+    int kv_dim = GQA_KV_HEADS * GQA_HEAD_DIM;
 
     /* KB6 (doc 013 QuaRot): fixed Hadamard fuse on weight columns
      * before quantization. One-time O(M·K) cost at materialization;
@@ -33,42 +35,44 @@ void wubu_gqa_ensure_f32(gqa_layer_weights *w, int d_model) {
      * WUBU_HADAMARD_FUSE=1. No accuracy impact (H is orthonormal). */
     int do_rotate = getenv("WUBU_HADAMARD_FUSE") != NULL;
 
-    if (w->attn_q_weight_raw && !w->attn_q_weight) {
-        w->attn_q_weight = (float *)malloc((size_t)d_model * q_dim * 2 * sizeof(float));
-        gqa_dequant_t(w->attn_q_weight_raw, q_dim * 2, d_model, w->lazy_dtype, w->attn_q_weight);
-        if (do_rotate) {
+    if (!w->attn_q_weight && w->attn_q_weight_q) {
+        int64_t n = (int64_t)d_model * q_dim * 2;
+        w->attn_q_weight = (float *)malloc((size_t)n * sizeof(float));
+        if (w->attn_q_weight) gguf_dequantize(w->attn_q_weight_q, w->attn_q_weight_type, n, w->attn_q_weight);
+        if (do_rotate && w->attn_q_weight) {
             wubu_rotate_fuse_right(w->attn_q_weight, q_dim * 2, d_model);
             wubu_rotate_fuse_right(w->attn_q_weight + d_model, q_dim * 2, d_model);
         }
     }
-    if (w->attn_k_weight_raw && !w->attn_k_weight) {
-        w->attn_k_weight = (float *)malloc((size_t)d_model * kv_dim * sizeof(float));
-        gqa_dequant_t(w->attn_k_weight_raw, kv_dim, d_model, w->lazy_dtype, w->attn_k_weight);
-        if (do_rotate) wubu_rotate_fuse_right(w->attn_k_weight, kv_dim, d_model);
+    if (!w->attn_k_weight && w->attn_k_weight_q) {
+        int64_t n = (int64_t)d_model * kv_dim;
+        w->attn_k_weight = (float *)malloc((size_t)n * sizeof(float));
+        if (w->attn_k_weight) gguf_dequantize(w->attn_k_weight_q, w->attn_k_weight_type, n, w->attn_k_weight);
+        if (do_rotate && w->attn_k_weight) wubu_rotate_fuse_right(w->attn_k_weight, kv_dim, d_model);
     }
-    if (w->attn_v_weight_raw && !w->attn_v_weight) {
-        w->attn_v_weight = (float *)malloc((size_t)d_model * kv_dim * sizeof(float));
-        gqa_dequant_t(w->attn_v_weight_raw, kv_dim, d_model, w->lazy_dtype, w->attn_v_weight);
-        if (do_rotate) wubu_rotate_fuse_right(w->attn_v_weight, kv_dim, d_model);
+    if (!w->attn_v_weight && w->attn_v_weight_q) {
+        int64_t n = (int64_t)d_model * kv_dim;
+        w->attn_v_weight = (float *)malloc((size_t)n * sizeof(float));
+        if (w->attn_v_weight) gguf_dequantize(w->attn_v_weight_q, w->attn_v_weight_type, n, w->attn_v_weight);
+        if (do_rotate && w->attn_v_weight) wubu_rotate_fuse_right(w->attn_v_weight, kv_dim, d_model);
     }
-    if (w->attn_output_weight_raw && !w->attn_output_weight) {
-        w->attn_output_weight = (float *)malloc((size_t)q_dim * d_model * sizeof(float));
-        gqa_dequant_t(w->attn_output_weight_raw, d_model, q_dim, w->lazy_dtype, w->attn_output_weight);
-        if (do_rotate) wubu_rotate_fuse_right(w->attn_output_weight, d_model, q_dim);
+    if (!w->attn_output_weight && w->attn_output_weight_q) {
+        int64_t n = (int64_t)q_dim * d_model;
+        w->attn_output_weight = (float *)malloc((size_t)n * sizeof(float));
+        if (w->attn_output_weight) gguf_dequantize(w->attn_output_weight_q, w->attn_output_weight_type, n, w->attn_output_weight);
+        if (do_rotate && w->attn_output_weight) wubu_rotate_fuse_right(w->attn_output_weight, d_model, q_dim);
     }
-    w->lazy_f32_done = 1;
 }
 
-/* Inverse of wubu_gqa_ensure_f32: free materialized F32 proj matrices. Only
- * frees when materialized from lazy BF16 (attn_q_weight_raw != NULL); layers
- * loaded as resident F32 keep their buffer. */
+/* Inverse of wubu_gqa_ensure_f32: free materialized F32 proj matrices.
+ * Only frees buffers that were materialized from quantized blobs; layers
+ * loaded as resident F32 keep their buffer (the _q pointer is NULL then). */
 void wubu_gqa_release_f32(gqa_layer_weights *w) {
     if (!w) return;
-    if (w->attn_q_weight_raw)     { free(w->attn_q_weight);     w->attn_q_weight = NULL; }
-    if (w->attn_k_weight_raw)     { free(w->attn_k_weight);     w->attn_k_weight = NULL; }
-    if (w->attn_v_weight_raw)     { free(w->attn_v_weight);     w->attn_v_weight = NULL; }
-    if (w->attn_output_weight_raw) { free(w->attn_output_weight); w->attn_output_weight = NULL; }
-    w->lazy_f32_done = 0;
+    if (w->attn_q_weight_q)     { free(w->attn_q_weight);     w->attn_q_weight = NULL; }
+    if (w->attn_k_weight_q)     { free(w->attn_k_weight);     w->attn_k_weight = NULL; }
+    if (w->attn_v_weight_q)     { free(w->attn_v_weight);     w->attn_v_weight = NULL; }
+    if (w->attn_output_weight_q) { free(w->attn_output_weight); w->attn_output_weight = NULL; }
 }
 
 // ============================================================

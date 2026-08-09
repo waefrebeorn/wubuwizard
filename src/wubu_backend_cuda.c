@@ -84,21 +84,21 @@ static int cuda_backend_chunk_size(wubu_model_t *model) {
 }
 
 /* ADR-003: KV cache as filesystem — backend-accelerated namespace I/O.
- * For now the CUDA backend routes namespace reads/writes to the flat
- * host tensor via wubu_kvfs (device-resident KV pages are a later
- * milestone); NULL entries would mean pure CPU fallback. */
+ * For now the CUDA backend routes namespace reads/writes through the
+ * host wubu_kvfs handle passed per-call by wubu_generate (the model
+ * struct has no kvfs field in the current architecture); NULL entries
+ * mean pure CPU fallback. Device-resident KV pages are a later
+ * milestone. */
 static int cuda_backend_kvfs_read(wubu_model_t *model, const char *path,
                                   float *dst, size_t n_floats) {
-    if (!model || !model->kvfs || !model->gqa_k_cache) return -1;
-    return wubu_kvfs_read(model->kvfs, path,
-                          (const float *)model->gqa_k_cache, dst, n_floats);
+    (void)model; (void)path; (void)dst; (void)n_floats;
+    return -1;  /* host-side KVFS is wired via wubu_generate's handle */
 }
 
 static int cuda_backend_kvfs_write(wubu_model_t *model, const char *path,
                                    const float *src, size_t n_floats) {
-    if (!model || !model->kvfs || !model->gqa_k_cache) return -1;
-    return wubu_kvfs_write(model->kvfs, path,
-                           (float *)model->gqa_k_cache, src, n_floats);
+    (void)model; (void)path; (void)src; (void)n_floats;
+    return -1;  /* host-side KVFS is wired via wubu_generate's handle */
 }
 
 static int cuda_backend_kvfs_snapshot(wubu_model_t *model,

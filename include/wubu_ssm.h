@@ -44,7 +44,7 @@ extern "C" {
 // Total: 11+11+10 = 32 pairs = 64 dims
 
 // All weights for one SSM layer
-typedef struct {
+typedef struct ssm_layer_weights {
     // Fused QKV projection: x @ attn_qkv -> [Q(2048), K(2048), V(4096)]
     float *attn_qkv_weight;  // [D_MODEL, KEY_DIM*2+VALUE_DIM] = [2048, 8192]
     
@@ -90,7 +90,7 @@ typedef struct {
 } ssm_layer_weights;
 
 // All weights for one GQA layer
-typedef struct {
+typedef struct gqa_layer_weights {
     // Q + gate fused: wq [D_MODEL, GQA_Q_HEADS*GQA_HEAD_DIM*2] = [2048, 8192]
     float *attn_q_weight;      // [2048, 8192]
     // K projection

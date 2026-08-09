@@ -209,7 +209,7 @@ int main() {
 
     wubu_nested_ssm_backward(B, T, x, output, d_output, NULL, &nstate1, &save1, &w,
                               d_x, d_qkv_w, d_gate_w, d_beta_w, d_alpha_w,
-                              d_conv1d_w, d_out_w, d_norm_w, d_state_init);
+                              d_conv1d_w, d_out_w, d_norm_w, d_state_init, NULL);
 
     // Check for NaN in all gradients
     int bwd_nan = 0;
@@ -270,7 +270,7 @@ int main() {
 
     wubu_nested_ssm_backward(B, T, x, output, d_output, gating2.ball_weights, &nstate2, &save2, &w,
                               d_x, d_qkv_w, d_gate_w, d_beta_w, d_alpha_w,
-                              d_conv1d_w, d_out_w, d_norm_w, d_state_init);
+                              d_conv1d_w, d_out_w, d_norm_w, d_state_init, NULL);
 
     int bwd2_nan = 0;
     bwd2_nan += check_nan_inf_all(d_x, N * D_MODEL, "d_x");
@@ -339,7 +339,7 @@ int main() {
 
     wubu_nested_ssm_backward(B, T, x, output, d_output, gating3.ball_weights, &nstate3, &save3, &w,
                               d_x, d_qkv_w, d_gate_w, d_beta_w, d_alpha_w,
-                              d_conv1d_w, d_out_w, d_norm_w, d_state_init);
+                              d_conv1d_w, d_out_w, d_norm_w, d_state_init, NULL);
 
     int bwd3_nan = 0;
     bwd3_nan += check_nan_inf_all(d_qkv_w, D_MODEL * qkv_dim, "d_qkv_w");

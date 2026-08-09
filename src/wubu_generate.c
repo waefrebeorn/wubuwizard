@@ -331,21 +331,21 @@ int wubu_generate(wubu_model_t *model, const int *prompt, int n_prompt,
          * (all positions, not just the last). 9P clients can then read
          * every attention K/V vector as a file. */
         if (kv_base && model->gqa_k_cache && model->gqa_v_cache &&
-            model->n_gqa_layers > 0 && seqlen > 0) {
+            seqlen > 0) {
             float *k_cache = (float *)model->gqa_k_cache;
             float *v_cache = (float *)model->gqa_v_cache;
             int gl = 0;  /* GQA layer index */
             /* The forward writes the whole sequence fresh each call, so the
              * cache holds positions [0, seqlen). Mirror all of them. */
             int npos = seqlen < model->gqa_max_ctx ? seqlen : model->gqa_max_ctx;
+            const int kv_dim = GQA_KV_DIM;
             for (int l = 0; l < model->n_layers; l++) {
-                int kv_dim = model->layers[l].gqa.kv_dim;
-                if (kv_dim <= 0 || kv_dim > 1024 || gl >= model->n_gqa_layers)
-                    continue;
+                if (model->layers[l].is_ssm) continue;  /* GQA only */
+                if (kv_dim <= 0 || kv_dim > 1024) { gl++; continue; }
                 /* Bounds: cache layout is [n_gqa_layers][gqa_max_ctx][kv_dim] */
                 if ((int64_t)gl * model->gqa_max_ctx * kv_dim +
                     (int64_t)npos * kv_dim >
-                    (int64_t)model->n_gqa_layers * model->gqa_max_ctx * kv_dim)
+                    (int64_t)model->n_layers * model->gqa_max_ctx * kv_dim)
                     continue;
                 float *k_span = k_cache + (size_t)gl * model->gqa_max_ctx * kv_dim;
                 float *v_span = v_cache + (size_t)gl * model->gqa_max_ctx * kv_dim;
@@ -386,11 +386,11 @@ int wubu_generate(wubu_model_t *model, const int *prompt, int n_prompt,
          * registry so external WuBuOS 9P clients can walk
          * /kv/ as a real filesystem — the KV cache IS a
          * filesystem, fully exposed to the namespace. */
-        if (kvfs && model->n_gqa_layers > 0) {
+        if (kvfs) {
             int gl = 0;
             for (int l = 0; l < model->n_layers; l++) {
                 if (model->layers[l].is_ssm) continue;
-                int kv_dim = model->layers[l].gqa.kv_dim;
+                int kv_dim = GQA_KV_DIM;
                 if (kv_dim <= 0 || kv_dim > 1024) { gl++; continue; }
                 size_t span = (size_t)model->gqa_max_ctx * kv_dim;
                 float *k_ptr = (float *)model->gqa_k_cache +

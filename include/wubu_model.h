@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 // Layer configuration
-typedef struct {
+typedef struct wubu_layer_t {
     int layer_idx;
     bool is_ssm;  // false = GQA
     
@@ -219,7 +219,7 @@ static inline int64_t kv_cache_alloc_size(int64_t n_elems) {
 
 // MTP (Multi-Token Prediction) head for speculative decode
 // Architecture: h_39 → hnorm → concat(hnorm, enorm(embd)) → eh_proj → blk.40 → shared_head_norm → output
-typedef struct {
+typedef struct mtp_head_t {
     bool loaded;
     
     // Nextn norms (F32, all [D_MODEL])
@@ -239,7 +239,7 @@ typedef struct {
     float *v_cache;  // [GQA_MAX_CTX * GQA_KV_DIM]
     int cache_len;
 } mtp_head_t;
-typedef struct {
+typedef struct wubu_model_t {
     int n_layers;
     wubu_layer_t *layers;
     
@@ -300,6 +300,10 @@ typedef struct {
     // GPU acceleration context (opaque pointer, managed by wubu_model_gpu.cu)
     // When non-NULL, GQA layers run on GPU via chunked attention.
     void *gpu_ctx;
+
+    // Active backend vtable (wubu_backend.h). NULL = CPU-only.
+    // Set at model load time by wubu_backend_cpu_get() / wubu_backend_cuda_get().
+    struct wubu_backend_t *backend;
 
     // Expert prefetch history (P3: prompt-aware prefetch matrix)
     // Records which 8 experts each layer selected on the last forward pass.
@@ -412,7 +416,7 @@ void wubu_gpu_sync_ssm_state_to_cpu(void *gpu_ctx, int layer_idx,
 void wubu_model_gpu_moe_experts(const moe_weights_t *w,
     const float *x_s,
     const int *indices_s, const float *weights_s,
-    float expert_contribs[8][D_MODEL],
+    float *expert_contribs,
     void *model_ptr);
 
 // Free all GPU resources and reset gpu_ctx to NULL.
