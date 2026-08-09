@@ -121,8 +121,12 @@ Status legend: **DONE** (measured, in the tree) / **TODO** (queued) /
 41. **-mno-avx512f on Zen4** — AVX-512 is double-pumped 256-bit here;
     measured 5.9→6.3s with zmm. DONE (keep AVX2). [own measurement]
 42. **-flto -funroll-loops** — DONE (in build).
-43. **PGO** — typical 5–30%; wuburvc has build_pgo.sh. TODO (needs a training
-    run per build). [learn.microsoft PGO]
+43. **PGO** — MEASURED 3× SLOWER (16.5s vs 5.0s step): the -fprofile-generate
+    instrumentation (per-instruction counters inside the SIMD GEMM loops)
+    distorts the branch/loop profile, and -fprofile-use then mis-schedules
+    the hot kernels. REJECTED for the SD GEMMs on this box. [learn.microsoft
+    PGO] — the generic 5–30% claim does NOT transfer to counter-heavy
+    SIMD loops.
 44. **mimalloc/jemalloc** — the per-call xcol/yt allocs are few (80/step);
     measured allocator cost negligible. REJECTED for now. [mimalloc]
 45. **-mno-xsave etc. CPU flags hygiene** — micro; TODO with a flags sweep.
