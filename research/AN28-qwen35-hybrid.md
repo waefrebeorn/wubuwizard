@@ -81,6 +81,21 @@ RESOLVE by checking the Qwen3.5-0.8B HF repo's modeling code or by probing
 the GGUF against the V1's llama.cpp (the llama.cpp supports qwen35 —
 run the same prompt, dump logits, match).
 
+**RESOLVED 2026-08-09 (AN61)** — the extra 1024 is the gated-attn's OWN
+output-gate projection fused at the tail: the config has
+`attn_output_gate: true`, so the fused layout is
+[q_and_gate (2*d_out) | k (kv*hd) | v (kv*hd) | z (d)] = 4096+512+512+1024.
+The separate `attn_gate [1024, 2048]` tensor is the sigmoid gate over the
+post-W_o output (2*d = 2048). The GDN branch has its own fused
+`ssm_in_proj [d, 8192]` = qk (2*key_dim = 4096) + v (value_dim = 2048) +
+z (value_dim = 2048); `ssm_conv1d [4, 6144]` = qk + v; `ssm_out
+[value_dim*2, d]` = [4096, 1024]. See include/wubu_qwen35.h (the config-
+driven split math, test_qwen35 pins the 0.8B numbers).
+
+**Build next (the loader role math is DONE)**: the hybrid FORWARD
+(gated-attn branch + GDN branch) + logit-parity vs llama.cpp — needs the
+Qwen3.5-0.8B GGUF on disk (unsloth/Qwen3.5-0.8B-GGUF, Q8_0, 1.19GB).
+
 ## Gated DeltaNet (Qwen3_5GatedDeltaNet, transformers modular)
 
 ```

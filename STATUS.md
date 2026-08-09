@@ -1,7 +1,11 @@
 # Status — implementation and verification state
 
 > 2026-08-09 refresh (Phase 0 truth sync — the INDEX is the source of
-> truth; AN27–AN39 are the closed-loop colony organs). Every claim
+> truth; AN27–AN39 are the closed-loop colony organs; **AN56–AN61 are
+> the endurance-depth + hybrid-adapter wave** — chaos suite-continuity,
+> skill persistence, the nightly gate, resource cells + soft fitness,
+> skill decay, the Qwen3.5 loader role split; the full rows are in
+> the colony section below + research/INDEX.md). Every claim
 > below was verified by running the command on this date (or the
 > session it names). Weights policy: GGUF = SSD
 > (`/home/wubu/models/`), safetensors = SD cold storage
