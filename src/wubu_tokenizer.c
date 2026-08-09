@@ -714,11 +714,19 @@ int wubu_tokenizer_decode(wubu_tokenizer_t *tok,
     for (int i = 0; i < n_ids && total < max_output_chars - 1; i++) {
         int id = input_ids[i];
         if (id >= 0 && id < tok->vocab_size) {
-            // For byte-level tokens: find which byte this token represents
+            // For byte-level tokens: find which byte this token represents.
+            // The byte must match EXACTLY (token text == the byte's canonical
+            // text); a token like vocab[0] (a 20-byte "Ċ"x10 string) can be
+            // wrongly flagged via the Qwen3.6 fallback ids — without the
+            // exact-match check the first byte whose fallback id equals the
+            // token (e.g. 0x7F) hijacks the decode.
             if (tok->is_byte_token && tok->is_byte_token[id]) {
                 int byte_val = -1;
+                int blen = tok->vocab[id].byte_len;
                 for (int b = 0; b < 256; b++) {
-                    if (tok->byte_token_ids[b] == id) {
+                    if (tok->byte_token_ids[b] == id &&
+                        tok->byte_text_len[b] == blen &&
+                        memcmp(tok->byte_text_bytes[b], tok->vocab[id].bytes, blen) == 0) {
                         byte_val = b;
                         break;
                     }
