@@ -129,13 +129,20 @@ static int load_checkpoint(wubu_model_t *m, const char *path)
 }
 
 /* read a .tok stream into a buffer; returns the token count. */
-static long read_tokens(const char *path, uint16_t *buf, long cap)
+static long read_tokens(const char *pattern, uint16_t *buf, long cap)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
+    /* read MULTIPLE .tok files via the glob (the reasoning tier is
+     * many files: openthoughts-114k.tok, openthoughts3-1.2m.tok, ...) */
+    glob_t g;
+    if (glob(pattern, 0, NULL, &g) != 0) return -1;
     long n = 0;
-    while (n < cap && fread(&buf[n], 2, 1, f) == 1) n++;
-    fclose(f);
+    for (size_t gi = 0; gi < g.gl_pathc && n < cap; gi++) {
+        FILE *f = fopen(g.gl_pathv[gi], "rb");
+        if (!f) continue;
+        while (n < cap && fread(&buf[n], 2, 1, f) == 1) n++;
+        fclose(f);
+    }
+    globfree(&g);
     return n;
 }
 
@@ -268,12 +275,11 @@ int main(int argc, char **argv)
         printf("wubu_train_cli: progressive start at %d layers\n", m.n_layers);
     }
 
-    /* load the corpus (expand the glob via a helper: we accept ONE file
-     * for now; the multi-file loop is the next step) */
-    /* cap 1<<24 = 16M tokens (32MB): the SFT pack is 12M tokens; the old
-     * 1<<22 = 4M cap silently truncated it (research/052). */
-    uint16_t *corpus = (uint16_t *)malloc(sizeof(uint16_t) * (1 << 24));
-    long corpus_n = read_tokens(tok_glob, corpus, 1 << 24);
+    /* the corpus glob (multiple .tok files) — cap 1<<29 = 512M tokens
+     * (1GB): the reasoning tier (openthoughts-114k 244M + ot3 39M +
+     * gpt-5.6 17M + ...) needs the room; the old 16M cap truncated. */
+    uint16_t *corpus = (uint16_t *)malloc(sizeof(uint16_t) * (1 << 29));
+    long corpus_n = read_tokens(tok_glob, corpus, 1 << 29);
     if (corpus_n <= 0) {
         fprintf(stderr, "cannot read corpus %s\n", tok_glob);
         return 1;
