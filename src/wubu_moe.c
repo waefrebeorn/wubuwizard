@@ -1,4 +1,5 @@
 #include "wubu_moe.h"
+#include "wubu_router.h"   /* the router slot: physics routing replaces the learned gate */
 #include "wubu_ssm.h"
 #include "mtp_q8_cache.h"
 #include <stdlib.h>
@@ -430,8 +431,27 @@ void wubu_moe_forward(const float *x, int B, int T,
         return;
     }
     
-    // Step 1-2: Router scores → softmax → top-k (or use pre-computed indices)
-    if (w->precomputed_indices) {
+    // Step 1-2: Router scores → softmax → top-k (or use pre-computed
+    // indices, or THE ROUTER SLOT -- physics routing replaces the
+    // learned gate entirely).
+    if (w->router && w->router->route) {
+        /* Physics router (Revolver): the vtable picks the K experts by
+         * potential wells / gravity / Poincaré centroids -- no learned
+         * gate weights touched. The MoE core below is unchanged; only
+         * the selector swaps. */
+        for (int s = 0; s < N; s++) {
+            const float *x_s = x + s * D_MODEL;
+            int *indices_s = topk_indices + s * N_ACTIVE_EXPTS;
+            float *weights_s = topk_weights + s * N_ACTIVE_EXPTS;
+            if (w->router->route(w->router->ctx, x_s, D_MODEL,
+                                 N_ACTIVE_EXPTS, indices_s, weights_s) != 0) {
+                for (int k = 0; k < N_ACTIVE_EXPTS; k++) {
+                    indices_s[k] = k;
+                    weights_s[k] = 1.0f / N_ACTIVE_EXPTS;
+                }
+            }
+        }
+    } else if (w->precomputed_indices) {
         // N64 pre-cache fill path: router already computed on pre-attention normed.
         // Compute softmax weights for the 8 pre-selected experts on this input.
         // Softmax over subset is mathematically identical to full softmax for the

@@ -5,6 +5,10 @@
 
 #include "gguf_reader.h"
 
+/* THE ROUTER SLOT forward declaration (wubu_router.h is the full
+ * contract; the MoE only needs the opaque pointer + route op here). */
+struct wubu_router;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -70,6 +74,12 @@ typedef struct moe_weights_t {
     // computes softmax weights for these 8 indices directly.
     // Saves ~0.5ms/layer (2048×256 router matmul) on decode path.
     const int *precomputed_indices;
+
+    // THE ROUTER SLOT (Revolver): when set, wubu_moe_forward routes by
+    // PHYSICS instead of the learned gate — the router vtable provides
+    // the top-K (potential wells / gravity / Poincaré centroids). The
+    // MoE core stays the same; only the selector swaps. NULL = learned.
+    const struct wubu_router *router;
 } moe_weights_t;
 
 // MoE forward pass for one layer

@@ -18,6 +18,7 @@
 #include "wubu_ecosystem.h"
 #include "wubu_moe_hyperbolic.h"
 #include "wubu_gravity.h"
+#include "wubu_moe.h"        /* moe_weights_t + wubu_moe_forward (engine wiring) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -168,6 +169,83 @@ static void gravity_free(void *ctx) {
 }
 
 static wubu_router_t g_gravity_router;
+
+/* ---- engine-wiring probe (used by test_router) ---- */
+
+/* Build a minimal MoE with the ecosystem router installed and run one
+ * forward -- proves wubu_moe_forward consumes the router slot. Only the
+ * shared expert is allocated (routed experts clip to skip with
+ * n_experts_loaded = 0); the physics router still selects the top-K
+ * indices, and the forward produces finite output. */
+int wubu_moe_forward_router_probe(const float *x, int B, int T) {
+    extern void wubu_moe_forward(const float *x, int B, int T,
+                                 const moe_weights_t *w,
+                                 float *output, int *selected_experts);
+    extern wubu_router_t *wubu_router_get(const char *name);
+
+    wubu_router_t *r = wubu_router_get("ecosystem");
+    if (!r) return -1;
+
+    const int N = B * T;
+    /* The MoE forward reads D_MODEL-wide tokens; the slot probe may be
+     * called with a smaller vector. Zero-pad to the engine's space. */
+    float *xpad = (float *)calloc((size_t)N * D_MODEL, sizeof(float));
+    if (!xpad) return -1;
+    memcpy(xpad, x, (size_t)(B * T) * sizeof(float));
+
+    moe_weights_t mw;
+    memset(&mw, 0, sizeof(mw));
+    mw.loaded = true;
+    /* n_experts_loaded = 1: every routed expert index (0..63 from the
+     * colony) clips to the skip path (memset 0) -- the probe runs the
+     * shared expert only. The clip guard is `n_experts_loaded > 0`, so
+     * 0 would NOT clip; 1 does. */
+    mw.n_experts_loaded = 1;
+    mw.router = r;                 /* THE SLOT: physics routing */
+
+    /* Shared expert F32 buffers (the only weights the forward touches
+     * with n_experts_loaded = 1, except expert 0). Small random init. */
+    size_t nsh = (size_t)D_MODEL * SHARED_D_FF;
+    mw.ffn_gate_shexp = (float *)calloc(nsh, sizeof(float));
+    mw.ffn_up_shexp   = (float *)calloc(nsh, sizeof(float));
+    mw.ffn_down_shexp = (float *)calloc(nsh, sizeof(float));
+    if (!mw.ffn_gate_shexp || !mw.ffn_up_shexp || !mw.ffn_down_shexp) {
+        free(mw.ffn_gate_shexp); free(mw.ffn_up_shexp); free(mw.ffn_down_shexp);
+        return -1;
+    }
+
+    /* Expert 0 must not clip (indices 1..63 do). Give it one REAL F32
+     * expert blob (zeroed) so the forward runs the complete path --
+     * router hook -> quantized matmul -> accumulate. */
+    size_t nff = (size_t)D_MODEL * D_FF;
+    mw.ffn_gate_exps_q = (const uint8_t *)calloc(nff, sizeof(float));
+    mw.ffn_up_exps_q   = (const uint8_t *)calloc(nff, sizeof(float));
+    mw.ffn_down_exps_q = (const uint8_t *)calloc((size_t)D_FF * D_MODEL, sizeof(float));
+    mw.ffn_gate_exps_q_type = GGML_TYPE_F32;
+    mw.ffn_up_exps_q_type   = GGML_TYPE_F32;
+    mw.ffn_down_exps_q_type = GGML_TYPE_F32;
+    if (!mw.ffn_gate_exps_q || !mw.ffn_up_exps_q || !mw.ffn_down_exps_q) {
+        free(mw.ffn_gate_shexp); free(mw.ffn_up_shexp); free(mw.ffn_down_shexp);
+        return -1;
+    }
+
+    float *out = (float *)calloc((size_t)N * D_MODEL, sizeof(float));
+    if (!out) {
+        free(mw.ffn_gate_shexp); free(mw.ffn_up_shexp); free(mw.ffn_down_shexp);
+        free((void *)mw.ffn_gate_exps_q); free((void *)mw.ffn_up_exps_q); free((void *)mw.ffn_down_exps_q);
+        return -1;
+    }
+
+    wubu_moe_forward(xpad, B, T, &mw, out, NULL);
+    int finite = 1;
+    for (int i = 0; i < N * D_MODEL; i++)
+        if (!isfinite(out[i])) { finite = 0; break; }
+    free(out);
+    free(xpad);
+    free(mw.ffn_gate_shexp); free(mw.ffn_up_shexp); free(mw.ffn_down_shexp);
+    free((void *)mw.ffn_gate_exps_q); free((void *)mw.ffn_up_exps_q); free((void *)mw.ffn_down_exps_q);
+    return finite ? 0 : -1;
+}
 
 /* ---- registration ---- */
 

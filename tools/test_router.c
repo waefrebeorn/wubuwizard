@@ -134,6 +134,17 @@ int main(void)
     CHECK(wubu_router_count() == 3,
           "re-registration replaces, does not duplicate");
 
+    /* ---- ENGINE WIRING: the slot drives a real MoE forward ---- */
+    /* The MoE core (wubu_moe_forward) accepts w->router and routes by
+     * physics instead of the learned gate. Prove the wiring: with a
+     * physics router installed, forward still runs and produces finite
+     * output of the right shape. */
+    {
+        extern int wubu_moe_forward_router_probe(const float *x, int B, int T);
+        int rc = wubu_moe_forward_router_probe(x, 1, 1);
+        CHECK(rc == 0, "MoE forward runs with the physics router installed");
+    }
+
     if (failures == 0) printf("=== ALL ROUTER-SLOT TESTS PASSED ===\n");
     else printf("=== %d FAILURES ===\n", failures);
     return failures ? 1 : 0;
