@@ -1092,6 +1092,10 @@ test_colony: tools/test_colony.c src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu
 test_gemv_dispatch: tools/test_gemv_dispatch.c src/wubu_gemv_dispatch.o src/wubu_gemm.o src/wubu_bf16_gemv.o src/wubu_precision_plan.o src/wubu_hwcaps.o src/wubu_scale.o src/wubu_mem_budget.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_harness_file: tools/test_harness_file.c src/wubu_harness_file.o src/wubu_trajcell.o src/wubu_hive.o src/wubu_codec.o src/wubu_canvas.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
