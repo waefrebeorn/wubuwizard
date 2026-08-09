@@ -1126,6 +1126,10 @@ test_qwen35: tools/test_qwen35.c src/wubu_qwen35.o
 test_qwen35_forward: tools/test_qwen35_forward.c src/wubu_qwen35_forward.o src/wubu_qwen35.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
 
+wubu_qwen35_probe: tools/wubu_qwen35_probe.c src/wubu_qwen35_forward.o src/wubu_qwen35.o src/gguf_reader.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+
 
 
 wubu_report: tools/wubu_report.c src/wubu_diagnosis.o src/wubu_priority_store.o src/wubu_events.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_lineage.o src/wubu_contracts.o
