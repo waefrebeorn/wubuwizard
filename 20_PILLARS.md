@@ -22,23 +22,25 @@
 | 4 | Document/productivity engine | 🔄 Stub | WuBuOffice not started in this checkout |
 | 5 | Code editor / dev environment | 🔄 Stub | WuBuPad not started in this checkout |
 | 6 | Unified tool surface | 🔄 Partial | wubuwizard: the Colonel channel (`src/wubu_colonel.c`) + the 9P capability caps (`wubu_agentic_os.c`); slermes: 40+ tools |
-| 11 | Continuous evaluation / benchmarking | 🔄 Partial→Progressing | wubuwizard: the dual-timescale diagnose (`src/wubu_metadiag.c`) treats the loss trend + task-harness signal as fitness; the multi-hour task suite is Phase 3 of the current wave |
+| 11 | Continuous evaluation / benchmarking | ✅ Implemented | wubuwizard: the sustained-autonomy harness (`src/wubu_harness.c` + `src/wubu_harness_file.c` — 7-task fixed suite + live-file tasks, scored outcomes as traj cells, the SUITE SCORE is first-class fitness the metadiag reads) + the endurance runner (`tools/wubu_endurance.c` — multi-hour, checkpoint-restart, events) + the report/timeseries post-mortem stack (AN41/AN47/A1-A3) |
 | 12 | Resource & stability management | 🔄 Partial | wubuwizard: `src/wubu_affinity.c`, `src/wubu_arena.c`, `src/wubu_capgate.c` (headroom gating), ds4-ssd slot-bank |
 | 13 | Sandboxing / permission model | 🔄 Partial→Progressing | wubuwizard: the Colonel's deny-by-default 9P capability boundary (a request outside the agent subtree is DENIED at enqueue); full container isolation stays in WuBuOS (cgroups + seccomp-bpf) |
 | 14 | Multi-platform human interface | 🔄 Partial | slermes: CLI + TUI + Wayland/X11/Win32/macOS GUI; WuBuOS: Win98/XP shell |
 | 15 | Web access / external world | 🔄 Partial→Progressing | wubuwizard: the Colonel requests carry the capability path; minimal external-world tools behind the cap surface are Phase 5 of the current wave (no full-host shell) |
 | 16 | Continuous autonomy (scheduling) | ✅ Implemented | slermes: `src/cron/scheduler.c`, `cronjob` tool in Hermes |
-| 17 | Skill creation / self-improvement curriculum | 🔄 Partial→Progressing | wubuwizard: tool-trajectory cells (`src/wubu_trajcell.c`) + capability gaps (`src/wubu_capgate.c`) are the skill-curriculum input; versioned skill cells in the hive are Phase 4 of the current wave |
+| 17 | Skill creation / self-improvement curriculum | ✅ Implemented | wubuwizard: the skill curriculum (`src/wubu_skillcell.c` — versioned skill cells from traj patterns, match-before-spawn, prune) + the skill→train feedback (`src/wubu_skill_train.c` + `wubu_train_apply_prefs` — preference/SFT stream into the real weights) (AN42/AN50) |
 | 18 | Geometric/math research foundations | 🔄 Research | `ENCODERS/`, `THEORY/` (Poincaré, GAAD, DFT/DCT) + the Lean-backed hyperbolic floor (`src/wubu_contracts.c` runtime form) |
-| 20 | Sustained autonomous productivity demo | 🔄 Progressing | the closed loop (AN27–AN39) IS the running colony: diagnose -> mutate -> validate -> archive/graveyard -> delegate -> oracle -> Body action -> recover. The multi-hour unattended harness is Phase 3 |
+| 20 | Sustained autonomous productivity demo | ✅ Implemented | wubuwizard: the endurance runner (`tools/wubu_endurance.c` — multi-hour rounds, checkpoint-restart, suite score + lineage moving right, replayable from .hive/.prio/.events) + the report/timeseries/replay post-mortem stack (AN47/A1/A2/A3/A7). The colony runs without a human resetting the loop. |
 
-## Key Gaps to Close (in priority order — the current wave)
-1. **The multi-hour unattended harness RUN** (Phase 3's done-definition): a real multi-hour run that improves the suite score via accepted mutations, with lineage + graveyard explaining why. The endurance path (--resume + --ckpt-hive) is wired — the RUN is the next proof.
-2. **The Body side of the Colonel**: WuBuOS consumes the requests (the Styx/9P namespace executor for wubu_colonel) — `docs/BODY-PILLAR-HANDOFF.md` (AN54) froze the message set; the executor implementation is the Body's job now.
-3. **The skill→train stream into the real trainer**: the drain API (AN50) exists; wiring the drained pairs into wubu_train's preference loss closes "experience → weights" for real.
-4. **Metal**: the colony runs in ring-0 (the Live Colonel hosts it; WuBuOS boots on metal, not just WSL-hosted).
-5. **The live hive walk**: walk the LIVE hive (not just the saved archive).
-6. **Phases 1-6 + AN47-54 are WIRED** (2026-08-09): the closed loop is the default train path (AN40), the priority store gates mutations on Fisher evidence (AN46), the endurance path restarts from .hive+.prio (AN47), the GEMV ladder executes (AN48), live-file tasks score real work (AN49), skills feed the train stream (AN50), the Colonel effect path is proven end-to-end (AN51), the policy recorder answers WHY (AN52), hive archives federate via the merge (AN53), and the Body handoff pack unblocks WuBuOS (AN54).
+## Key Gaps to Close (in priority order — the post-AN54 backlog)
+1. **The A items (telemetry)**: A5 kill-resume chaos script + A6 resource ledger (the recorder + report + timeseries + replay are WIRED — A1/A2/A3/A7).
+2. **The B items (harness depth)**: multi-file userfs scenarios, codec stress, adversarial pack, long-horizon goal, curriculum schedule, golden-suite baseline.
+3. **The C items (skills & training)**: skill quality decay, negative skill cells, composition, drain metrics, pair dedup, on/off-policy tags, skill→MoE bias.
+4. **The D items (precision/bandwidth)**: full ladder families, bandwidth oracle cell, thermal fitness, KV-tier policy, scale-to-fit audit, dispatch A/B.
+5. **The F items (Body boundary)**: fake-Body test, cap attenuation, durable effect journal, sandbox policy matrix, colonel-under-harness — with WuBuOS, not by reinventing Colonel.
+6. **The G/H items (safety + orchestration)**: contracts pack, expansion governance, nightly gate, ship-bit policy, policy graveyard, NaN tripwire; lens priors, critique-veto audit, plan DAGs, budgeted search, self-play.
+7. **The E items (federation)**: signed bundles, partial merge, conflict report, colony identity, async merge queue.
+8. **AN27-AN54 are WIRED** (2026-08-09, see the colony section above) — do not re-implement. See docs/AGENT-PROMPT-LOCK.md + docs/COLONY-OPERATOR-MANUAL.md.
 
 ## WSL as Agnostic Accelerator Design
 WSL2 on this machine is the current compute substrate:

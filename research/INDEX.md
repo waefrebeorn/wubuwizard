@@ -2056,6 +2056,8 @@ archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
 - AN52 METADIAG POLICY RECORDER `wired` (src/wubu_metadiag.c — every policy change is a versioned meta-cell with the REASON CODE (1=loss rising, 2=suite failing, 3=relax); the hive walk answers WHY the colony got aggressive at step N; test_metadiag PASSES)
 - AN53 MULTI-CHECKPOINT LINEAGE MERGE `wired` (include/wubu_hive_merge.h + src/wubu_hive_merge.c — safe merge of two .hive archives, each with its OWN priority evidence: union + better-fitness conflict rule + the PRIORITY EVIDENCE override (a protected lineage survives even with worse fitness) + the graveyards always union; the colony federates without forking; test_hive_merge PASSES)
 - AN54 BODY PILLAR HANDOFF `wired` (docs/BODY-PILLAR-HANDOFF.md — the frozen Brain->Body contract: the message set, the cap semantics, the ack contract; unblocks the WuBuOS Styx/9P executor, sandbox/seccomp, and metal boot without Brain rework)
+- AN55 THE POST-COLONY THEME — "ENDURANCE, TELEMETRY, AND THE BODY" `open` (the post-AN54 backlog — the run recorder + report + timeseries + replay are WIRED (A1/A2/A3/A7), the operator manual is docs/COLONY-OPERATOR-MANUAL.md; the open items are the chaos script (A5), resource ledger (A6), harness depth (B), skill quality decay (C15+), precision ladder families (D22+), federation (E), the fake-Body test (F33), the safety packs (G40+), and the orchestration priors (H44+). DO NOT re-implement AN27-AN54.)
+
 
 
 
