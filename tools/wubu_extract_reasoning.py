@@ -208,6 +208,52 @@ def extract_ot3(path, out, n_out):
         if n_out[0] % 10000 == 0:
             print(f"    {n_out[0]} docs", flush=True)
 
+def extract_v4_session(path, out, n_out):
+    """DeepSeek-v4-Pro-Agent: Codex-CLI-style session logs. Lines are
+    type=session/message/model_change/thinking_level_change. The
+    messages carry role=user/assistant with tool-use blocks — the REAL
+    agent-session format (the AGI-OS tool-call training the user wants)."""
+    import json as _json
+    turns = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                obj = _json.loads(line)
+            except Exception:
+                continue
+            if obj.get("type") != "message": continue
+            msg = obj.get("message", {})
+            role = msg.get("role", "")
+            if role not in ("user", "assistant", "system", "developer"):
+                continue
+            # content can be a str or a list of {type: text|tool_use|...}
+            content = msg.get("content")
+            parts = []
+            if isinstance(content, str):
+                parts.append(clean(content))
+            elif isinstance(content, list):
+                for p in content:
+                    if not isinstance(p, dict): continue
+                    if p.get("type") == "text":
+                        parts.append(clean(p.get("text", "")))
+                    elif p.get("type") == "tool_use":
+                        nm = p.get("name", "tool")
+                        inp = p.get("input", "")
+                        if isinstance(inp, dict):
+                            inp = _json.dumps(inp)[:200]
+                        parts.append(f"<tool_call> {nm}({inp}) </tool_call>")
+                    elif p.get("type") == "tool_result":
+                        parts.append(f"<tool_result> {clean(str(p.get('content', '')))[:200]} </tool_result>")
+            body = "\n".join(x for x in parts if x)
+            if not body: continue
+            who = "[USER]\n" if role == "user" else "[ASSISTANT]\n"
+            turns.append(who + body)
+    if len(turns) >= 2:
+        out.write("\n".join(turns) + "\n\n")
+        n_out[0] += 1
+
 def main():
     # (glob, extractor, outname) — recursive: HF datasets land in
     # data/ and metadata/ subdirs
@@ -238,10 +284,10 @@ def main():
          extract_glm51, "glm-5.1-reasoning"),
         ("/home/wubu/models/corpus/reasoning/openthoughts3-1.2m/**/*.parquet",
          extract_ot3, "openthoughts3-1.2m"),
-        ("/home/wubu/models/corpus/interactions/glm-5.2-conversation/**/*.parquet",
-         extract_conversation, "glm-5.2-conversation"),
+        ("/home/wubu/models/corpus/interactions/glm-5.2-conversation/dataset.jsonl",
+         extract_jsonl, "glm-5.2-conversation"),
         ("/home/wubu/models/corpus/interactions/deepseek-v4-pro-agent/**/*.jsonl",
-         extract_jsonl, "deepseek-v4-pro-agent"),
+         extract_v4_session, "deepseek-v4-pro-agent"),
     ]
     for pat, fn, name in jobs:
         files = sorted(glob.glob(pat, recursive=True))
