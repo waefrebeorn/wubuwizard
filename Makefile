@@ -1130,6 +1130,13 @@ test_qwen35_forward: tools/test_qwen35_forward.c src/wubu_qwen35_forward.o src/w
 wubu_qwen35_probe: tools/wubu_qwen35_probe.c src/wubu_qwen35_forward.o src/wubu_qwen35.o src/gguf_reader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
 
+wubu_runcompare: tools/wubu_runcompare.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+wubu_anomaly: tools/wubu_anomaly.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+
 
 
 

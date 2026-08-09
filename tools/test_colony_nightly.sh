@@ -100,6 +100,16 @@ else
         echo "  PASS: replay (0 divergences)" || { echo "  FAIL: replay"; RC=1; }
 fi
 
+# 5. the A8 anomaly detector — the RELEASE GATE (a rising suite that
+# hides contract trips or a degenerate accept-all gate fails the night)
+if ./wubu_anomaly "$BASE.events.jsonl" > /tmp/nightly_anomaly.log 2>&1; then
+    echo "  PASS: the anomaly detector (release gate) is clean"
+else
+    echo "  FAIL: the anomaly detector flagged anomalies:"
+    grep "ANOMALY\|WARNING" /tmp/nightly_anomaly.log | head -4
+    RC=1
+fi
+
 echo ""
 if [ $RC -eq 0 ]; then
     echo "=== NIGHTLY COLONY GATE PASSED — artifacts in $OUTDIR ==="
