@@ -78,9 +78,23 @@ int main(int argc, char **argv) {
         int nan = 0;
         for (int i = 0; i < m.vocab_size; i++) {
             float v = logits[i];
-            if (isnan(v) || isinf(v)) { nan++; logits[i] = -1e30f; }
+            if (v != v || v > 1e30f || v < -1e30f) { nan = 1; break; }
         }
-        if (nan) { fprintf(stderr, "lfm2: %d nan logits at step %d\n", nan, step); break; }
+        if (nan) { fprintf(stderr, "lfm2: NaN in logits at step %d\n", step); break; }
+
+        /* repetition penalty (log-space): damp the last REP_WIN tokens so
+         * the LFM2.5's greedy/sampling loops ("(((((" / "PeriodPeriod")
+         * break. The model's degeneration margin is large — llama.cpp's
+         * default ~0.1 log is useless here; 1.0 reliably escalates out. */
+        {
+            float rep_pen = 1.0f;
+            const char *rp = getenv("LFM2_REP_PEN");
+            if (rp) rep_pen = (float)atof(rp);
+            if (rep_pen > 0.0f && T > 1) {
+                int from = (T > 64) ? T - 64 : 0;
+                for (int i = from; i < T; i++) logits[seq[i]] -= rep_pen;
+            }
+        }
 
         int sample;
         if (temp <= 0.0001f) {

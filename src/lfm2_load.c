@@ -381,6 +381,8 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
 #define LOAD(var, fmt) do { snprintf(nm, sizeof(nm), fmt, l); \
             L->var = load_bf16_f32(nm); \
             if (!L->var) fprintf(stderr, "lfm2: missing %s\n", nm); } while (0)
+#define LOAD_SILENT(var, fmt) do { snprintf(nm, sizeof(nm), fmt, l); \
+            L->var = load_bf16_f32(nm); } while (0)
         if (m->is_conv[l]) {
             LOADQ(in_proj, q_in_proj, q_in_proj_t, "model.layers.%d.conv.in_proj.weight");
             LOADQ(conv_w,   q_conv_w,  q_conv_w_t,  "model.layers.%d.conv.conv.weight");
@@ -390,8 +392,10 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
             LOADQ(k_proj, q_k_proj, q_k_proj_t, "model.layers.%d.self_attn.k_proj.weight");
             LOADQ(v_proj, q_v_proj, q_v_proj_t, "model.layers.%d.self_attn.v_proj.weight");
             LOADQ(o_proj, q_o_proj, q_o_proj_t, "model.layers.%d.self_attn.out_proj.weight");
-            LOAD(q_ln,   "model.layers.%d.self_attn.q_layernorm.weight");
-            LOAD(k_ln,   "model.layers.%d.self_attn.k_layernorm.weight");
+            /* per-head q/k norms are OPTIONAL (MiniCPM5-class models have
+             * none; lfm2_attn skips NULL norms) — load silently */
+            LOAD_SILENT(q_ln, "model.layers.%d.self_attn.q_layernorm.weight");
+            LOAD_SILENT(k_ln, "model.layers.%d.self_attn.k_layernorm.weight");
         }
         LOADQ(w1,      q_w1, q_w1_t, "model.layers.%d.feed_forward.w1.weight");
         LOADQ(w2,      q_w2, q_w2_t, "model.layers.%d.feed_forward.w2.weight");
