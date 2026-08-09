@@ -96,6 +96,17 @@ driven split math, test_qwen35 pins the 0.8B numbers).
 (gated-attn branch + GDN branch) + logit-parity vs llama.cpp — needs the
 Qwen3.5-0.8B GGUF on disk (unsloth/Qwen3.5-0.8B-GGUF, Q8_0, 1.19GB).
 
+**PARITY PROTOCOL (2026-08-09, the GGUF is local + llama-server runs)**:
+- the reference: `/home/wubu/llama.cpp/build/bin/llama-server -m
+  /home/wubu/models/Qwen3.5-0.8B-Q8_0.gguf --port 8090`; the fixture
+  tool `tools/qwen35_parity_fixture.py "PROMPT" --port 8090` captures
+  the deterministic (temp 0) TOP-5 logprobs per generated position.
+- the anchor: `research/qwen35-parity-reference.json` — "The capital
+  of France is" -> " Paris." (top-1 ' Paris' -2.062, then '.' -0.618).
+- the wizard side must match TOP-1 per position once the hybrid
+  loader runs the full 24-layer stack (the MiniCPM5-style
+  verification); the TOP-5 logprobs are the richer oracle.
+
 ## Gated DeltaNet (Qwen3_5GatedDeltaNet, transformers modular)
 
 ```

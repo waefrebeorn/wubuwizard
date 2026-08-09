@@ -1,0 +1,60 @@
+{
+  "model": "Qwen3.5-0.8B-Q8_0.gguf",
+  "prompt": "The capital of France is",
+  "temperature": 0,
+  "reference_generation": " Paris.",
+  "top5_per_token": [
+    {
+      "position": 1,
+      "token": " Paris",
+      "top5": [
+        {
+          "token": " Paris",
+          "logprob": -2.0621
+        },
+        {
+          "token": " the",
+          "logprob": -2.3404
+        },
+        {
+          "token": " located",
+          "logprob": -2.633
+        },
+        {
+          "token": ":",
+          "logprob": -2.7799
+        },
+        {
+          "token": "\n",
+          "logprob": -2.8289
+        }
+      ]
+    },
+    {
+      "position": 2,
+      "token": ".",
+      "top5": [
+        {
+          "token": ".",
+          "logprob": -0.6184
+        },
+        {
+          "token": ",",
+          "logprob": -1.0169
+        },
+        {
+          "token": " (",
+          "logprob": -3.987
+        },
+        {
+          "token": "\n",
+          "logprob": -4.1432
+        },
+        {
+          "token": " and",
+          "logprob": -4.2593
+        }
+      ]
+    }
+  ]
+}
