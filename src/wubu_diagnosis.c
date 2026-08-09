@@ -94,6 +94,18 @@ wubu_diag_verdict_t wubu_diag_cycle(wubu_diag_loop_t *loop,
 
     /* the mutation cycle: diagnose -> mutate -> validate */
     if (!loop->amoeba) return WUBU_DIAG_STASIS;
+    /* Phase 2: the priority store — consult BEFORE the mutation. A
+     * protected cell (high Fisher + a recent rejection) is REFUSED:
+     * the loss already cares about it, a new mutation would trash it.
+     * The whole-colony mutation consults EVERY registered cell (any
+     * protected cell blocks the cycle). */
+    if (loop->prio) {
+        int blocked = 0;
+        for (int c = 0; c < 32; c++) {
+            if (!wubu_prio_gate(loop->prio, (uint8_t)c)) { blocked = 1; break; }
+        }
+        if (blocked) return WUBU_DIAG_REJECT;
+    }
     if (wubu_amoeba_diagnose(loop->amoeba) != 0) return WUBU_DIAG_REJECT;
     int mutated = wubu_amoeba_mutate(loop->amoeba);
     if (mutated <= 0) {
@@ -147,6 +159,10 @@ wubu_diag_verdict_t wubu_diag_cycle(wubu_diag_loop_t *loop,
     cell.graveyard = accepted ? 0 : 1;
     push_fitness_cell(loop, &cell, !accepted);
     if (accepted) loop->n_accepted++; else loop->n_rejected++;
+    /* Phase 2: the priority ledger records the outcome (the same
+     * provenance as the hive, mirrored for the sidecar) */
+    if (loop->prio)
+        wubu_prio_record_mutation(loop->prio, cell.cell_idx, accepted);
     return accepted ? WUBU_DIAG_ACCEPT : WUBU_DIAG_REJECT;
 }
 

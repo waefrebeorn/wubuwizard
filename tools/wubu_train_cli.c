@@ -29,6 +29,7 @@
 #include "wubu_rsi.h"
 #include "wubu_lineage.h"
 #include "wubu_contracts.h"
+#include "wubu_priority_store.h"
 
 /* FTZ + DAZ: flush denormals (from wuburvc's CPU research — the softmax/
  * exp/backprop tails create subnormals; denormal FP ops are ~100x slower
@@ -375,6 +376,11 @@ int main(int argc, char **argv)
     wubu_contracts_init(&contracts, &diag_tissue);
     diag_loop.lineage = &lineage;
     diag_loop.contracts = &contracts;
+    /* Phase 2: the priority store — the diagnose consults it before
+     * every mutation (BI + the online Fisher + the ledger) */
+    wubu_priority_store_t prio;
+    wubu_prio_init(&prio, 0.5f, 0.3f);
+    diag_loop.prio = &prio;
     for (int step = 1; step <= max_steps; step++) {
         if (pos + seq > corpus_n) pos = 0;   /* epoch wrap */
         for (int i = 0; i < seq; i++) win[i] = corpus[pos + i];
@@ -416,6 +422,20 @@ int main(int argc, char **argv)
                                     WUBU_DIM, WUBU_FFN_DIM,
                                     WUBU_KV_HEADS * WUBU_HEAD_DIM,
                                     WUBU_HEADS * WUBU_HEAD_DIM);
+            /* Phase 2: the online Fisher (EWC) — the real grad norm
+             * feeds the diagonal per batch (what the loss cares
+             * about); the diagnose gate protects those cells */
+            {
+                float gn = (float)(tr.grad_norm_sum /
+                                   (tr.micro_steps > 0 ? tr.micro_steps : 1));
+                for (int c = 0; c < diag_loop.n_cells_alloc; c++) {
+                    wubu_prio_register(&prio, (uint8_t)c, 2,
+                                       diag_loop.cell_grads[c], (uint64_t)step);
+                    wubu_prio_update_fisher(&prio, (uint8_t)c,
+                                            gn > 0 ? gn : diag_loop.cell_grads[c],
+                                            0.1f);
+                }
+            }
             if (diag_every > 0 && step % diag_every == 0) {
                 wubu_diag_cycle(&diag_loop, &rec, (float)loss_ema);
                 /* the RSI engine proposes a mutation under the gate;
@@ -506,6 +526,9 @@ int main(int argc, char **argv)
         wubu_contracts_stats(&contracts, cstats, sizeof(cstats));
         printf("  lineage: %s\n", lstats);
         printf("  contracts: %s\n", cstats);
+        char pstats[256];
+        wubu_prio_stats(&prio, pstats, sizeof(pstats));
+        printf("  priority store: %s\n", pstats);
         printf("  closed loop: hive live cells %zu (fitness archive)\n",
                wubu_hive_live(&diag_tissue));
         char arch[640];
@@ -513,6 +536,17 @@ int main(int argc, char **argv)
         if (wubu_diag_save(&diag_loop, arch) == 0)
             printf("  closed loop: archive -> %s (wubu_hive_walk %s --accepted)\n",
                    arch, arch);
+        /* Phase 2: the priority sidecar — the checkpoint's ledger
+         * (BI + Fisher + precision deltas + the mutation history) */
+        char psck[640];
+        snprintf(psck, sizeof(psck), "%s.prio", out_path);
+        static char pbuf[8192];
+        long pn = wubu_prio_save(&prio, pbuf, (long)sizeof(pbuf));
+        if (pn > 0) {
+            FILE *pf = fopen(psck, "wb");
+            if (pf) { fwrite(pbuf, 1, (size_t)pn, pf); fclose(pf); }
+            printf("  priority store: sidecar -> %s (%ld bytes)\n", psck, pn);
+        }
         wubu_diag_loop_free(&diag_loop);
         wubu_amoeba_free(&diag_amoeba);
         wubu_moe2_free(&diag_agents);

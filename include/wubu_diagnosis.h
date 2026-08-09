@@ -94,6 +94,11 @@ typedef struct {
      * passes fitness + prover + contracts + lineage pressure. */
     struct wubu_lineage_tracker_t *lineage;   /* optional (owned by caller) */
     struct wubu_contracts_t       *contracts; /* optional (owned by caller) */
+    /* Phase 2: the priority store (BI + Fisher/EWC + precision deltas
+     * + the mutation ledger) — the diagnose consults it before the
+     * next mutation; a protected cell (the loss cares + recent
+     * rejection) is REFUSED. */
+    struct wubu_priority_store_t  *prio;      /* optional (owned by caller) */
 } wubu_diag_loop_t;
 
 /* L1: init the closed loop. The caller owns the organs. */

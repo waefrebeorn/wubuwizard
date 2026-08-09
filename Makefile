@@ -1041,7 +1041,7 @@ test_amoeba: tools/test_amoeba.c src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
 
-test_diagnosis: tools/test_diagnosis.c src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o
+test_diagnosis: tools/test_diagnosis.c src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_priority_store.o src/wubu_lineage.o src/wubu_contracts.o src/wubu_priority_store.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_orch: tools/test_orch.c src/wubu_agi.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o src/wubu.o src/wubu_runtime_dims.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_mobius.o src/wubu_grow.o src/wubu_plateau.o
@@ -1082,6 +1082,10 @@ test_toolreg: tools/test_toolreg.c src/wubu_toolreg.o src/wubu_trajcell.o src/wu
 
 test_blueprint: tools/test_blueprint.c src/wubu_blueprint.o src/wubu_contracts.o src/wubu_hive.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_priority_store: tools/test_priority_store.c src/wubu_priority_store.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 
 
 
@@ -1552,7 +1556,7 @@ wubu_pond2tok: tools/wubu_pond2tok.c src/wubu_tokenizer_hf.o
 gpu_wubu.o: src/gpu_wubu.cu
 	nvcc -O2 -c src/gpu_wubu.cu -o $@ -Xcompiler -fPIC
 
-wubu_train: tools/wubu_train_cli.c src/wubu_runtime_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_selfimprove.o src/wubu_rsi.o src/wubu_lineage.o src/wubu_contracts.o
+wubu_train: tools/wubu_train_cli.c src/wubu_runtime_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_selfimprove.o src/wubu_rsi.o src/wubu_lineage.o src/wubu_contracts.o src/wubu_priority_store.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 
 wubu_live_learn: tools/wubu_live_learn.c src/wubu_runtime_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_tokenizer_hf.o gpu_wubu.o
