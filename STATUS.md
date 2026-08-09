@@ -29,6 +29,7 @@
 | **Phase 4: skill curriculum** (AN42) | traj patterns -> versioned skill cells; drafts gate-accepted; orchestrator matches before spawning; unused skills pruned | `make test_skillcell` (3 drafts -> 3 accepted, match finds the 0.9 skill, 1 pruned) |
 | **Phase 5: deny-by-default tool registry** (AN43) | unregistered tools DENIED; every action a traj cell; thrashing tools auto-barred | `make test_toolreg` (denied/registered/barred all correct) |
 | **Phase 6: executable blueprint** (AN44) | WB01's lineage as machine-readable bounds; off-blueprint mutations refused; bounds move only via a versioned expansion meta-cell | `make test_blueprint` (in-range passes, MoE 64 refused, expansion versioned) |
+| **Phase 2: priority store** (AN46) | per-cell BI + online Fisher/EWC + precision deltas + mutation ledger; the diagnose gate REFUSES mutations on protected cells (high Fisher + recent rejection); `.prio` sidecar next to the `.hive` archive; wired into wubu_diag_cycle + the CLI | `make test_priority_store` (Fisher 0.562, protected refused, sidecar round-trips); live run: 9 cells, 384 consults, sidecar 392 bytes |
 
 ## Verified this wave (2026-08-09 — acceleration + build integrity)
 

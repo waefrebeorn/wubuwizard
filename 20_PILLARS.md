@@ -33,13 +33,12 @@
 | 20 | Sustained autonomous productivity demo | 🔄 Progressing | the closed loop (AN27–AN39) IS the running colony: diagnose -> mutate -> validate -> archive/graveyard -> delegate -> oracle -> Body action -> recover. The multi-hour unattended harness is Phase 3 |
 
 ## Key Gaps to Close (in priority order — the current wave)
-1. **Phase 1 — the closed loop as the DEFAULT training path**: `--diag-every` not optional; every real train/agent run emits Diagnosis cells; the amoeba mutate path only reachable through the gate + contracts + lineage; one ASan integration test (train N -> diagnose -> mutate -> accept/reject -> archive -> next N); replayable from hive cells alone.
-2. **Phase 2 — priority store + precision ladder**: per-family GEMV dispatch from the hw profile ladder; `wubu_priority_store` (BI + Fisher/EWC + precision deltas + mutation ledger as safetensors sidecar); diagnose consults it before the next mutation.
-3. **Phase 3 — the sustained autonomy harness (Pillar 11 + 20)**: fixed multi-hour task suite (code edit, file transform, tool-use) with scored outcomes as traj cells; slow metadiag treats suite score as first-class fitness; capgate gaps become training goals; hard deadline + loopguard wired for unattended runs.
-4. **Phase 4 — skill curriculum (Pillar 17)**: recurring successful traj patterns -> versioned skill cells in the hive; failed high-partial traj + capgate gaps propose skill drafts; the orchestrator prefers matching skill cells; extinction prunes unused skills.
-5. **Phase 5 — Body boundary hardening (Pillar 13/15)**: deny-by-default tool registry as the ONLY path from specialist cells to effects; minimal external-world tools behind the same cap surface; every external action is a traj cell with cost + outcome.
-6. **Phase 6 — the blueprint executable (WB01)**: the lineage doc becomes a machine-readable plan the trainer + diagnose path follow; off-blueprint mutations require an explicit contract-expansion meta-cell.
-7. **Pillar 2 — OS kernel**: WuBuOS hosted binary works; needs metal boot on WSL for full control.
+1. **The multi-hour unattended harness RUN** (Phase 3's done-definition): a real multi-hour run that improves the suite score via accepted mutations, with lineage + graveyard explaining why.
+2. **The Body side of the Colonel**: WuBuOS consumes the requests (the Styx/9P namespace executor for wubu_colonel); the tool registry's registered tools get real implementations behind the cap surface.
+3. **Metal**: the colony runs in ring-0 (the Live Colonel hosts it; WuBuOS boots on metal, not just WSL-hosted).
+4. **The live hive walk**: walk the LIVE hive (not just the saved archive).
+5. **Pillar 2 — OS kernel**: WuBuOS hosted binary works; needs metal boot on WSL for full control.
+6. **Phases 1-6 are WIRED** (2026-08-09): the closed loop is the default training path (AN40), the priority store gates mutations on Fisher evidence (AN46), the autonomy harness's suite score is first-class fitness (AN41), the skill curriculum learns from experience (AN42), the deny-by-default tool registry bounds agency (AN43), and the executable blueprint refuses off-lineage mutations (AN44).
 
 ## WSL as Agnostic Accelerator Design
 WSL2 on this machine is the current compute substrate:

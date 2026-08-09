@@ -2047,6 +2047,8 @@ archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
 - AN43 PHASE 5 — THE DENY-BY-DEFAULT TOOL REGISTRY `wired` (include/wubu_toolreg.h + src/wubu_toolreg.c — the ONLY path from specialist cells to effects; unregistered tools DENIED (no ambient host authority); every action is a traj cell with cost+outcome; a thrashing tool is auto-barred; test_toolreg PASSES)
 - AN44 PHASE 6 — THE EXECUTABLE BLUEPRINT `wired` (include/wubu_blueprint.h + src/wubu_blueprint.c — WB01's lineage as a machine-readable plan: per-axis bounds, off-blueprint mutations REFUSED by default, bounds move only via a versioned contract-expansion meta-cell; test_blueprint PASSES)
 - AN45 HIVE CLEAR_WITH `wired` (src/wubu_hive.c — wubu_hive_clear_with(free_fn): the ASan-clean teardown for hive-backed modules; the owner's destructor runs on every live cell before the blocks are freed)
+- AN46 PHASE 2 — THE PRIORITY STORE `wired` (include/wubu_priority_store.h + src/wubu_priority_store.c — per-cell BI + the online FISHER/EWC diagonal (the mean-squared-grad EMA) + precision deltas + the mutation ledger; the DIAGNOSE GATE refuses mutations on protected cells (high Fisher + recent rejection); the .prio SIDECAR (a checkpoint's priority ledger, next to the .hive archive); wired into wubu_diag_cycle (consult before, record after) + the CLI (real grad norm feeds the Fisher, sidecar saved at teardown); test_priority_store PASSES)
+
 
 
 
