@@ -140,19 +140,21 @@ A+1. Cram, then cram into the crams.
 | `wubu_poincare_gqa.c` (gyro-rotated attention) | ✅ | within-ball attention |
 | `wubu_moe.c` (256 experts) | ✅ | candidate sphere pool |
 | `wubu_hive` (grow/shrink/specialize) | ✅ | ecosystem lifecycle |
-| physics router (potential well top-k) | ❌ NEW | the user's "use physics" |
-| surface fractal index (space-filling addr) | ❌ NEW | the "cram into empty space" |
+| `wubu_ecosystem.c` (physics router: potential-well top-K, zero learned params) | ✅ NEW | the user's "use physics" |
+| surface fractal index (space-filling addr) | ✅ NEW | the "cram into empty space" |
 
 **Gate for the physics router**: `test_ecosystem` — build a 64-ball colony,
 feed synthetic clusters, assert that (a) inputs land in the balls whose
 region they resemble (top-k purity > 90%), (b) only K balls' params are
 touched (active-param counter < 12% of total), (c) shrink+grow keeps the
-colony stable (no thrash).
+colony stable (no thrash). **PASS** (purity 100%, active 6.25%, no thrash,
+ASan clean).
 
 **Gate for fractal stacking**: `test_fractal_index` — a space-filling
 curve on the sphere surface assigns unique addresses to ≥ 2^20 surface
 sites in < 1MB of curve table; address collision rate 0; round-trip
-address→point→address exact.
+address→point→address exact. **PASS** (Hilbert bijection 1M/1M, box-dim
+2.000, stacking 94% distinct).
 
 ## 5. Triple-DA
 
