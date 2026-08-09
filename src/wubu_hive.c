@@ -181,3 +181,16 @@ void wubu_hive_clear(wubu_hive_t *h)
     free(h->free_entries);
     memset(h, 0, sizeof(*h));
 }
+
+/* the hive holds USER payloads (opaque pointers); clear cannot free
+ * them. clear_with(free_fn) calls free_fn on every live payload first
+ * (the owner's destructor), then clears. The ASan-clean teardown for
+ * hive-backed modules. */
+void wubu_hive_clear_with(wubu_hive_t *h, void (*free_fn)(void *ptr))
+{
+    if (!h) return;
+    if (free_fn) {
+        wubu_hive_foreach(h, (int (*)(void *, void *))free_fn, NULL);
+    }
+    wubu_hive_clear(h);
+}

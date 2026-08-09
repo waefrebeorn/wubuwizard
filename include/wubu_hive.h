@@ -89,4 +89,9 @@ void wubu_hive_clear(wubu_hive_t *h);
 /* H7: total capacity (slots across all blocks). */
 size_t wubu_hive_capacity(const wubu_hive_t *h);
 
+/* H8: clear + free the user payloads first (the hive holds opaque
+ * pointers; the owner's destructor runs on every live cell, then the
+ * blocks are freed). The ASan-clean teardown for hive-backed modules. */
+void wubu_hive_clear_with(wubu_hive_t *h, void (*free_fn)(void *ptr));
+
 #endif

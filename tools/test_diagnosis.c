@@ -138,6 +138,11 @@ int main(void)
 
     wubu_diag_loop_free(&loop);
     wubu_moe2_free(&agents);
+    /* the Phase 1 ASan gate: the caller owns the organs — free the
+     * amoeba + the hive tissue with the cell payloads (the closed
+     * loop is leak-free) */
+    wubu_amoeba_free(&amoeba);
+    wubu_hive_clear_with(&tissue, free);
     printf("=== ALL DIAGNOSIS TESTS PASSED (the closed loop is live) ===\n");
     return 0;
 }
