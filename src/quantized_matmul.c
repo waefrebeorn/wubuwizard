@@ -267,13 +267,18 @@ void quantized_matmul(const float *x,
     void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void ggml_vec_dot_q4_K_q8_K_generic(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void ggml_vec_dot_q4_K_q8_K_avx2(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     
     switch (weight_type) {
         case GGML_TYPE_IQ2_XXS: dot_fn = (vec_dot_fn)iq2_xxs_vec_dot; break;
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
+#if defined(__AVX2__)
+        case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_avx2; break;
+#else
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
+#endif
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
         case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:
@@ -405,13 +410,18 @@ void quantized_matmul_from_q8(const void *q8_x,
     void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void ggml_vec_dot_q4_K_q8_K_generic(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void ggml_vec_dot_q4_K_q8_K_avx2(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
 
     switch (weight_type) {
         case GGML_TYPE_IQ2_XXS: dot_fn = (vec_dot_fn)iq2_xxs_vec_dot; break;
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
+#if defined(__AVX2__)
+        case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_avx2; break;
+#else
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
+#endif
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
         case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:
@@ -502,13 +512,18 @@ void quantized_matmul_batched(const float *x,
     void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
     void ggml_vec_dot_q4_K_q8_K_generic(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
+    void ggml_vec_dot_q4_K_q8_K_avx2(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc);
 
     switch (weight_type) {
         case GGML_TYPE_IQ2_XXS: dot_fn = (vec_dot_fn)iq2_xxs_vec_dot; break;
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
+#if defined(__AVX2__)
+        case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_avx2; break;
+#else
         case GGML_TYPE_Q4_K:    dot_fn = (vec_dot_fn)ggml_vec_dot_q4_K_q8_K_generic; break;
+#endif
         case GGML_TYPE_Q6_K:    dot_fn = (vec_dot_fn)q6_K_vec_dot;    break;
         case GGML_TYPE_Q8_0:    dot_fn = (vec_dot_fn)q8_0_vec_dot;    break;
         default:

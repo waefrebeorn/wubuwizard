@@ -23,7 +23,14 @@ CUDA_HOME = $(shell d=$(NVCC); d=$${d%/*}; d=$${d%/*}; echo $$d)
 CUDA_INC = -I$(CUDA_HOME)/include
 CUDA_LIBDIR = $(shell if [ -d $(CUDA_HOME)/lib/x86_64-linux-gnu ]; then echo $(CUDA_HOME)/lib/x86_64-linux-gnu; else echo $(CUDA_HOME)/lib64; fi)
 WSL_LIB = /usr/lib/wsl/lib
-CFLAGS = -O3 -march=native -funroll-loops -fno-fast-math -ffp-contract=fast -ftree-vectorize -Wall -Wextra -Wno-unused-parameter -I include $(CUDA_INC) -fopenmp
+# AVX-512 is double-pumped on this box (Zen4 4-core): -mno-avx512f keeps
+# AVX2 which wins here. Guarded to x86_64 — the ARM (CM4/Distiller V1)
+# cross-builds must not see the flag.
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),x86_64)
+NOAVX512 = -mno-avx512f
+endif
+CFLAGS = -O3 -march=native $(NOAVX512) -funroll-loops -fno-fast-math -ffp-contract=fast -ftree-vectorize -Wall -Wextra -Wno-unused-parameter -I include $(CUDA_INC) -fopenmp
 LDFLAGS = -lm -fopenmp -L$(CUDA_LIBDIR) -L$(WSL_LIB) -Wl,-rpath,$(WSL_LIB) -lcudart -lcublas -lpthread -lssl -lcrypto
 NVCC_FLAGS = -O3 -I include $(CUDA_INC) -arch=sm_89
 CUDA_INCS = $(CUDA_INC)

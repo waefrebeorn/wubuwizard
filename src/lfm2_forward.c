@@ -10,10 +10,25 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 
 extern int lfm2_dump_layer;
+/* LFM2_TIMERS: per-component cumulative decode ms (conv/attn/ffn/head). */
+static int lfm2_timers_enabled(void) {
+    static int e = -1;
+    if (e < 0) e = getenv("LFM2_TIMERS") ? 1 : 0;
+    return e;
+}
+#define LFM2_TIMERS lfm2_timers_enabled()
 bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits) {
     if (B != 1) { fprintf(stderr, "lfm2: only B=1 supported\n"); return false; }
+    static double t_conv = 0, t_attn = 0, t_ffn = 0, t_head = 0;
+    static int t_calls = 0;
+    if (LFM2_TIMERS && t_calls == 0) {
+        /* first call of the run: zero the accumulators */
+        t_conv = t_attn = t_ffn = t_head = 0;
+    }
+    t_calls++;
     int d = m->d_model;
     float *h = (float *)malloc((size_t)T * d * sizeof(float));
     memcpy(h, emb, (size_t)T * d * sizeof(float));
@@ -69,13 +84,19 @@ bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits
             /* conv_w: F32 kernel — materialized, or the F32 GGUF blob direct
              * (same [C,k] row layout) when the layer skipped materialize */
             const float *cw = L->conv_w ? L->conv_w : (const float *)L->q_conv_w;
+            struct timespec t0, t1;
+            if (LFM2_TIMERS) clock_gettime(CLOCK_MONOTONIC, &t0);
             lfm2_conv_q(L->in_proj, cw, L->out_proj, L->conv_k,
                         m->conv_dim, d, tmp, T, scratch,
                         full_q ? L->q_in_proj : NULL, L->q_in_proj_t,
                         full_q ? L->q_out_proj : NULL, L->q_out_proj_t,
                         m->conv_state + (size_t)l * m->conv_state_dim, m->kv_len);
+            if (LFM2_TIMERS) { clock_gettime(CLOCK_MONOTONIC, &t1);
+                t_conv += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6; }
         } else {
             float *kvc = m->kv_cache + (size_t)l * 2 * m->n_kv_heads * m->head_dim * m->kv_max_t;
+            struct timespec t0, t1;
+            if (LFM2_TIMERS) clock_gettime(CLOCK_MONOTONIC, &t0);
             lfm2_gqa_q(L->q_proj, L->k_proj, L->v_proj, L->o_proj, L->q_ln, L->k_ln,
                        m->n_q_heads, m->n_kv_heads, m->head_dim, d, m->rope_theta,
                        tmp, T, kvc, m->kv_max_t, m->kv_len /* start_pos */, scratch,
@@ -83,6 +104,8 @@ bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits
                        full_q ? L->q_k_proj : NULL, L->q_k_proj_t,
                        full_q ? L->q_v_proj : NULL, L->q_v_proj_t,
                        full_q ? L->q_o_proj : NULL, L->q_o_proj_t);
+            if (LFM2_TIMERS) { clock_gettime(CLOCK_MONOTONIC, &t1);
+                t_attn += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6; }
         }
         for (size_t i = 0; i < (size_t)T * d; i++) h[i] += scratch[i];
 
@@ -100,10 +123,14 @@ bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits
             memcpy(tmp + (size_t)t * d, h + (size_t)t * d, d * sizeof(float));
             lfm2_rmsnorm(tmp + (size_t)t * d, L->ffn_norm, d, m->rms_eps);
         }
+        struct timespec f0, f1;
+        if (LFM2_TIMERS) clock_gettime(CLOCK_MONOTONIC, &f0);
         lfm2_ffn_q(L->w1, L->w2, L->w3, m->ff_dim, d, tmp, T, scratch,
                    full_q ? L->q_w1 : NULL, L->q_w1_t,
                    full_q ? L->q_w2 : NULL, L->q_w2_t,
                    full_q ? L->q_w3 : NULL, L->q_w3_t);
+        if (LFM2_TIMERS) { clock_gettime(CLOCK_MONOTONIC, &f1);
+            t_ffn += (f1.tv_sec - f0.tv_sec) * 1e3 + (f1.tv_nsec - f0.tv_nsec) / 1e6; }
         if (getenv("LFM2_DBGLAYER")) {
             int dl = atoi(getenv("LFM2_DBGLAYER"));
             if (l == dl) {
@@ -194,21 +221,29 @@ bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits
         }
         free(hn);
     }
+    struct timespec h0, h1;
+    if (LFM2_TIMERS) clock_gettime(CLOCK_MONOTONIC, &h0);
     if (m->embed) {
         lfm2_matmul_f32(h + (size_t)(T - 1) * d, m->embed, 1, d, m->vocab_size, logits);
     } else if (m->q_lm_head) {
-        /* separate untied quantized lm_head (output.weight) */
-        lfm2_lmhead_q_from(h + (size_t)(T - 1) * d, m, logits,
-                           m->q_lm_head, m->q_lm_head_type,
-                           m->lm_head_bytes_per_row);
+        /* separate untied quantized lm_head (output.weight): vec-dot the
+         * raw blob directly (q8(h) once) — no per-row F32 dequant */
+        quantized_matmul_batched(h + (size_t)(T - 1) * d, m->q_lm_head, m->q_lm_head_type,
+                                 d, m->vocab_size, 0, 1, logits);
     } else if (m->q_embed) {
-        /* quantized tied lm_head: dequantize the head row-block on demand */
-        lfm2_lmhead_q_from(h + (size_t)(T - 1) * d, m, logits,
-                           m->q_embed, m->q_embed_type,
-                           m->embed_bytes_per_row);
+        /* quantized tied lm_head: same vec-dot path on the embed blob */
+        quantized_matmul_batched(h + (size_t)(T - 1) * d, m->q_embed, m->q_embed_type,
+                                 d, m->vocab_size, 0, 1, logits);
     }
+    if (LFM2_TIMERS) { clock_gettime(CLOCK_MONOTONIC, &h1);
+        t_head += (h1.tv_sec - h0.tv_sec) * 1e3 + (h1.tv_nsec - h0.tv_nsec) / 1e6; }
     free(h); free(scratch); free(tmp);
     m->kv_len += T;   /* incremental decode: KV fill level + conv state pos */
+    if (LFM2_TIMERS && t_calls >= 2) {
+        fprintf(stderr, "[lfm2 timers %d fwd calls] conv=%.1fms attn=%.1fms ffn=%.1fms head=%.1fms total=%.1fms\n",
+                t_calls, t_conv, t_attn, t_ffn, t_head,
+                t_conv + t_attn + t_ffn + t_head);
+    }
     return true;
 }
 
