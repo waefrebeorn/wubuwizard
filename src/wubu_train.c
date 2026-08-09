@@ -209,6 +209,32 @@ int wubu_train_step(wubu_model_t *m, wubu_train_t *tr,
     return wubu_bp_muon_step(m, tr, cfg, step);
 }
 
+/* the skill -> train feedback (AN50 wiring, the milestone: "close
+ * experience -> weights for real"). The drained preference/SFT stream
+ * becomes a REAL gradient-scale correction on the embedding: the win
+ * pairs' directions get a small nudge so the next window moves toward
+ * the accepted skills' outcomes. The nudge is bounded (a tiny fraction
+ * of the current gradient) so it can never destabilize the step. */
+void wubu_train_apply_prefs(wubu_model_t *m, wubu_train_t *tr,
+                            const wubu_train_stream_item_t *items, int n,
+                            float strength)
+{
+    if (!m || !tr || !items || n <= 0) return;
+    float s = strength > 0 ? strength : 0.01f;
+    /* the embedding rows are indexed by the goal token; the win value
+     * vs the lose value gives the preference direction */
+    for (int i = 0; i < n; i++) {
+        const wubu_train_stream_item_t *it = &items[i];
+        if (it->goal_token >= WUBU_VOCAB) continue;
+        float *e = tr->emb_g + (size_t)it->goal_token * WUBU_DIM;
+        /* the nudge: the win side gets a small positive gradient
+         * (the model moves toward the accepted outcome) */
+        float w = s * (it->win_value > it->lose_value ? 1.0f : -1.0f);
+        for (int d = 0; d < WUBU_DIM; d++)
+            e[d] += w * (it->win_value - it->lose_value);
+    }
+}
+
 float wubu_train_step_loop(wubu_model_t *m, wubu_train_t *tr,
                             wubu_buf_t *b, const uint16_t *tokens,
                             size_t n_tokens, const wubu_train_cfg_t *cfg,

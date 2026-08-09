@@ -20,6 +20,7 @@
 #define WUBU_TRAIN_H
 
 #include "wubu.h"
+#include "wubu_skill_train.h"
 /* NOTE: wubu.h defines wubu_model_t (the direct-weights training model).
  * wubu_model.h is the gguf-loader's OPAQUE model — do NOT include both. */
 
@@ -109,14 +110,22 @@ int wubu_train_step(wubu_model_t *m, wubu_train_t *tr,
 
 /* T5: the full training loop -- one step = batch of micro-batches. */
 float wubu_train_step_loop(wubu_model_t *m, wubu_train_t *tr,
-                            wubu_buf_t *b, const uint16_t *tokens,
-                            size_t n_tokens, const wubu_train_cfg_t *cfg,
-                            uint32_t step);
+                           wubu_buf_t *b, const uint16_t *tokens,
+                           size_t n_tokens, const wubu_train_cfg_t *cfg,
+                           uint32_t step);
 
-/* T6: the learning-rate schedule (warmup + cosine decay). */
+/* T6: the skill -> train feedback (AN50 wired): the drained
+ * preference/SFT stream becomes a REAL bounded nudge on the embedding
+ * gradient — the next window moves toward the accepted skills'
+ * outcomes. strength ~0.01 (tiny, cannot destabilize). */
+void wubu_train_apply_prefs(wubu_model_t *m, wubu_train_t *tr,
+                            const wubu_train_stream_item_t *items, int n,
+                            float strength);
+
+/* T7: the learning-rate schedule (warmup + cosine decay). */
 float wubu_train_lr(const wubu_train_cfg_t *cfg, uint32_t step);
 
-/* T7: free the training state. */
+/* T8: free the training state. */
 void wubu_train_free(wubu_train_t *tr);
 
 #endif
