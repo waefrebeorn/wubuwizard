@@ -254,6 +254,33 @@ def extract_v4_session(path, out, n_out):
         out.write("\n".join(turns) + "\n\n")
         n_out[0] += 1
 
+def extract_messages(path, out, n_out):
+    """generic {messages: [{role, content}]} jsonl (glm-5.2-conversation)."""
+    import json as _json
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                obj = _json.loads(line)
+            except Exception:
+                continue
+            msgs = obj.get("messages")
+            if not isinstance(msgs, list): continue
+            doc = []
+            for m in msgs:
+                if not isinstance(m, dict): continue
+                role = str(m.get("role", "")).lower()
+                content = clean(m.get("content", ""))
+                if not content: continue
+                who = "[USER]\n" if role == "user" else "[ASSISTANT]\n"
+                doc.append(who + content)
+            if len(doc) < 2: continue
+            out.write("\n".join(doc) + "\n\n")
+            n_out[0] += 1
+            if n_out[0] % 5000 == 0:
+                print(f"    {n_out[0]} docs", flush=True)
+
 def main():
     # (glob, extractor, outname) — recursive: HF datasets land in
     # data/ and metadata/ subdirs
@@ -285,7 +312,7 @@ def main():
         ("/home/wubu/models/corpus/reasoning/openthoughts3-1.2m/**/*.parquet",
          extract_ot3, "openthoughts3-1.2m"),
         ("/home/wubu/models/corpus/interactions/glm-5.2-conversation/dataset.jsonl",
-         extract_jsonl, "glm-5.2-conversation"),
+         extract_messages, "glm-5.2-conversation"),
         ("/home/wubu/models/corpus/interactions/deepseek-v4-pro-agent/**/*.jsonl",
          extract_v4_session, "deepseek-v4-pro-agent"),
     ]
