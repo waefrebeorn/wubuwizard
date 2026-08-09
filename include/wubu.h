@@ -125,7 +125,11 @@ typedef struct {
 /* B1: init the model from raw weight buffers (the safetensors loader
  * fills them; the model takes ownership of the pointers). */
 int wubu_model_init(wubu_model_t *m, float *embedding, float *final_norm,
-                     wubu_block_t *blocks, float **selectors);
+                    wubu_block_t *blocks, float **selectors);
+/* The from-scratch random-init builder: allocates the FULL model at the
+ * runtime WUBU35_DIMS geometry with zero pretrained weights (the amoeba
+ * doctrine — 'delete the old model, make a new model'). */
+int wubu_model_random_init(wubu_model_t *m);
 
 /* B2: load the released checkpoint from a safetensors file. */
 int wubu_load(wubu_model_t *m, const char *safetensors_path);

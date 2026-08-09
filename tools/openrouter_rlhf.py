@@ -20,15 +20,32 @@ import sys
 import json
 import urllib.request
 
-KEYS = [
-    "***REMOVED***",
-    "***REMOVED***",
-    "***REMOVED***",
-    "***REMOVED***",
-    "***REMOVED***",
-    "***REMOVED***",
-]
 BASE = "https://openrouter.ai/api/v1"
+
+
+def _load_keys():
+    """Load the 6 OpenRouter keys from the VAULT (secrets/hf.env).
+    The user's doctrine: the keys stay in the vault, the tools call the
+    keys THROUGH the vault — never hardcoded in the tool."""
+    keys = []
+    env_path = os.path.expanduser(
+        "~/.hermes/profiles/mind-palace/secrets/hf.env")
+    if os.path.exists(env_path):
+        for line in open(env_path):
+            m = __import__("re").match(r'(?:export )?OPENROUTER_KEY_(\d+)="([^"]*)"',
+                                       line.strip())
+            if m:
+                keys.append((int(m.group(1)), m.group(2)))
+    # also honor the environment directly (source hf.env before running)
+    for i in range(1, 7):
+        v = os.environ.get(f"OPENROUTER_KEY_{i}", "")
+        if v and v not in [k for _, k in keys]:
+            keys.append((i, v))
+    keys.sort()
+    return [k for _, k in keys]
+
+
+KEYS = _load_keys()
 
 # verified free models (2026-08-03)
 FREE_MODELS = [

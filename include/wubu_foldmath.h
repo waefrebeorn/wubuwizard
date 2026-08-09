@@ -94,4 +94,93 @@ static inline float wubu_fold_cos(float x)
     return c;
 }
 
+/* ---- the AVX2 8-wide batch (ported from wuburvc src/wubu_math.c,
+ * the sibling repo's CPU-optimization research, 2026-08-09).
+ * Computes 8 sin/cos pairs per iteration with FMA + branchless
+ * quadrant blending. Falls back to the scalar fold on non-AVX2. */
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+static inline void wubu_fold_sincos8(const float *x, float *s, float *c, int n)
+{
+    const __m256 k2opi  = _mm256_set1_ps(FMTWO_OVER_PI);
+    const __m256 khalfpi = _mm256_set1_ps(FMPI2_HI);
+    const __m256 khalflo = _mm256_set1_ps(FMPI2_LO);
+    /* our scalar coefficients (the higher-order 9-term sin / 8-term cos) */
+    const __m256 ks9 = _mm256_set1_ps(FMS9);
+    const __m256 ks7 = _mm256_set1_ps(FMS7);
+    const __m256 ks5 = _mm256_set1_ps(FMS5);
+    const __m256 ks3 = _mm256_set1_ps(FMS3);
+    const __m256 ks1 = _mm256_set1_ps(FMS1);
+    const __m256 kc8 = _mm256_set1_ps(FMC8);
+    const __m256 kc6 = _mm256_set1_ps(FMC6);
+    const __m256 kc4 = _mm256_set1_ps(FMC4);
+    const __m256 kc2 = _mm256_set1_ps(FMC2);
+    const __m256 kone = _mm256_set1_ps(1.0f);
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 xv = _mm256_loadu_ps(x + i);
+        __m256 q = _mm256_mul_ps(xv, k2opi);
+        __m256 nf = _mm256_round_ps(q, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        __m256 r = _mm256_fnmadd_ps(nf, khalfpi, xv);   /* Cody-Waite */
+        r = _mm256_fnmadd_ps(nf, khalflo, r);
+        /* the quadrant as a float in [0,4) */
+        __m256 qd = _mm256_sub_ps(nf, _mm256_mul_ps(_mm256_set1_ps(4.0f),
+                              _mm256_floor_ps(_mm256_mul_ps(nf, _mm256_set1_ps(0.25f)))));
+        __m256 sgn = _mm256_blendv_ps(_mm256_set1_ps(1.0f), _mm256_set1_ps(-1.0f),
+                                      _mm256_cmp_ps(r, _mm256_setzero_ps(), _CMP_LT_OQ));
+        __m256 ar = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), r);
+        __m256 r2 = _mm256_mul_ps(ar, ar);
+        /* sin poly: r * (s1 + r2*(s3 + r2*(s5 + r2*(s7 + r2*s9)))) */
+        __m256 ps = _mm256_fmadd_ps(ks9, r2, ks7);
+        ps = _mm256_fmadd_ps(ps, r2, ks5);
+        ps = _mm256_fmadd_ps(ps, r2, ks3);
+        ps = _mm256_fmadd_ps(ps, r2, ks1);
+        __m256 sa = _mm256_mul_ps(ar, ps);
+        /* cos poly: 1 + r2*(c2 + r2*(c4 + r2*(c6 + r2*c8))) */
+        __m256 pc = _mm256_fmadd_ps(kc8, r2, kc6);
+        pc = _mm256_fmadd_ps(pc, r2, kc4);
+        pc = _mm256_fmadd_ps(pc, r2, kc2);
+        __m256 ca = _mm256_fmadd_ps(pc, r2, kone);
+        /* odd quadrant ? swap : keep */
+        __m256 m1 = _mm256_cmp_ps(qd, _mm256_set1_ps(1.0f), _CMP_LT_OQ);
+        __m256 m2 = _mm256_cmp_ps(qd, _mm256_set1_ps(2.0f), _CMP_LT_OQ);
+        __m256 m3 = _mm256_cmp_ps(qd, _mm256_set1_ps(3.0f), _CMP_LT_OQ);
+        __m256 m4b = _mm256_cmp_ps(qd, _mm256_set1_ps(3.0f), _CMP_GE_OQ);
+        __m256 m2b = _mm256_andnot_ps(m1, m2);
+        __m256 m3b = _mm256_andnot_ps(m2, m3);
+        __m256 sa_sgn = _mm256_mul_ps(sa, sgn);
+        __m256 sa_neg = _mm256_xor_ps(sa_sgn, _mm256_set1_ps(-0.0f));
+        __m256 ca_neg = _mm256_xor_ps(ca, _mm256_set1_ps(-0.0f));
+        /* sin: q0 sgn*sa | q1 ca | q2 -sgn*sa | q3 -ca */
+        __m256 sv = _mm256_blendv_ps(_mm256_setzero_ps(), sa_sgn, m1);
+        sv = _mm256_blendv_ps(sv, ca, m2b);
+        sv = _mm256_blendv_ps(sv, sa_neg, m3b);
+        sv = _mm256_blendv_ps(sv, ca_neg, m4b);
+        /* cos: q0 ca | q1 -sgn*sa | q2 -ca | q3 sgn*sa */
+        __m256 cv = _mm256_blendv_ps(_mm256_setzero_ps(), ca, m1);
+        cv = _mm256_blendv_ps(cv, sa_neg, m2b);
+        cv = _mm256_blendv_ps(cv, ca_neg, m3b);
+        cv = _mm256_blendv_ps(cv, sa_sgn, m4b);
+        _mm256_storeu_ps(s + i, sv);
+        _mm256_storeu_ps(c + i, cv);
+    }
+    for (; i < n; i++) {
+        float ss, cc;
+        wubu_fold_sincos(x[i], &ss, &cc);
+        s[i] = ss;
+        c[i] = cc;
+    }
+}
+#else
+static inline void wubu_fold_sincos8(const float *x, float *s, float *c, int n)
+{
+    for (int i = 0; i < n; i++) {
+        float ss, cc;
+        wubu_fold_sincos(x[i], &ss, &cc);
+        s[i] = ss;
+        c[i] = cc;
+    }
+}
+#endif
+
 #endif

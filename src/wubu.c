@@ -128,6 +128,77 @@ static float *load_tensor(st_ctx *r, const char *name, size_t expect_elems)
     return buf;
 }
 
+/* ---- the from-scratch random-init builder (the amoeba doctrine:
+ * 'delete the old model, make a new model' — dims are data, the fresh
+ * model is born at the runtime WUBU35_DIMS geometry, zero pretrained
+ * weights. Every matrix gets the GPT-2-style init (N(0, 0.02), scaled
+ * by 1/sqrt(2*n_layers) for the residual path). ---- */
+
+/* the alloc/rand helpers (xorshift32 + Box-Muller Gaussian) */
+static void *malloc_f(size_t n)   { void *p = malloc(n ? n : 1); return p; }
+static float *calloc_f(size_t n)  { return (float *)calloc(n ? n : 1, sizeof(float)); }
+static unsigned xrs_next(unsigned *s) {
+    *s ^= *s << 13; *s ^= *s >> 17; *s ^= *s << 5; return *s;
+}
+static float wubu_randn(unsigned *s) {
+    /* Box-Muller: two uniforms -> a standard normal */
+    float u1 = (xrs_next(s) & 0xFFFFFFu) / 16777216.0f + 1e-9f;
+    float u2 = (xrs_next(s) & 0xFFFFFFu) / 16777216.0f;
+    return sqrtf(-2.0f * logf(u1)) * cosf(2.0f * 3.14159265f * u2);
+}
+static float *wubu_rand_mat(size_t rows, size_t cols, float std, unsigned *s) {
+    float *w = (float *)malloc(rows * cols * sizeof(float));
+    if (!w) return NULL;
+    for (size_t i = 0; i < rows * cols; i++) w[i] = wubu_randn(s) * std;
+    return w;
+}
+
+int wubu_model_random_init(wubu_model_t *m)
+{
+    if (!m) return -1;
+    memset(m, 0, sizeof(*m));
+    unsigned seed = (unsigned)(time(NULL) ^ (uintptr_t)m);
+    float *embedding = malloc_f((size_t)WUBU_VOCAB * WUBU_DIM * sizeof(float));
+    float *final_norm = calloc_f((size_t)WUBU_DIM);
+    wubu_block_t *blocks = calloc((size_t)WUBU_MAX_LAYERS, sizeof(wubu_block_t));
+    float **selectors = calloc((size_t)(WUBU_SELECTORS > 0 ? WUBU_SELECTORS : 1),
+                               sizeof(float *));
+    if (!embedding || !final_norm || !blocks || !selectors) return -1;
+    float rscale = 1.0f / sqrtf(2.0f * (float)WUBU_LAYERS);
+    for (int i = 0; i < WUBU_LAYERS; i++) {
+        wubu_block_t *blk = &blocks[i];
+        blk->attn_norm = calloc_f((size_t)WUBU_DIM);
+        blk->q_norm = calloc_f((size_t)WUBU_HEAD_DIM);
+        blk->k_norm = calloc_f((size_t)WUBU_HEAD_DIM);
+        blk->ffn_norm = calloc_f((size_t)WUBU_DIM);
+        blk->q_proj = wubu_rand_mat((size_t)WUBU_DIM, (size_t)WUBU_HEADS * WUBU_HEAD_DIM, 0.02f * rscale, &seed);
+        blk->k_proj = wubu_rand_mat((size_t)WUBU_DIM, (size_t)WUBU_KV_HEADS * WUBU_HEAD_DIM, 0.02f * rscale, &seed);
+        blk->v_proj = wubu_rand_mat((size_t)WUBU_DIM, (size_t)WUBU_KV_HEADS * WUBU_HEAD_DIM, 0.02f * rscale, &seed);
+        blk->o_proj = wubu_rand_mat((size_t)WUBU_HEADS * WUBU_HEAD_DIM, (size_t)WUBU_DIM, 0.02f * rscale, &seed);
+        blk->g_proj = wubu_rand_mat((size_t)WUBU_DIM, (size_t)WUBU_DIM, 0.02f * rscale, &seed);
+        blk->gate_up = wubu_rand_mat((size_t)WUBU_DIM, (size_t)2 * WUBU_FFN_DIM, 0.02f * rscale, &seed);
+        blk->down = wubu_rand_mat((size_t)WUBU_FFN_DIM, (size_t)WUBU_DIM, 0.02f * rscale, &seed);
+    }
+    for (int i = 0; i < WUBU_VOCAB; i++)
+        for (int d = 0; d < WUBU_DIM; d++)
+            embedding[(size_t)i * WUBU_DIM + d] = wubu_randn(&seed) * 0.02f;
+    for (int i = 0; i < WUBU_SELECTORS; i++)
+        selectors[i] = calloc_f((size_t)WUBU_DIM);
+    for (int i = 0; i < WUBU_DIM; i++) final_norm[i] = 1.0f;
+    for (int i = 0; i < WUBU_LAYERS; i++) {
+        /* per-layer norms start at 1.0 (the calloc'd ones) */
+        for (int d = 0; d < WUBU_DIM; d++) {
+            blocks[i].attn_norm[d] = 1.0f;
+            blocks[i].ffn_norm[d] = 1.0f;
+        }
+        for (int d = 0; d < WUBU_HEAD_DIM; d++) {
+            blocks[i].q_norm[d] = 1.0f;
+            blocks[i].k_norm[d] = 1.0f;
+        }
+    }
+    return wubu_model_init(m, embedding, final_norm, blocks, selectors);
+}
+
 int wubu_load(wubu_model_t *m, const char *path)
 {
     if (!m || !path) return -1;

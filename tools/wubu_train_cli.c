@@ -34,6 +34,13 @@ static int arg_int(int argc, char **argv, const char *name, int def)
     const char *v = arg_get(argc, argv, name, NULL);
     return v ? atoi(v) : def;
 }
+/* flag presence: --name (no value) */
+static int arg_has(int argc, char **argv, const char *name)
+{
+    for (int i = 1; i < argc; i++)
+        if (strcmp(argv[i], name) == 0) return 1;
+    return 0;
+}
 static float arg_float(int argc, char **argv, const char *name, float def)
 {
     const char *v = arg_get(argc, argv, name, NULL);
@@ -217,12 +224,20 @@ int main(int argc, char **argv)
     int ckpt_every = arg_int(argc, argv, "--ckpt", 10);
     int grow_check = arg_int(argc, argv, "--grow-check", 0);
     int base_layers = arg_int(argc, argv, "--base-layers", 0);
+    int init_random = arg_has(argc, argv, "--init-random");
 
     wubu_model_t m;
     if (resume) {
         printf("wubu_train_cli: resuming from %s ...\n", resume);
         if (load_checkpoint(&m, resume) != 0) {
             fprintf(stderr, "cannot load checkpoint %s\n", resume);
+            return 1;
+        }
+    } else if (init_random) {
+        printf("wubu_train_cli: FROM-SCRATCH random init at the runtime dims "
+               "(the amoeba doctrine: dims are data, no pretrained weights)\n");
+        if (wubu_model_random_init(&m) != 0) {
+            fprintf(stderr, "cannot build the from-scratch model\n");
             return 1;
         }
     } else {
