@@ -1062,6 +1062,10 @@ test_lineage: tools/test_lineage.c src/wubu_lineage.o
 test_trajcell: tools/test_trajcell.c src/wubu_trajcell.o src/wubu_hive.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_metadiag: tools/test_metadiag.c src/wubu_metadiag.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
