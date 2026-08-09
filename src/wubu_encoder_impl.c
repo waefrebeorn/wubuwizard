@@ -55,14 +55,17 @@ typedef struct {
 static int image_encode(void *ctx, const float *x, size_t n, float *out) {
     image_ctx_t *c = (image_ctx_t *)ctx;
     /* wubu_imgenc wants a 64x64x3 image; it emits N_TOKENS x EMBED_DIM
-     * in the SHARED dim already (128 == WUBU_IMGENC_EMBED_DIM). */
+     * (65 tokens: 64 patches + CLS). The SLOT contract is one
+     * embedding of `dim` floats per input — so we return the CLS
+     * token (the standard ViT classification readout): the image's
+     * one embedding in the shared space. */
     if (n != (size_t)WUBU_IMGENC_IMAGE * WUBU_IMGENC_IMAGE * WUBU_IMGENC_CHANNELS)
         return -1;
     float tokens[WUBU_IMGENC_N_TOKENS * WUBU_IMGENC_EMBED_DIM];
     if (wubu_imgenc_encode(&c->v, x, tokens) != 0) return -1;
-    /* the shared space = the image token space; the caller reads
-     * WUBU_ENC_SHARED_DIM per token */
-    memcpy(out, tokens, sizeof(tokens));
+    /* the CLS token is the last one (index N_PATCHES) */
+    memcpy(out, &tokens[WUBU_IMGENC_N_PATCHES * WUBU_IMGENC_EMBED_DIM],
+           (size_t)WUBU_IMGENC_EMBED_DIM * sizeof(float));
     return 0;
 }
 

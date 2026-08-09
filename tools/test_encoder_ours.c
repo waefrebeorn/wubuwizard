@@ -54,22 +54,21 @@ int main(void)
         float img[WUBU_IMGENC_IMAGE * WUBU_IMGENC_IMAGE * WUBU_IMGENC_CHANNELS];
         for (int i = 0; i < (int)(sizeof(img)/sizeof(img[0])); i++)
             img[i] = (float)((i * 2654435761u) % 1000) / 1000.0f;  /* grayscale-ish */
-        float e1[WUBU_IMGENC_N_TOKENS * WUBU_IMGENC_EMBED_DIM];
-        float e2[WUBU_IMGENC_N_TOKENS * WUBU_IMGENC_EMBED_DIM];
+        float e1[WUBU_IMGENC_EMBED_DIM], e2[WUBU_IMGENC_EMBED_DIM];
         CHECK(wubu_encoder_encode_named("our-image", img,
               (size_t)WUBU_IMGENC_IMAGE*WUBU_IMGENC_IMAGE*WUBU_IMGENC_CHANNELS,
               e1) == 0, "image encodes through our ViT");
         wubu_encoder_encode_named("our-image", img,
               (size_t)WUBU_IMGENC_IMAGE*WUBU_IMGENC_IMAGE*WUBU_IMGENC_CHANNELS, e2);
         int finite = 1, det = 1;
-        for (int i = 0; i < WUBU_IMGENC_N_TOKENS * WUBU_IMGENC_EMBED_DIM; i++) {
+        for (int i = 0; i < WUBU_IMGENC_EMBED_DIM; i++) {
             if (!isfinite(e1[i])) finite = 0;
             if (e1[i] != e2[i]) det = 0;
         }
         CHECK(finite, "image embedding is finite");
         CHECK(det, "image embedding is deterministic");
-        printf("  ok: image -> %d tokens x %d dim (our ViT, CC01)\n",
-               WUBU_IMGENC_N_TOKENS, WUBU_IMGENC_EMBED_DIM);
+        printf("  ok: image -> 1 x %d-dim embedding (CLS readout of our ViT, CC01)\n",
+               WUBU_IMGENC_EMBED_DIM);
     }
 
     /* ---- 3. audio: PCM through our mel-spectrogram + shared head ---- */
