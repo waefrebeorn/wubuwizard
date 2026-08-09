@@ -195,6 +195,57 @@ int wubu_scale_plan(const wubu_scale_hw_t *hw,
     plan->weight_bytes = core_bytes + eco_bytes;
     plan->total_bytes = plan->weight_bytes + kv;
     plan->ratio_active = (double)k / (double)n;
+
+    /* ---- RESEARCH/063 axes ---- */
+
+    /* C. BANDWIDTH: bytes per token = weight bytes touched per token.
+     * k_active balls fire; each touches its ball's params. The core is
+     * always touched (dense). This is the roofline-honest cost. */
+    double bpt = (double)core_bytes;                       /* dense core */
+    bpt += (double)k * (double)ball_params * (double)prec_bytes(d->cascade);
+    plan->bytes_per_token = bpt;
+
+    /* A. DEVICES: route across the devices the machine has. The plan
+     * reports how many are USED (1 = CPU only; more = split). The
+     * split itself is the router's job at runtime (QEIL: hardware-
+     * aware routing); the planner sizes so the CPU can run the core
+     * alone and the accelerator carries the outer body. */
+    plan->n_devices_used = 1;
+    if (hw->n_devices > 0) {
+        int accel = 0;
+        for (int i = 0; i < hw->n_devices && i < WUBU_SCALE_MAX_DEVICES; i++)
+            if (hw->devices[i].kind != WUBU_DEV_CPU) accel++;
+        plan->n_devices_used = 1 + (accel > 0 ? 1 : 0);
+    }
+
+    /* B. ENERGY: estimate avg draw under load from the device power
+     * figures + the active ratio. Energy class 0-3 (EnerInfer: the
+     * slack is exploitable -- the runtime tunes frequencies). */
+    {
+        double watts = 0.0;
+        double max_w = 0.0;
+        if (hw->n_devices > 0) {
+            for (int i = 0; i < hw->n_devices && i < WUBU_SCALE_MAX_DEVICES; i++) {
+                watts += hw->devices[i].watts;
+                if (hw->devices[i].watts > max_w) max_w = hw->devices[i].watts;
+            }
+        } else {
+            watts = (double)hw->cores * 5.0;   /* ~5W/core default */
+            max_w = watts;
+        }
+        /* scale by how much of the body actually fires */
+        plan->watts_estimate = watts * (0.5 + 0.5 * plan->ratio_active);
+        if (max_w <= 7.0)      plan->energy_class = 0;   /* phone-class */
+        else if (max_w <= 30)  plan->energy_class = 1;   /* SBC/laptop */
+        else if (max_w <= 200) plan->energy_class = 2;   /* desktop */
+        else                   plan->energy_class = 3;   /* server */
+    }
+
+    /* D. ADAPTIVE: on constrained tiers, fractal_depth is a CEILING --
+     * the runtime early-exits easy tokens (PALBERT: not every input
+     * needs every layer). Every tier can adapt; tiny/small get it
+     * because they need it most. */
+    plan->adaptive_depth = 1;
     return 0;
 }
 
@@ -202,12 +253,16 @@ void wubu_scale_report(const wubu_scale_plan_t *plan, char *buf, size_t buflen) 
     if (!plan || !buf || buflen < 1) return;
     snprintf(buf, buflen,
              "tier=%-5s ram=%lluMB core=%d balls=%d k=%d frac=%d "
-             "prec=%d w=%lluMB tot=%lluMB ratio=%.4f",
+             "prec=%d w=%lluMB tot=%lluMB ratio=%.4f "
+             "bw=%.0fB/tok watts=%.0f eclass=%d devs=%d adapt=%d",
              plan->tier_name,
              (unsigned long long)(plan->ram_budget / (1024*1024)),
              plan->core_layers, plan->ecosystem_n, plan->k_active,
              plan->fractal_depth, (int)plan->cascade,
              (unsigned long long)(plan->weight_bytes / (1024*1024)),
              (unsigned long long)(plan->total_bytes / (1024*1024)),
-             plan->ratio_active);
+             plan->ratio_active,
+             plan->bytes_per_token, plan->watts_estimate,
+             plan->energy_class, plan->n_devices_used,
+             plan->adaptive_depth);
 }

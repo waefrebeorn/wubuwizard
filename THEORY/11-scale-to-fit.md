@@ -51,12 +51,24 @@ wubu_scale_plan_t {
     kv_bytes           (bytes reserved for the KV namespace)
     headroom_bytes     (budget - weight - kv; must be > 0)
     ratio_active       (k_active / ecosystem_n — must be ≤ target)
+
+    -- RESEARCH/063 axes (the 7-hop mandate) --
+    bytes_per_token    (bandwidth cost: core + k_active ball params)
+    watts_estimate     (avg draw under load — EnerInfer energy axis)
+    energy_class       (0 low ... 3 high — the thermal budget)
+    n_devices_used     (CPU-only, or CPU+NPU/GPU split — QEIL routing)
+    adaptive_depth     (1 = fractal_depth is a ceiling; the runtime
+                        early-exits easy tokens — PALBERT)
 }
 ```
 
 The planner is O(1) closed-form: given the checkpoint's geometry (probed
 from tensor shapes — Revolver), it solves for the largest ecosystem N and
-the deepest core that fit `ram_budget - kv_reserve`.
+the deepest core that fit `ram_budget - kv_reserve`, then derives the
+bandwidth, energy, and device-routing axes from the same geometry.
+Research basis: research/063-scale-to-fit-7hop.md (QEIL inference-time
+scaling laws, Prima.cpp heterogeneous clusters, OHQ on-chip quant,
+PALBERT early exit, PROBE expert prefetch, EnerInfer energy slack).
 
 ## 4. The invariants (the gate, `test_scale_to_fit`)
 

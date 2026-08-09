@@ -45,12 +45,35 @@ typedef enum {
     WUBU_SCALE_Q2
 } wubu_scale_prec_t;
 
-/* The probed machine (injected by tests; probed for real on the host). */
+/* The probed machine (injected by tests; probed for real on the host).
+ * RESEARCH/063 mandate: RAM is the weakest sizing axis -- the plan must
+ * also weigh BANDWIDTH and ENERGY and route across DEVICES. device[0]
+ * is always the CPU (backward compatible: existing callers leave
+ * n_devices = 0 and the planner assumes a single CPU device). */
+#define WUBU_SCALE_MAX_DEVICES 4
+
+typedef enum {
+    WUBU_DEV_CPU = 0,      /* scalar/SIMD cores */
+    WUBU_DEV_GPU,          /* discrete/integrated GPU */
+    WUBU_DEV_NPU,          /* neural accelerator (e.g. CM4's Hailo) */
+    WUBU_DEV_DISK          /* storage tier (mmap/prefetch, PRP) */
+} wubu_scale_device_kind_t;
+
 typedef struct {
-    uint64_t ram_bytes;        /* available RAM */
+    wubu_scale_device_kind_t kind;
+    uint64_t  ram_bytes;       /* this device's memory (bytes) */
+    double    tfops;           /* peak TFLOPS (fp16 or fp32) */
+    double    bandwidth_gbps;  /* GB/s to its memory */
+    double    watts;           /* average draw under load */
+} wubu_scale_device_t;
+
+typedef struct {
+    uint64_t ram_bytes;        /* available RAM (total system) */
     int      cores;            /* CPU cores */
     int      simd_bits;        /* 128/256/512 (from wubu_hwcaps) */
     int      has_accel;        /* CUDA/Vulkan present */
+    int      n_devices;        /* devices to route across (>=1) */
+    wubu_scale_device_t devices[WUBU_SCALE_MAX_DEVICES];
 } wubu_scale_hw_t;
 
 /* The checkpoint geometry (probed from tensor shapes -- Revolver). */
@@ -75,6 +98,14 @@ typedef struct {
     uint64_t total_bytes;      /* weight + kv */
     double   ratio_active;     /* k_active / ecosystem_n */
     const char *tier_name;     /* "tiny" ... "huge" */
+
+    /* RESEARCH/063 axes (bandwidth + energy + devices + adaptive). */
+    double   bytes_per_token;  /* weight bytes / k_active (the BW cost) */
+    double   watts_estimate;   /* est. avg draw under load (EnerInfer) */
+    int      energy_class;     /* 0=lowest ... 3=highest */
+    int      n_devices_used;   /* how many devices the plan routes across */
+    int      adaptive_depth;   /* 1 = fractal_depth is a ceiling; the
+                                  runtime early-exits easy tokens (PALBERT) */
 } wubu_scale_plan_t;
 
 /* Opaque planner handle. */

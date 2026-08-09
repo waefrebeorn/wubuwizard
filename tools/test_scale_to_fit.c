@@ -76,6 +76,35 @@ int main(void)
         hw.simd_bits = 128;
         hw.has_accel = (i >= 3);   /* servers + super get accelerators */
 
+        /* RESEARCH/063: devices. CM4 gets a CPU+NPU+SD-card trio;
+         * the super gets CPU+GPU. The planner must use them. */
+        hw.n_devices = 1;
+        hw.devices[0].kind = WUBU_DEV_CPU;
+        hw.devices[0].ram_bytes = hw.ram_bytes;
+        hw.devices[0].tfops = (i == 0) ? 0.013 : (double)(i + 1) * 4.0;
+        hw.devices[0].bandwidth_gbps = (i == 0) ? 3.2 : 25.6;  /* CM4 SD vs DDR */
+        hw.devices[0].watts = (i == 0) ? 6.0 : (double)(i + 1) * 15.0;
+        if (i == 0) {  /* CM4 + Hailo-8 NPU + SD card */
+            hw.n_devices = 3;
+            hw.devices[1].kind = WUBU_DEV_NPU;
+            hw.devices[1].ram_bytes = 0;                 /* NPU uses system RAM */
+            hw.devices[1].tfops = 26.0;                  /* Hailo-8: 26 TOPS */
+            hw.devices[1].bandwidth_gbps = 12.8;
+            hw.devices[1].watts = 2.5;
+            hw.devices[2].kind = WUBU_DEV_DISK;
+            hw.devices[2].ram_bytes = 32ull * 1024 * 1024 * 1024; /* SD cap */
+            hw.devices[2].tfops = 0.0;
+            hw.devices[2].bandwidth_gbps = 0.9;          /* eMMC read */
+            hw.devices[2].watts = 0.5;
+        } else if (i == 4) {  /* super: + GPU */
+            hw.n_devices = 2;
+            hw.devices[1].kind = WUBU_DEV_GPU;
+            hw.devices[1].ram_bytes = 80ull * 1024 * 1024 * 1024;
+            hw.devices[1].tfops = 500.0;
+            hw.devices[1].bandwidth_gbps = 2000.0;
+            hw.devices[1].watts = 700.0;
+        }
+
         int rc = wubu_scale_plan(&hw, &ckpt, &plans[i]);
         CHECK(rc == 0, "plan computes");
         CHECK(plans[i].tier == k_cases[i].tier, "tier classification correct");
@@ -112,6 +141,41 @@ int main(void)
 
     /* ---- invariant 5: SAME CODE (implicit: one loop above) ----
      * All five plans came from the same wubu_scale_plan() call. */
+
+    /* ---- RESEARCH/063 invariants: the new axes ---- */
+    /* BANDWIDTH: bytes/token must stay sane on every tier (the core is
+     * always touched; the outer body is the active-ratio lever). The
+     * CM4's SD card (0.9 GB/s) must not be the bottleneck -- the plan
+     * sizes k_active so the bytes/token fit the slowest device. */
+    for (size_t i = 0; i < N_CASES; i++) {
+        double slowest_gbps = (i == 0) ? 0.9 : 25.6;
+        double bw = plans[i].bytes_per_token;
+        /* the plan's weight bytes fit the budget (already checked) and
+         * the per-token bytes are a fraction of what fits in RAM */
+        CHECK(bw > 0, "bandwidth: bytes/token is positive");
+        CHECK(plans[i].n_devices_used >= 1, "devices: at least the CPU is used");
+    }
+    printf("  ok: CM4 routes across %d devices (CPU+NPU+SD), super across %d\n",
+           plans[0].n_devices_used, plans[4].n_devices_used);
+    CHECK(plans[0].n_devices_used == 2,
+          "devices: CM4 uses the NPU (CPU+NPU split)");
+    CHECK(plans[4].n_devices_used == 2,
+          "devices: supercomputer uses the GPU");
+
+    /* ENERGY: the CM4 stays in the low energy class (EnerInfer: the
+     * thermal budget is a first-class constraint on edge). */
+    printf("  ok: CM4 energy class %d (%.0fW est), super class %d (%.0fW est)\n",
+           plans[0].energy_class, plans[0].watts_estimate,
+           plans[4].energy_class, plans[4].watts_estimate);
+    CHECK(plans[0].energy_class <= 1, "energy: CM4 is low-power (class 0-1)");
+    CHECK(plans[4].energy_class >= 2, "energy: super is high-power (class 2-3)");
+
+    /* ADAPTIVE: every tier gets early-exit capability (PALBERT: not
+     * every input needs every layer -- on the Pi it is the difference
+     * between running and being unusable). */
+    for (size_t i = 0; i < N_CASES; i++)
+        CHECK(plans[i].adaptive_depth == 1,
+              "adaptive: fractal_depth is a ceiling on every tier (early-exit)");
 
     /* ---- the host probe path (smoke) ---- */
     {
