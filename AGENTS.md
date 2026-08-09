@@ -39,18 +39,17 @@ training, the research ledger, and the math vault. The **Body** half is
 | `MATH/lean/` | Lean-verified theorems (MobiusAdd, Poincaré ball, etc.) |
 | `tests/` (tools/test_*.c) | Test drivers, one per subsystem |
 
-## Branches (the 2-branch reality — 2026-08-09 consolidation)
+## Branches (ONE branch — 2026-08-09 unification)
 
-The repo was consolidated from 7 branches to 2. Do not create more:
-
-| Branch | Purpose |
-|---|---|
-| `wubu-integration` | **THE trunk** (GitHub default). ALL work flows here. |
-| `lfm25-adapter` | The LFM/Distiller agent's branch. Leave it alone. |
+The repo is consolidated to **ONE branch: `wubu-integration`** (GitHub
+default). Both agents (WuBu + LFM/Distiller) work on the SAME trunk,
+together:
 
 - Work on local `unified`, push to `origin/wubu-integration`
   (`git push origin unified:wubu-integration`). Fetch + rebase before
   pushing — the other agent pushes to the same branch.
+- The LFM/Distiller agent's former branch (`lfm25-adapter`) was
+  unified into the trunk (0 unique commits; 2 empty LFS stubs).
 - Retired branches are preserved as archive tags
   (`archive/retired-*`) — see `docs/BRANCH-AUDIT-2026-08-09.md` for
   the no-code-lost audit and recovery commands.

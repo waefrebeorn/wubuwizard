@@ -38,12 +38,11 @@ training, the universal encoder space, and the research ledger.
 - **Spine principle:** decode is memory-bandwidth-bound (Roofline
   2607.02558). Every performance win attacks bytes moved.
 
-## Branches (2026-08-09 consolidation)
+## Branches (2026-08-09 unification)
 
-| Branch | Purpose |
-|---|---|
-| `wubu-integration` | **THE trunk** (GitHub default). ALL work flows here. |
-| `lfm25-adapter` | The LFM/Distiller agent's branch. Leave it alone. |
+**ONE branch: `wubu-integration`** (GitHub default). ALL work — both
+agents, together — flows here. The former LFM/Distiller branch was
+unified into the trunk.
 
 Retired branches live as `archive/retired-*` tags — see
 `docs/BRANCH-AUDIT-2026-08-09.md` for the no-code-lost audit.

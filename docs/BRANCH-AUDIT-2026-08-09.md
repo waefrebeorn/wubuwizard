@@ -1,12 +1,13 @@
 # Branch Consolidation Audit — 2026-08-09
 
-**Result: NO CODE LOST.** All work lives in `origin/wubu-integration`.
+**Result: NO CODE LOST.** All work lives in `origin/wubu-integration`
+— the ONLY branch.
 
 ## What was retired
 
 On 2026-08-09 the GitHub repository was consolidated from 7 branches
-to 2 (`wubu-integration` + the LFM agent's `lfm25-adapter`). The
-default branch is now `wubu-integration`. Retired:
+to **ONE** (`wubu-integration`), which is also the default branch.
+Retired:
 
 | Branch | Tip | Fate |
 |---|---|---|
@@ -15,6 +16,9 @@ default branch is now `wubu-integration`. Retired:
 | `windows-port-support` | `0475569` | 3 paths absent, all empty LFS stubs |
 | `interim-organization` (2025 reorg WIP) | `0b62bb9` | 97/140 files exact in trunk; rest superseded drafts or old-brand junk |
 | `unified` (stale remote mirror) | `78b34f6` | 0 paths absent |
+| `lfm25-adapter` (LFM/Distiller agent) | `4f26058` | 0 unique commits; 2 paths absent, both empty LFS stubs — the agent's work was ALREADY in the trunk |
+
+The LFM/Distiller agent now works on the SAME trunk as everyone else.
 
 ## How the audit was done
 
@@ -48,6 +52,7 @@ archive/retired-cpu-optimize-may26      -> 816aea8
 archive/retired-windows-port-support    -> 0475569
 archive/retired-interim-organization    -> 0b62bb9
 archive/retired-unified-mirror          -> 78b34f6
+archive/retired-lfm25-adapter           -> 4f26058
 ```
 
 To recover any file from a retired branch:
