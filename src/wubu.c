@@ -95,6 +95,44 @@ int wubu_model_init(wubu_model_t *m, float *embedding, float *final_norm,
 }
 
 /* ---- the safetensors loader ---- */
+/* Load a row-major [rows, cols] weight matrix with alignment padding.
+ * The checkpoint stores chk_rows × chk_cols; the aligned engine needs
+ * out_rows × out_cols. We calloc the output (zeroed), read the checkpoint's
+ * chk_rows × chk_cols values, then scatter-copy into the first chk_rows
+ * rows and first chk_cols columns. The pad rows/cols are dead (zero input
+ * → zero activation) but keep every quant block (QK_K=256) tileable.
+ * See Theory/08 (Aligned Rewrite). */
+static float *load_tensor_aligned(st_ctx *r, const char *name,
+                                  size_t out_rows, size_t out_cols,
+                                  size_t chk_rows, size_t chk_cols)
+{
+    const st_tensor_info *info = st_find_tensor(r, name);
+    if (!info) { fprintf(stderr, "wubu: missing %s\n", name); return NULL; }
+    float *buf = (float *)calloc(out_rows * out_cols, sizeof(float));
+    if (!buf) return NULL;
+    /* validate: checkpoint must have chk_rows × chk_cols elements */
+    if ((size_t)info->n_elems != chk_rows * chk_cols) {
+        fprintf(stderr, "wubu: %s shape mismatch: have %lld, want %zu×%zu\n",
+                name, (long long)info->n_elems, chk_rows, chk_cols);
+        free(buf); return NULL;
+    }
+    float *tmp = (float *)malloc(chk_rows * chk_cols * sizeof(float));
+    if (!tmp) { free(buf); return NULL; }
+    int got = st_read_tensor_f32(r, info, tmp, (int64_t)(chk_rows * chk_cols));
+    if (got < 0) got = 0;
+    for (size_t row = 0; row < chk_rows; row++) {
+        const float *src = tmp + row * chk_cols;
+        float *dst = buf + row * out_cols;
+        memcpy(dst, src, chk_cols * sizeof(float));
+        /* pad cols [chk_cols, out_cols) are zero (calloc) */
+    }
+    /* pad rows [chk_rows, out_rows) are zero (calloc) */
+    free(tmp);
+    return buf;
+}
+
+/* Original loader for tensors whose dimensions are already aligned (norms,
+   gate_up where chk_cols == out_cols). */
 static float *load_tensor(st_ctx *r, const char *name, size_t expect_elems)
 {
     const st_tensor_info *info = st_find_tensor(r, name);
@@ -123,18 +161,26 @@ int wubu_load(wubu_model_t *m, const char *path)
     st_ctx *r = st_open(path);
     if (!r) return -1;
 
-    /* the tied embedding = lm_head */
-    float *embedding = load_tensor(r, "embedding.weight", 16384 * 448);
+    /* The probe stored the checkpoint-native geometry in WUBU35_DIMS; the
+     * aligned engine geometry is in the WUBU_* macros. The loader zero-
+     * pads from ckpt→aligned so every quant block tiles evenly. */
+    int q_out = WUBU_HEADS * WUBU_HEAD_DIM;
+    int ck_d   = WUBU35_DIMS.ckpt_dim;    /* checkpoint native: 448 */
+    int ck_f   = WUBU35_DIMS.ckpt_ffn_dim; /* checkpoint native: 1228 */
+    int ck_hd  = WUBU35_DIMS.ckpt_head_dim;/* checkpoint native: 64 */
+    int ck_q_out = ck_hd * WUBU35_DIMS.ckpt_heads;     /* checkpoint q_out: 7*64=448 */
+    int ck_kv_out = ck_hd * WUBU35_DIMS.ckpt_kv_heads; /* checkpoint kv_out: 1*64=64 */
+
+    float *embedding = load_tensor_aligned(r, "embedding.weight",
+                                           WUBU_VOCAB, WUBU_DIM, WUBU_VOCAB, ck_d);
     if (!embedding) { st_close(r); return -1; }
-    float *final_norm = load_tensor(r, "final_norm.weight", 448);
+    float *final_norm = load_tensor_aligned(r, "final_norm.weight",
+                                            1, WUBU_DIM, 1, ck_d);
     if (!final_norm) { free(embedding); st_close(r); return -1; }
 
     wubu_block_t blocks[WUBU_LAYERS];
     memset(blocks, 0, sizeof(blocks));
     char name[128];
-    /* probe the checkpoint for the active layer count (progressive-growth
-     * checkpoints save fewer than WUBU_LAYERS). We check for layers.N
-     * tensors and stop at the first missing one. */
     int active_layers = 0;
     for (int i = 0; i < WUBU_LAYERS; i++) {
         snprintf(name, sizeof(name), "layers.%d.attn.q_proj.weight", i);
@@ -142,32 +188,38 @@ int wubu_load(wubu_model_t *m, const char *path)
         active_layers = i + 1;
     }
     if (active_layers == 0) { st_close(r); return -1; }
-    if (active_layers == 1) active_layers = WUBU_LAYERS; /* legacy: no probe -> full */
+    if (active_layers == 1) active_layers = WUBU_LAYERS;
     int ok = 1;
     for (int i = 0; i < active_layers && ok; i++) {
         wubu_block_t *blk = &blocks[i];
+        /* All weight matrices are [out, in] row-major. The aligned engine
+         * has out=aligned, in=aligned, but the checkpoint has out=ckpt,
+         * in=ckpt_dim. load_tensor_aligned zero-pads the difference. */
         snprintf(name, sizeof(name), "layers.%d.attn.q_proj.weight", i);
-        blk->q_proj = load_tensor(r, name, 448 * 448);
+        blk->q_proj   = load_tensor_aligned(r, name, q_out, WUBU_DIM, ck_d, ck_d);
         snprintf(name, sizeof(name), "layers.%d.attn.k_proj.weight", i);
-        blk->k_proj = load_tensor(r, name, 448 * 64);
+        blk->k_proj   = load_tensor_aligned(r, name, WUBU_KV_HEADS * WUBU_HEAD_DIM, WUBU_DIM, ck_kv_out, ck_d);
         snprintf(name, sizeof(name), "layers.%d.attn.v_proj.weight", i);
-        blk->v_proj = load_tensor(r, name, 448 * 64);
+        blk->v_proj   = load_tensor_aligned(r, name, WUBU_KV_HEADS * WUBU_HEAD_DIM, WUBU_DIM, ck_kv_out, ck_d);
         snprintf(name, sizeof(name), "layers.%d.attn.o_proj.weight", i);
-        blk->o_proj = load_tensor(r, name, 448 * 448);
+        /* o_proj: ckpt [448,448] → aligned [512,512] */
+        blk->o_proj   = load_tensor_aligned(r, name, WUBU_DIM, q_out, ck_d, ck_d);
         snprintf(name, sizeof(name), "layers.%d.attn.g_proj.weight", i);
-        blk->g_proj = load_tensor(r, name, 448 * 448);
+        blk->g_proj   = load_tensor_aligned(r, name, WUBU_DIM, WUBU_DIM, ck_d, ck_d);
         snprintf(name, sizeof(name), "layers.%d.attn.q_norm.weight", i);
-        blk->q_norm = load_tensor(r, name, 64);
+        blk->q_norm   = load_tensor(r, name, WUBU_HEAD_DIM);
         snprintf(name, sizeof(name), "layers.%d.attn.k_norm.weight", i);
-        blk->k_norm = load_tensor(r, name, 64);
+        blk->k_norm   = load_tensor(r, name, WUBU_HEAD_DIM);
         snprintf(name, sizeof(name), "layers.%d.attn_norm.weight", i);
-        blk->attn_norm = load_tensor(r, name, 448);
+        blk->attn_norm = load_tensor_aligned(r, name, 1, WUBU_DIM, 1, ck_d);
         snprintf(name, sizeof(name), "layers.%d.ffn.gate_up.weight", i);
-        blk->gate_up = load_tensor(r, name, 448 * 2456);
+        /* gate_up: ckpt [2*ck_f, ck_d] = [2456,448] → aligned [4096,512] */
+        blk->gate_up  = load_tensor_aligned(r, name, 2 * WUBU_FFN_DIM, WUBU_DIM, 2 * ck_f, ck_d);
         snprintf(name, sizeof(name), "layers.%d.ffn.down.weight", i);
-        blk->down = load_tensor(r, name, 1228 * 448);
+        /* down: ckpt [ck_d, ck_f] = [448,1228] → aligned [512,2048] */
+        blk->down     = load_tensor_aligned(r, name, WUBU_DIM, WUBU_FFN_DIM, ck_d, ck_f);
         snprintf(name, sizeof(name), "layers.%d.ffn_norm.weight", i);
-        blk->ffn_norm = load_tensor(r, name, 448);
+        blk->ffn_norm = load_tensor_aligned(r, name, 1, WUBU_DIM, 1, ck_d);
         ok = blk->q_proj && blk->k_proj && blk->v_proj && blk->o_proj &&
              blk->g_proj && blk->q_norm && blk->k_norm && blk->attn_norm &&
              blk->gate_up && blk->down && blk->ffn_norm;
@@ -175,7 +227,7 @@ int wubu_load(wubu_model_t *m, const char *path)
     float *selectors[WUBU_SELECTORS];
     for (int i = 0; i < WUBU_SELECTORS && ok; i++) {
         snprintf(name, sizeof(name), "selectors.%d.score.weight", i);
-        selectors[i] = load_tensor(r, name, 448);
+        selectors[i] = load_tensor_aligned(r, name, 1, WUBU_DIM, 1, ck_d);
         ok = ok && selectors[i] != NULL;
     }
     st_close(r);
@@ -219,8 +271,8 @@ int wubu_buf_alloc(wubu_buf_t *b, size_t max_seq)
     b->checkpoint = (float *)calloc(WUBU_MAX_SEQ * WUBU_DIM, sizeof(float));
     b->cos_tbl = (float *)calloc(WUBU_MAX_SEQ * WUBU_ROPE_DIM, sizeof(float));
     b->sin_tbl = (float *)calloc(WUBU_MAX_SEQ * WUBU_ROPE_DIM, sizeof(float));
-    b->cache_k = (float *)calloc(WUBU_LAYERS * WUBU_MAX_SEQ * 64, sizeof(float));
-    b->cache_v = (float *)calloc(WUBU_LAYERS * WUBU_MAX_SEQ * 64, sizeof(float));
+    b->cache_k = (float *)calloc(WUBU_LAYERS * WUBU_MAX_SEQ * WUBU_KV_HEADS * WUBU_HEAD_DIM, sizeof(float));
+    b->cache_v = (float *)calloc(WUBU_LAYERS * WUBU_MAX_SEQ * WUBU_KV_HEADS * WUBU_HEAD_DIM, sizeof(float));
     b->seq_alloc = seq;
     if (!b->x || !b->x2 || !b->q || !b->k || !b->v || !b->attn_out ||
         !b->gate || !b->g_out || !b->ffn_gate || !b->ffn_up || !b->ffn_out ||
@@ -274,32 +326,29 @@ static void matmul(float *out, const float *w, const float *x,
     }
 }
 
-/* attention: q [seq, heads*64], k/v [seq, 64]; local window or full. */
+/* attention: q [seq, heads*HEAD_DIM], k/v [seq, kv_heads*HEAD_DIM] */
 static void attention(wubu_buf_t *b, int seq, int is_full, int local_window,
                       int pos0)
 {
-    /* GQA: 7 query heads share the single KV head. For each head: dot
+    /* GQA: 8 query heads share the single KV head. For each head: dot
      * with the KV, softmax over the causal (windowed) range, weighted
      * sum of v. */
     for (int s = 0; s < seq; s++) {
         float *acc = b->attn_out + (size_t)s * WUBU_DIM;
         memset(acc, 0, WUBU_DIM * sizeof(float));
         float *osum = b->x2 + (size_t)s * WUBU_DIM;  /* scratch: probs */
-        memset(osum, 0, WUBU_DIM * sizeof(float));   /* zeroed: the
-            buffer held the previous layer's o_proj output */
+        memset(osum, 0, WUBU_DIM * sizeof(float));
         for (int h = 0; h < WUBU_HEADS; h++) {
-            const float *qrow = b->q + (size_t)s * WUBU_DIM + (size_t)h * 64;
+            const float *qrow = b->q + (size_t)s * WUBU_DIM + (size_t)h * WUBU_HEAD_DIM;
             float maxv = -1e30f;
-            /* find the window start */
             int lo = is_full ? 0 : (s > local_window ? s - local_window + 1 : 0);
-            /* include only positions <= s (causal) */
             int kv_n = 0;
             float probs[WUBU_LOCAL_WIN + 2];
             for (int t = lo; t <= s; t++) {
-                const float *krow = b->k + (size_t)t * 64;
+                const float *krow = b->k + (size_t)t * WUBU_HEAD_DIM;
                 float dot = 0;
-                for (int i = 0; i < 64; i++) dot += qrow[i] * krow[i];
-                dot *= 1.0f / sqrtf(64.0f);
+                for (int i = 0; i < WUBU_HEAD_DIM; i++) dot += qrow[i] * krow[i];
+                dot *= 1.0f / sqrtf((float)WUBU_HEAD_DIM);
                 if (dot > maxv) maxv = dot;
                 probs[kv_n++] = dot;
             }
@@ -310,12 +359,12 @@ static void attention(wubu_buf_t *b, int seq, int is_full, int local_window,
             }
             for (int i = 0; i < kv_n; i++) probs[i] /= sum;
             for (int i = 0; i < kv_n; i++) {
-                const float *vrow = b->v + (size_t)(lo + i) * 64;
-                for (int d = 0; d < 64; d++)
-                    osum[h * 64 + d] += probs[i] * vrow[d];
+                const float *vrow = b->v + (size_t)(lo + i) * WUBU_HEAD_DIM;
+                for (int d = 0; d < WUBU_HEAD_DIM; d++)
+                    osum[h * WUBU_HEAD_DIM + d] += probs[i] * vrow[d];
             }
-            for (int d = 0; d < 64; d++)
-                acc[h * 64 + d] = osum[h * 64 + d];
+            for (int d = 0; d < WUBU_HEAD_DIM; d++)
+                acc[h * WUBU_HEAD_DIM + d] = osum[h * WUBU_HEAD_DIM + d];
         }
         (void)pos0;
     }
@@ -360,26 +409,26 @@ int wubu_forward(wubu_model_t *m, wubu_buf_t *b,
                            h + (size_t)s * WUBU_DIM, blk->attn_norm,
                            WUBU_DIM, WUBU_EPS);
         /* q/k/v projections */
-        matmul(b->q, blk->q_proj, b->gate, WUBU_HEADS * 64, WUBU_DIM, seq);
-        matmul(b->k, blk->k_proj, b->gate, WUBU_KV_HEADS * 64, WUBU_DIM, seq);
-        matmul(b->v, blk->v_proj, b->gate, WUBU_KV_HEADS * 64, WUBU_DIM, seq);
-        /* qk norm per head */
+        matmul(b->q, blk->q_proj, b->gate, WUBU_HEADS * WUBU_HEAD_DIM, WUBU_DIM, seq);
+        matmul(b->k, blk->k_proj, b->gate, WUBU_KV_HEADS * WUBU_HEAD_DIM, WUBU_DIM, seq);
+        matmul(b->v, blk->v_proj, b->gate, WUBU_KV_HEADS * WUBU_HEAD_DIM, WUBU_DIM, seq);
+        /* q/norm per head */
         for (int s = 0; s < seq; s++) {
             for (int h = 0; h < WUBU_HEADS; h++) {
-                float *qr = b->q + (size_t)s * WUBU_DIM + (size_t)h * 64;
-                rms_norm_value(qr, qr, blk->q_norm, 64, WUBU_EPS);
+                float *qr = b->q + (size_t)s * WUBU_DIM + (size_t)h * WUBU_HEAD_DIM;
+                rms_norm_value(qr, qr, blk->q_norm, WUBU_HEAD_DIM, WUBU_EPS);
             }
-            float *kr = b->k + (size_t)s * 64;
-            rms_norm_value(kr, kr, blk->k_norm, 64, WUBU_EPS);
+            float *kr = b->k + (size_t)s * WUBU_HEAD_DIM;
+            rms_norm_value(kr, kr, blk->k_norm, WUBU_HEAD_DIM, WUBU_EPS);
         }
         /* partial rope */
         for (int s = 0; s < seq; s++) {
             for (int h = 0; h < WUBU_HEADS; h++) {
-                float *qr = b->q + (size_t)s * WUBU_DIM + (size_t)h * 64;
-                apply_rope(qr, 1, 64, WUBU_ROPE_DIM, b->cos_tbl, b->sin_tbl, s);
+                float *qr = b->q + (size_t)s * WUBU_DIM + (size_t)h * WUBU_HEAD_DIM;
+                apply_rope(qr, 1, WUBU_HEAD_DIM, WUBU_ROPE_DIM, b->cos_tbl, b->sin_tbl, s);
             }
-            float *kr = b->k + (size_t)s * 64;
-            apply_rope(kr, 1, 64, WUBU_ROPE_DIM, b->cos_tbl, b->sin_tbl, s);
+            float *kr = b->k + (size_t)s * WUBU_HEAD_DIM;
+            apply_rope(kr, 1, WUBU_HEAD_DIM, WUBU_ROPE_DIM, b->cos_tbl, b->sin_tbl, s);
         }
         /* attention */
         attention(b, seq, m->is_full[l], WUBU_LOCAL_WIN, 0);
@@ -690,21 +739,21 @@ long wubu_parameter_count(const wubu_model_t *m)
 {
     if (!m) return -1;
     long n = 0;
-    n += 16384L * 448;                 /* embedding */
-    n += 448;                          /* final norm */
+    n += (long)WUBU_VOCAB * WUBU_DIM;        /* embedding (tied) */
+    n += WUBU_DIM;                          /* final_norm */
     for (int i = 0; i < m->n_layers; i++) {
         (void)m->blocks[i];
-        n += 448L * 448;               /* q_proj */
-        n += 448L * 64;                /* k_proj */
-        n += 448L * 64;                /* v_proj */
-        n += 448L * 448;               /* o_proj */
-        n += 448L * 448;               /* g_proj */
-        n += 64 + 64;                  /* q_norm k_norm */
-        n += 448 + 448;                /* attn_norm ffn_norm */
-        n += 448L * 2456;              /* gate_up */
-        n += 1228L * 448;              /* down */
+        n += (long)WUBU_DIM * WUBU_DIM;    /* q_proj (aligned 512×512) */
+        n += (long)WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM); /* k_proj */
+        n += (long)WUBU_DIM * (WUBU_KV_HEADS * WUBU_HEAD_DIM); /* v_proj */
+        n += (long)WUBU_DIM * WUBU_DIM;      /* o_proj */
+        n += (long)WUBU_DIM * WUBU_DIM;      /* g_proj */
+        n += WUBU_HEAD_DIM + WUBU_HEAD_DIM;  /* q_norm + k_norm */
+        n += WUBU_DIM + WUBU_DIM;             /* attn_norm + ffn_norm */
+        n += (long)WUBU_DIM * (2 * WUBU_FFN_DIM); /* gate_up */
+        n += (long)WUBU_FFN_DIM * WUBU_DIM;  /* down */
     }
-    for (int i = 0; i < WUBU_SELECTORS; i++) n += 448;
+    for (int i = 0; i < WUBU_SELECTORS; i++) n += WUBU_DIM;
     return n;
 }
 

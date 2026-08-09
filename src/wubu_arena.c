@@ -1,116 +1,122 @@
 /*
- * wubu_arena.c -- Arena allocator for per-request + KV buffers (doc 006).
- * Self-contained C11. See header.
+ * wubu_arena.c -- the kernel's single allocator of record.
+ *
+ * Theory/07: one arena, bump-allocated; slabs are alignment-tagged so
+ * the byte budget is predictable and Styx-exportable. The arena replaces
+ * the 14 separate calloc calls in wubu_load with a single mem_alloc +
+ * recorded slab table.
+ *
+ * Alignments used by the kernel:
+ *   AVX-512 GEMM ........ 64  (vmovdqa / vpmovs-wx)
+ *   F32 tensor ........... 4
+ *   F16 / q8 dequant .... 2
+ *   int4 pack ........... 1 (but slab padded to parent align)
  */
 #include "wubu_arena.h"
 #include <stdlib.h>
-#include <sys/mman.h>
-#include <errno.h>
 #include <string.h>
-#include <stdint.h>
-#include <string.h>
-#include <errno.h>
+#include <stdio.h>
 
-/* Round up to power-of-two alignment */
-static size_t align_up(size_t x, size_t a) {
-    return (x + a - 1) & ~(a - 1);
+static size_t align_up(size_t n, size_t a) {
+    return (n + (a - 1)) & ~(a - 1);
 }
 
-/* Try mmap with huge pages; fallback to regular mmap; final fallback malloc */
-static void *try_mmap(size_t size, int huge, size_t *actual) {
-#if defined(__linux__) || defined(__APPLE__)
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    int prot = PROT_READ | PROT_WRITE;
-    if (huge) {
-#if defined(MAP_HUGETLB) && defined(MAP_HUGE_2MB)
-        flags |= MAP_HUGETLB | MAP_HUGE_2MB;
-#endif
+static size_t clamp_align(size_t a) {
+    if (a < 1) return 1;
+    if (a & (a - 1)) return 64;   /* not a power of two → use max safe */
+    return a;
+}
+
+int wubu_prec_bytes(int prec) {
+    switch (prec) {
+        case WUBU_PREC_F32:  return 4;
+        case WUBU_PREC_F16:  return 2;
+        case WUBU_PREC_INT4: return 0;   /* 0.5 (nybble) — caller handles packing */
+        case WUBU_PREC_Q8_0: return 9;   /* 1.0 + 1/8 (scale per group of 32) */
+        case WUBU_PREC_Q4_0: return 5;   /* 0.56 (4-bit + per-block scale) */
+        default:             return 0;
     }
-    void *p = mmap(NULL, size, prot, flags, -1, 0);
-    if (p != MAP_FAILED) { *actual = size; return p; }
-    /* fallback: regular mmap */
-    flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    p = mmap(NULL, size, prot, flags, -1, 0);
-    if (p != MAP_FAILED) { *actual = size; return p; }
-#endif
-    /* final fallback: malloc + align */
-    void *raw = malloc(size + WUBU_ARENA_PAGE);
-    if (!raw) return NULL;
-    uintptr_t r = (uintptr_t)raw;
-    uintptr_t aligned = align_up(r, WUBU_ARENA_PAGE);
-    *actual = size;
-    return (void *)aligned;
 }
 
-int wubu_arena_init(wubu_arena_t *a, size_t total_bytes, int use_huge_pages) {
-    if (!a || total_bytes == 0) return -1;
-    memset(a, 0, sizeof(*a));
-    size_t actual;
-    a->base = try_mmap(total_bytes, use_huge_pages, &actual);
-    if (!a->base) return -1;
-    a->limit = a->base + actual;
-    a->total_bytes = actual;
-    a->huge_pages = use_huge_pages;
-    return 0;
+wubu_arena_t *wubu_arena_create(size_t bytes)
+{
+    wubu_arena_t *a = (wubu_arena_t *)calloc(1, sizeof(*a));
+    if (!a) return NULL;
+    a->capacity = align_up(bytes, 64);
+    a->slab_cap = 16;
+    a->slabs = (wubu_slab_t *)calloc(a->slab_cap, sizeof(wubu_slab_t));
+    if (!a->slabs) { free(a); return NULL; }
+    /* The kernel's mem_alloc guarantees 64-byte alignment (page-mapped).
+     * On libc (tests) posix_memalign gives the same guarantee so the
+     * alignment invariant holds without a second allocator. */
+    if (posix_memalign((void **)&a->base, 64, a->capacity) != 0 || !a->base) {
+        free(a->slabs); free(a); return NULL;
+    }
+    a->pos = 0;
+    return a;
 }
 
-void wubu_arena_free(wubu_arena_t *a) {
-    if (!a || !a->base) return;
-    munmap(a->base, a->total_bytes);
-    a->base = a->limit = NULL;
-    a->total_bytes = a->used_bytes = 0;
-}
+void *wubu_arena_push(wubu_arena_t *a, const char *name,
+                      size_t sz, size_t align, int prec, int elems)
+{
+    if (!a) return NULL;
+    size_t a_align = clamp_align(align);
+    size_t off = align_up(a->pos, a_align);
+    if (off + sz > a->capacity) return NULL;   /* slab overflow = OOM */
+    void *p = a->base + off;
+    a->pos = off + sz;
 
-int wubu_sub_arena_create(wubu_arena_t *a, wubu_sub_arena_t *out, size_t bytes) {
-    if (!a || !out || bytes == 0) return -1;
-    /* Align slice start to cache line, size to page for clean boundaries */
-    size_t slice_bytes = align_up(bytes, WUBU_ARENA_PAGE);
-    size_t align = WUBU_ARENA_CACHELINE;
-    size_t start = align_up((size_t)(a->limit - a->base) - a->used_bytes - slice_bytes, align);
-    if (start + slice_bytes > a->total_bytes) return -1; /* out of space */
-    /* Actually we bump from the END backwards so sub-arenas stack down.
-     * But simpler: bump from current used_bytes forward. */
-    size_t bump = align_up(a->used_bytes, align);
-    if (bump + slice_bytes > a->total_bytes) return -1;
-    out->base = a->base + bump;
-    out->bump = out->base;
-    out->limit = out->base + slice_bytes;
-    out->used = 0;
-    a->used_bytes = bump + slice_bytes;
-    return 0;
-}
-
-void wubu_sub_arena_reset(wubu_sub_arena_t *sa) {
-    if (!sa) return;
-    sa->bump = sa->base;
-    sa->used = 0;
-}
-
-void wubu_sub_arena_destroy(wubu_arena_t *a, wubu_sub_arena_t *sa) {
-    (void)a; (void)sa;
-    /* For simplicity: we don't return slices to a free list.
-     * In production: add to free_list for reuse. Here we just reset. */
-    wubu_sub_arena_reset(sa);
-}
-
-void *wubu_sub_arena_alloc(wubu_sub_arena_t *sa, size_t size, size_t align) {
-    if (!sa || size == 0) return NULL;
-    if (align == 0) align = WUBU_ARENA_CACHELINE;
-    size_t offset = (size_t)(sa->bump - sa->base);
-    size_t aligned = align_up(offset, align);
-    if (aligned + size > (size_t)(sa->limit - sa->base)) return NULL;
-    void *p = sa->base + aligned;
-    sa->bump = (uint8_t *)p + size;
-    sa->used = (size_t)(sa->bump - sa->base);
+    /* Grow slab table if needed. */
+    if (a->n_slabs >= a->slab_cap) {
+        a->slab_cap *= 2;
+        wubu_slab_t *ns = (wubu_slab_t *)realloc(a->slabs,
+            (size_t)a->slab_cap * sizeof(wubu_slab_t));
+        if (!ns) return NULL;
+        a->slabs = ns;
+    }
+    wubu_slab_t *s = &a->slabs[a->n_slabs++];
+    s->name = name;
+    s->base = p;
+    s->bytes = sz;
+    s->padded = off - (a->pos - sz) + sz;  /* sz + leading pad */
+    s->align = a_align;
+    s->prec = prec;
+    s->elems = elems;
     return p;
 }
 
-void *wubu_sub_arena_calloc(wubu_sub_arena_t *sa, size_t nmemb, size_t size, size_t align) {
-    size_t total = nmemb * size;
-    void *p = wubu_sub_arena_alloc(sa, total, align);
-    if (p) memset(p, 0, total);
-    return p;
+void wubu_arena_reset(wubu_arena_t *a)
+{
+    if (!a) return;
+    a->pos = 0;
 }
 
-size_t wubu_arena_committed(const wubu_arena_t *a) { return a ? a->used_bytes : 0; }
-size_t wubu_arena_available(const wubu_arena_t *a) { return a ? a->total_bytes - a->used_bytes : 0; }
+int wubu_arena_free(wubu_arena_t *a)
+{
+    if (!a) return 0;
+    free(a->base);
+    free(a->slabs);
+    free(a);
+    return 0;
+}
+
+size_t wubu_arena_used(const wubu_arena_t *a) {
+    return a ? a->pos : 0;
+}
+
+int wubu_arena_nslabs(const wubu_arena_t *a) {
+    return a ? a->n_slabs : 0;
+}
+
+const wubu_slab_t *wubu_arena_slab(const wubu_arena_t *a, int i) {
+    if (!a || i < 0 || i >= a->n_slabs) return NULL;
+    return &a->slabs[i];
+}
+
+const wubu_slab_t *wubu_arena_find(const wubu_arena_t *a, const char *name) {
+    if (!a || !name) return NULL;
+    for (int i = 0; i < a->n_slabs; i++)
+        if (a->slabs[i].name && strcmp(a->slabs[i].name, name) == 0)
+            return &a->slabs[i];
+    return NULL;
+}

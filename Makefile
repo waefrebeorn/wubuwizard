@@ -2030,6 +2030,49 @@ check_forward: tools/check_forward.c $(MODEL_OBJ) src/wubu_tokenizer.o
 test_iq2_xxs_dot: tools/test_iq2_xxs_dot.c src/gguf_reader.o src/dequant_iq2_xxs.o src/wubu_moe.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+<<<<<<< HEAD
+=======
+# ================================================================
+# WuBu-35M mustard-seed engine (the Revolver Doctrine closure S1-S5)
+# ================================================================
+WUBU35_OBJ = src/wubu35_dims.o src/wubu.o \
+             src/safetensors_reader.o src/wubu_moe2.o src/wubu_dequant_nf4.o
+
+src/wubu35_dims.o: src/wubu35_dims.c include/wubu35_dims.h include/safetensors_reader.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu.o: src/wubu.c include/wubu.h include/wubu35_dims.h include/safetensors_reader.h include/wubu_moe2.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_dequant_nf4.o: src/wubu_dequant_nf4.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# The 35M gate: load the REAL released checkpoint, probe its geometry
+# (probe-don't-assume), forward, generate. MODEL=... to point at a
+# checkpoint (default models/wubu/model.safetensors).
+test_wubu_arch: tools/test_wubu_arch.c $(WUBU35_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	@echo "test_wubu_arch built (WuBu-35M revolver gate)"
+
+test_wubu_arch_run: test_wubu_arch
+	./test_wubu_arch $(MODEL)
+
+# Theory/08: aligned-geometry gate. Proves the redesigned 35M engine
+# geometry (dim=512, heads=8, head_dim=64, ffn=2048) tiles evenly across
+# every quant block + SIMD width, so zero-dequant compute applies.
+test_wubu_alignment: tools/test_wubu_alignment.c src/wubu35_dims.o src/wubu_dims_stub.o src/wubu_arena.o
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+# The 35M dims probe gate: proves the loader reads REAL geometry from
+# the checkpoint tensor shapes (no fixed geometry).
+test_wubu35_dims: tools/test_wubu35_dims.c $(WUBU35_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_wubu35_dims_run: test_wubu35_dims
+	./test_wubu35_dims $(MODEL)
+
+# ================================================================
+>>>>>>> 0945ca7 (S7-WIP: Theory/08 aligned rewrite (448→512 geometry, zero-dequant dispatch))
 # Test runners
 test: test_ssm
 	./test_ssm

@@ -1057,6 +1057,13 @@ void iq3_xxs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, cons
 #endif
 }
 void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
+    /* IQ4_XS has a different block layout (block_iq4_xs: d, scales_h,
+     * scales_l, qs) from Q4_K (block_q4_K: d, dmin, scales, qs), so it cannot
+     * share the Q4_K SIMD path. The generic path applies the scale ONCE
+     * at the reduction boundary (int32 accumulator, single dequant) — no
+     * per-element F32 materialization. With the Theory/08 aligned geometry
+     * (input dim always div-256), the generic path is still correct and
+     * branch-free; a dedicated IQ4_XS AVX2 kernel is future work. */
     ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
 }
 

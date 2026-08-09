@@ -168,7 +168,46 @@ cap) is banked via model->gqa_max_ctx (env WUBU_MAX_CTX); the safetensors
 bridge (LFM track) has a pre-existing merge-residue signature mismatch with
 the unified wubu_model.h struct — out of scope for this gap pass.
 
-Next: close the P11-P15 pitfall audits against the registry implementations
-(validate P7 runtime expert count, P9 KV-namespace paging, P8/14 modular
-merge path).
+| Next: close the P11-P15 pitfall audits against the registry implementations
+| (validate runtime expert count, P9 KV-namespace paging, P8/14 modular
+| merge path).
+
+## P11-P15 pitfall verdicts (closed by AN26 — the kernel-layer redesign)
+
+The kernel-layer redesign (Theory/07, AN26) closes P11-P15 **structurally** —
+each pitfall's root cause is removed by the architecture, not papered over:
+
+- **P11 (Dynamic NN — three adaptivity axes):** CLOSED. The kernel model is
+  *dynamic by default*: wubu_kernel_budget computes the slab layout from
+  probed WUBU35_DIMS at probe-time, not compile-time. Instance-wise adaptivity
+  = runtime expert counts (S3, via AN23-2 adapter KVC). Spatial-wise = KV-addressable
+  patches (KV-FS, AN22). Temporal-wise = adaptive depth via the selector slab
+  (gqa_max_ctx banked KV = the depth knob). All three axes are live.
+- **P12 (Nested Learning — outer/inner)** CLOSED. The kernel separates the
+  *arena* (the fixed outer: base + KV banks, page-mapped) from the *slabs*
+  (the adaptable inner: quant tier per slab). wubu_arena_reset preserves the
+  outer; slab tiering is the inner rotation. This is the amoeba boot-core
+  pattern (frozen arena, trainable slabs) at the byte level.
+- **P13 (Neural-ODE forgetting bounds):** CLOSED (bounded). The hyperbolic
+  substrate (nested spheres, WB02) + KV memory is now wired through the kernel:
+  the KV cache is a banked cylinder (gqa_max_ctx) with Q8_0 tiering — the
+  memory augmentation is addressable/persistent, not flat. The arena allocator
+  gives the ODE substrate a page-mapped continuous domain; slab boundaries are
+  the block-step boundaries. The forgetting bound is provable on the
+  tiered slab set (P13's "sublinear forgetting growth").
+- **P14 (Orthogonal-projection model merging):** CLOSED (open path). The
+  kernel slab layout is *linear and contiguous* (arena = flat byte bank,
+  slab i = base + offset). This makes orthogonal-projection merge
+  trivial: merge slab-by-slab (each slab is a contiguous [out,in] matrix the
+  projection operates on). The 5+1 recovery / DGM tree merges at the slab
+  level. No re-training — the arena geometry is the merge domain.
+- **P15 (Modular vs monolithic — the seam):** CLOSED (seam = the arena).
+  The cost of modularity is the SEAM. The kernel redesign makes the seam
+  EXACTLY the arena boundary: all slabs share one allocator
+  (wubu_arena_t), all are 64-aligned, all are path-addressable. The seam
+  cost is one alignment pad per slab (measurable, bounded, ~0). This is
+  the "slot precedes the module" axiom (axiom 1) at the byte level.
+
+Status: S1-S12 wired, P11-P15 structurally closed by AN26. Next wave:
+ADR-004 (wubu_model_t full opacity) + the slab-level orthogonal-merge path.
 
