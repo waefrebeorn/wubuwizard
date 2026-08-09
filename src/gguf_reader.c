@@ -1210,6 +1210,61 @@ int64_t gguf_read_kv_i64(gguf_ctx *ctx, const char *want, int64_t def) {
     return def;
 }
 
+int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out) {
+    int64_t v = gguf_read_kv_i64(ctx, key, INT64_MIN);
+    if (v == INT64_MIN) return 0;
+    if (out) *out = (int)v;
+    return 1;
+}
+int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out) {
+    int64_t v = gguf_read_kv_i64(ctx, key, INT64_MIN);
+    if (v == INT64_MIN) return 0;
+    if (out) *out = (float)v;
+    return 1;
+}
+int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max) {
+    /* the walker returns the FIRST element of an int array; the LFM2.5
+     * per-layer head_count_kv needs the FULL array — walk and collect. */
+    if (!ctx || !ctx->file || !out || max <= 0) return 0;
+    fseek(ctx->file, 16, SEEK_SET);
+    int64_t n_kv = 0;
+    if (fread(&n_kv, 8, 1, ctx->file) != 1) return 0;
+    for (int64_t ki = 0; ki < n_kv; ki++) {
+        uint64_t klen = 0;
+        if (fread(&klen, 8, 1, ctx->file) != 1) return 0;
+        char k[256];
+        if (klen >= sizeof(k)) { fseek(ctx->file, (long)klen, SEEK_CUR); continue; }
+        if (fread(k, 1, (size_t)klen, ctx->file) != klen) return 0;
+        k[klen] = 0;
+        int32_t vt = 0;
+        if (fread(&vt, 4, 1, ctx->file) != 1) return 0;
+        if (strcmp(k, key) == 0 && vt == 9) {
+            int32_t at = 0; uint64_t al = 0;
+            if (fread(&at, 4, 1, ctx->file) != 1) return 0;
+            if (fread(&al, 8, 1, ctx->file) != 1) return 0;
+            if ((at == 4 || at == 5) && al > 0) {
+                int n = (int)(al < (uint64_t)max ? al : (uint64_t)max);
+                for (int i = 0; i < n; i++)
+                    if (fread(&out[i], 4, 1, ctx->file) != 1) return 0;
+                return n;
+            }
+            return 0;
+        }
+        /* skip */
+        if (vt == 8) { uint64_t sl; if (fread(&sl, 8, 1, ctx->file) == 1) fseek(ctx->file, (long)sl, SEEK_CUR); }
+        else if (vt == 9) {
+            int32_t at; uint64_t al;
+            if (fread(&at, 4, 1, ctx->file) != 1 || fread(&al, 8, 1, ctx->file) != 1) return 0;
+            if (at == 8) { for (uint64_t j = 0; j < al; j++) { uint64_t sl; if (fread(&sl, 8, 1, ctx->file) == 1) fseek(ctx->file, (long)sl, SEEK_CUR); } }
+            else { int esz = 4; if (at == 0 || at == 1 || at == 7) esz = 1; else if (at == 2 || at == 3) esz = 2; else if (at == 10 || at == 11 || at == 12) esz = 8; fseek(ctx->file, (long)(al * (uint64_t)esz), SEEK_CUR); }
+        } else {
+            int esz = 4; if (vt == 0 || vt == 1 || vt == 7) esz = 1; else if (vt == 2 || vt == 3) esz = 2; else if (vt == 10 || vt == 11 || vt == 12) esz = 8;
+            fseek(ctx->file, esz, SEEK_CUR);
+        }
+    }
+    return 0;
+}
+
 // ========== Q2_K Dequant (84 bytes/block, 256 elems/block) ==========
 // Block layout: scales[16] + qs[64] + d[2](fp16) + dmin[2](fp16)
 static void dequantize_q2_K_row(const uint8_t *data, float *output, int64_t n_elems) {

@@ -436,6 +436,11 @@ bool lfm2_load(const char *model_dir, lfm2_model_t *m) {
     size_t kv_bytes = (size_t)m->n_layers * 2 * m->n_kv_heads * m->head_dim * m->kv_max_t;
     m->kv_cache = (float *)xmalloc(kv_bytes * sizeof(float));
     memset(m->kv_cache, 0, kv_bytes * sizeof(float));
+    /* conv state for the incremental decode: (k-1) x conv_dim per layer */
+    m->conv_state_dim = (m->conv_k > 1 ? m->conv_k - 1 : 2) * m->conv_dim;
+    m->conv_state = (float *)xmalloc((size_t)m->n_layers * m->conv_state_dim * sizeof(float));
+    memset(m->conv_state, 0, (size_t)m->n_layers * m->conv_state_dim * sizeof(float));
+    m->kv_len = 0;
 
     if ((!m->embed && !m->q_embed) || !m->embed_norm) { fprintf(stderr, "lfm2: missing embed/embed_norm\n"); return false; }
     fprintf(stderr, "[lfm2] loaded d=%d layers=%d q=%d kv=%d hd=%d ff=%d vocab=%d conv_dim=%d rope_theta=%.0f\n",
@@ -456,6 +461,7 @@ void lfm2_free(lfm2_model_t *m) {
         free(m->layers);
     }
     free(m->is_conv); free(m->embed); free(m->embed_norm); free(m->kv_cache);
+    free(m->conv_state);
     for (int s = 0; s < g_nsh; s++) if (g_shards[s]) st_close(g_shards[s]);
     g_nsh = 0;
     if (g_gguf) { gguf_close(g_gguf); g_gguf = NULL; }

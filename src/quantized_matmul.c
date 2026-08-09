@@ -15,7 +15,9 @@
 #include <stdio.h>
 #include <math.h>
 #include <assert.h>
+#if defined(__AVX2__) || defined(__SSE2__)
 #include <immintrin.h>  // _mm_prefetch
+#endif
 #include <omp.h>
 
 #include "gguf_reader.h"
@@ -287,7 +289,9 @@ void quantized_matmul(const float *x,
         const void *w_col = (const uint8_t *)W + j * col_stride;
         // Prefetch next column into L1 cache
         if (j + 1 < n_cols) {
+#if defined(__AVX2__) || defined(__SSE2__)
             _mm_prefetch((const char *)W + (j + 1) * col_stride, _MM_HINT_T0);
+#endif
         }
         dot_fn((int)n_rows, &y[j], 0, w_col, 0, q8_buf, 0, 1);
     }
@@ -423,7 +427,9 @@ void quantized_matmul_from_q8(const void *q8_x,
     for (int64_t j = 0; j < n_cols; j++) {
         const void *w_col = (const uint8_t *)W + j * col_stride;
         if (j + 1 < n_cols) {
+#if defined(__AVX2__) || defined(__SSE2__)
             _mm_prefetch((const char *)W + (j + 1) * col_stride, _MM_HINT_T0);
+#endif
         }
         dot_fn((int)n_rows, &y[j], 0, w_col, 0, q8_x, 0, 1);
     }
@@ -518,7 +524,9 @@ void quantized_matmul_batched(const float *x,
     #pragma omp parallel for if(n_cols > 32)
     for (int64_t j = 0; j < n_cols; j++) {
         const void *w_col = (const uint8_t *)W + j * col_stride;
+#if defined(__AVX2__) || defined(__SSE2__)
         _mm_prefetch((const char *)W + ((j + 1) < n_cols ? (j + 1) : j) * col_stride, _MM_HINT_T0);
+#endif
         for (int i = 0; i < N; i++) {
             const void *q8_i = (const uint8_t *)q8_all + i * q8_tok_bytes;
             dot_fn((int)n_rows, &y[i * n_cols + j], 0, w_col, 0, q8_i, 0, 1);

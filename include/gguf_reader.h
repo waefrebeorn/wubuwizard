@@ -88,6 +88,12 @@ int64_t gguf_tokenizer_token_count(gguf_ctx *ctx);  /* vocab size from the GGUF 
  * runtime dims (embedding_length, head_count, rope.*, ...). */
 int64_t gguf_read_kv_i64(gguf_ctx *ctx, const char *want, int64_t def);
 
+/* lfm2_load.c API (the LFM2.5 loader uses these) — thin wrappers over
+ * the KV walker. Return 1 on found, 0 on absent. */
+int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out);
+int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out);
+int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max);
+
 // Calculate raw (quantized) byte size for a tensor type/element count
 int64_t gguf_raw_size(int ggml_type, int64_t n_elems);
 

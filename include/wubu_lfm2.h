@@ -92,6 +92,13 @@ typedef struct {
     /* KV cache for attention layers: [n_layers][2][n_kv_heads*head_dim*maxT] */
     float *kv_cache;
     int    kv_max_t;
+    /* Incremental decode state: running sequence length (KV fill level,
+     * start_pos for the next single-token step) + per-layer conv state
+     * [n_layers][conv_k-1][conv_dim] (the last k-1 gated inputs, so the
+     * causal depthwise conv can run at T=1). */
+    int    kv_len;
+    float *conv_state;
+    int    conv_state_dim;  /* (conv_k-1)*conv_dim per layer */
 } lfm2_model_t;
 
 /* Load a LFM2.5 safetensors checkpoint directory into an lfm2_model_t.
@@ -103,7 +110,7 @@ void lfm2_free(lfm2_model_t *m);
 
 /* Forward one sequence of token embeddings. emb[B*T*d_model] in,
  * logits[vocab] out (last token). Allocates scratch internally. */
-bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T,
+bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T,
                   float *logits);
 
 /* Materialize ONE layer's quantized weights to F32 (fills the float*

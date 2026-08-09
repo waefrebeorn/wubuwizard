@@ -39,18 +39,25 @@ int main(int argc, char **argv) {
 
     int produced = 0;
     for (int step = 0; step < max_new; step++) {
-        for (int t = 0; t < T; t++) {
+        /* incremental decode: the first call pre-fills the whole prompt
+         * (T=np), every later call feeds ONE new token at kv_len — the
+         * attention reads the KV cache, the conv uses its saved state. */
+        int feed_t = (step == 0) ? T : 1;
+        int feed_idx = (step == 0) ? 0 : (T - 1);   /* the last emitted token */
+        for (int t = 0; t < feed_t; t++) {
+            int tok = seq[feed_idx + t];
             if (m.embed) {
-                const float *row = m.embed + (size_t)seq[t] * m.d_model;
+                const float *row = m.embed + (size_t)tok * m.d_model;
                 memcpy(emb + (size_t)t * m.d_model, row, m.d_model * sizeof(float));
             } else if (m.q_embed) {
                 /* quantized embed: dequantize ONE row per token */
-                const uint8_t *row = m.q_embed + (size_t)seq[t] * m.embed_bytes_per_row;
+                const uint8_t *row = m.q_embed + (size_t)tok * m.embed_bytes_per_row;
                 gguf_dequantize(row, m.q_embed_type, m.d_model,
                                 emb + (size_t)t * m.d_model);
             }
         }
-        if (!lfm2_forward(&m, emb, 1, T, logits)) { fprintf(stderr, "lfm2: forward failed at step %d\n", step); break; }
+        if (!lfm2_forward(&m, emb, 1, feed_t, logits)) { fprintf(stderr, "lfm2: forward failed at step %d\n", step); break; }
+        seq = realloc(seq, (T + 2) * sizeof(int));   /* room for the new token */
 
         int nan = 0;
         for (int i = 0; i < m.vocab_size; i++) {

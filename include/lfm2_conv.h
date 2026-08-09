@@ -27,6 +27,16 @@ void lfm2_conv(const float *in_proj, const float *conv_w, const float *out_proj,
                int conv_k, int conv_dim, int d_model,
                const float *x, int T, float *op_out);
 
+/* Quantized variant: q_in_proj/q_out_proj are GGUF blobs (types q_in_t/
+ * q_out_t) used via the vec-dot matmul when non-NULL; conv_w is always the
+ * F32 kernel (same layout materialized or blob-direct). */
+void lfm2_conv_q(const float *in_proj, const float *conv_w, const float *out_proj,
+                 int conv_k, int conv_dim, int d_model,
+                 const float *x, int T, float *op_out,
+                 const uint8_t *q_in_proj, int q_in_t,
+                 const uint8_t *q_out_proj, int q_out_t,
+                 float *conv_state, int state_pos);
+
 #ifdef __cplusplus
 }
 #endif

@@ -22,6 +22,17 @@ void lfm2_gqa(const float *q_proj, const float *k_proj, const float *v_proj,
                float *kv_cache_layer, int kv_max_t, int start_pos,
                float *attn_out);
 
+void lfm2_gqa_q(const float *q_proj, const float *k_proj, const float *v_proj,
+                const float *o_proj, const float *q_ln, const float *k_ln,
+                int n_q_heads, int n_kv_heads, int head_dim, int d_model,
+                float rope_theta, const float *x, int T,
+                float *kv_cache_layer, int kv_max_t, int start_pos,
+                float *attn_out,
+                const uint8_t *q_q_proj, int q_q_t,
+                const uint8_t *q_k_proj, int q_k_t,
+                const uint8_t *q_v_proj, int q_v_t,
+                const uint8_t *q_o_proj, int q_o_t);
+
 #ifdef __cplusplus
 }
 #endif

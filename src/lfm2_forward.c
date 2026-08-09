@@ -12,7 +12,7 @@
 #include <math.h>
 
 extern int lfm2_dump_layer;
-bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *logits) {
+bool lfm2_forward(lfm2_model_t *m, const float *emb, int B, int T, float *logits) {
     if (B != 1) { fprintf(stderr, "lfm2: only B=1 supported\n"); return false; }
     int d = m->d_model;
     float *h = (float *)malloc((size_t)T * d * sizeof(float));
@@ -31,8 +31,18 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
         }
 
         /* Lazy materialize: dequantize THIS layer's quantized GGUF weights
-         * to F32, run, then release — peak RAM = one layer, not the model. */
-        if (!lfm2_layer_materialize(L, d, m->conv_dim, m->ff_dim)) {
+         * to F32, run, then release — peak RAM = one layer, not the model.
+         * When the layer is FULLY quantized (all big weights have blob
+         * pointers) the vec-dot path runs directly on the blob — no
+         * materialize, no F32 copy, no per-step dequant. */
+        int full_q;
+        if (getenv("LFM2_FORCE_F32")) full_q = 0;
+        else if (m->is_conv[l])
+            full_q = L->q_in_proj && L->q_out_proj && L->q_w1 && L->q_w2 && L->q_w3;
+        else
+            full_q = L->q_q_proj && L->q_k_proj && L->q_v_proj && L->q_o_proj &&
+                     L->q_w1 && L->q_w2 && L->q_w3;
+        if (!full_q && !lfm2_layer_materialize(L, d, m->conv_dim, m->ff_dim)) {
             fprintf(stderr, "lfm2: layer %d materialize failed\n", l);
             free(h); free(scratch); free(tmp);
             return false;
@@ -56,13 +66,23 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
             }
         }
         if (m->is_conv[l]) {
-            lfm2_conv(L->in_proj, L->conv_w, L->out_proj, L->conv_k,
-                      m->conv_dim, d, tmp, T, scratch);
+            /* conv_w: F32 kernel — materialized, or the F32 GGUF blob direct
+             * (same [C,k] row layout) when the layer skipped materialize */
+            const float *cw = L->conv_w ? L->conv_w : (const float *)L->q_conv_w;
+            lfm2_conv_q(L->in_proj, cw, L->out_proj, L->conv_k,
+                        m->conv_dim, d, tmp, T, scratch,
+                        full_q ? L->q_in_proj : NULL, L->q_in_proj_t,
+                        full_q ? L->q_out_proj : NULL, L->q_out_proj_t,
+                        m->conv_state + (size_t)l * m->conv_state_dim, m->kv_len);
         } else {
             float *kvc = m->kv_cache + (size_t)l * 2 * m->n_kv_heads * m->head_dim * m->kv_max_t;
-            lfm2_gqa(L->q_proj, L->k_proj, L->v_proj, L->o_proj, L->q_ln, L->k_ln,
-                     m->n_q_heads, m->n_kv_heads, m->head_dim, d, m->rope_theta,
-                     tmp, T, kvc, m->kv_max_t, 0 /* start_pos: fresh prefill */, scratch);
+            lfm2_gqa_q(L->q_proj, L->k_proj, L->v_proj, L->o_proj, L->q_ln, L->k_ln,
+                       m->n_q_heads, m->n_kv_heads, m->head_dim, d, m->rope_theta,
+                       tmp, T, kvc, m->kv_max_t, m->kv_len /* start_pos */, scratch,
+                       full_q ? L->q_q_proj : NULL, L->q_q_proj_t,
+                       full_q ? L->q_k_proj : NULL, L->q_k_proj_t,
+                       full_q ? L->q_v_proj : NULL, L->q_v_proj_t,
+                       full_q ? L->q_o_proj : NULL, L->q_o_proj_t);
         }
         for (size_t i = 0; i < (size_t)T * d; i++) h[i] += scratch[i];
 
@@ -80,7 +100,10 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
             memcpy(tmp + (size_t)t * d, h + (size_t)t * d, d * sizeof(float));
             lfm2_rmsnorm(tmp + (size_t)t * d, L->ffn_norm, d, m->rms_eps);
         }
-        lfm2_ffn(L->w1, L->w2, L->w3, m->ff_dim, d, tmp, T, scratch);
+        lfm2_ffn_q(L->w1, L->w2, L->w3, m->ff_dim, d, tmp, T, scratch,
+                   full_q ? L->q_w1 : NULL, L->q_w1_t,
+                   full_q ? L->q_w2 : NULL, L->q_w2_t,
+                   full_q ? L->q_w3 : NULL, L->q_w3_t);
         if (getenv("LFM2_DBGLAYER")) {
             int dl = atoi(getenv("LFM2_DBGLAYER"));
             if (l == dl) {
@@ -88,11 +111,11 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
                 FILE *fp = fopen("/tmp/lfm2_ffn_in.bin", "wb");
                 if (fp) { fwrite(tmp, sizeof(float), (size_t)T * d, fp); fclose(fp); }
                 fp = fopen("/tmp/lfm2_w1.bin", "wb");
-                if (fp) { fwrite(L->w1, sizeof(float), (size_t)m->ff_dim * d, fp); fclose(fp); }
+                if (fp && L->w1) { fwrite(L->w1, sizeof(float), (size_t)m->ff_dim * d, fp); fclose(fp); }
                 fp = fopen("/tmp/lfm2_w2.bin", "wb");
-                if (fp) { fwrite(L->w2, sizeof(float), (size_t)d * m->ff_dim, fp); fclose(fp); }
+                if (fp && L->w2) { fwrite(L->w2, sizeof(float), (size_t)d * m->ff_dim, fp); fclose(fp); }
                 fp = fopen("/tmp/lfm2_w3.bin", "wb");
-                if (fp) { fwrite(L->w3, sizeof(float), (size_t)m->ff_dim * d, fp); fclose(fp); }
+                if (fp && L->w3) { fwrite(L->w3, sizeof(float), (size_t)m->ff_dim * d, fp); fclose(fp); }
                 fp = fopen("/tmp/lfm2_ffn_out.bin", "wb");
                 if (fp) { fwrite(scratch, sizeof(float), (size_t)T * d, fp); fclose(fp); }
                 fprintf(stderr, "DBG L%d FFN dumps written (in/w1/w2/w3/out)\n", l);
@@ -180,6 +203,7 @@ bool lfm2_forward(const lfm2_model_t *m, const float *emb, int B, int T, float *
                            m->embed_bytes_per_row);
     }
     free(h); free(scratch); free(tmp);
+    m->kv_len += T;   /* incremental decode: KV fill level + conv state pos */
     return true;
 }
 

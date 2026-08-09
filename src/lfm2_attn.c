@@ -18,20 +18,35 @@ static void rope(float *vec, int hd, int pos, float theta) {
 }
 
 void lfm2_gqa(const float *q_proj, const float *k_proj, const float *v_proj,
-               const float *o_proj, const float *q_ln, const float *k_ln,
-               int nq, int nkv, int hd, int d,
-               float rope_theta, const float *x, int T,
-               float *kv_cache_layer, int kv_max_t, int start_pos,
-               float *attn_out) {
+              const float *o_proj, const float *q_ln, const float *k_ln,
+              int nq, int nkv, int hd, int d,
+              float rope_theta, const float *x, int T,
+              float *kv_cache_layer, int kv_max_t, int start_pos,
+              float *attn_out) {
+    lfm2_gqa_q(q_proj, k_proj, v_proj, o_proj, q_ln, k_ln, nq, nkv, hd, d,
+               rope_theta, x, T, kv_cache_layer, kv_max_t, start_pos, attn_out,
+               NULL, 0, NULL, 0, NULL, 0, NULL, 0);
+}
+
+void lfm2_gqa_q(const float *q_proj, const float *k_proj, const float *v_proj,
+                const float *o_proj, const float *q_ln, const float *k_ln,
+                int nq, int nkv, int hd, int d,
+                float rope_theta, const float *x, int T,
+                float *kv_cache_layer, int kv_max_t, int start_pos,
+                float *attn_out,
+                const uint8_t *q_q_proj, int q_q_t,
+                const uint8_t *q_k_proj, int q_k_t,
+                const uint8_t *q_v_proj, int q_v_t,
+                const uint8_t *q_o_proj, int q_o_t) {
     int kv_dim = nkv * hd;
     int q_dim = nq * hd;   /* NOTE: q_dim may differ from d (MiniCPM5: 2048 vs 1536) */
     int Ttot = start_pos + T;
     float *q = (float *)malloc((size_t)T * q_dim * sizeof(float));
     float *k = (float *)malloc((size_t)T * kv_dim * sizeof(float));
     float *v = (float *)malloc((size_t)T * kv_dim * sizeof(float));
-    lfm2_matmul_f32(x, q_proj, T, d, q_dim, q);
-    lfm2_matmul_f32(x, k_proj, T, d, kv_dim, k);
-    lfm2_matmul_f32(x, v_proj, T, d, kv_dim, v);
+    lfm2_qmatmul(x, q_proj, q_q_proj, q_q_t, T, d, q_dim, q);
+    lfm2_qmatmul(x, k_proj, q_k_proj, q_k_t, T, d, kv_dim, k);
+    lfm2_qmatmul(x, v_proj, q_v_proj, q_v_t, T, d, kv_dim, v);
 
     /* write new K/V into cache (layout: [kv_max_t, kv_dim] K block, then V block) */
     if (kv_cache_layer) {
@@ -96,6 +111,6 @@ void lfm2_gqa(const float *q_proj, const float *k_proj, const float *v_proj,
         }
     }
 
-    lfm2_matmul_f32(out, o_proj, T, q_dim, d, attn_out);
+    lfm2_qmatmul(out, o_proj, q_o_proj, q_o_t, T, q_dim, d, attn_out);
     free(q); free(k); free(v); free(out);
 }
