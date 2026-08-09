@@ -1095,6 +1095,10 @@ test_gemv_dispatch: tools/test_gemv_dispatch.c src/wubu_gemv_dispatch.o src/wubu
 test_harness_file: tools/test_harness_file.c src/wubu_harness_file.o src/wubu_trajcell.o src/wubu_hive.o src/wubu_codec.o src/wubu_canvas.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_skill_train: tools/test_skill_train.c src/wubu_skill_train.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
