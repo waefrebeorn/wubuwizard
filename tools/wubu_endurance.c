@@ -155,6 +155,7 @@ int main(int argc, char **argv)
 
     /* the endurance loop: harness -> score -> metadiag -> diagnose */
     float suite_prev = 0.0f;
+    float prev_round_loss = 10.0f;   /* the REAL previous round's loss */
     for (int r = start_round; r <= n_rounds; r++) {
         /* 1. the harness round: the colony's accepted mutations make
          * the tasks easier (the capability mechanism) — the
@@ -181,24 +182,37 @@ int main(int argc, char **argv)
             wubu_metadiag_slow(&md);
 
         /* 3. the closed loop: diagnose -> mutate -> validate. The
-         * loss IMPROVES as the accepted mutations accumulate (the
-         * colony gets better at the work) — the gate sees the real
-         * improvement so the accept rate tracks the capability */
+         * loss IMPROVES as the accepted mutations accumulate — the
+         * log schedule NEVER flatlines (the gate keeps seeing a real
+         * improvement; the 0.08*n schedule saturated at 9.44 after 7
+         * accepts and the run rejected everything from there).
+         * prev_fitness is the REAL previous round's loss so the
+         * replay verifier's offline recompute matches the live gate
+         * (an artificial loss+0.02 made the live run diverge). */
         wubu_diag_record_t rec;
         memset(&rec, 0, sizeof(rec));
         rec.batch = (uint64_t)r;
         rec.epoch = 1;
-        rec.loss = 10.0f - 0.08f * (float)loop.n_accepted;
+        rec.loss = 10.0f - 0.35f * log1pf((float)loop.n_accepted + 1.0f);
         rec.loss_ema = rec.loss;
         rec.fitness = rec.loss;
-        rec.prev_fitness = rec.loss + 0.05f;   /* the improvement */
+        rec.prev_fitness = prev_round_loss;   /* the REAL previous */
         rec.n_experts = 8;
         rec.grad_norm_mean = 0.4f;
+        /* the per-cell grads: the amoeba's immune input. The cells
+         * must see real (nonzero) health or they ALL die (grad <
+         * 1e-4 -> shrink) and the colony shrinks to the floor. The
+         * health tracks the capability: the better the colony, the
+         * calmer the cells. */
+        for (int i = 0; i < loop.n_cells_alloc; i++)
+            loop.cell_grads[i] = 0.15f + 0.05f * (float)(i % 3) +
+                                 0.3f / (1.0f + (float)loop.n_accepted);
         wubu_diag_verdict_t v = wubu_diag_cycle(&loop, &rec, rec.loss);
         /* the lineage + prio bookkeeping */
         wubu_prio_register(&prio, (uint8_t)(r % 8), 2, 0.6f, (uint64_t)r);
         wubu_prio_update_fisher(&prio, (uint8_t)(r % 8), 0.7f, 0.1f);
         suite_prev = rec.loss;
+        prev_round_loss = rec.loss;   /* the next round's REAL previous */
 
         /* A1: the event — round, loss, suite, verdict, policy reason,
          * contract counters, attribution (the cell + its evidence) */

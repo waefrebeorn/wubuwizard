@@ -138,6 +138,10 @@ int wubu_amoeba_diagnose(wubu_amoeba_t *am)
 
 /* ---- the operators (the hive is the body) ---- */
 
+/* forward: the amoeba's OWN live-cell count (defined below, used by
+ * grow_cell first) */
+static int amoeba_live_cells(const wubu_amoeba_t *am);
+
 /* GROW: mitosis. The parent's gate splits (+eps / -eps), and a NEW
  * hive slot holds the daughter cell -- the freelist pop or a new
  * block. The pseudopod extends. */
@@ -146,7 +150,7 @@ static void grow_cell(wubu_amoeba_t *am, int parent_idx)
     if (!am || !am->agents || !am->tissue) return;
     wubu_moe2_t *moe = am->agents;
     if (parent_idx < 0 || parent_idx >= MOE2_N_EXPERTS) return;
-    if ((int)wubu_hive_live(am->tissue) >= am->cfg.max_cells) return;
+    if (amoeba_live_cells(am) >= am->cfg.max_cells) return;   /* colony cap */
     /* the split: parent keeps -eps, the daughter gets +eps */
     for (int d = 0; d < MOE2_D_FF; d++) {
         float pv = moe->exp_gate[parent_idx][d];
@@ -191,6 +195,30 @@ static void shrink_cell(wubu_amoeba_t *am, wubu_amoeba_cell_t *cell)
     am->vitals.total_live = (double)wubu_hive_live(am->tissue);
 }
 
+/* the amoeba's OWN live-cell count: how many of the fixed registry
+ * slots (am->cells[]) are live in the hive. The colony-size contract
+ * (max_cells/min_cells) measures THE COLONY, not the observation
+ * layer — the hive also carries traj cells (the harness), fitness
+ * cells (the diag ledger), and meta-cells (the metadiag), and counting
+ * all of them trips max_cells after the first round (the 3000-round
+ * run's 2993 rejections were this bug). */
+static int amoeba_live_cells(const wubu_amoeba_t *am)
+{
+    if (!am || !am->tissue) return 0;
+    int n = 0;
+    for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
+        if (blk->live == 0) continue;
+        for (size_t s = 0; s < blk->cap; s++) {
+            if (blk->skip[s]) continue;
+            const void *p = blk->slots[s];
+            for (int i = 0; i < am->cfg.max_cells; i++) {
+                if (p == (const void *)&am->cells[i]) { n++; break; }
+            }
+        }
+    }
+    return n;
+}
+
 int wubu_amoeba_mutate(wubu_amoeba_t *am)
 {
     if (!am || !am->tissue) return -1;
@@ -219,7 +247,7 @@ int wubu_amoeba_mutate(wubu_amoeba_t *am)
     /* collect the actions first (the hive changes under us) */
     wubu_amoeba_cell_t *to_grow[64], *to_shrink[64];
     int ng = 0, ns = 0;
-    size_t live_now = wubu_hive_live(am->tissue);
+    int colony = amoeba_live_cells(am);   /* the amoeba's own count */
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
@@ -227,10 +255,11 @@ int wubu_amoeba_mutate(wubu_amoeba_t *am)
                 wubu_amoeba_cell_t *c =
                     (wubu_amoeba_cell_t *)blk->slots[s];
                 /* grow: grad >> mean (the cell is overworked); only up
-                 * to the ceiling */
+                 * to the ceiling (the COLONY ceiling, not the whole
+                 * hive) */
                 int grow = c->grad_norm >
                            am->cfg.grow_grad * mean_grad &&
-                           (int)live_now < am->cfg.max_cells;
+                           colony < am->cfg.max_cells;
                 /* die: grad << mean OR below the absolute floor (the
                  * cell is dead weight); only down to the floor. The
                  * absolute floor catches the all-dead colony: when
@@ -238,7 +267,7 @@ int wubu_amoeba_mutate(wubu_amoeba_t *am)
                 int die  = (c->grad_norm <
                             am->cfg.shrink_grad * mean_grad ||
                             c->grad_norm < 1e-4) &&
-                           (int)live_now > am->cfg.min_cells;
+                           colony > am->cfg.min_cells;
                 if (grow && ng < 16) to_grow[ng++] = c;
                 else if (die && ns < 16) to_shrink[ns++] = c;
             }
@@ -271,10 +300,14 @@ int wubu_amoeba_validate(wubu_amoeba_t *am, double held_out_loss)
      * hold (the colony's geometry is intact) */
     wubu_pf_step_t m = { WUBU_PF_MOBUS, 0.25, 0.3, -0.4, 0, 0 };
     if (!wubu_prover_check(&m)) ok = 0;
-    /* 3. the safety: the colony is within the floor/ceiling */
-    size_t live = wubu_hive_live(am->tissue);
-    if (live < (size_t)am->cfg.min_cells ||
-        live > (size_t)am->cfg.max_cells)
+    /* 3. the safety: the COLONY (the amoeba's own cells) is within the
+     * floor/ceiling — NOT the whole hive, which also carries traj
+     * cells (the harness), fitness cells (the diag ledger), and
+     * meta-cells (the metadiag). Counting those tripped max_cells
+     * after round 1 and rejected every mutation (the 3000-round run). */
+    int colony = amoeba_live_cells(am);
+    if (colony < am->cfg.min_cells ||
+        colony > am->cfg.max_cells)
         ok = 0;
     return ok;
 }

@@ -34,17 +34,19 @@ int main(int argc, char **argv)
     int n = wubu_events_read(epath, ev, 8192);
     if (n <= 0) { printf("no events at %s\n", epath); return 1; }
 
-    /* the offline recomputation: the gate accepts when the loss
-     * improved (held-out < prev) within the tolerance; the prev is
-     * the previous event's loss (the round sequence) */
+    /* the offline recomputation: the gate ACCEPTS unless the loss
+     * WORSENED by more than the tolerance (the amoeba's loss_tol
+     * 0.05 — a flat or improving loss is accepted, matching the live
+     * wubu_amoeba_validate). The prev is the previous event's loss
+     * (the round sequence). */
     float prev_loss = ev[0].loss;
     int n_diverged = 0, n_checked = 0;
     int n_recompute_accept = 0, n_recompute_reject = 0;
     for (int i = 0; i < n; i++) {
         float held = ev[i].loss;
-        /* the deterministic gate: improved by >= 0.01 -> accept;
-         * worsened or flat -> reject */
-        int recomputed = (prev_loss - held) >= 0.01f ? 1 : 0;
+        /* the deterministic gate: worsened by > 0.05 -> reject;
+         * flat or improved -> accept */
+        int recomputed = (held > prev_loss + 0.05f) ? 0 : 1;
         if (recomputed) n_recompute_accept++; else n_recompute_reject++;
         n_checked++;
         /* the LIVE verdict: 1 = accept, 0 = reject (skip stasis) */

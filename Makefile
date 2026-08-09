@@ -1044,7 +1044,7 @@ test_gravity: tools/test_gravity.c src/wubu_gravity.o
 test_orbits: tools/test_orbits.c src/wubu_orbits.o src/wubu_hive.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
-test_amoeba: tools/test_amoeba.c src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o $(CPU_OBJ)
+test_amoeba: tools/test_amoeba.c src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o $(CPU_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm
 	./$@
 

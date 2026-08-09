@@ -92,7 +92,17 @@ int wubu_metadiag_slow(wubu_metadiag_t *md)
      * aggressive); a negative trend (improving) does the opposite */
     float prev_rate = md->mutation_rate;
     int   reason = 0;   /* AN47 #8: the policy-change reason code */
-    if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
+    /* the STASIS band: a flat trend (the loss plateaued — a normal
+     * training phase) must HOLD the policy, not relax into stasis.
+     * The 3000-round run showed the bug: trend==0 was treated as
+     * 'improving', the rate decayed to 0.10 and the floor climbed to
+     * 3.00 while the colony was stuck. */
+    float scale = 1e-3f;
+    for (int i = 0; i < md->win_n; i++) scale += fabsf(md->window[i]);
+    scale /= (float)(md->win_n > 0 ? md->win_n : 1);
+    if (fabsf(trend) < 1e-3f * scale) {
+        reason = 0;   /* stasis: hold the policy */
+    } else if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
         md->mutation_rate += md->lr_scale * 0.5f;
         md->fitness_floor -= md->lr_scale * 0.2f;
         reason = (trend > 0) ? 1 : 2;   /* 1 = loss rising, 2 = suite failing */
