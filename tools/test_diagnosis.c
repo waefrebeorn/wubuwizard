@@ -42,15 +42,43 @@ static int setup_colony(wubu_hive_t *tissue, wubu_amoeba_t *amoeba,
     cfg.grow_util = 0.7; cfg.grow_grad = 0.3;
     cfg.shrink_util = 0.02; cfg.shrink_grad = 0.1;
     cfg.entropy_min = 0.05; cfg.loss_tol = 0.05;
-    cfg.split_eps = 0.01; cfg.max_cells = 8; cfg.min_cells = 2;
+    cfg.split_eps = 0.01; cfg.max_cells = 16; cfg.min_cells = 2;
+    /* THE DA FIX: max_cells must be ABOVE the seed count (8) — with
+     * max=seed the colony is at capacity from init, amoeba_live_cells
+     * reports 8 == max, grow is impossible, mutate returns 0, and the
+     * gate is stasis forever. The runner got max_cells=16 in the DA
+     * audit; the unit test kept max=8 and silently broke (the
+     * amoeba_live_cells fix made the deadlock visible). */
     if (wubu_amoeba_init(amoeba, &cfg, tissue, agents) != 0) return -1;
     return 0;
+}
+
+/* the hive-clear helper: free every hive payload EXCEPT the amoeba's
+ * own registry cells (they live in the hive AND in am->cells — the
+ * amoeba frees them; the grow_cell daughters are hive-owned and ARE
+ * freed here). The skip guard runs BEFORE wubu_amoeba_free. */
+static int hive_clear_cb(void *p, void *user)
+{
+    wubu_amoeba_t *am = (wubu_amoeba_t *)user;
+    if (am && am->cells) {
+        for (int i = 0; i < am->cfg.max_cells; i++) {
+            if (p == (void *)&am->cells[i]) return 0;   /* the amoeba owns it */
+        }
+    }
+    free(p);
+    return 0;
+}
+
+static void hive_clear_skip_amoeba(wubu_hive_t *h, wubu_amoeba_t *am)
+{
+    if (!h || !am) return;
+    wubu_hive_foreach(h, (int (*)(void *, void *))hive_clear_cb, am);
+    wubu_hive_clear(h);
 }
 
 int main(void)
 {
     printf("=== test_diagnosis (the closed control loop) ===\n");
-
     wubu_hive_t tissue;
     wubu_amoeba_t amoeba;
     wubu_moe2_t agents;
@@ -138,11 +166,12 @@ int main(void)
 
     wubu_diag_loop_free(&loop);
     wubu_moe2_free(&agents);
-    /* the Phase 1 ASan gate: the caller owns the organs — free the
-     * amoeba + the hive tissue with the cell payloads (the closed
-     * loop is leak-free) */
+    /* the Phase 1 ASan gate: the caller owns the organs — clear the
+     * hive WITHOUT double-freeing the amoeba's own registry cells
+     * (they live in the hive AND in am->cells; the grow_cell daughters
+     * are hive-owned and DO get freed here), THEN free the amoeba. */
+    hive_clear_skip_amoeba(&tissue, &amoeba);
     wubu_amoeba_free(&amoeba);
-    wubu_hive_clear_with(&tissue, free);
     printf("=== ALL DIAGNOSIS TESTS PASSED (the closed loop is live) ===\n");
     return 0;
 }

@@ -167,6 +167,8 @@ int main(int argc, char **argv)
                 if (c) { *c = loop.ledger[i]; wubu_hive_insert(&tissue, c); }
             }
             start_round = (int)loop.batch + 1;
+            printf("  [endurance] resume continues at round %d (batch %llu)\n",
+                   start_round, (unsigned long long)loop.batch);
         }
         char p[640];
         snprintf(p, sizeof(p), "%s.prio", resume);

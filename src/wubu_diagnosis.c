@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <fcntl.h>    /* the dir-fsync (O_RDONLY|O_DIRECTORY) */
+#include <unistd.h>   /* fsync/close */
 
 static void *calloc_f(size_t n)
 {
@@ -348,8 +350,16 @@ int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path)
     if (fclose(f) != 0) ok = 0;
     if (!ok) { remove(tmp); return -1; }
     if (rename(tmp, path) != 0) { remove(tmp); return -1; }
-    /* fsync the DIRECTORY so the rename itself is durable */
-    int dfd = open(".", O_RDONLY | O_DIRECTORY);
+    /* fsync the DIRECTORY so the rename itself is durable.
+     * O_DIRECTORY is a GNU extension — under strict -std=c11 it is
+     * hidden; the dir-fsync is a durability nicety, so the plain
+     * fallback (open "." without O_DIRECTORY) is fine when it is
+     * unavailable. */
+    int dfd = open(".", O_RDONLY
+#ifdef O_DIRECTORY
+                   | O_DIRECTORY
+#endif
+    );
     if (dfd >= 0) { (void)fsync(dfd); close(dfd); }
     return 0;
 }
@@ -366,6 +376,11 @@ int wubu_diag_load(wubu_diag_loop_t *loop, const char *path)
         fclose(f);
         return -1;
     }
+    /* THE A10 FIX: the batch counter must be restored too — it was
+     * saved in the header but never read back, so a resume re-stamped
+     * the round counter from 1 (the clock-skew drill caught it: the
+     * event stream went 86 -> 2 instead of continuing at 87). */
+    loop->batch = hdr.batch;
     /* the rings must hold the saved counts (grow if the caller's were
      * smaller — the endurance resume is allowed to expand) */
     uint32_t ln = hdr.ledger_n, gn = hdr.grave_n;
