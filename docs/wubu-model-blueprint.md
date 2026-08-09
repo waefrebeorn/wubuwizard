@@ -1,5 +1,13 @@
 # THE WUBU MODEL — the AGI's blueprint (the model is WuBu)
 
+> **2026-08-09 (Phase 6): WB01 is WIRED** — this doc's lineage is now
+> EXECUTABLE (`src/wubu_blueprint.c` + `test_blueprint`): the six
+> axes (seed/nesting/MoE/sparse-attention/math-RL/amoeba) have
+> machine-readable bounds; off-blueprint mutations are REFUSED by
+> default and move ONLY via a versioned contract-expansion meta-cell
+> in the hive. The train+diagnose path can consult it as the
+> architecture floor (the same discipline as the runtime contracts).
+>
 > **SUPERSEDED 2026-08-06** — replaced by WuBu1
 > (`docs/wubu1-base-model-design.md`), the redesigned base model built
 > from the autopsy of what sucked (loader naming blindness, dual

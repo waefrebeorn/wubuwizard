@@ -24,6 +24,11 @@
 | **Dual-timescale diagnose** (AN37) | fast per-batch + slow scheduled colony-state META-CELL adjusting rate/floor | `make test_metadiag` (rising tail raises rate 0.50->0.57, improving lowers to 0.44) |
 | **Capability-gated spawning** (AN38) | headroom/tool/verifier/redundancy checks; DECOMPOSE/FALLBACK/DENY; gaps are first-class cells | `make test_capgate` (all 4 verdicts, 2 gaps visible) |
 | **Runtime contracts** (AN39) | Lean floor in runtime form (ball/exp/route/quant/finite); loss-improving but contract-violating mutations REJECTED; versioned meta-cells | `make test_contracts` (clean passes, violating rejected 2 violations, NaN caught) |
+| **Phase 1: closed loop = DEFAULT** (AN40) | `--diag-every 1` default (every batch diagnoses + mutates); the gate = fitness + contracts + lineage; finite guard every step; ASan-clean (0 leaks) | `./wubu_train --init-random ... --steps 12` (7 accepted / 5 rejected, lineage 12, contracts 35 checks 0 violations); `gcc -fsanitize=address test_diagnosis` EXIT 0 |
+| **Phase 3: autonomy harness** (AN41) | 7-task fixed suite, deterministic scorers, outcomes as traj cells, suite score = first-class fitness (failing suite raises the rate even when loss improves), loopguard-bounded | `make test_harness` (4 pass/2 fail, score 0.657, stops at step ceiling) |
+| **Phase 4: skill curriculum** (AN42) | traj patterns -> versioned skill cells; drafts gate-accepted; orchestrator matches before spawning; unused skills pruned | `make test_skillcell` (3 drafts -> 3 accepted, match finds the 0.9 skill, 1 pruned) |
+| **Phase 5: deny-by-default tool registry** (AN43) | unregistered tools DENIED; every action a traj cell; thrashing tools auto-barred | `make test_toolreg` (denied/registered/barred all correct) |
+| **Phase 6: executable blueprint** (AN44) | WB01's lineage as machine-readable bounds; off-blueprint mutations refused; bounds move only via a versioned expansion meta-cell | `make test_blueprint` (in-range passes, MoE 64 refused, expansion versioned) |
 
 ## Verified this wave (2026-08-09 — acceleration + build integrity)
 
