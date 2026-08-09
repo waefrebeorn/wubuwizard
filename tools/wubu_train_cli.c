@@ -25,6 +25,8 @@
 #include "wubu_hive.h"
 #include "wubu_amoeba.h"
 #include "wubu_moe2.h"
+#include "wubu_selfimprove.h"
+#include "wubu_rsi.h"
 
 /* FTZ + DAZ: flush denormals (from wuburvc's CPU research — the softmax/
  * exp/backprop tails create subnormals; denormal FP ops are ~100x slower
@@ -352,6 +354,12 @@ int main(int argc, char **argv)
     wubu_amoeba_init(&diag_amoeba, &acfg, &diag_tissue, &diag_agents);
     wubu_diag_loop_init(&diag_loop, &diag_tissue, &diag_amoeba,
                         &diag_agents, 256, 128);
+    /* the RSI-powered mutation engine (P20): the trace/span operator
+     * writes into the hive; the experience loop feeds the diagnose;
+     * the amoeba calls the RSI proposals (directive #4: RSI is the
+     * mutation engine, not a parallel system). */
+    wubu_selfimprove_t si;
+    wubu_selfimprove_init(&si, &diag_tissue);
     for (int step = 1; step <= max_steps; step++) {
         if (pos + seq > corpus_n) pos = 0;   /* epoch wrap */
         for (int i = 0; i < seq; i++) win[i] = corpus[pos + i];
@@ -389,6 +397,19 @@ int main(int argc, char **argv)
                                     WUBU_HEADS * WUBU_HEAD_DIM);
             if (diag_every > 0 && step % diag_every == 0) {
                 wubu_diag_cycle(&diag_loop, &rec, (float)loss_ema);
+                /* the RSI engine proposes a mutation under the gate;
+                 * the proposal runs through the amoeba's mutate (the
+                 * amoeba is the ONLY mutation operator) */
+                wubu_mutation_t mut;
+                float vscore = rec.grad_norm_mean > 0 ? 0.8f : 0.4f;
+                if (wubu_selfimprove_step(&si, vscore, rec.slope < 0 ? 0.9f : 0.4f,
+                                          1.0f, 0.5f, &mut)) {
+                    /* the trace span: this batch's outcome */
+                    wubu_selfimprove_trace(&si, WUBU_SPAN_BATCH,
+                                           (uint64_t)step, (uint64_t)step,
+                                           (float)loss_ema, 1, 0, 0xFF);
+                    wubu_selfimprove_report(&si, 1);
+                }
             } else {
                 wubu_diag_record(&diag_loop, &rec);
             }
@@ -432,12 +453,15 @@ int main(int argc, char **argv)
     if (save_checkpoint(&m, out_path) == 0)
         printf("final checkpoint -> %s\n", out_path);
 
-    /* the closed loop teardown: report the colony's vitals + archive
-     * the fitness ledger (the hive walk reads the archive) */
+    /* the closed loop teardown: report the colony's vitals + the RSI
+     * engine + archive the fitness ledger (the hive walk reads it) */
     {
         char stats[256];
         wubu_diag_stats(&diag_loop, stats, sizeof(stats));
         printf("  closed loop: %s\n", stats);
+        char sistats[256];
+        wubu_selfimprove_stats(&si, sistats, sizeof(sistats));
+        printf("  selfimprove: %s\n", sistats);
         printf("  closed loop: hive live cells %zu (fitness archive)\n",
                wubu_hive_live(&diag_tissue));
         char arch[640];

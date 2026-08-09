@@ -163,6 +163,28 @@ float wubu_train_microbatch(wubu_model_t *m, wubu_train_t *tr,
     clock_gettime(CLOCK_MONOTONIC, &_t1);
     double _db = (_t1.tv_sec-_t0.tv_sec)+(_t1.tv_nsec-_t0.tv_nsec)/1e9;
     (void)_df; (void)_db;
+    /* the gradient-health telemetry (the diagnose input): accumulate
+     * the per-layer grad norm mean so the closed loop sees the REAL
+     * gradient signal (was dead — never accumulated). */
+    {
+        double gn = 0;
+        int cnt = 0;
+        for (int l = 0; l < WUBU_LAYERS && l < WUBU_MAX_LAYERS; l++) {
+            const float *g = tr->q_proj_g[l];
+            if (g) {
+                double s2 = 0;
+                for (int i = 0; i < WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM); i++)
+                    s2 += (double)g[i] * (double)g[i];
+                gn += sqrt(s2 / (double)(WUBU_DIM * (WUBU_HEADS * WUBU_HEAD_DIM)));
+                cnt++;
+            }
+        }
+        if (cnt > 0) {
+            tr->grad_norm_sum += gn / (double)cnt;
+            tr->micro_steps++;
+            tr->loss_sum += loss;
+        }
+    }
     return loss;
 }
 

@@ -1053,6 +1053,10 @@ test_pref: tools/test_pref.c src/wubu_pref.o
 test_colonel: tools/test_colonel.c src/wubu_colonel.o src/wubu_agentic_os.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_selfimprove: tools/test_selfimprove.c src/wubu_selfimprove.o src/wubu_rsi.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
@@ -1512,7 +1516,7 @@ wubu_pond2tok: tools/wubu_pond2tok.c src/wubu_tokenizer_hf.o
 gpu_wubu.o: src/gpu_wubu.cu
 	nvcc -O2 -c src/gpu_wubu.cu -o $@ -Xcompiler -fPIC
 
-wubu_train: tools/wubu_train_cli.c src/wubu_runtime_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_prover2.o src/wubu_hyper.o
+wubu_train: tools/wubu_train_cli.c src/wubu_runtime_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_grow.o src/wubu_plateau.o gpu_wubu.o src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_selfimprove.o src/wubu_rsi.o
 	$(CC) $(CFLAGS) -I include -o $@ $^ -lm $(CUDA_LIBS)
 
 wubu_live_learn: tools/wubu_live_learn.c src/wubu_runtime_dims.o src/wubu.o src/wubu_train.o src/wubu_backprop.o src/wubu_moe2.o src/safetensors_reader.o src/wubu_dequant_nf4.o src/wubu_tokenizer_hf.o gpu_wubu.o
