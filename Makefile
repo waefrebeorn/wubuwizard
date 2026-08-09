@@ -1068,6 +1068,10 @@ test_metadiag: tools/test_metadiag.c src/wubu_metadiag.o src/wubu_hive.o
 test_capgate: tools/test_capgate.c src/wubu_capgate.o src/wubu_hive.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_contracts: tools/test_contracts.c src/wubu_contracts.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
