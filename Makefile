@@ -1059,6 +1059,10 @@ test_selfimprove: tools/test_selfimprove.c src/wubu_selfimprove.o src/wubu_rsi.o
 test_lineage: tools/test_lineage.c src/wubu_lineage.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_trajcell: tools/test_trajcell.c src/wubu_trajcell.o src/wubu_hive.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 
