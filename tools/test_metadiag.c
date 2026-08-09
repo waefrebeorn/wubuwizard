@@ -93,6 +93,12 @@ int main(void)
     printf("  failing suite + fine loss: rate=%.2f (the colony got aggressive)\n", rate3);
     if (rate3 <= 0.5f) FAIL("the failing task score did not raise the rate");
 
+    /* 6. AN47 #8: the POLICY RECORDER — every change is a versioned
+     * meta-cell with the reason code (the hive walk answers WHY) */
+    printf("  policy changes recorded: %llu\n",
+           (unsigned long long)(md.n_policy_changes + md2.n_policy_changes + md3.n_policy_changes));
+    if (md3.n_policy_changes < 1) FAIL("the policy change was not recorded");
+
     char stats[256];
     wubu_metadiag_stats(&md, stats, sizeof(stats));
     printf("  stats: %s\n", stats);

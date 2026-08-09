@@ -62,6 +62,7 @@ typedef struct {
     float   fitness_floor;
     float   lr_scale;          /* how much the slow path moves things */
     float   task_ema;          /* Phase 3: the running suite-score EMA */
+    uint64_t n_policy_changes; /* AN47 #8: policy-change meta-cells */
 } wubu_metadiag_t;
 
 /* M1: init. */

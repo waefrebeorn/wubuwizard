@@ -91,12 +91,15 @@ int wubu_metadiag_slow(wubu_metadiag_t *md)
      * mutation rate + lowers the floor (the colony gets more
      * aggressive); a negative trend (improving) does the opposite */
     float prev_rate = md->mutation_rate;
+    int   reason = 0;   /* AN47 #8: the policy-change reason code */
     if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
         md->mutation_rate += md->lr_scale * 0.5f;
         md->fitness_floor -= md->lr_scale * 0.2f;
+        reason = (trend > 0) ? 1 : 2;   /* 1 = loss rising, 2 = suite failing */
     } else {
         md->mutation_rate -= md->lr_scale * 0.3f;
         md->fitness_floor += md->lr_scale * 0.1f;
+        reason = 3;                     /* 3 = improving, relax */
     }
     if (md->mutation_rate < 0.1f) md->mutation_rate = 0.1f;
     if (md->mutation_rate > 1.0f) md->mutation_rate = 1.0f;
@@ -105,6 +108,21 @@ int wubu_metadiag_slow(wubu_metadiag_t *md)
     mc->fitness_floor = md->fitness_floor;
     /* the meta-cell goes into the hive (the colony's self-knowledge) */
     wubu_hive_insert(md->tissue, mc);
+    /* AN47 #8: the POLICY RECORDER — every policy change is a
+     * versioned meta-cell with the reason code, so the hive walk can
+     * answer 'why did the colony get more aggressive at step N?' */
+    if (fabsf(md->mutation_rate - prev_rate) > 1e-6f) {
+        wubu_meta_cell_t *pr = (wubu_meta_cell_t *)calloc(1, sizeof(wubu_meta_cell_t));
+        if (pr) {
+            pr->batch = md->fast_cycles;
+            pr->mutation_rate = md->mutation_rate;
+            pr->fitness_floor = md->fitness_floor;
+            pr->trend = trend;
+            pr->lineage_health = (float)reason;   /* the reason code */
+            wubu_hive_insert(md->tissue, pr);
+            md->n_policy_changes++;
+        }
+    }
     (void)prev_rate;
     return 0;
 }
