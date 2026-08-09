@@ -143,4 +143,19 @@ void wubu_diag_loss_surface(wubu_diag_record_t *rec,
  * to the Body). */
 int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path);
 
+/* L10: SELF-CRITIQUE + RECOVERY (the user directive #6: failed
+ * generations auto-trigger diagnose->mutate on the responsible
+ * lineage). Called when an execution fails (the fitness gate rejects,
+ * the Body reports a failed action, the oracle rates a lineage low).
+ *   - records the failure as a preference pair (the losing lineage)
+ *   - marks the responsible cell for shrink (apoptosis pressure)
+ *   - triggers an immediate mutation cycle (not waiting for the next
+ *     diag_every)
+ *   - returns the verdict (accept/stasis/reject)
+ */
+wubu_diag_verdict_t wubu_diag_recover(wubu_diag_loop_t *loop,
+                                      uint8_t cell_idx,
+                                      float failed_fitness,
+                                      float survived_fitness);
+
 #endif

@@ -1050,6 +1050,10 @@ test_orch: tools/test_orch.c src/wubu_agi.o src/wubu_hive.o src/wubu_moe2.o src/
 test_pref: tools/test_pref.c src/wubu_pref.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_colonel: tools/test_colonel.c src/wubu_colonel.o src/wubu_agentic_os.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 

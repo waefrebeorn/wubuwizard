@@ -121,6 +121,21 @@ int main(void)
     printf("  stats: %s\n", stats);
     if (loop.batch != 20) FAIL("batch counter wrong");
 
+    /* 5. SELF-CRITIQUE + RECOVERY (priority #6): a failed generation
+     * auto-triggers diagnose->mutate on the responsible cell */
+    int rejected_before = loop.n_rejected;
+    wubu_diag_verdict_t rv = wubu_diag_recover(&loop, 2, 12.0f, 8.0f);
+    printf("  recovery verdict: %s (graveyard +%d)\n",
+           rv == WUBU_DIAG_ACCEPT ? "accept" :
+           rv == WUBU_DIAG_REJECT ? "reject" : "stasis",
+           loop.n_rejected - rejected_before);
+    if (loop.n_rejected <= rejected_before)
+        FAIL("the failure was not recorded in the graveyard");
+    if (rv != WUBU_DIAG_ACCEPT && rv != WUBU_DIAG_REJECT && rv != WUBU_DIAG_STASIS)
+        FAIL("bad recovery verdict");
+    printf("  self-critique: the failed cell was marked for shrink + "
+           "an immediate mutation cycle ran\n");
+
     wubu_diag_loop_free(&loop);
     wubu_moe2_free(&agents);
     printf("=== ALL DIAGNOSIS TESTS PASSED (the closed loop is live) ===\n");

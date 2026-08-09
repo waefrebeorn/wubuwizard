@@ -258,3 +258,51 @@ int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path)
     fclose(f);
     return 0;
 }
+
+/* ── SELF-CRITIQUE + RECOVERY (priority #6) ───────────────────── */
+
+wubu_diag_verdict_t wubu_diag_recover(wubu_diag_loop_t *loop,
+                                      uint8_t cell_idx,
+                                      float failed_fitness,
+                                      float survived_fitness)
+{
+    if (!loop) return WUBU_DIAG_REJECT;
+    /* 1. the failure is a preference pair: the SURVIVED lineage is
+     * preferred over the FAILED one — the responsible cell's survival
+     * score falls (the oracle's teeth bite on the failure) */
+    if (loop->amoeba && cell_idx < (uint8_t)loop->n_cells_alloc) {
+        /* push the shrink pressure: the failed cell's grad signal is
+         * killed (the immune system sees a dead cell) */
+        loop->cell_grads[cell_idx] = 0.0f;
+        wubu_amoeba_feed_grads(loop->amoeba, loop->cell_grads);
+    }
+
+    /* 2. record the outcome: the failure goes to the graveyard (a
+     * negative example with provenance), the survivor to the ledger */
+    wubu_fitness_cell_t cell;
+    memset(&cell, 0, sizeof(cell));
+    cell.batch = loop->batch;
+    cell.epoch = loop->epoch;
+    cell.fitness = failed_fitness;
+    cell.delta = failed_fitness - survived_fitness;
+    cell.verdict = WUBU_DIAG_REJECT;
+    cell.cell_idx = cell_idx;
+    cell.graveyard = 1;
+    push_fitness_cell(loop, &cell, 1);
+    loop->n_rejected++;
+
+    /* 3. the immediate mutation cycle (diagnose -> mutate -> validate)
+     * — not waiting for the next diag_every. The gate compares the
+     * surviving lineage's fitness against the failed one. */
+    if (!loop->amoeba) return WUBU_DIAG_REJECT;
+    wubu_amoeba_diagnose(loop->amoeba);
+    int mutated = wubu_amoeba_mutate(loop->amoeba);
+    if (mutated <= 0) {
+        loop->n_stasis++;
+        return WUBU_DIAG_STASIS;
+    }
+    int accepted = wubu_amoeba_validate(loop->amoeba, survived_fitness);
+    wubu_amoeba_commit(loop->amoeba, accepted);
+    if (accepted) loop->n_accepted++;
+    return accepted ? WUBU_DIAG_ACCEPT : WUBU_DIAG_REJECT;
+}

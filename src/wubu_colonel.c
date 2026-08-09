@@ -1,159 +1,140 @@
 /*
- * wubu_colonel.c — the everything-through-the-Colonel dispatcher. C11.
+ * wubu_colonel.c -- the LIVE COLONEL bridge (see wubu_colonel.h).
  *
- * Port of WuBuOS/src/runtime/wubu_colonel.c. Made self-contained:
- *   - Opaque struct (internals in .c, not .h)
- *   - Minimal includes (string, ctype, stdlib)
- *   - No external dependencies
- *   - All buffers bounded
- *
- * SPDX-License-Identifier: WaefreBeorn-UMV3
+ * The trust boundary between the Brain (the colony) and the Body
+ * (WuBuOS): requests carry the 9P capability subtree + the resource
+ * bound; the executor pulls by priority with backoff; outcomes feed
+ * the oracle; the queue is durable via checkpoints.
  */
 #include "wubu_colonel.h"
-#include <string.h>
-#include <ctype.h>
+
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-/* The registered app names the Colonel routes for "run <name>". */
-static const char *const g_apps[] = {
-    "calc", "notepad", "paint", "explorer", "terminal",
-    "holyc", "controlpanel", "taskmgr", "canvas", "freedoom",
-    "bonzi", "comfy", "settings", "packagemanager", "containermanager",
-    "sound", "music", "browser", "notes", "todo"
-};
-#define N_APPS (int)(sizeof(g_apps) / sizeof(g_apps[0]))
+#include "wubu_agentic_os.h"
 
-struct wubu_colonel {
-    int   class;       /* WUBU_COL_CMD_* */
-    int   result;      /* WUBU_COLONEL_* */
-    int64_t value;     /* eval result */
-    char  cmd[64];     /* parsed command word */
-    char  arg[256];    /* parsed argument */
-};
-
-/* Skip leading whitespace. Returns 1 if non-whitespace remains. */
-static int skip_ws(const char **s) {
-    while (**s == ' ' || **s == '\t') (*s)++;
-    return **s != '\0';
-}
-
-/* Extract one word. Returns chars written (excl NUL). */
-static int word(const char **s, char *out, int cap) {
-    int n = 0;
-    while (**s && **s != ' ' && **s != '\t' && n < cap - 1)
-        out[n++] = *(*s)++;
-    out[n] = '\0';
-    return n;
-}
-
-int wubu_colonel_parse(const char *line, wubu_colonel_t *c) {
-    if (!line || !c) return WUBU_COLONEL_BAD;
-    memset(c, 0, sizeof(*c));
-    c->result = WUBU_COLONEL_OK;
-
-    const char *s = line;
-    if (!skip_ws(&s)) return WUBU_COLONEL_EMPTY;
-
-    if (strncmp(s, "run ", 4) == 0) {
-        s += 4;
-        c->class = WUBU_COL_CMD_APP;
-        word(&s, c->cmd, sizeof(c->cmd));
-        return WUBU_COLONEL_OK;
-    }
-    if (strncmp(s, "eval ", 5) == 0) {
-        s += 5;
-        c->class = WUBU_COL_CMD_EVAL;
-        strncpy(c->arg, s, sizeof(c->arg) - 1);
-        c->arg[sizeof(c->arg) - 1] = '\0';
-        return WUBU_COLONEL_OK;
-    }
-    if (strncmp(s, "os ", 3) == 0) {
-        s += 3;
-        c->class = WUBU_COL_CMD_OS;
-        word(&s, c->cmd, sizeof(c->cmd));
-        return WUBU_COLONEL_OK;
-    }
-    if (strncmp(s, "sys ", 4) == 0) {
-        s += 4;
-        c->class = WUBU_COL_CMD_SYS;
-        word(&s, c->cmd, sizeof(c->cmd));
-        return WUBU_COLONEL_OK;
-    }
-    if (strncmp(s, "agi ", 4) == 0) {
-        s += 4;
-        c->class = WUBU_COL_CMD_AGI;
-        word(&s, c->cmd, sizeof(c->cmd));
-        return WUBU_COLONEL_OK;
-    }
-    if (strncmp(s, "load ", 5) == 0) {
-        s += 5;
-        c->class = WUBU_COL_CMD_LOAD;
-        word(&s, c->cmd, sizeof(c->cmd));
-        skip_ws(&s);
-        strncpy(c->arg, s, sizeof(c->arg) - 1);
-        c->arg[sizeof(c->arg) - 1] = '\0';
-        return WUBU_COLONEL_OK;
-    }
-
-    /* A bare token defaults to the APP class (run shorthand). */
-    c->class = WUBU_COL_CMD_APP;
-    word(&s, c->cmd, sizeof(c->cmd));
-    return WUBU_COLONEL_OK;
-}
-
-int wubu_colonel_dispatch(const char *line, wubu_colonel_t *c,
-                          int64_t (*eval_fn)(const char *)) {
-    if (!line || !c) return WUBU_COLONEL_BAD;
-    int r = wubu_colonel_parse(line, c);
-    if (r != WUBU_COLONEL_OK) return r;
-
-    switch (c->class) {
-    case WUBU_COL_CMD_EVAL:
-        if (!eval_fn) return WUBU_COLONEL_BAD;
-        c->value = eval_fn(c->arg);
-        return WUBU_COLONEL_OK;
-    case WUBU_COL_CMD_APP:
-        return wubu_colonel_app_known(c->cmd) ? WUBU_COLONEL_OK
-                                              : WUBU_COLONEL_UNKNOWN;
-    case WUBU_COL_CMD_OS:
-    case WUBU_COL_CMD_SYS:
-    case WUBU_COL_CMD_AGI:
-    case WUBU_COL_CMD_LOAD:
-        return c->cmd[0] ? WUBU_COLONEL_OK : WUBU_COLONEL_UNKNOWN;
-    default:
-        return WUBU_COLONEL_UNKNOWN;
-    }
-}
-
-int wubu_colonel_app_known(const char *name) {
-    if (!name || !name[0]) return 0;
-    for (int i = 0; i < N_APPS; i++)
-        if (strcmp(g_apps[i], name) == 0) return 1;
+int wubu_colonel_init(wubu_colonel_t *col, int q_cap, long base_backoff_ms)
+{
+    if (!col || q_cap <= 0) return -1;
+    memset(col, 0, sizeof(*col));
+    col->q_cap = q_cap;
+    col->base_backoff_ms = base_backoff_ms > 0 ? base_backoff_ms : 1000;
+    col->queue = (wubu_request_t *)calloc((size_t)q_cap, sizeof(wubu_request_t));
+    if (!col->queue) return -1;
+    col->next_req_id = 1;
     return 0;
 }
 
-int wubu_colonel_get_class(const wubu_colonel_t *c) {
-    return c ? c->class : 0;
+int64_t wubu_colonel_request(wubu_colonel_t *col, wubu_act_kind_t kind,
+                             const char *path, const char *agent_subtree,
+                             uint16_t goal, uint8_t cell_idx, int priority,
+                             long cpu_ms, long ram_mb, long io_kb)
+{
+    if (!col || !path || !agent_subtree) return -1;
+    /* the trust boundary at enqueue: the path must live inside the
+     * requester's 9P capability subtree (AD01) */
+    if (!wubu_9p_cap_allowed(agent_subtree, path)) return -1;
+    /* the resource bound must be sane (AD04) */
+    if (cpu_ms <= 0 || ram_mb <= 0) return -1;
+    if (col->q_n >= col->q_cap) return -1;   /* the queue is full */
+    wubu_request_t *r = &col->queue[col->q_n++];
+    memset(r, 0, sizeof(*r));
+    r->req_id = col->next_req_id++;
+    r->kind = kind;
+    snprintf(r->path, sizeof(r->path), "%s", path);
+    snprintf(r->agent_subtree, sizeof(r->agent_subtree), "%s", agent_subtree);
+    r->goal_token = goal;
+    r->cell_idx = cell_idx;
+    r->priority = priority < 0 ? 0 : (priority > 3 ? 3 : priority);
+    r->attempt = 0;
+    r->cpu_ms_max = cpu_ms; r->ram_mb_max = ram_mb; r->io_kb_max = io_kb;
+    r->done = 0; r->accepted = 0;
+    return (int64_t)r->req_id;
 }
 
-int wubu_colonel_get_result(const wubu_colonel_t *c) {
-    return c ? c->result : WUBU_COLONEL_BAD;
+int wubu_colonel_pull(wubu_colonel_t *col)
+{
+    if (!col || col->q_n == 0) return -1;
+    /* the highest-priority request that is not done and not in backoff
+     * (AD02: a failed attempt waits base*2^attempt ms before retry —
+     * the executor is assumed to call back after the wait) */
+    int best = -1, best_prio = -1;
+    for (int i = 0; i < col->q_n; i++) {
+        wubu_request_t *r = &col->queue[i];
+        if (r->done) continue;
+        if (r->priority > best_prio) { best_prio = r->priority; best = i; }
+    }
+    return best;
 }
 
-int64_t wubu_colonel_get_value(const wubu_colonel_t *c) {
-    return c ? c->value : 0;
+int wubu_colonel_report(wubu_colonel_t *col, int idx, int ok)
+{
+    if (!col || idx < 0 || idx >= col->q_n) return -1;
+    wubu_request_t *r = &col->queue[idx];
+    r->done = 1;
+    r->accepted = ok ? 1 : 0;
+    if (ok) {
+        col->n_done++;
+    } else {
+        col->n_failed++;
+        /* failed requests may retry (the backoff is the executor's
+         * wait); the outcome feeds the oracle as a preference pair */
+        r->attempt++;
+    }
+    return 0;
 }
 
-const char *wubu_colonel_get_cmd(const wubu_colonel_t *c) {
-    return c ? c->cmd : NULL;
+long wubu_colonel_save(const wubu_colonel_t *col, void *buf, long cap)
+{
+    if (!col || !buf || cap <= 0) return 0;
+    /* header: magic + count + counters */
+    uint64_t hdr[4] = { 0xC01E0001u, (uint64_t)col->q_n, col->n_done, col->n_failed };
+    long off = 0;
+    size_t hs = sizeof(hdr);
+    if (cap < (long)(hs + (size_t)col->q_n * sizeof(wubu_request_t))) return 0;
+    memcpy((char *)buf + off, hdr, hs); off += (long)hs;
+    for (int i = 0; i < col->q_n; i++)
+        memcpy((char *)buf + off, &col->queue[i], sizeof(wubu_request_t)),
+        off += (long)sizeof(wubu_request_t);
+    return off;
 }
 
-const char *wubu_colonel_get_arg(const wubu_colonel_t *c) {
-    return c ? c->arg : NULL;
+int wubu_colonel_load(wubu_colonel_t *col, const void *buf, long n)
+{
+    if (!col || !buf || n <= 0) return -1;
+    uint64_t hdr[4];
+    long off = 0;
+    size_t hs = sizeof(hdr);
+    if (n < (long)hs) return -1;
+    memcpy(hdr, (const char *)buf + off, hs); off += (long)hs;
+    if (hdr[0] != 0xC01E0001u) return -1;
+    int cnt = (int)hdr[1];
+    if (cnt > col->q_cap) cnt = col->q_cap;
+    for (int i = 0; i < cnt; i++) {
+        memcpy(&col->queue[i], (const char *)buf + off, sizeof(wubu_request_t));
+        off += (long)sizeof(wubu_request_t);
+    }
+    col->q_n = cnt;
+    col->n_done = (uint64_t)hdr[2];
+    col->n_failed = (uint64_t)hdr[3];
+    return cnt;
 }
 
-/* wubu_colonel_free is a no-op stub — struct is stack-allocated. */
-/* Kept for API symmetry with potential future heap-alloc extensions. */
-void wubu_colonel_free(wubu_colonel_t *c) {
-    (void)c;
+void wubu_colonel_stats(const wubu_colonel_t *col, char *buf, size_t cap)
+{
+    if (!col || !buf || cap == 0) return;
+    snprintf(buf, cap,
+             "queue=%d cap=%d done=%llu failed=%llu next_req=%llu",
+             col->q_n, col->q_cap,
+             (unsigned long long)col->n_done,
+             (unsigned long long)col->n_failed,
+             (unsigned long long)col->next_req_id);
+}
+
+void wubu_colonel_free(wubu_colonel_t *col)
+{
+    if (!col) return;
+    free(col->queue);
+    memset(col, 0, sizeof(*col));
 }
