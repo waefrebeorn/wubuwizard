@@ -440,7 +440,10 @@ void wubu_ssm_forward(const float *x, int B, int T,
         memcpy(v_conv + s * VALUE_DIM, cv + 2 * KEY_DIM, VALUE_DIM * sizeof(float));
     }
     
-    // Step 7: L2 normalize Q and K
+    // Step 7: L2 normalize Q and K (llama.cpp qwen35moe.cpp:456-457:
+    // q_conv = ggml_l2_norm(...); k_conv = ggml_l2_norm(...)). The oracle
+    // L2-norms BOTH q and k, then the fused GDN kernel applies the
+    // attn_data = S·q·(1/sqrt(S_v)) scale. Do NOT drop either.
     // q_conv: [N, SSM_K_HEADS, SSM_D_STATE]
     wubu_l2_norm(B, T, SSM_K_HEADS, SSM_D_STATE, q_conv, g_ssm_l2_eps, q_norm);
     wubu_l2_norm(B, T, SSM_K_HEADS, SSM_D_STATE, k_conv, g_ssm_l2_eps, k_norm);
@@ -634,11 +637,15 @@ void wubu_ssm_forward(const float *x, int B, int T,
             float *out_vh = delta_out + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
             float *z_vh = z_silu + (s * SSM_V_HEADS + vh) * SSM_D_STATE;
             
-            // RMSNorm
-            float sum_sq = 0.0f;
-            for (int i = 0; i < SSM_D_STATE; i++) sum_sq += out_vh[i] * out_vh[i];
-            float rms = sqrtf(sum_sq / SSM_D_STATE + 1e-6f);
-            float scale = 1.0f / rms;
+            // RMSNorm — match llama.cpp build_norm (RMS) exactly:
+            //   ggml_float sum = 0.0;  (DOUBLE accumulation)
+            //   mean = sum/ne00;  scale = 1/sqrtf(mean + eps)
+            // Float accumulation rounds differently and shifts near-tie
+            // logits (the 4858/25, 4627/279 swaps).
+            double dsum = 0.0;
+            for (int i = 0; i < SSM_D_STATE; i++) dsum += (double)out_vh[i] * (double)out_vh[i];
+            const float mean = (float)(dsum / SSM_D_STATE);
+            const float scale = 1.0f / sqrtf(mean + 1e-6f);
             
             // Apply norm weight and multiply by silu(z)
             for (int i = 0; i < SSM_D_STATE; i++) {
@@ -776,7 +783,11 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
         memcpy(v_conv + s * VALUE_DIM, cv + 2 * KEY_DIM, VALUE_DIM * sizeof(float));
     }
     
-    // Step 7: L2 normalize Q and K
+    // Step 7: L2 normalize Q and K (llama.cpp qwen35moe.cpp:456-457:
+    // q_conv = ggml_l2_norm(...); k_conv = ggml_l2_norm(...)). The oracle
+    // L2-norms BOTH q and k, then the fused GDN kernel applies the
+    // attn_data = S·q·(1/sqrt(S_v)) scale. Do NOT drop either.
+    // q_conv: [N, SSM_K_HEADS, SSM_D_STATE]
     wubu_l2_norm(B, T, SSM_K_HEADS, SSM_D_STATE, q_conv, g_ssm_l2_eps, q_norm);
     wubu_l2_norm(B, T, SSM_K_HEADS, SSM_D_STATE, k_conv, g_ssm_l2_eps, k_norm);
     
@@ -825,6 +836,12 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
                 for (int i = 0; i < SSM_D_STATE; i++)
                     for (int j = 0; j < SSM_D_STATE; j++)
                         out[i] += h[i * SSM_D_STATE + j] * q_vh[j];
+                /* Oracle scale: attn_data[j] = sum * (1/sqrt(S_v)) in the
+                 * fused GDN_AR kernel. The old L2 norm on q roughly
+                 * covered this but deviated per token. */
+                float gdn_scale = 1.0f / sqrtf((float)SSM_D_STATE);
+                for (int i = 0; i < SSM_D_STATE; i++)
+                    out[i] *= gdn_scale;
             }
         }
     }

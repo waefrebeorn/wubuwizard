@@ -185,6 +185,11 @@ void quantized_matmul(const float *x,
         block_q8_0 *q8a = (block_q8_0 *)malloc((size_t)n_blocks_per_col * sizeof(block_q8_0));
         if (!q8a) { fprintf(stderr, "quantized_matmul: q8_0 alloc failed\n"); return; }
         quantize_row_q8_0(x, q8a, n_rows);
+        /* q8_0_vec_dot ACCUMULATES into y (llama.cpp convention: caller
+         * zeroes the sums buffer first — the old dequant-SGEMM wrote
+         * y[j]=sum, so uninitialized malloc'd outputs were fine before).
+         * Without this memset, garbage lands in the output -> NaN logits. */
+        memset(y, 0, (size_t)n_cols * sizeof(float));
         #pragma omp parallel for if(n_cols > 8)
         for (int64_t j = 0; j < n_cols; j++) {
             const void *w_col = (const uint8_t *)W + j * stride;
@@ -461,6 +466,10 @@ void quantized_matmul_from_q8_0(const void *q8_0_x,
     const int64_t BLK = 32, BLK_BYTES = 34;
     int64_t n_blocks_per_col = (n_rows + BLK - 1) / BLK;
     int64_t col_stride = (col_stride_bytes > 0) ? col_stride_bytes : (n_blocks_per_col * BLK_BYTES);
+    /* q8_0_vec_dot ACCUMULATES into y (llama.cpp convention: caller zeroes
+     * the sums buffer). The decode paths malloc qkv_all/z_all without
+     * zeroing — without this memset, garbage -> NaN logits. */
+    memset(y, 0, (size_t)n_cols * sizeof(float));
     #pragma omp parallel for if(n_cols > 8)
     for (int64_t j = 0; j < n_cols; j++) {
         const void *w_col = (const uint8_t *)W + j * col_stride;

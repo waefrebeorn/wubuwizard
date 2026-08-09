@@ -88,25 +88,15 @@ void wubu_l2_norm(int B, int T, int n_heads, int d,
         for (int h = 0; h < n_heads; h++) {
             const float *inp = x + (s * n_heads + h) * d;
             float *oup = out + (s * n_heads + h) * d;
-            float sum_sq = 0.0f;
-#ifdef __AVX2__
-            __m256 acc = _mm256_setzero_ps();
-            int i;
-            for (i = 0; i <= d - 8; i += 8) {
-                __m256 v = _mm256_loadu_ps(inp + i);
-                acc = _mm256_fmadd_ps(v, v, acc);
-            }
-            __m128 lo = _mm256_castps256_ps128(acc);
-            __m128 hi = _mm256_extractf128_ps(acc, 1);
-            lo = _mm_add_ps(lo, hi);
-            lo = _mm_hadd_ps(lo, lo);
-            lo = _mm_hadd_ps(lo, lo);
-            sum_sq = _mm_cvtss_f32(lo);
-            for (; i < d; i++) sum_sq += inp[i] * inp[i];
-#else
-            for (int i = 0; i < d; i++) sum_sq += inp[i] * inp[i];
-#endif
-            float scale = 1.0f / sqrtf(sum_sq + eps);
+            /* llama.cpp ggml_compute_forward_l2_norm_f32:
+             *   ggml_float sum = 0.0;  (DOUBLE accumulation)
+             *   for i: sum += (ggml_float)(xi*xi);
+             *   scale = 1.0f / fmaxf(sqrtf((float)sum), eps);
+             * Float AVX2 accumulation + 1/sqrt(sum+eps) round differently
+             * and shift near-tie logits. Match the oracle exactly. */
+            double dsum = 0.0;
+            for (int k = 0; k < d; k++) dsum += (double)inp[k] * (double)inp[k];
+            float scale = 1.0f / fmaxf(sqrtf((float)dsum), eps);
 #ifdef __AVX2__
             __m256 v_scale = _mm256_set1_ps(scale);
             for (int i = 0; i <= d - 8; i += 8)
@@ -130,26 +120,15 @@ void wubu_rms_norm(int B, int T, int d,
     for (int s = 0; s < seq_len; s++) {
         const float *inp = x + s * d;
         float *oup = out + s * d;
-        float sum_sq = 0.0f;
-#ifdef __AVX2__
-        __m256 acc = _mm256_setzero_ps();
-        int i;
-        for (i = 0; i <= d - 8; i += 8) {
-            __m256 v = _mm256_loadu_ps(inp + i);
-            acc = _mm256_fmadd_ps(v, v, acc);
-        }
-        __m128 lo = _mm256_castps256_ps128(acc);
-        __m128 hi = _mm256_extractf128_ps(acc, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        sum_sq = _mm_cvtss_f32(lo);
-        for (; i < d; i++) sum_sq += inp[i] * inp[i];
-#else
-        for (int i = 0; i < d; i++) sum_sq += inp[i] * inp[i];
-#endif
-        float rms = sqrtf(sum_sq / d + eps);
-        float scale = 1.0f / rms;
+        /* llama.cpp accumulates the sum-of-squares in ggml_float (double):
+         * sum += (ggml_float)(x[i]*x[i]); mean = sum/ne00; then
+         * scale = 1/sqrtf(mean+eps). Float accumulation rounds differently
+         * and shifts every norm output slightly — over 24 layers that's
+         * enough to flip near-tie logits (the 4858/25, 4627/279 swaps). */
+        double dsum = 0.0;
+        for (int k = 0; k < d; k++) dsum += (double)inp[k] * (double)inp[k];
+        const float mean = (float)(dsum / d);
+        const float scale = 1.0f / sqrtf(mean + eps);
 #ifdef __AVX2__
         __m256 v_scale = _mm256_set1_ps(scale);
         for (int i = 0; i <= d - 8; i += 8)

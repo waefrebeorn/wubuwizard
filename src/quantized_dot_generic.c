@@ -717,7 +717,14 @@ void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
     const uint8_t *w = (const uint8_t *)vx;   /* Q8_0 weights */
     const uint8_t *x = (const uint8_t *)vy;   /* Q8_0 activations */
 #ifdef __AVX2__
-    __m256 acc = _mm256_setzero_ps();
+    /* Match the ORACLE's arithmetic exactly. The reference runs llama.cpp
+     * on ARM (V1 = CM4) -> the NEON kernel: per block compute the FULL
+     * int32 sum of all 32 products (exact), then scalar fp32 accumulate
+     * acc += d0*d1*(float)block_sum. The x86 llama.cpp pattern (8 partial
+     * lanes accumulated in fp32, one hsum at the end) gives DIFFERENT
+     * fp32 rounding and flips near-tie logits (the 4858/25 and 4627/279
+     * swaps). NEON-style scalar accumulate is bit-identical to the oracle. */
+    float acc = 0.0f;
     for (int i = 0; i < nb; i++) {
         float d0 = fp16_to_fp32(*(const uint16_t *)(w + i * 34));
         float d1 = fp16_to_fp32(*(const uint16_t *)(x + i * 34));
@@ -726,20 +733,16 @@ void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
         __m256i xs = _mm256_sign_epi8(x_i, x_i);          /* |x| (u8) */
         __m256i ys = _mm256_sign_epi8(y_i, x_i);          /* y·sign(x) (s8) */
         __m256i p16 = _mm256_maddubs_epi16(xs, ys);       /* x·y pairs → s16 */
-        /* 8 int32 lanes, each = 4 products (llama.cpp sum_i16_pairs_float) */
-        __m256i p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
-        /* NO horizontal hadd here — accumulate the 8 partial lanes across
-         * blocks (llama.cpp mul_sum_i8_pairs_float + fmadd), single hsum at
-         * the end. A double hadd + hsum8 over-counts by 4x (each lane holds
-         * a half-sum, then the final add sums 4 copies of each half) — that
-         * scale error is invisible to top-1 but flips near-tie logits. */
-        __m256 q = _mm256_cvtepi32_ps(p32);
-        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * d1), q, acc);
+        __m256i p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(1)); /* 8 lanes, 4 products each */
+        /* full int32 block sum: hadd down to 2 lanes, then lo+hi (exact) */
+        __m256i h1 = _mm256_hadd_epi32(p32, p32);
+        __m256i h2 = _mm256_hadd_epi32(h1, h1);
+        __m128i lo = _mm256_castsi256_si128(h2);
+        __m128i hi = _mm256_extracti128_si256(h2, 1);
+        int block_sum = _mm_cvtsi128_si32(_mm_add_epi32(lo, hi));
+        acc += d0 * d1 * (float)block_sum;               /* scalar, like NEON */
     }
-    __m128 acc0 = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-    acc0 = _mm_add_ps(acc0, _mm_movehl_ps(acc0, acc0));
-    acc0 = _mm_add_ss(acc0, _mm_shuffle_ps(acc0, acc0, 1));
-    *s += _mm_cvtss_f32(acc0);
+    *s += acc;
 #elif defined(__aarch64__)
     float32x4_t acc = vdupq_n_f32(0.0f);
     for (int i = 0; i < nb; i++) {
