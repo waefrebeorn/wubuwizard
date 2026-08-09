@@ -1086,6 +1086,10 @@ test_blueprint: tools/test_blueprint.c src/wubu_blueprint.o src/wubu_contracts.o
 test_priority_store: tools/test_priority_store.c src/wubu_priority_store.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_colony: tools/test_colony.c src/wubu_diagnosis.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_lineage.o src/wubu_contracts.o src/wubu_priority_store.o src/wubu_harness.o src/wubu_trajcell.o src/wubu_loopguard.o src/wubu_blueprint.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 
 
 

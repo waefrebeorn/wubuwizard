@@ -268,6 +268,12 @@ int main(int argc, char **argv)
      * larger values still RECORD every batch (only the mutation cycle
      * is gated by the interval). There is no silent path. */
     int diag_every = arg_int(argc, argv, "--diag-every", 1);
+    /* AN47: the ENDURANCE path — --resume <base> also loads the
+     * .hive archive + the .prio sidecar so a kill/restart continues
+     * the colony's fitness history, not zero */
+    /* AN47: --ckpt-hive N saves the hive + prio sidecars every N steps
+     * (not just at teardown) so the endurance run survives a kill */
+    int ckpt_hive = arg_int(argc, argv, "--ckpt-hive", 0);
     int base_layers = arg_int(argc, argv, "--base-layers", 0);
     int init_random = arg_has(argc, argv, "--init-random");
     flush_denormals();   /* the wuburvc CPU speed trick (MXCSR FTZ+DAZ) */
@@ -381,6 +387,35 @@ int main(int argc, char **argv)
     wubu_priority_store_t prio;
     wubu_prio_init(&prio, 0.5f, 0.3f);
     diag_loop.prio = &prio;
+    /* AN47: the ENDURANCE resume — the colony's fitness history + the
+     * priority evidence come back from the sidecars (a kill/restart
+     * continues, it does not reset) */
+    if (resume) {
+        char hpath[640], ppath[640];
+        snprintf(hpath, sizeof(hpath), "%s.hive", resume);
+        snprintf(ppath, sizeof(ppath), "%s.prio", resume);
+        int hn = wubu_diag_load(&diag_loop, hpath);
+        if (hn > 0) {
+            printf("  closed loop: resumed %d fitness cells from %s\n", hn, hpath);
+            /* replay the resumed ledger into the hive tissue (the walk
+             * reads the live hive + the archive both) */
+            for (int i = 0; i < diag_loop.ledger_n; i++) {
+                wubu_fitness_cell_t *c = (wubu_fitness_cell_t *)
+                    calloc(1, sizeof(wubu_fitness_cell_t));
+                if (c) { *c = diag_loop.ledger[i]; wubu_hive_insert(&diag_tissue, c); }
+            }
+        } else {
+            printf("  closed loop: no .hive archive at %s (fresh colony)\n", hpath);
+        }
+        FILE *pf = fopen(ppath, "rb");
+        if (pf) {
+            static char pbuf[8192];
+            long pn = (long)fread(pbuf, 1, sizeof(pbuf), pf);
+            fclose(pf);
+            int pr = wubu_prio_load(&prio, pbuf, pn);
+            if (pr > 0) printf("  priority store: resumed %d cells from %s\n", pr, ppath);
+        }
+    }
     for (int step = 1; step <= max_steps; step++) {
         if (pos + seq > corpus_n) pos = 0;   /* epoch wrap */
         for (int i = 0; i < seq; i++) win[i] = corpus[pos + i];
@@ -506,6 +541,23 @@ int main(int argc, char **argv)
             if (save_checkpoint(&m, ck) == 0) {
                 printf("  checkpoint -> %s\n", ck);
                 prune_step_checkpoints(out_path);  /* rolling keep 3 (2 if large) */
+                /* AN47: the endurance sidecars ride along — the hive
+                 * + the priority store save at the same cadence so a
+                 * kill/restart resumes from THIS step, not teardown */
+                if (ckpt_hive > 0 && step % ckpt_hive == 0) {
+                    char hck[640];
+                    snprintf(hck, sizeof(hck), "%s.hive", ck);
+                    if (wubu_diag_save(&diag_loop, hck) == 0)
+                        printf("  colony sidecars -> %s.hive/.prio\n", ck);
+                    char pck[640];
+                    snprintf(pck, sizeof(pck), "%s.prio", ck);
+                    static char pbuf[8192];
+                    long pn = wubu_prio_save(&prio, pbuf, (long)sizeof(pbuf));
+                    if (pn > 0) {
+                        FILE *pf = fopen(pck, "wb");
+                        if (pf) { fwrite(pbuf, 1, (size_t)pn, pf); fclose(pf); }
+                    }
+                }
             }
         }
     }

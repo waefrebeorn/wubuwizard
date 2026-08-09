@@ -307,6 +307,49 @@ int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path)
 
 /* ── SELF-CRITIQUE + RECOVERY (priority #6) ───────────────────── */
 
+int wubu_diag_load(wubu_diag_loop_t *loop, const char *path)
+{
+    if (!loop || !path) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    hive_archive_hdr_t hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != 0xD1A60001u) {
+        fclose(f);
+        return -1;
+    }
+    /* the rings must hold the saved counts (grow if the caller's were
+     * smaller — the endurance resume is allowed to expand) */
+    uint32_t ln = hdr.ledger_n, gn = hdr.grave_n;
+    if ((int)ln > loop->ledger_cap) {
+        wubu_fitness_cell_t *nl = (wubu_fitness_cell_t *)
+            realloc(loop->ledger, (size_t)ln * sizeof(wubu_fitness_cell_t));
+        if (!nl) { fclose(f); return -1; }
+        loop->ledger = nl;
+        loop->ledger_cap = (int)ln;
+    }
+    if ((int)gn > loop->grave_cap) {
+        wubu_fitness_cell_t *ng = (wubu_fitness_cell_t *)
+            realloc(loop->graveyard, (size_t)gn * sizeof(wubu_fitness_cell_t));
+        if (!ng) { fclose(f); return -1; }
+        loop->graveyard = ng;
+        loop->grave_cap = (int)gn;
+    }
+    if (ln > 0) fread(loop->ledger, sizeof(wubu_fitness_cell_t), ln, f);
+    if (gn > 0) fread(loop->graveyard, sizeof(wubu_fitness_cell_t), gn, f);
+    fclose(f);
+    loop->ledger_n = (int)ln;
+    loop->grave_n = (int)gn;
+    loop->n_accepted = 0;
+    loop->n_rejected = 0;
+    loop->n_stasis = 0;
+    for (int i = 0; i < loop->ledger_n; i++) {
+        if (loop->ledger[i].verdict == WUBU_DIAG_ACCEPT) loop->n_accepted++;
+        else if (loop->ledger[i].verdict == WUBU_DIAG_REJECT) loop->n_rejected++;
+    }
+    loop->n_stasis = loop->ledger_n - loop->n_accepted - loop->n_rejected;
+    return loop->ledger_n;
+}
+
 wubu_diag_verdict_t wubu_diag_recover(wubu_diag_loop_t *loop,
                                       uint8_t cell_idx,
                                       float failed_fitness,

@@ -153,6 +153,13 @@ void wubu_diag_loss_surface(wubu_diag_record_t *rec,
  * to the Body). */
 int wubu_diag_save(const wubu_diag_loop_t *loop, const char *path);
 
+/* L9b: LOAD the loop's ledger + graveyard + counters from an archive
+ * (the ENDURANCE resume path — a kill/restart continues the colony
+ * from the saved fitness history, not from zero). The caller's ring
+ * capacities must be >= the saved counts (or the rings grow).
+ * Returns the ledger count restored. */
+int wubu_diag_load(wubu_diag_loop_t *loop, const char *path);
+
 /* L10: SELF-CRITIQUE + RECOVERY (the user directive #6: failed
  * generations auto-trigger diagnose->mutate on the responsible
  * lineage). Called when an execution fails (the fitness gate rejects,
