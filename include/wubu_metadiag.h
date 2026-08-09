@@ -31,6 +31,9 @@ typedef struct {
     float util_spread;      /* utilization spread (max - min) */
     float repeat;           /* repetition/coherence flag (0..1) */
     float grad_norm;        /* the gradient health */
+    float task_score;       /* Phase 3: the harness suite score
+                               (the first-class fitness signal — the
+                               colony cannot pass by loss alone) */
 } wubu_fast_signal_t;
 
 /* the slow-path colony-state meta-cell (the summary written into the
@@ -58,6 +61,7 @@ typedef struct {
     float   mutation_rate;     /* the current rate (slow adjusts it) */
     float   fitness_floor;
     float   lr_scale;          /* how much the slow path moves things */
+    float   task_ema;          /* Phase 3: the running suite-score EMA */
 } wubu_metadiag_t;
 
 /* M1: init. */

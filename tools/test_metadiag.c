@@ -76,6 +76,23 @@ int main(void)
     printf("  meta-cells written: %zu (hive live %zu)\n", metacells, live);
     if (metacells != 5) FAIL("meta-cells not written (3+2)");
 
+    /* 5. Phase 3: the TASK SCORE is a first-class signal — a FALLING
+     * suite score (task_ema < 0.5) raises the mutation rate even when
+     * the loss trend looks fine (the colony cannot pass by loss alone) */
+    wubu_metadiag_t md3;
+    wubu_metadiag_init(&md3, &tissue, 10, 32, 0.1f);
+    for (int b = 1; b <= 15; b++) {
+        wubu_fast_signal_t s;
+        memset(&s, 0, sizeof(s));
+        s.loss = 5.0f - 0.1f * (float)b;    /* the loss is IMPROVING */
+        s.task_score = 0.3f;                /* but the task suite FAILS */
+        if (wubu_metadiag_fast(&md3, &s)) wubu_metadiag_slow(&md3);
+    }
+    float rate3, floor3;
+    wubu_metadiag_state(&md3, &rate3, &floor3);
+    printf("  failing suite + fine loss: rate=%.2f (the colony got aggressive)\n", rate3);
+    if (rate3 <= 0.5f) FAIL("the failing task score did not raise the rate");
+
     char stats[256];
     wubu_metadiag_stats(&md, stats, sizeof(stats));
     printf("  stats: %s\n", stats);

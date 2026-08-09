@@ -28,6 +28,12 @@ int wubu_metadiag_fast(wubu_metadiag_t *md, const wubu_fast_signal_t *s)
 {
     if (!md || !s) return -1;
     md->fast_cycles++;
+    /* Phase 3: the task-suite score is a first-class signal — keep
+     * its EMA (a falling suite score is a real regression even when
+     * the loss looks fine) */
+    if (s->task_score > 0.0f)
+        md->task_ema = (md->task_ema == 0.0f) ? s->task_score
+                        : 0.9f * md->task_ema + 0.1f * s->task_score;
     /* push the loss into the rolling window */
     if (md->win_n >= md->win_cap) {
         memmove(md->window, md->window + 1,
@@ -85,7 +91,7 @@ int wubu_metadiag_slow(wubu_metadiag_t *md)
      * mutation rate + lowers the floor (the colony gets more
      * aggressive); a negative trend (improving) does the opposite */
     float prev_rate = md->mutation_rate;
-    if (trend > 0) {
+    if (trend > 0 || (md->task_ema > 0.0f && md->task_ema < 0.5f)) {
         md->mutation_rate += md->lr_scale * 0.5f;
         md->fitness_floor -= md->lr_scale * 0.2f;
     } else {
