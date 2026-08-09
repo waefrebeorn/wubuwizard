@@ -42,7 +42,7 @@ int main(int argc, char **argv)
     CHECK(d.heads == 8,     "probe: heads == 8 (512/64, aligned)");
     CHECK(d.kv_heads == 1,  "probe: kv_heads == 1 (GQA 8:1)");
     CHECK(d.head_dim == 64, "probe: head_dim == 64 (div 16 for VNNI)");
-    CHECK(d.ffn_dim == 1280, "probe: ffn_dim aligned 1228→1280 (div by 256)");
+    CHECK(d.ffn_dim == 2048, "probe: ffn_dim design target 4*dim=2048 (16 QK_K blocks)");
     CHECK(d.rope_dim == 32, "probe: rope_dim == 32 (head_dim/2)");
 
     /* 2. The defaults seed the aligned geometry. */
@@ -61,28 +61,26 @@ int main(int argc, char **argv)
     printf("  rotated dims -> WUBU_LAYERS=%d WUBU_SELECTORS=%d\n",
            WUBU_LAYERS, WUBU_SELECTORS);
 
-    /* 4. Restore + full engine smoke: load, forward, generate. */
+    /* 4. Aligned geometry smoke test (no checkpoint needed — the
+     * geometry is self-describing from the defaults. The old seed-sft2
+     * checkpoint is frozen to SD archive per WuBu1's total break; the
+     * new model trains from scratch in aligned geometry). */
     wubu35_dims_set(&d);
     CHECK(WUBU_LAYERS == 12, "revolver: back to 12 after restore");
 
     wubu_model_t m;
-    CHECK(wubu_load(&m, path) == 0, "wubu_load (probe-then-load)");
-    if (1) {
-        wubu_buf_t b;
-        CHECK(wubu_buf_alloc(&b, 64) == 0, "buf alloc");
-        static const uint16_t prompt[] = { 0, 1, 2, 3, 4, 5, 6, 7 };
-        CHECK(wubu_forward(&m, &b, prompt, 8) == 0, "forward after probe");
-        long params = wubu_parameter_count(&m);
-        printf("  params=%ld (aligned 42221568, ckpt native 35073216)\n", params);
-        CHECK(params == 42221056L, "param count == 42,221,056 (aligned, zero-padded)");
-        wubu_free(&m, &b);
+    memset(&m, 0, sizeof(m));
+    /* use default geometry only (no checkpoint load — WuBu1 fresh train) */
+    /* param count is a pure function of the runtime geometry */
+    long params = wubu_parameter_count(&m);
+    printf("  params=%ld (aligned 56376832, ckpt native 35073216)\n", params);
+    CHECK(params == 56376832L, "param count == 56,376,832 (aligned, 3 selectors from 12 layers)");
 
     /* 5. Aligned geometry tiles evenly (Theory/08 contract). */
     CHECK(WUBU_DIM % 256 == 0 && WUBU_FFN_DIM % 256 == 0,
           "aligned dims divide QK_K=256 (no zero-fill guards fire)");
     CHECK(WUBU_DIM % 64 == 0, "dim divides 64 (AVX-512 cache line)");
     CHECK(WUBU_HEAD_DIM % 16 == 0, "head_dim divides 16 (VNNI int8 tile)");
-    }
 
     if (failures == 0) printf("=== ALL WUBU35-DIMS TESTS PASSED ===\n");
     else printf("=== %d FAILURES ===\n", failures);

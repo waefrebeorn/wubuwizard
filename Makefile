@@ -2030,8 +2030,6 @@ check_forward: tools/check_forward.c $(MODEL_OBJ) src/wubu_tokenizer.o
 test_iq2_xxs_dot: tools/test_iq2_xxs_dot.c src/gguf_reader.o src/dequant_iq2_xxs.o src/wubu_moe.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-<<<<<<< HEAD
-=======
 # ================================================================
 # WuBu-35M mustard-seed engine (the Revolver Doctrine closure S1-S5)
 # ================================================================
@@ -2072,7 +2070,6 @@ test_wubu35_dims_run: test_wubu35_dims
 	./test_wubu35_dims $(MODEL)
 
 # ================================================================
->>>>>>> 0945ca7 (S7-WIP: Theory/08 aligned rewrite (448→512 geometry, zero-dequant dispatch))
 # Test runners
 test: test_ssm
 	./test_ssm

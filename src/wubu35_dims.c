@@ -36,7 +36,13 @@ void wubu35_dims_default(void)
     d.kv_heads     = 1;      /* GQA 8:1 (head_dim stays 64) */
     d.head_dim     = 64;     /* unchanged — div 16 for VNNI, checkpoint-native */
     d.rope_dim     = 32;     /* head_dim/2 */
-    d.ffn_dim      = 1280;   /* was 1228 — aligned up to div-256 (2*1280=2560 div 256) */
+    d.ffn_dim      = 2048;   /* DESIGN TARGET: 4*dim=2048 (power-of-2).
+                              * gate_up=[2*2048,512]=[4096,512]=16 QK_K
+                              * blocks exactly; down=[512,2048]=4 blocks.
+                              * (The seed checkpoint's 1228→1280 is only a
+                              * compat shim for loading the OLD weights; new
+                              * training uses 2048 — the hardware-native
+                              * scale. THEORY/08.) */
     d.max_seq      = 16384;  /* was 2048 — 4096-aligned KV pages */
     d.local_win    = 512;
     d.full_every   = 4;
@@ -45,7 +51,7 @@ void wubu35_dims_default(void)
     d.eps          = 1e-6f;
     d.selectors    = 4;
     d.rope_theta   = 10000.0f;
-    d.params       = 42221568L; /* aligned (zero-padded from 35M ckpt */
+    d.params       = 56376832L; /* aligned (zero-padded from 35M ckpt */
     d.ckpt_dim     = 448;
     d.ckpt_ffn_dim = 1228;
     d.ckpt_head_dim = 64;
@@ -132,8 +138,11 @@ int wubu35_dims_probe(const char *path, wubu35_dims_t *d)
     out.ckpt_heads    = out.heads;
     out.ckpt_kv_heads = out.kv_heads;
     out.dim           = (out.dim + 255) & ~255;     /* 448 → 512 */
-    out.ffn_dim       = (out.ffn_dim + 255) & ~255; /* 1228 → 2048 */
-    /* head_dim stays 64 (checkpoint-native, div-by-16 for VNNI). */
+    out.ffn_dim       = 4 * out.dim;  /* DESIGN TARGET: 4*dim (power-of-2).
+                                       * 1228 → 2048. gate_up=[4096,512]
+                                       * = exactly 16 QK_K blocks; down=[512,
+                                       * 2048] = exactly 8 blocks. No rem.
+                                       * THEORY/08 hardware-native scale. */
     out.heads         = out.dim / out.head_dim;     /* 512/64 = 8 */
     out.kv_heads      = (out.kv_heads > 0) ? out.kv_heads : 1;
     if (out.kv_heads > out.heads) out.kv_heads = 1;
