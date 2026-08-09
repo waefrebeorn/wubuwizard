@@ -33,12 +33,12 @@
 | 20 | Sustained autonomous productivity demo | 🔄 Progressing | the closed loop (AN27–AN39) IS the running colony: diagnose -> mutate -> validate -> archive/graveyard -> delegate -> oracle -> Body action -> recover. The multi-hour unattended harness is Phase 3 |
 
 ## Key Gaps to Close (in priority order — the current wave)
-1. **The multi-hour unattended harness RUN** (Phase 3's done-definition): a real multi-hour run that improves the suite score via accepted mutations, with lineage + graveyard explaining why.
-2. **The Body side of the Colonel**: WuBuOS consumes the requests (the Styx/9P namespace executor for wubu_colonel); the tool registry's registered tools get real implementations behind the cap surface.
-3. **Metal**: the colony runs in ring-0 (the Live Colonel hosts it; WuBuOS boots on metal, not just WSL-hosted).
-4. **The live hive walk**: walk the LIVE hive (not just the saved archive).
-5. **Pillar 2 — OS kernel**: WuBuOS hosted binary works; needs metal boot on WSL for full control.
-6. **Phases 1-6 are WIRED** (2026-08-09): the closed loop is the default training path (AN40), the priority store gates mutations on Fisher evidence (AN46), the autonomy harness's suite score is first-class fitness (AN41), the skill curriculum learns from experience (AN42), the deny-by-default tool registry bounds agency (AN43), and the executable blueprint refuses off-lineage mutations (AN44).
+1. **The multi-hour unattended harness RUN** (Phase 3's done-definition): a real multi-hour run that improves the suite score via accepted mutations, with lineage + graveyard explaining why. The endurance path (--resume + --ckpt-hive) is wired — the RUN is the next proof.
+2. **The Body side of the Colonel**: WuBuOS consumes the requests (the Styx/9P namespace executor for wubu_colonel) — `docs/BODY-PILLAR-HANDOFF.md` (AN54) froze the message set; the executor implementation is the Body's job now.
+3. **The skill→train stream into the real trainer**: the drain API (AN50) exists; wiring the drained pairs into wubu_train's preference loss closes "experience → weights" for real.
+4. **Metal**: the colony runs in ring-0 (the Live Colonel hosts it; WuBuOS boots on metal, not just WSL-hosted).
+5. **The live hive walk**: walk the LIVE hive (not just the saved archive).
+6. **Phases 1-6 + AN47-54 are WIRED** (2026-08-09): the closed loop is the default train path (AN40), the priority store gates mutations on Fisher evidence (AN46), the endurance path restarts from .hive+.prio (AN47), the GEMV ladder executes (AN48), live-file tasks score real work (AN49), skills feed the train stream (AN50), the Colonel effect path is proven end-to-end (AN51), the policy recorder answers WHY (AN52), hive archives federate via the merge (AN53), and the Body handoff pack unblocks WuBuOS (AN54).
 
 ## WSL as Agnostic Accelerator Design
 WSL2 on this machine is the current compute substrate:

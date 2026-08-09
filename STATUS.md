@@ -30,6 +30,15 @@
 | **Phase 5: deny-by-default tool registry** (AN43) | unregistered tools DENIED; every action a traj cell; thrashing tools auto-barred | `make test_toolreg` (denied/registered/barred all correct) |
 | **Phase 6: executable blueprint** (AN44) | WB01's lineage as machine-readable bounds; off-blueprint mutations refused; bounds move only via a versioned expansion meta-cell | `make test_blueprint` (in-range passes, MoE 64 refused, expansion versioned) |
 | **Phase 2: priority store** (AN46) | per-cell BI + online Fisher/EWC + precision deltas + mutation ledger; the diagnose gate REFUSES mutations on protected cells (high Fisher + recent rejection); `.prio` sidecar next to the `.hive` archive; wired into wubu_diag_cycle + the CLI | `make test_priority_store` (Fisher 0.562, protected refused, sidecar round-trips); live run: 9 cells, 384 consults, sidecar 392 bytes |
+| **Endurance + restart** (AN47) | `--resume` loads `.hive` + `.prio` (wubu_diag_load restores ledger + counters, cells replay into the hive); `--ckpt-hive N` mid-run sidecars; PROVEN kill/restart | 8-step run → resume → "resumed 3 fitness cells" + 4 more batches continue |
+| **Release gate** (AN47) | `test_colony` — the "no ship without it" gate: harness floor + zero contract violations + prio sidecar + blueprint bounds | `make test_colony` (harness 0.643, contracts 35 checks 0 violations, prio 392B, blueprint intact — ALL PASS) |
+| **GEMV dispatch** (AN48) | the precision ladder EXECUTES: >=16 bits → F32/BF16, <16 → INT8; reladder switches the backend (re-quantize, not paper) | `make test_gemv_dispatch` (dense 8→INT8, reladder 8→32 switches, INT8 rel err 0.0049) |
+| **Live-file harness** (AN49) | REAL file work: byte-exact text chunk + the Kodak codec round-trip (shape corr 0.707) → traj cells | `make test_harness_file` (text pass, degenerate fail, codec pass) |
+| **Skill → train** (AN50) | accepted skills → preference pairs, high-value traj → SFT segments; the stream drains into the next window | `make test_skill_train` (2 pairs + 2 SFT → drain 4) |
+| **Colonel effect** (AN51) | the end-to-end chain PROVEN: specialist → Colonel request → toolreg gate → the file lands → traj + cap accounting | `make test_colonel_effect` (denied → registered → effect landed) |
+| **Policy recorder** (AN52) | every metadiag policy change is a versioned meta-cell with the reason code (1=loss rising 2=suite failing 3=relax) | `make test_metadiag` (6 policy meta-cells recorded) |
+| **Lineage merge** (AN53) | two `.hive` archives merge (each with its own priority evidence): union + better-fitness + the protected override + graveyards union | `make test_hive_merge` (3 cells, protected survives, 2 rejections preserved) |
+| **Body handoff** (AN54) | `docs/BODY-PILLAR-HANDOFF.md` — the frozen Brain→Body message set + cap semantics; unblocks the WuBuOS executor | doc + `make test_colonel_effect` as the reference chain |
 
 ## Verified this wave (2026-08-09 — acceleration + build integrity)
 
