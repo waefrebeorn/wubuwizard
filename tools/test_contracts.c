@@ -30,8 +30,11 @@ int main(void)
     if (wubu_contracts_init(&ct, &tissue) != 0) FAIL("contracts init");
     printf("  default set: %d contracts (ball/exp/route/quant/finite)\n", ct.n);
 
-    /* 1. a contract-clean mutation passes */
-    float clean[5] = { 1e-5f, 1e-6f, 0.4f, 1e-3f, 1.0f };
+    /* 1. a contract-clean mutation passes — EIGHT probes now (the G38
+     * pack added skills/specialists/toolfails kinds 5-7; the 5-element
+     * array was an OOB stack read that nondeterministically tripped
+     * the new kinds — the DA sweep caught it) */
+    float clean[8] = { 1e-5f, 1e-6f, 0.4f, 1e-3f, 1.0f, 0.5f, 1.0f, 0.5f };
     int v = wubu_contracts_check(&ct, clean);
     printf("  clean mutation: %d violations (0 = pass)\n", v);
     if (v != 0) FAIL("clean mutation violated a contract");
@@ -39,7 +42,7 @@ int main(void)
     /* 2. a violating mutation is rejected — the ball closure blown
      * (0.5 >> 1e-3) and the quant error too big (0.05 >> 1e-2).
      * Its loss improved, but the contract floor holds. */
-    float bad[5] = { 0.5f, 1e-6f, 0.4f, 0.05f, 1.0f };
+    float bad[8] = { 0.5f, 1e-6f, 0.4f, 0.05f, 1.0f, 0.5f, 1.0f, 0.5f };
     v = wubu_contracts_check(&ct, bad);
     printf("  violating mutation: %d violations (rejected despite loss gain)\n", v);
     if (v < 2) FAIL("the ball/quant violations were not caught (%d)", v);

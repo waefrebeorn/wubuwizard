@@ -2,14 +2,17 @@
  * test_qwen35.c — the QWEN3.5 HYBRID loader role split gate (AN28
  * "build next": the fused-tensor role math resolved from the config).
  *
- * Asserts (against the REAL 0.8B config from HF, 2026-08-09):
- *   1. the gated-attn fused 6144 = q_and_gate(4096) + k(512) + v(512)
- *      + z(1024) — the AN28 open question (the extra 1024) RESOLVED
- *      as the output-gate tail (attn_output_gate: true)
- *   2. the GDN ssm_in_proj 8192 = qk(4096) + v(2048) + z(2048)
- *   3. the GDN conv 6144 = qk(4096) + v(2048)
- *   4. the layer kinds: 24 layers = 6 x [3 GDN + 1 gated-attn] from
+ * Asserts (against the REAL Qwen3.5-0.8B GGUF, 2026-08-09):
+ *   1. the GDN attn_qkv 6144 = qk(4096) + v(2048), attn_gate (z) 2048,
+ *      conv 6144, ssm_out rows 2048
+ *   2. the gated-attn UNFUSED layout: attn_q 4096 = q(2048) + gate(2048),
+ *      attn_k/v 512, shared per-head q/k norms 256
+ *   3. the layer kinds: 24 layers = 6 x [3 GDN + 1 gated-attn] from
  *      the config's layer_types (gated at 3,7,11,15,19,23)
+ * NOTE: the AN61 config-only inference (the fused 6144 attributed to
+ * the gated-attn with an output-gate z tail) was CORRECTED the same
+ * day by the on-disk GGUF — the fused 6144 is the GDN's, the gated
+ * attention is unfused.
  */
 #include <stdio.h>
 #include <string.h>
@@ -36,7 +39,6 @@ int main(void)
     cfg.lin_key_head_dim = 128;
     cfg.lin_value_head_dim = 128;
     cfg.lin_conv_kernel = 4;
-    cfg.attn_output_gate = 1;
 
     wubu_q35_split_t s;
     if (wubu_q35_compute_split(&cfg, &s) != 0) FAIL("split compute");
@@ -44,33 +46,33 @@ int main(void)
     wubu_q35_split_str(&s, sb, sizeof(sb));
     printf("  0.8B split: %s\n", sb);
 
-    /* 1. the gated-attn fused 6144 (the AN28 open question) */
-    printf("  gated-attn attn_qkv total %u (expect 6144)\n", s.ga_total);
-    if (s.ga_total != 6144) FAIL("the fused attn_qkv total is %u, want 6144",
-                                 s.ga_total);
-    if (s.ga_q_and_gate_len != 4096) FAIL("q_and_gate %u, want 4096",
+    /* 1. the GDN attn_qkv 6144 = qk(4096) + v(2048) — the GGUF-corrected
+     * layout (the fused 6144 belongs to the GDN, NOT the gated-attn) */
+    printf("  GDN attn_qkv total %u (expect 6144)\n", s.gdn_qkv_total);
+    if (s.gdn_qkv_total != 6144) FAIL("the GDN attn_qkv %u, want 6144",
+                                      s.gdn_qkv_total);
+    if (s.gdn_qk_len != 4096 || s.gdn_v_len != 2048)
+        FAIL("the GDN qk/v %u/%u, want 4096/2048",
+             s.gdn_qk_len, s.gdn_v_len);
+    if (s.gdn_z_len != 2048) FAIL("the GDN attn_gate (z) %u, want 2048",
+                                  s.gdn_z_len);
+    if (s.gdn_conv_total != 6144 || s.gdn_out_rows != 2048)
+        FAIL("the GDN conv/out %u/%u, want 6144/2048",
+             s.gdn_conv_total, s.gdn_out_rows);
+
+    /* 2. the gated-attn UNFUSED layout (the GGUF shows separate q/k/v) */
+    printf("  gated-attn attn_q %u = q %u + gate %u (unfused)\n",
+           s.ga_q_and_gate_len, s.ga_q_len, s.ga_gate_len);
+    if (s.ga_q_and_gate_len != 4096) FAIL("the gated-attn q %u, want 4096",
                                           s.ga_q_and_gate_len);
+    if (s.ga_q_len != 2048 || s.ga_gate_len != 2048)
+        FAIL("the gated q/gate %u/%u, want 2048/2048",
+             s.ga_q_len, s.ga_gate_len);
     if (s.ga_k_len != 512 || s.ga_v_len != 512)
-        FAIL("kv len %u/%u, want 512/512", s.ga_k_len, s.ga_v_len);
-    if (s.ga_z_len != 1024) FAIL("the output-gate z %u, want 1024",
-                                 s.ga_z_len);
-    if (s.ga_v_off != 4608 || s.ga_z_off != 5120)
-        FAIL("the fused offsets wrong (%u/%u)", s.ga_v_off, s.ga_z_off);
-
-    /* 2. the GDN ssm_in_proj 8192 */
-    printf("  GDN ssm_in_proj total %u (expect 8192)\n", s.gdn_total);
-    if (s.gdn_total != 8192) FAIL("the GDN in_proj %u, want 8192",
-                                  s.gdn_total);
-    if (s.gdn_qk_len != 4096 || s.gdn_v_len != 2048 || s.gdn_z_len != 2048)
-        FAIL("the GDN qk/v/z %u/%u/%u, want 4096/2048/2048",
-             s.gdn_qk_len, s.gdn_v_len, s.gdn_z_len);
-
-    /* 3. the GDN conv 6144 */
-    printf("  GDN ssm_conv1d width %u (expect 6144)\n", s.gdn_conv_total);
-    if (s.gdn_conv_total != 6144) FAIL("the GDN conv %u, want 6144",
-                                       s.gdn_conv_total);
-    if (s.gdn_out_rows != 4096) FAIL("the ssm_out rows %u, want 4096",
-                                     s.gdn_out_rows);
+        FAIL("the gated k/v %u/%u, want 512/512", s.ga_k_len, s.ga_v_len);
+    if (s.ga_q_norm_len != 256 || s.ga_k_norm_len != 256)
+        FAIL("the shared norms %u/%u, want 256/256",
+             s.ga_q_norm_len, s.ga_k_norm_len);
 
     /* 4. the layer kinds: 6 x [3 GDN + 1 gated] = gated at 3,7,...,23 */
     int gated_count = 0;

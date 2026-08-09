@@ -1,5 +1,7 @@
 /*
- * wubu_qwen35.c — the QWEN3.5 HYBRID loader role split (see header).
+ * wubu_qwen35.c — the QWEN3.5 HYBRID loader role math (see header).
+ * GGUF-corrected 2026-08-09: the fused 6144 belongs to the GDN, the
+ * gated-attn is unfused.
  */
 #include "wubu_qwen35.h"
 
@@ -16,35 +18,33 @@ int wubu_q35_compute_split(const wubu_q35_cfg_t *cfg, wubu_q35_split_t *out)
         return -1;
     memset(out, 0, sizeof(*out));
 
-    /* the gated-attn: d_out = q_heads * hd; the fused is
-     * [q_and_gate (2*d_out) | k (kv*hd) | v (kv*hd) | z (d if gate)] */
-    uint32_t d_out = cfg->num_attention_heads * cfg->head_dim;
-    uint32_t kv_len = cfg->num_key_value_heads * cfg->head_dim;
-    out->ga_q_and_gate_off = 0;
-    out->ga_q_and_gate_len = 2 * d_out;
-    out->ga_k_off = out->ga_q_and_gate_len;
-    out->ga_k_len = kv_len;
-    out->ga_v_off = out->ga_k_off + kv_len;
-    out->ga_v_len = kv_len;
-    if (cfg->attn_output_gate) {
-        out->ga_z_off = out->ga_v_off + kv_len;
-        out->ga_z_len = cfg->hidden_size;
-    }
-    out->ga_total = out->ga_q_and_gate_len + 2 * kv_len +
-                    (cfg->attn_output_gate ? cfg->hidden_size : 0);
-
-    /* the GDN: key_dim = qk_heads * key_hd, value_dim = v_heads * v_hd */
+    /* the GDN: key_dim = qk_heads * key_hd, value_dim = v_heads * v_hd.
+     * attn_qkv [d, qk + v]; attn_gate [d, value_dim] (the z); the
+     * config's in_proj_qkvz total (qk + v + z) is split across the
+     * two GGUF tensors. */
     uint32_t key_dim = cfg->lin_num_key_heads * cfg->lin_key_head_dim;
     uint32_t value_dim = cfg->lin_num_value_heads * cfg->lin_value_head_dim;
     out->gdn_qk_off = 0;
     out->gdn_qk_len = 2 * key_dim;      /* q + k */
     out->gdn_v_off = 2 * key_dim;
     out->gdn_v_len = value_dim;
-    out->gdn_z_off = 2 * key_dim + value_dim;
-    out->gdn_z_len = value_dim;         /* the z gate (same width as v) */
-    out->gdn_total = 2 * key_dim + 2 * value_dim;
-    out->gdn_conv_total = 2 * key_dim + value_dim;
-    out->gdn_out_rows = 2 * value_dim;  /* the ssm_out [2*value_dim, d] */
+    out->gdn_qkv_total = 2 * key_dim + value_dim;   /* 6144 */
+    out->gdn_z_len = value_dim;         /* the attn_gate width (2048) */
+    out->gdn_conv_total = out->gdn_qkv_total;       /* the conv width */
+    out->gdn_out_rows = value_dim;      /* the ssm_out rows (2048) */
+
+    /* the gated-attn UNFUSED tensors (the GGUF-corrected layout):
+     * attn_q [d, 2*d_out] = q_and_gate; attn_k/v [d, kv*hd]; the
+     * shared per-head norms [head_dim]. */
+    uint32_t d_out = cfg->num_attention_heads * cfg->head_dim;
+    uint32_t kv_len = cfg->num_key_value_heads * cfg->head_dim;
+    out->ga_q_and_gate_len = 2 * d_out; /* 4096 */
+    out->ga_q_len = d_out;              /* 2048 */
+    out->ga_gate_len = d_out;           /* 2048 */
+    out->ga_k_len = kv_len;             /* 512 */
+    out->ga_v_len = kv_len;             /* 512 */
+    out->ga_q_norm_len = cfg->head_dim; /* 256 (shared per-head) */
+    out->ga_k_norm_len = cfg->head_dim; /* 256 */
     return 0;
 }
 
@@ -68,9 +68,11 @@ void wubu_q35_split_str(const wubu_q35_split_t *s, char *buf, size_t cap)
 {
     if (!s || !buf || cap == 0) return;
     snprintf(buf, cap,
-             "gated-attn qkv[%u] = q_and_gate[%u] k[%u] v[%u] z[%u]; "
-             "gdn in_proj[%u] = qk[%u] v[%u] z[%u]; conv[%u]; out[%u]",
-             s->ga_total, s->ga_q_and_gate_len, s->ga_k_len, s->ga_v_len,
-             s->ga_z_len, s->gdn_total, s->gdn_qk_len, s->gdn_v_len,
-             s->gdn_z_len, s->gdn_conv_total, s->gdn_out_rows);
+             "GDN attn_qkv[%u] = qk[%u] v[%u], attn_gate(z)[%u], conv[%u], "
+             "out[%u]; gated-attn attn_q[%u] = q[%u]+gate[%u], k[%u], v[%u], "
+             "q_norm[%u], k_norm[%u]",
+             s->gdn_qkv_total, s->gdn_qk_len, s->gdn_v_len, s->gdn_z_len,
+             s->gdn_conv_total, s->gdn_out_rows, s->ga_q_and_gate_len,
+             s->ga_q_len, s->ga_gate_len, s->ga_k_len, s->ga_v_len,
+             s->ga_q_norm_len, s->ga_k_norm_len);
 }
