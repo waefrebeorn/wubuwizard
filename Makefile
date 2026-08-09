@@ -1120,6 +1120,10 @@ test_skill_train_real: tools/test_skill_train_real.c src/wubu_train.o src/wubu_s
 test_events: tools/test_events.c src/wubu_events.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_qwen35: tools/test_qwen35.c src/wubu_qwen35.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+
 wubu_report: tools/wubu_report.c src/wubu_diagnosis.o src/wubu_priority_store.o src/wubu_events.o src/wubu_amoeba.o src/wubu_hive.o src/wubu_moe2.o src/wubu_prover2.o src/wubu_hyper.o src/wubu_lineage.o src/wubu_contracts.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 

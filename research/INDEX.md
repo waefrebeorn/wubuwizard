@@ -2062,6 +2062,8 @@ archive/graveyard -> repeat. All pure C11, opaque, one module + one test:
 - AN58 NIGHTLY COLONY GATE `wired` (tools/test_colony_nightly.sh — fixed wall-clock budget + ONE forced resume + published artifacts to colony-runs/nightly-<ts>/; asserts zero contract violations, the suite at the LEARNED level, .hive/.prio/.events/.skills present, report + replay post-mortem run. The 60s smoke PASSED; the 30-60min nightly job uses the same path)
 - AN59 RESOURCE LEDGER CELL + SOFT FITNESS `wired` (A3/A4: wubu_res_cell_t hive meta-cells — per-200-round RSS/CPU/throughput snapshots the walk can read; the metadiag's fast signal carries soft_fitness, and SUSTAINED RESOURCE STRESS (soft < 0.5) is a first-class aggression trigger — reason code 4 fires even when the loss is flat + the suite is healthy. test_metadiag: resource stress + fine loss -> rate 0.60)
 - AN60 SKILL-QUALITY DECAY `wired` (C1: wubu_skill_report_outcome (K9) — a matched skill whose use FAILED decays its fitness (an EMA toward 0.1); a consistently-misleading skill auto-demotes toward the prune floor (fitness 0.90 -> 0.44 after 8 fails, test_skillcell pins it), and a good outcome reinforces back. Wired into the runner: every task's pass/fail feeds the matched skill. Healthy loop confirmed: suite 0.836, 85% pass, no decay spiral)
+- AN61 QWEN3.5 HYBRID LOADER ROLE SPLIT `wired` (the AN28 open question RESOLVED from the HF config + NVIDIA bridge + the justinchuby GDN analysis: include/wubu_qwen35.h + src/wubu_qwen35.c — the fused-tensor role math driven by the config, NOT hardcoded. Gated-attn attn_qkv [d,6144] = q_and_gate(4096) + k(512) + v(512) + z(1024) — the extra 1024 is the OUTPUT-GATE tail (attn_output_gate: true), NOT a missing head split; the GDN ssm_in_proj [d,8192] = qk(4096) + v(2048) + z(2048), conv 6144, out 4096. Layer kinds from the config's layer_types: 24 layers = 6 x [3 GDN + 1 gated] (gated at 3,7,11,15,19,23). test_qwen35 pins ALL the 0.8B numbers. The loader's fused-split + per-layer kind are now computable; the forward + logit-parity remain the next step once the 0.8B GGUF is on disk)
+
 
 
 
@@ -2119,7 +2121,7 @@ q_and_gate chunk + QK norms + RoPE + SDPA + sigmoid-gate elementwise + W_o
 delta-rule state + z gate + ssm_out)] + post_attention_norm + FFN; 6 pure-
 attn layers = the standard GQA (q=4d hd=256, kv=0.5d, q/k norms). wubu_ssm.h
 already models the GDN family (Gemma-4 dims; Qwen3.5: d=1024 dt_rank=16
-conv_dim=6144 d_state=128 value_dim=2048). Open question: the fused 6144 =
+conv_dim=6144 d_state=128 value_dim=2048). RESOLVED 2026-08-09 (see AN61): the fused 6144 =
 4096+512+512+1024 — the extra 1024's split (resolve via the HF modeling code
 or logit-parity vs the V1's llama.cpp, which supports qwen35). `research`
 (build next: loader roles + hybrid forward + GDN state + parity).

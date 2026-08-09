@@ -44,6 +44,7 @@
 | **Nightly gate** (AN58) | fixed budget + one forced resume + published artifacts | `tools/test_colony_nightly.sh` — 60s smoke PASSED (0 violations, suite 0.836, replay agrees) |
 | **Resource cells** (AN59) | per-200-round RSS/CPU/throughput hive meta-cells + the metadiag soft-fitness trigger (reason 4 fires on resource stress even with fine loss) | `test_metadiag` (stress + fine loss → rate 0.60); live: rss 14.6MB soft 1.00 |
 | **Skill decay** (AN60) | matched skills get the real outcome: fails decay fitness (EMA→0.1), a consistently-misleading skill auto-demotes toward prune | `make test_skillcell` (0.90→0.44 after 8 fails, recovers on good); live suite 0.836, 85% pass |
+| **Qwen3.5 role split** (AN61) | the AN28 open question resolved: the fused attn_qkv 6144 = q_and_gate(4096)+k(512)+v(512)+z(1024) — the 1024 is the output-gate tail (attn_output_gate:true), not a missing head; GDN in_proj 8192 = qk+v+z; layer kinds from the config (6×[3 GDN+1 gated]) | `make test_qwen35` (all 0.8B numbers pinned); the forward + logit-parity remain next once the GGUF is on disk |
 
 ## Verified this wave (2026-08-09 — acceleration + build integrity)
 
