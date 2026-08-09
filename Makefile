@@ -666,6 +666,23 @@ test_enc_h3: tools/test_enc_h3.c src/wubu_enc_h3.o src/wubu_rotate.o src/wubu_fp
 	$(CC) $(CFLAGS) -o $@ tools/test_enc_h3.c src/wubu_enc_h3.o src/wubu_rotate.o src/wubu_fp8.o src/wubu_nvfp4.o $(LDFLAGS)
 	./test_enc_h3
 
+# SD1.5 txt2img (SD-port agent, d8668bb) — quantized-only inference.
+# Wired into the shared build: both agents, one trunk.
+txt2img_sd: tools/txt2img_sd.c src/wubu_sd_clip.o src/wubu_sd_unet.o src/wubu_sd_vae.o src/wubu_sd_ops.o src/gguf_reader.o
+	$(CC) $(CFLAGS) -I include -o $@ tools/txt2img_sd.c src/wubu_sd_clip.o src/wubu_sd_unet.o src/wubu_sd_vae.o src/wubu_sd_ops.o src/gguf_reader.o $(LDFLAGS)
+
+src/wubu_sd_clip.o: src/wubu_sd_clip.c include/wubu_sd_clip.h include/wubu_sd_ops.h include/gguf_reader.h
+	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_clip.c
+
+src/wubu_sd_unet.o: src/wubu_sd_unet.c include/wubu_sd_unet.h include/wubu_sd_ops.h include/gguf_reader.h
+	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_unet.c
+
+src/wubu_sd_vae.o: src/wubu_sd_vae.c include/wubu_sd_vae.h include/wubu_sd_ops.h include/gguf_reader.h
+	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_vae.c
+
+src/wubu_sd_ops.o: src/wubu_sd_ops.c include/wubu_sd_ops.h include/gguf_reader.h
+	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_ops.c
+
 test_ops: tools/test_ops.c src/wubu_ops.o
 	$(CC) $(CFLAGS) -I include -I tools/include -o $@ tools/test_ops.c src/wubu_ops.o -lm
 	./test_ops
