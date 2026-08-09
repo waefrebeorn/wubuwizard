@@ -1,0 +1,685 @@
+/* wubu_sd_unet.c -- LDM UNet forward for the WuBu stable-diffusion engine.
+ * SD 1.5 topology (Anything-V5 / DreamShaper8):
+ *   in 4ch -> 320 -> 640 -> 1280 -> 1280, cross-attn vs CLIP 77x768.
+ *   ResBlock: GroupNorm(32) + SiLU + 3x3, time-emb Linear, skip 1x1.
+ *   SpatialTransformer: LN + self-attn + cross-attn + GEGLU FFN.
+ *   Downsample 3x3 s2, Upsample nearest2x + 3x3.
+ * Weights stay quantized in the GGUF blob; per-tensor F32 lazy cache
+ * (same pattern as wubu_sd_clip). C11, self-contained.
+ */
+#include "wubu_sd_unet.h"
+#include "wubu_sd_ops.h"
+#include "gguf_reader.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <omp.h>
+
+#define U_CH 320          /* model_channels */
+#define U_TIME 1280       /* time_embed_dim = 320*4 */
+#define U_CTX 768         /* CLIP context dim */
+#define U_CTX_LEN 77
+#define U_HEADS 8
+
+/* DEBUG HOOK (cfg_diff): capture attn2 outputs for cond vs uncond. */
+int g_attn2_capture = 0;
+char g_attn2_prefix[128] = {0};
+float g_attn2_out[3 * 1280 * 4096];
+int g_attn2_slot = 0;
+int g_attn2_slot2 = -1;
+/* stage capture: 0=off, 1=middle-block input, 2=after middle transformer,
+ * 3=final pre-conv activations (out.0 gn out), 4=out.2 conv out (eps),
+ * 5=output block N result (g_stage_block), 6=after output block transformer */
+int g_stage_capture = 0;
+int g_stage_block = 0;
+int g_stage_count = 0;
+float g_stage_out[2][1280 * 64 * 64];
+
+/* per-block channels (SD1.5): block -> in_channels */
+/* input blocks (SD1.5 GGUF ground truth):
+ *   0: conv 4->320; 1: res320+attn; 2: res320+attn; 3: DOWN;
+ *   4: res640+attn; 5: res640+attn; 6: DOWN; 7: res1280+attn; 8: res1280+attn;
+ *   9: DOWN; 10: res1280; 11: res1280. */
+static const int IN_TYPE[12] = { /* 0=conv,1=res+attn,2=res,3=down */
+    0, 1, 1, 3, 1, 1, 3, 1, 1, 3, 2, 2 };
+/* channel after each input block (the skip buffer's channels) */
+static const int IN_OUT_CH[12] = { 320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280 };
+
+/* output blocks: prev_ch (cur channels), skip_ch (from IN_OUT_CH[skip]),
+ * out_ch, attn, up (subblock index of the upsample conv: 1 for block 2,
+ * 2 for blocks 5/8 — GGUF naming varies!), skip-from-input-block index. */
+typedef struct { int prev_ch; int skip_ch; int out_ch; int attn; int up; int skip; } out_cfg_t;
+static const out_cfg_t OUT_CFG[12] = {
+    {1280, 1280, 1280, 0, 0, 11}, {1280, 1280, 1280, 0, 0, 10}, {1280, 1280, 1280, 0, 1, 9},
+    {1280, 1280, 1280, 1, 0, 8},  {1280, 1280, 1280, 1, 0, 7},  {1280, 640, 1280, 1, 2, 6},
+    {1280, 640, 640, 1, 0, 5},    {640,  640,  640, 1, 0, 4},   {640,  320, 640, 1, 2, 3},
+    {640,  320, 320, 1, 0, 2},    {320,  320,  320, 1, 0, 1},   {320,  320, 320, 1, 0, 0},
+};
+
+struct wubu_sd_unet {
+    gguf_ctx *gguf;
+    /* no F32 weight cache — weights stay in the mmap'd blob */
+};
+
+/* raw (quantized, never-dequantized) weight descriptor */
+typedef struct {
+    const void *ptr;
+    int type;
+    int64_t K, N;      /* dims[0] (contraction), dims[1] (columns) */
+    int64_t n_elems;
+    int found;
+} unet_raw_t;
+
+/* ---------------- quantized weight access (no F32 cache) ---------------- */
+static unet_raw_t unet_get_raw(wubu_sd_unet_t *u, const char *name) {
+    unet_raw_t r = {0};
+    gguf_tensor_info *ti = gguf_find_tensor(u->gguf, name);
+    if (!ti) { fprintf(stderr, "UNET: missing %s\n", name); return r; }
+    r.ptr = (const uint8_t *)u->gguf->data_blob + ti->data_offset;
+    r.type = ti->ggml_type;
+    r.n_elems = 1;
+    for (int d = 0; d < ti->n_dims; d++) r.n_elems *= ti->dims[d];
+    r.K = ti->n_dims > 0 ? ti->dims[0] : 1;
+    r.N = ti->n_dims > 1 ? ti->dims[1] : 1;
+    r.found = 1;
+    return r;
+}
+
+/* linear helper: out[M][N] = x[M][K] @ W^T[K][N] + b[N], W raw blob.
+ * W is column-major [K][N] (ggml dims[0]=K innermost). */
+static void unet_linear(const void *W, int wtype, const float *b, int N, int K,
+                        const float *x, int M, float *out) {
+    wubu_sd_linear_qb(x, W, wtype, b, M, K, N, out);
+}
+
+/* tiny F32 read for 1D params (biases, layernorm) — a few KB each,
+ * never the big matmul weights. No cache (weights stay in the blob). */
+static float *unet_get_f32(wubu_sd_unet_t *u, const char *name) {
+    gguf_tensor_info *ti = gguf_find_tensor(u->gguf, name);
+    if (!ti) { fprintf(stderr, "UNET: missing %s\n", name); return NULL; }
+    int64_t ne = 1;
+    for (int d = 0; d < ti->n_dims; d++) ne *= ti->dims[d];
+    float *f = (float *)malloc((size_t)ne * sizeof(float));
+    if (!f) return NULL;
+    if (gguf_read_tensor_f32(u->gguf, ti, f, ne) != (int)ne) { free(f); return NULL; }
+    return f;
+}
+
+/* quantized conv2d helper: fetch raw weight, run conv2d_q. */
+static int unet_conv_q(wubu_sd_unet_t *u, const char *wname, const char *bname,
+                       const float *x, int C_in, int H, int W,
+                       int C_out, int KH, int KW, int stride,
+                       int pad_h, int pad_w, float *y) {
+    unet_raw_t w = unet_get_raw(u, wname);
+    if (!w.found) return -1;
+    float *b = bname ? unet_get_f32(u, bname) : NULL;
+    wubu_sd_conv2d_q(x, 1, C_in, H, W, w.ptr, w.type, b, C_out, KH, KW,
+                     stride, pad_h, pad_w, y, NULL, NULL);
+    free(b);
+    return 0;
+}
+
+/* silu in place */
+static void unet_silu(float *x, int n) {
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) x[i] = x[i] / (1.0f + expf(-x[i]));
+}
+
+/* groupnorm in place, G=32 */
+static void unet_gn(float *x, int C, int HW, const float *g, const float *b) {
+    wubu_sd_groupnorm(x, 1, C, 1, HW, 32, 1e-6f, g, b, x);
+}
+
+/* timestep embedding: sinusoidal 320 -> Linear -> silu -> Linear -> 1280 */
+static void unet_time_embed(wubu_sd_unet_t *u, int t, float *out /*[1280]*/) {
+    float emb[U_CH];
+    /* sinusoidal embedding (half = 160), matches diffusers get_timestep_embedding
+     * with flip_sin_to_cos=TRUE (SD1.5 default): COS in the first half,
+     * SIN in the second. [sin,cos] order would feed the MLP wrong inputs. */
+    const int half = U_CH / 2;
+    for (int i = 0; i < half; i++) {
+        float w = expf(-logf(10000.0f) * (float)i / (float)half);
+        emb[i] = cosf((float)t * w);
+        emb[i + half] = sinf((float)t * w);
+    }
+    unet_raw_t l1 = unet_get_raw(u, "model.diffusion_model.time_embed.0.weight");
+    float *l1b = unet_get_f32(u, "model.diffusion_model.time_embed.0.bias");
+    unet_raw_t l2 = unet_get_raw(u, "model.diffusion_model.time_embed.2.weight");
+    float *l2b = unet_get_f32(u, "model.diffusion_model.time_embed.2.bias");
+    if (!l1.found || !l2.found) { fprintf(stderr, "time_embed missing\n"); return; }
+    float mid[U_TIME];
+    unet_linear(l1.ptr, l1.type, l1b, U_TIME, U_CH, emb, 1, mid);
+    unet_silu(mid, U_TIME);
+    unet_linear(l2.ptr, l2.type, l2b, U_TIME, U_TIME, mid, 1, out);
+    free(l1b); free(l2b);
+}
+
+/* ResBlock: x [C][H][W] + temb[1280] -> out [Cout][H][W].
+ * names: model.diffusion_model.<prefix>.0.*  (prefix = input_blocks.N / etc.) */
+static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
+                         float *x, int C, int Cout, int H, int W,
+                         const float *temb, float *out) {
+    char nm[256];
+    float *scratch = (float *)malloc((size_t)Cout * H * W * sizeof(float));
+    if (!scratch) return -1;
+    int HW = H * W;
+
+    /* CRITICAL: x is the caller's `cur` buffer (skips[i-1]) — MUST NOT be
+     * modified in place. The skip connection adds the ORIGINAL x, and the
+     * caller still needs it for an output block. Copy to a norm buffer. */
+    float *xn = (float *)malloc((size_t)C * H * W * sizeof(float));
+    if (!xn) { free(scratch); return -1; }
+    memcpy(xn, x, (size_t)C * H * W * sizeof(float));
+
+    /* in_layers: groupnorm(32,C) -> silu -> conv3x3 C->Cout */
+    snprintf(nm, sizeof(nm), "%s.in_layers.0.weight", prefix);
+    float *gn_w = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.in_layers.0.bias", prefix);
+    float *gn_b = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.in_layers.2.weight", prefix);
+    char conv_nm[256]; snprintf(conv_nm, sizeof(conv_nm), "%s", nm);
+    snprintf(nm, sizeof(nm), "%s.in_layers.2.bias", prefix);
+    char conv_bn[256]; snprintf(conv_bn, sizeof(conv_bn), "%s", nm);
+    if (!gn_w) { free(scratch); free(xn); return -1; }
+
+    unet_gn(xn, C, HW, gn_w, gn_b);
+    unet_silu(xn, C * HW);
+    if (unet_conv_q(u, conv_nm, conv_bn, xn, C, H, W, Cout, 3, 3, 1, 1, 1,
+                    scratch) != 0) { free(scratch); free(xn); return -1; }
+    free(xn);
+
+    /* emb_layers: nn.Sequential(SiLU, Linear(1280 -> Cout)) — GGUF stores
+     * emb_layers.1.weight = the Linear; SiLU is the non-parametric .0 and
+     * comes FIRST. y = Linear(silu(temb)). Applied to scratch channel-wise:
+     * scratch *= (1 + y[c]). */
+    snprintf(nm, sizeof(nm), "%s.emb_layers.1.weight", prefix);
+    unet_raw_t emb_w = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.emb_layers.1.bias", prefix);
+    float *emb_b = unet_get_f32(u, nm);
+    if (!emb_w.found) { free(scratch); return -1; }
+    float emb_in[U_TIME];   /* silu(temb) — temb is shared, don't clobber */
+    for (int i = 0; i < U_TIME; i++) emb_in[i] = temb[i] / (1.0f + expf(-temb[i]));
+    float emb_out[2048];
+    unet_linear(emb_w.ptr, emb_w.type, emb_b, Cout, U_TIME, emb_in, 1, emb_out);
+    #pragma omp parallel for
+    for (int c = 0; c < Cout; c++)
+        for (int p = 0; p < HW; p++)
+            scratch[(size_t)c * HW + p] *= (1.0f + emb_out[c]);
+
+    /* out_layers: groupnorm(32,Cout) -> silu -> conv3x3 Cout->Cout */
+    snprintf(nm, sizeof(nm), "%s.out_layers.0.weight", prefix);
+    float *gn2_w = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.out_layers.0.bias", prefix);
+    float *gn2_b = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.out_layers.3.weight", prefix);
+    char conv2_nm[256]; snprintf(conv2_nm, sizeof(conv2_nm), "%s", nm);
+    snprintf(nm, sizeof(nm), "%s.out_layers.3.bias", prefix);
+    char conv2_bn[256]; snprintf(conv2_bn, sizeof(conv2_bn), "%s", nm);
+    if (!gn2_w) { free(scratch); return -1; }
+    unet_gn(scratch, Cout, HW, gn2_w, gn2_b);
+    unet_silu(scratch, Cout * HW);
+    if (unet_conv_q(u, conv2_nm, conv2_bn, scratch, Cout, H, W, Cout, 3, 3, 1, 1, 1,
+                    out) != 0) { free(scratch); return -1; }
+
+    /* skip_connection: 1x1 conv C->Cout (only present when C != Cout) */
+    if (C != Cout) {
+        snprintf(nm, sizeof(nm), "%s.skip_connection.weight", prefix);
+        char skip_nm[256]; snprintf(skip_nm, sizeof(skip_nm), "%s", nm);
+        snprintf(nm, sizeof(nm), "%s.skip_connection.bias", prefix);
+        char skip_bn[256]; snprintf(skip_bn, sizeof(skip_bn), "%s", nm);
+        float *sx = (float *)malloc((size_t)Cout * HW * sizeof(float));
+        if (!sx) { free(scratch); return -1; }
+        if (unet_conv_q(u, skip_nm, skip_bn, x, C, H, W, Cout, 1, 1, 1, 0, 0,
+                        sx) != 0) { free(sx); free(scratch); return -1; }
+        #pragma omp parallel for
+        for (int i = 0; i < Cout * HW; i++) out[i] += sx[i];
+        free(sx);
+    } else {
+        #pragma omp parallel for
+        for (int i = 0; i < Cout * HW; i++) out[i] += x[i];
+    }
+    free(scratch);
+    free(gn_w); free(gn_b); free(gn2_w); free(gn2_b);
+    return 0;
+}
+
+/* spatial attention over the H*W spatial positions (SD transformer:
+ * input [C][H][W] -> treat each spatial position as a token).
+ * attn1 = self (n = H*W), attn2 = cross (k/v from ctx 77x768).
+ * heads = 8, head_dim = C/8. */
+static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
+                     float *x, int C, int H, int W,
+                     const float *ctx /*[77][768]*/, int is_cross) {
+    char nm[256];
+    const int n = H * W;
+    const int hd = C / U_HEADS;
+    const int dim = C;
+    float *q = (float *)malloc((size_t)n * dim * sizeof(float));
+    float *k = (float *)malloc((size_t)n * dim * sizeof(float));
+    float *v = (float *)malloc((size_t)n * dim * sizeof(float));
+    if (!q || !k || !v) return -1;
+    /* projections (all Linear C->C) */
+    snprintf(nm, sizeof(nm), "%s.to_q.weight", prefix);
+    unet_raw_t qw = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.to_q.bias", prefix);
+    float *qb = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.to_k.weight", prefix);
+    unet_raw_t kw = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.to_k.bias", prefix);
+    float *kb = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.to_v.weight", prefix);
+    unet_raw_t vw = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.to_v.bias", prefix);
+    float *vb = unet_get_f32(u, nm);
+    if (!qw.found || !kw.found || !vw.found) return -1;
+    /* NOTE: SD1.5 middle_block attention has NO biases — qb/kb/vb may be
+     * NULL and unet_linear handles NULL bias (adds 0). */
+    unet_linear(qw.ptr, qw.type, qb, dim, dim, x, n, q);
+    if (is_cross) {
+        /* k/v from ctx [77][768] -> [77][dim] — replace the (unused)
+         * n-length k/v buffers; they are freed once at the end. */
+        float *kctx = (float *)malloc((size_t)U_CTX_LEN * dim * sizeof(float));
+        float *vctx = (float *)malloc((size_t)U_CTX_LEN * dim * sizeof(float));
+        unet_linear(kw.ptr, kw.type, kb, dim, U_CTX, ctx, U_CTX_LEN, kctx);
+        unet_linear(vw.ptr, vw.type, vb, dim, U_CTX, ctx, U_CTX_LEN, vctx);
+        free(k); free(v);
+        k = kctx; v = vctx;
+    } else {
+        unet_linear(kw.ptr, kw.type, kb, dim, dim, x, n, k);
+        unet_linear(vw.ptr, vw.type, vb, dim, dim, x, n, v);
+    }
+    /* attention: out[i] = sum_j softmax(q_i . k_j / sqrt(hd)) v_j.
+     * k/v are transposed to head-major contiguous [U_HEADS][Tk][hd] so the
+     * j-loop inner products walk sequential memory (the [j][dim] layout
+     * strides 3KB per j — cache-thrash). */
+    const int Tk = is_cross ? U_CTX_LEN : n;
+    float *kt = (float *)malloc((size_t)U_HEADS * Tk * hd * sizeof(float));
+    float *vt = (float *)malloc((size_t)U_HEADS * Tk * hd * sizeof(float));
+    #pragma omp parallel for collapse(2)
+    for (int h = 0; h < U_HEADS; h++)
+        for (int j = 0; j < Tk; j++) {
+            const float *kj = k + (size_t)j * dim + (size_t)h * hd;
+            const float *vj = v + (size_t)j * dim + (size_t)h * hd;
+            float *kth = kt + ((size_t)h * Tk + j) * hd;
+            float *vth = vt + ((size_t)h * Tk + j) * hd;
+            memcpy(kth, kj, (size_t)hd * sizeof(float));
+            memcpy(vth, vj, (size_t)hd * sizeof(float));
+        }
+    /* NOTE: k/v are NOT freed here — they are freed once at the end
+     * (cross path: k/v are kctx/vctx; self path: the originals). */
+    /* att row is only used within one (i,h) iteration — a private stack
+     * array (NOT a full n*U_HEADS*Tk matrix: 536MB at 64x64 self-attn). */
+    float *out = (float *)calloc((size_t)n * dim, sizeof(float));
+    const float scale = 1.0f / sqrtf((float)hd);
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int i = 0; i < n; i++)
+        for (int h = 0; h < U_HEADS; h++) {
+            float att_h[4096]; /* private per iteration: Tk <= 4096 */
+            const float *qi = q + (size_t)i * dim + (size_t)h * hd;
+            const float *kth = kt + (size_t)h * Tk * hd;
+            const float *vth = vt + (size_t)h * Tk * hd;
+            float mx = -INFINITY;
+            for (int j = 0; j < Tk; j++) {
+                const float *kj = kth + (size_t)j * hd;
+                float s = 0;
+                for (int d = 0; d < hd; d++) s += qi[d] * kj[d];
+                s *= scale;
+                att_h[j] = s;
+                if (s > mx) mx = s;
+            }
+            float sum = 0;
+            for (int j = 0; j < Tk; j++) {
+                att_h[j] = expf(att_h[j] - mx);
+                sum += att_h[j];
+            }
+            float *oi = out + (size_t)i * dim + (size_t)h * hd;
+            for (int j = 0; j < Tk; j++) {
+                float w_ = att_h[j] / sum;
+                const float *vj = vth + (size_t)j * hd;
+                for (int d = 0; d < hd; d++) oi[d] += w_ * vj[d];
+            }
+        }
+    free(kt); free(vt);
+    /* out_proj */
+    snprintf(nm, sizeof(nm), "%s.to_out.0.weight", prefix);
+    unet_raw_t ow = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.to_out.0.bias", prefix);
+    float *ob = unet_get_f32(u, nm);
+    if (!ow.found) return -1;
+    unet_linear(ow.ptr, ow.type, ob, dim, dim, out, n, x);
+    free(q); free(k); free(v); free(out);
+    free(qb); free(kb); free(vb); free(ob);
+    return 0;
+}
+
+/* GEGLU FFN: Linear C->8C (half = 4C for gelu) -> Linear 4C->C */
+static int unet_ffn(wubu_sd_unet_t *u, const char *prefix, float *x, int C, int n) {
+    char nm[256];
+    const int hidden = C * 8;
+    snprintf(nm, sizeof(nm), "%s.net.0.proj.weight", prefix);
+    unet_raw_t p_w = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.net.0.proj.bias", prefix);
+    float *p_b = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.net.2.weight", prefix);
+    unet_raw_t f_w = unet_get_raw(u, nm);
+    snprintf(nm, sizeof(nm), "%s.net.2.bias", prefix);
+    float *f_b = unet_get_f32(u, nm);
+    if (!p_w.found || !f_w.found) return -1;
+    float *h = (float *)malloc((size_t)n * hidden * sizeof(float));
+    if (!h) return -1;
+    unet_linear(p_w.ptr, p_w.type, p_b, hidden, C, x, n, h);
+    /* GEGLU: split hidden into a|b, h = a * gelu(b). MUST write to a
+     * separate buffer: in-place compression races (row i reads up to
+     * (i+1)*8C while row i+1 writes from (i+1)*4C). */
+    float *g = (float *)malloc((size_t)n * (hidden / 2) * sizeof(float));
+    if (!g) { free(h); return -1; }
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < hidden / 2; j++) {
+            float a = h[(size_t)i * hidden + j];
+            float b = h[(size_t)i * hidden + j + hidden / 2];
+            float ge = 0.5f * b * (1.0f + tanhf(0.7978845608028654f * (b + 0.044715f * b * b * b)));
+            g[(size_t)i * (hidden / 2) + j] = a * ge;
+        }
+    free(h);
+    unet_linear(f_w.ptr, f_w.type, f_b, C, hidden / 2, g, n, x);
+    free(g);
+    return 0;
+}
+
+/* spatial transformer: norm(group) -> proj_in 1x1 -> attn1 self -> attn2
+ * cross -> ffn -> proj_out 1x1 -> residual. prefix = ...1.transformer_blocks.0 */
+static int unet_transformer(wubu_sd_unet_t *u, const char *prefix,
+                            float *x, int C, int H, int W, const float *ctx) {
+    char nm[256];
+    int HW = H * W;
+    /* outer norm: GroupNorm(32, C) — SD1.5 SpatialTransformer norm is
+     * GROUPnorm (unlike CLIP). The inner norm1/2/3 are LayerNorm. */
+    snprintf(nm, sizeof(nm), "%s.norm.weight", prefix);
+    float *ln_w = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.norm.bias", prefix);
+    float *ln_b = unet_get_f32(u, nm);
+    /* proj_in 1x1 */
+    snprintf(nm, sizeof(nm), "%s.proj_in.weight", prefix);
+    char pi_nm[256]; snprintf(pi_nm, sizeof(pi_nm), "%s", nm);
+    snprintf(nm, sizeof(nm), "%s.proj_in.bias", prefix);
+    char pi_bn[256]; snprintf(pi_bn, sizeof(pi_bn), "%s", nm);
+    if (!ln_w) return -1;
+    /* groupnorm over C (per spatial position) */
+    float *ln = (float *)malloc((size_t)C * HW * sizeof(float));
+    if (!ln) return -1;
+    /* CRITICAL: the transformer's outer residual is out = x + proj_out(...).
+     * proj_in OVERWRITES x below, so save the original input FIRST. */
+    float *xorig = (float *)malloc((size_t)C * HW * sizeof(float));
+    if (!xorig) { free(ln); return -1; }
+    memcpy(xorig, x, (size_t)C * HW * sizeof(float));
+    wubu_sd_groupnorm(x, 1, C, H, W, 32, 1e-6f, ln_w, ln_b, ln);
+    if (unet_conv_q(u, pi_nm, pi_bn, ln, C, H, W, C, 1, 1, 1, 0, 0, x) != 0) { free(ln); free(xorig); return -1; }
+    free(ln);
+    /* transformer_blocks.0 */
+    char tb[300];
+    snprintf(tb, sizeof(tb), "%s.transformer_blocks.0", prefix);
+    /* norm1 -> attn1 (self) -> residual */
+    snprintf(nm, sizeof(nm), "%s.norm1.weight", tb);
+    float *n1w = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.norm1.bias", tb);
+    float *n1b = unet_get_f32(u, nm);
+    float *ln2 = (float *)malloc((size_t)C * HW * sizeof(float));
+    #pragma omp parallel for
+    for (int p = 0; p < HW; p++) {
+        const float *xr = x + (size_t)p * C;
+        float mean = 0, var = 0;
+        for (int c = 0; c < C; c++) { mean += xr[c]; var += xr[c] * xr[c]; }
+        mean /= C; var = var / C - mean * mean;
+        float inv = 1.0f / sqrtf(var + 1e-5f);
+        float *lr = ln2 + (size_t)p * C;
+        for (int c = 0; c < C; c++) lr[c] = (xr[c] - mean) * inv * n1w[c] + (n1b ? n1b[c] : 0);
+    }
+    snprintf(nm, sizeof(nm), "%s.attn1", tb);
+    if (unet_attn(u, nm, ln2, C, H, W, ctx, 0) == 0)
+        #pragma omp parallel for
+        for (int i = 0; i < C * HW; i++) x[i] += ln2[i];
+    free(ln2);
+    /* norm2 -> attn2 (cross) -> residual */
+    snprintf(nm, sizeof(nm), "%s.norm2.weight", tb);
+    float *n2w = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.norm2.bias", tb);
+    float *n2b = unet_get_f32(u, nm);
+    float *ln3 = (float *)malloc((size_t)C * HW * sizeof(float));
+    #pragma omp parallel for
+    for (int p = 0; p < HW; p++) {
+        const float *xr = x + (size_t)p * C;
+        float mean = 0, var = 0;
+        for (int c = 0; c < C; c++) { mean += xr[c]; var += xr[c] * xr[c]; }
+        mean /= C; var = var / C - mean * mean;
+        float inv = 1.0f / sqrtf(var + 1e-5f);
+        float *lr = ln3 + (size_t)p * C;
+        for (int c = 0; c < C; c++) lr[c] = (xr[c] - mean) * inv * n2w[c] + (n2b ? n2b[c] : 0);
+    }
+    snprintf(nm, sizeof(nm), "%s.attn2", tb);
+    if (unet_attn(u, nm, ln3, C, H, W, ctx, 1) == 0) {
+        #pragma omp parallel for
+        for (int i = 0; i < C * HW; i++) x[i] += ln3[i];
+        /* DEBUG HOOK (cfg_diff): capture the attn2 OUTPUT for the first
+         * transformer block to compare cond vs uncond contributions. */
+        if (g_attn2_capture && g_attn2_slot >= 0 &&
+            (g_attn2_prefix[0] == 0 || strstr(tb, g_attn2_prefix))) {
+            memcpy(g_attn2_out + (size_t)g_attn2_slot * C * HW, ln3,
+                   (size_t)C * HW * sizeof(float));
+            g_attn2_slot = -1;
+            if (g_attn2_slot2 >= 0) { /* also capture x post-attn2-residual */
+                memcpy(g_attn2_out + (size_t)g_attn2_slot2 * C * HW, x,
+                       (size_t)C * HW * sizeof(float));
+                g_attn2_slot2 = -1;
+            }
+        }
+    }
+    free(ln3);
+    /* norm3 -> ffn -> residual */
+    snprintf(nm, sizeof(nm), "%s.norm3.weight", tb);
+    float *n3w = unet_get_f32(u, nm);
+    snprintf(nm, sizeof(nm), "%s.norm3.bias", tb);
+    float *n3b = unet_get_f32(u, nm);
+    float *ln4 = (float *)malloc((size_t)C * HW * sizeof(float));
+    #pragma omp parallel for
+    for (int p = 0; p < HW; p++) {
+        const float *xr = x + (size_t)p * C;
+        float mean = 0, var = 0;
+        for (int c = 0; c < C; c++) { mean += xr[c]; var += xr[c] * xr[c]; }
+        mean /= C; var = var / C - mean * mean;
+        float inv = 1.0f / sqrtf(var + 1e-5f);
+        float *lr = ln4 + (size_t)p * C;
+        for (int c = 0; c < C; c++) lr[c] = (xr[c] - mean) * inv * n3w[c] + (n3b ? n3b[c] : 0);
+    }
+    snprintf(nm, sizeof(nm), "%s.ff", tb);
+    if (unet_ffn(u, nm, ln4, C, HW) == 0)
+        #pragma omp parallel for
+        for (int i = 0; i < C * HW; i++) x[i] += ln4[i];
+    free(ln4);
+    /* proj_out 1x1 -> residual: out = xorig + proj_out(blocks_out) */
+    snprintf(nm, sizeof(nm), "%s.proj_out.weight", prefix);
+    char po_nm[256]; snprintf(po_nm, sizeof(po_nm), "%s", nm);
+    snprintf(nm, sizeof(nm), "%s.proj_out.bias", prefix);
+    char po_bn[256]; snprintf(po_bn, sizeof(po_bn), "%s", nm);
+    float *po = (float *)malloc((size_t)C * HW * sizeof(float));
+    memcpy(po, x, (size_t)C * HW * sizeof(float));
+    if (unet_conv_q(u, po_nm, po_bn, po, C, H, W, C, 1, 1, 1, 0, 0, x) != 0) { free(po); free(xorig); return -1; }
+    #pragma omp parallel for
+    for (int i = 0; i < C * HW; i++) x[i] += xorig[i];
+    free(po); free(xorig);
+    free(n1w); free(n1b); free(n2w); free(n2b); free(n3w); free(n3b);
+    free(ln_w); free(ln_b);
+    return 0;
+}
+
+/* downsample: conv 3x3 s2 (prefix.0.op) */
+static int unet_downsample(wubu_sd_unet_t *u, const char *prefix,
+                           float *x, int C, int H, int W, float *out) {
+    char nm[256];
+    snprintf(nm, sizeof(nm), "%s.op.weight", prefix);
+    char op_nm[256]; snprintf(op_nm, sizeof(op_nm), "%s", nm);
+    snprintf(nm, sizeof(nm), "%s.op.bias", prefix);
+    char op_bn[256]; snprintf(op_bn, sizeof(op_bn), "%s", nm);
+    return unet_conv_q(u, op_nm, op_bn, x, C, H, W, C, 3, 3, 2, 1, 1, out);
+}
+
+/* upsample: nearest2x + conv 3x3 at prefix.<up_sub>.conv — the subblock
+ * index varies by block (1 for out.2, 2 for out.5/out.8). */
+static int unet_upsample(wubu_sd_unet_t *u, const char *prefix, int up_sub,
+                         float *x, int C, int H, int W, float *out) {
+    char nm[256];
+    snprintf(nm, sizeof(nm), "%s.%d.conv.weight", prefix, up_sub);
+    char up_nm[256]; snprintf(up_nm, sizeof(up_nm), "%s", nm);
+    snprintf(nm, sizeof(nm), "%s.%d.conv.bias", prefix, up_sub);
+    char up_bn[256]; snprintf(up_bn, sizeof(up_bn), "%s", nm);
+    float *up = (float *)malloc((size_t)C * (2 * H) * (2 * W) * sizeof(float));
+    if (!up) return -1;
+    wubu_sd_upsample2x(x, 1, C, H, W, up);
+    int rc = unet_conv_q(u, up_nm, up_bn, up, C, 2 * H, 2 * W, C, 3, 3, 1, 1, 1, out);
+    free(up);
+    return rc;
+}
+
+wubu_sd_unet_t *wubu_sd_unet_load(void *ctx) {
+    wubu_sd_unet_t *u = (wubu_sd_unet_t *)calloc(1, sizeof(wubu_sd_unet_t));
+    if (!u) return NULL;
+    u->gguf = (gguf_ctx *)ctx;
+    /* mmap the data blob — quantized path reads weights straight from it */
+    {
+        gguf_ctx *g = (gguf_ctx *)ctx;
+        if (!g->data_blob) gguf_buffer_data(g);
+    }
+    return u;
+}
+
+void wubu_sd_unet_free(wubu_sd_unet_t *u) {
+    if (!u) return;
+    free(u);
+}
+
+void wubu_sd_unet_clear_cache(wubu_sd_unet_t *u) {
+    /* no cache to clear — weights stay in the mmap'd blob */
+    (void)u;
+}
+
+int wubu_sd_unet_forward(wubu_sd_unet_t *u,
+                         const float *latent, int t,
+                         const float *ctx,
+                         float *out) {
+    /* timestep embedding */
+    float temb[U_TIME];
+    unet_time_embed(u, t, temb);
+
+    /* conv_in: 4 -> 320 */
+    float *x = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+    if (unet_conv_q(u, "model.diffusion_model.input_blocks.0.0.weight",
+                    "model.diffusion_model.input_blocks.0.0.bias",
+                    latent, 4, 64, 64, 320, 3, 3, 1, 1, 1, x) != 0) return -1;
+
+    /* input blocks. Ownership: skips[i] OWNS its buffer; `cur` borrows
+     * skips[i] until the next block replaces it. */
+    float *skips[12];
+    memset(skips, 0, sizeof(skips));
+    int H = 64, W = 64;
+    float *cur = x;   /* after conv_in, cur = x (320ch @ 64x64) */
+    for (int i = 0; i < 12; i++) {
+        char prefix[128];
+        int type = IN_TYPE[i];
+        if (type == 3) {  /* downsample only */
+            snprintf(prefix, sizeof(prefix), "model.diffusion_model.input_blocks.%d.0", i);
+            int C = IN_OUT_CH[i - 1];
+            float *ds = (float *)malloc((size_t)C * (H / 2) * (W / 2) * sizeof(float));
+            if (unet_downsample(u, prefix, cur, C, H, W, ds) != 0) return -1;
+            /* cur (skips[i-1]'s buffer) is STILL NEEDED by an output block
+             * (every skip feeds exactly one out block) — never free here. */
+            cur = ds;
+            H /= 2; W /= 2;
+        } else if (type == 1 || type == 2) {  /* resblock [+ transformer] */
+            snprintf(prefix, sizeof(prefix), "model.diffusion_model.input_blocks.%d.0", i);
+            int C = IN_OUT_CH[i];
+            int Cin = (i == 1) ? 320 : IN_OUT_CH[i - 1];  /* res in-ch = prev out-ch */
+            float *rb = (float *)malloc((size_t)C * H * W * sizeof(float));
+            if (unet_resblock(u, prefix, cur, Cin, C, H, W, temb, rb) != 0) return -1;
+            /* cur is still skips[i-1]'s buffer — do NOT free it here */
+            cur = rb;
+            if (type == 1) {
+                snprintf(prefix, sizeof(prefix), "model.diffusion_model.input_blocks.%d.1", i);
+                if (unet_transformer(u, prefix, cur, C, H, W, ctx) != 0) return -1;
+            }
+        }
+        skips[i] = cur;
+        /* cur is now OWNED by skips[i] */
+    }
+
+    /* middle block: res -> attn -> res. NOTE: cur is skips[11] — do NOT
+     * free it here (output block 0 concats it). */
+    {
+        float *m = (float *)malloc((size_t)1280 * H * W * sizeof(float));
+        float *m2 = (float *)malloc((size_t)1280 * H * W * sizeof(float));
+        if (g_stage_capture == 1) memcpy(g_stage_out[0], cur, (size_t)1280 * H * W * sizeof(float));
+        if (unet_resblock(u, "model.diffusion_model.middle_block.0", cur, 1280, 1280, H, W, temb, m) != 0) return -1;
+        /* middle attention: uses transformer-style attn with ctx (cross) */
+        if (unet_transformer(u, "model.diffusion_model.middle_block.1", m, 1280, H, W, ctx) != 0) return -1;
+        if (g_stage_capture == 2) memcpy(g_stage_out[0], m, (size_t)1280 * H * W * sizeof(float));
+        if (unet_resblock(u, "model.diffusion_model.middle_block.2", m, 1280, 1280, H, W, temb, m2) != 0) return -1;
+        free(m);
+        cur = m2;
+    }
+
+    /* output blocks: concat prev + skip, res, [attn], [up] */
+    for (int i = 0; i < 12; i++) {
+        const out_cfg_t *cfg = &OUT_CFG[i];
+        int Cin = cfg->prev_ch + cfg->skip_ch;  /* concat dims */
+        int C = cfg->out_ch;
+        /* concat cur (prev_ch) + skips[cfg->skip] (skip_ch) -> [Cin] */
+        float *cat = (float *)malloc((size_t)Cin * H * W * sizeof(float));
+        #pragma omp parallel for
+        for (int p = 0; p < H * W; p++) {
+            for (int c = 0; c < cfg->prev_ch; c++)
+                cat[(size_t)c * (H * W) + p] = cur[(size_t)c * (H * W) + p];
+            for (int c = 0; c < cfg->skip_ch; c++)
+                cat[(size_t)(cfg->prev_ch + c) * (H * W) + p] = skips[cfg->skip][(size_t)c * (H * W) + p];
+        }
+        free(cur);
+        char prefix[128];
+        snprintf(prefix, sizeof(prefix), "model.diffusion_model.output_blocks.%d.0", i);
+        float *rb = (float *)malloc((size_t)C * H * W * sizeof(float));
+        if (unet_resblock(u, prefix, cat, Cin, C, H, W, temb, rb) != 0) return -1;
+        free(cat);
+        cur = rb;
+        if (g_stage_capture == 5 && g_stage_block == i) {
+            memcpy(g_stage_out[0], cur, (size_t)C * H * W * sizeof(float));
+            g_stage_count = C * H * W;
+        }
+        if (cfg->attn) {
+            snprintf(prefix, sizeof(prefix), "model.diffusion_model.output_blocks.%d.1", i);
+            if (unet_transformer(u, prefix, cur, C, H, W, ctx) != 0) return -1;
+            if (g_stage_capture == 6 && g_stage_block == i)
+                memcpy(g_stage_out[0], cur, (size_t)C * H * W * sizeof(float));
+        }
+        if (cfg->up) {
+            /* upsample conv subblock varies (1 for block 2, 2 for 5/8) */
+            snprintf(prefix, sizeof(prefix), "model.diffusion_model.output_blocks.%d", i);
+            float *up = (float *)malloc((size_t)C * (2 * H) * (2 * W) * sizeof(float));
+            if (unet_upsample(u, prefix, cfg->up, cur, C, H, W, up) != 0) return -1;
+            free(cur); cur = up;
+            H *= 2; W *= 2;
+        }
+    }
+
+    /* out: groupnorm(32, 320) -> silu -> conv 320->4 */
+    float *gn_w = unet_get_f32(u, "model.diffusion_model.out.0.weight");
+    float *gn_b = unet_get_f32(u, "model.diffusion_model.out.0.bias");
+    if (!gn_w) return -1;
+    if (g_stage_capture == 3) memcpy(g_stage_out[0], cur, (size_t)320 * 64 * 64 * sizeof(float));
+    unet_gn(cur, 320, 64 * 64, gn_w, gn_b);
+    unet_silu(cur, 320 * 64 * 64);
+    if (unet_conv_q(u, "model.diffusion_model.out.2.weight",
+                    "model.diffusion_model.out.2.bias",
+                    cur, 320, 64, 64, 4, 3, 3, 1, 1, 1, out) != 0) return -1;
+    if (g_stage_capture == 4) memcpy(g_stage_out[0], out, (size_t)4 * 64 * 64 * sizeof(float));
+    free(cur);
+    for (int i = 0; i < 12; i++) free(skips[i]);
+    return 0;
+}
