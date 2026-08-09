@@ -484,6 +484,9 @@ int wubu_model_init_safetensors_ssd(wubu_model_t *m, const char *path,
         }
     }
     m->n_gqa_layers = n_gqa;
+    /* S6: store the active KV context cap into the model so downstream
+     * forward code (per-layer stride) uses the banked/rotated count. */
+    m->gqa_max_ctx = runtime_max_ctx;
     // Auto-select KV precision (Roofline) for this model before sizing cache.
     {
         int ghd = 128, gnkv = 1;

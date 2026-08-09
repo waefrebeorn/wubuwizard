@@ -260,10 +260,11 @@ typedef struct {
     float *ssm_states;    // [max_layers, SSM_V_HEADS, SSM_D_STATE, SSM_D_STATE]
     float *conv_states;   // [max_layers, B, CONV_KERNEL-1, CONV_DIM]
     
-    // GQA KV cache (10 GQA layers, max 256k context)
+    // GQA KV cache (10 GQA layers, max GQA_MAX_CTX context)
     void *gqa_k_cache;  // [10 * GQA_MAX_CTX * GQA_KV_DIM] F32 or F16
     void *gqa_v_cache;  // [10 * GQA_MAX_CTX * GQA_KV_DIM]
     int gqa_cache_len;   // how many tokens cached per layer (all 10 layers same len)
+    int gqa_max_ctx;     // active KV context cap — runtime-overridable (Revolver: banked, not flat-static)
     
     // GGUF context (for per-layer MoE lazy loading)
     // Model state save/restore (for speculative decode rollback)

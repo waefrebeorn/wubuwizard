@@ -383,8 +383,17 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
            model->n_layers/4,
            model->vocab_size);
     
-    // Allocate GQA KV cache (10 GQA layers × 256k context × 512 dim)
-    int64_t cache_elems = (int64_t)10 * GQA_MAX_CTX * GQA_KV_DIM;
+    // Allocate GQA KV cache (10 GQA layers × runtime context × GQA_KV_DIM)
+    // Revolver S6: the active KV context cap is runtime-overridable via
+    // WUBU_MAX_CTX (env), defaulting to GQA_MAX_CTX. The physical buffer
+    // is the banked cylinder; gqa_max_ctx is the active rotation count.
+    int runtime_max_ctx = GQA_MAX_CTX;
+    {
+        const char *mc_env = getenv("WUBU_MAX_CTX");
+        if (mc_env) { int mc = atoi(mc_env); if (mc > GQA_MAX_CTX/64 && mc <= GQA_MAX_CTX) runtime_max_ctx = mc; }
+    }
+    model->gqa_max_ctx = runtime_max_ctx;
+    int64_t cache_elems = (int64_t)10 * model->gqa_max_ctx * GQA_KV_DIM;
     model->gqa_k_cache = malloc(kv_cache_alloc_size(cache_elems));
     model->gqa_v_cache = malloc(kv_cache_alloc_size(cache_elems));
     memset(model->gqa_k_cache, 0, kv_cache_alloc_size(cache_elems));
@@ -664,7 +673,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             for (int li = 0; li < l; li++) {
                 if (!model->layers[li].is_ssm) l_gqa++;
             }
-            int64_t layer_cache_off = (int64_t)l_gqa * GQA_MAX_CTX * GQA_KV_DIM;
+            int64_t layer_cache_off = (int64_t)l_gqa * model->gqa_max_ctx * GQA_KV_DIM;
             void *k_cache = (uint8_t *)model->gqa_k_cache + kv_cache_alloc_size(layer_cache_off);
             void *v_cache = (uint8_t *)model->gqa_v_cache + kv_cache_alloc_size(layer_cache_off);
             void *k_out = (model->gqa_cache_len > 0) ? 
