@@ -66,7 +66,18 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     for (int l = 0; l < model->n_layers; l++) {
         wubu_layer_t *layer = &model->layers[l];
         layer->layer_idx = l;
-        layer->is_ssm = wubu_is_ssm_layer(l);
+        /* Tensor-driven block type (NOT wubu_is_ssm_layer's hardcoded
+         * (l+1)%4 pattern — that only matches Qwen3.5's 18-SSM/6-GQA split.
+         * MiniCPM5 is all-GQA, LFM2.5 is 8 GQA + 22 shortconv). */
+        {
+            char probe[256];
+            snprintf(probe, sizeof(probe), "blk.%d.shortconv.in_proj.weight", l);
+            int has_scv = gguf_find_tensor(ctx, probe) != NULL;
+            snprintf(probe, sizeof(probe), "blk.%d.attn_qkv.weight", l);
+            int has_ssm = gguf_find_tensor(ctx, probe) != NULL;
+            layer->block_type = has_scv ? 2 : (has_ssm ? 0 : 1);
+            layer->is_ssm = (layer->block_type == 0);
+        }
         
         gguf_tensor_info *t;
         
@@ -78,15 +89,21 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                 { fprintf(stderr, "Failed to load attn_norm[%d]\n", l); goto fail; }
         }
         
-        // post_attention_norm.weight
+        // post_attention_norm.weight (or ffn_norm.weight — LFM2.5 names the
+        // FFN-input norm ffn_norm and has no post_attention_norm)
         t = gguf_find_tensor(ctx, tensor_name_post_attn_norm(l));
+        if (!t) {
+            char fn[256];
+            snprintf(fn, sizeof(fn), "blk.%d.ffn_norm.weight", l);
+            t = gguf_find_tensor(ctx, fn);
+        }
         if (t) {
             layer->post_attn_norm_weight = (float *)malloc(D_MODEL * sizeof(float));
             if (!gguf_read_tensor_f32(ctx, t, layer->post_attn_norm_weight, D_MODEL))
                 { fprintf(stderr, "Failed to load post_attn_norm[%d]\n", l); goto fail; }
         }
         
-        if (layer->is_ssm) {
+        if (layer->block_type == 0) {
             // Load SSM weights — QUANTIZED-ONLY PATH for large weight matrices.
             // attn_qkv, attn_gate, ssm_out use quantized blob pointers (set later).
             // Small tensors (norms, a, dt, conv1d) loaded as F32.
@@ -153,6 +170,26 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             if (!ok) { fprintf(stderr, "Failed to load SSM weights for layer %d\n", l); goto fail; }
             printf("  Layer %d: SSM loaded (quantized attn_qkv/gate/out)\n", l);
             
+        } else if (layer->block_type == 2) {
+            // LFM shortconv block: attn_norm -> shortconv(in_proj -> conv1d
+            // -> out_proj) + residual -> ffn_norm -> dense FFN. The big
+            // projections are blob-bound later (riding ssm.attn_qkv/ssm_out);
+            // only the F32 conv kernel loads here.
+            char name[256];
+            int ok = 1;
+            layer->ssm.attn_qkv_weight = NULL;
+            layer->ssm.ssm_out_weight = NULL;
+            snprintf(name, sizeof(name), "blk.%d.shortconv.conv.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (!t) { fprintf(stderr, "Missing %s\n", name); goto fail; }
+            {
+                int64_t n_conv = 1;
+                for (int d = 0; d < t->n_dims; d++) n_conv *= t->dims[d];
+                layer->scv_conv_weight = (float *)malloc((size_t)n_conv * sizeof(float));
+                ok = ok && (gguf_read_tensor_f32(ctx, t, layer->scv_conv_weight, (int)n_conv) > 0);
+            }
+            if (!ok) { fprintf(stderr, "Failed to load shortconv weights for layer %d\n", l); goto fail; }
+            printf("  Layer %d: LFM shortconv loaded (in_proj/conv/out_proj)\n", l);
         } else {
             // Load GQA weights — QUANTIZED-ONLY PATH for large weight matrices.
             // attn_q, attn_k, attn_v, attn_output use quantized blob pointers (set later).
@@ -171,19 +208,22 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             // LARGE: attn_output.weight — quantized-only (blob pointer)
             layer->gqa.attn_output_weight = NULL;
             
-            // Small: attn_q_norm.weight [256] F32
+            // Small: attn_q_norm.weight [256] F32 — OPTIONAL (MiniCPM5 has
+            // no q/k norms; the forward uses the hardcoded L2-normalize)
             snprintf(name, sizeof(name), "blk.%d.attn_q_norm.weight", l);
             t = gguf_find_tensor(ctx, name);
-            if (!t) { fprintf(stderr, "Missing %s\n", name); goto fail; }
-            layer->gqa.attn_q_norm_weight = (float *)malloc(GQA_HEAD_DIM * sizeof(float));
-            ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_q_norm_weight, GQA_HEAD_DIM) > 0);
+            if (t) {
+                layer->gqa.attn_q_norm_weight = (float *)malloc(GQA_HEAD_DIM * sizeof(float));
+                ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_q_norm_weight, GQA_HEAD_DIM) > 0);
+            }
             
-            // Small: attn_k_norm.weight [256] F32
+            // Small: attn_k_norm.weight [256] F32 — OPTIONAL
             snprintf(name, sizeof(name), "blk.%d.attn_k_norm.weight", l);
             t = gguf_find_tensor(ctx, name);
-            if (!t) { fprintf(stderr, "Missing %s\n", name); goto fail; }
-            layer->gqa.attn_k_norm_weight = (float *)malloc(GQA_HEAD_DIM * sizeof(float));
-            ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_k_norm_weight, GQA_HEAD_DIM) > 0);
+            if (t) {
+                layer->gqa.attn_k_norm_weight = (float *)malloc(GQA_HEAD_DIM * sizeof(float));
+                ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_k_norm_weight, GQA_HEAD_DIM) > 0);
+            }
             
             if (!ok) { fprintf(stderr, "Failed to load GQA weights for layer %d\n", l); goto fail; }
             printf("  Layer %d: GQA loaded (quantized attn_q/k/v/output)\n", l);
@@ -201,24 +241,38 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         gguf_read_tensor_f32(ctx, t, model->norm_weight, D_MODEL);
         printf("  Final norm loaded\n");
     } else {
-        printf("  WARNING: output_norm.weight not found\n");
+        /* LFM2.5 names the final norm token_embd_norm.weight */
+        t = gguf_find_tensor(ctx, "token_embd_norm.weight");
+        if (t) {
+            model->norm_weight = (float *)malloc(D_MODEL * sizeof(float));
+            gguf_read_tensor_f32(ctx, t, model->norm_weight, D_MODEL);
+            printf("  Final norm loaded (token_embd_norm.weight)\n");
+        } else {
+            printf("  WARNING: output_norm.weight not found\n");
+        }
     }
     
     // Embeddings: auto-extract from GGUF if not available, else load from file
     model->use_embedding_file = true;
-    const char *emb_path = "data/qwen36_embeddings_c.bin.raw";
+    /* The MODEL's vocab comes from the token_embd tensor — the embedding
+     * FILE is model-specific (Qwen3.5=248320, LFM2.5=128000); matching the
+     * file against a hardcoded 248320 silently loads the WRONG embeddings. */
+    gguf_tensor_info *t_emb0 = gguf_find_tensor(ctx, "token_embd.weight");
+    int model_vocab = t_emb0 && t_emb0->dims[1] > 0 ? (int)t_emb0->dims[1] : 0;
+    char emb_path[256];
+    snprintf(emb_path, sizeof(emb_path), "data/embeddings_%d.bin.raw", model_vocab);
     FILE *emb_f = fopen(emb_path, "rb");
-    if (emb_f) {
+    if (emb_f && model_vocab > 0) {
         fseek(emb_f, 0, SEEK_END);
         long emb_size = ftell(emb_f);
         int file_vocab = (int)(emb_size / (D_MODEL * sizeof(float)));
-        if (file_vocab == 248320) {
+        if (file_vocab == model_vocab) {
             model->vocab_size = file_vocab;
             printf("  Embeddings: %d tokens from file (%ld MB)\n", model->vocab_size, emb_size / (1024*1024));
             fclose(emb_f);
         } else {
             fclose(emb_f);
-            printf("  Embedding file has wrong size (%d tokens, expected 248320), re-extracting...\n", file_vocab);
+            printf("  Embedding file has wrong size (%d tokens, expected %d), re-extracting...\n", file_vocab, model_vocab);
             goto extract_embeddings;
         }
     } else {
@@ -227,7 +281,10 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             gguf_tensor_info *t_emb = gguf_find_tensor(ctx, "token_embd.weight");
             if (!t_emb) { fprintf(stderr, "  ERROR: token_embd.weight not found\n"); }
             else {
-                int64_t n_emb = (int64_t)248320 * D_MODEL;
+                /* vocab from the tensor itself (LFM2.5 = 128000, Qwen3.5 =
+                 * 248320 — never hardcode) */
+                int64_t vocab = t_emb->dims[1] > 0 ? t_emb->dims[1] : 248320;
+                int64_t n_emb = vocab * D_MODEL;
                 float *temp_emb = (float *)malloc(n_emb * sizeof(float));
                 if (temp_emb && gguf_read_tensor_f32(ctx, t_emb, temp_emb, n_emb) > 0) {
                     FILE *out = fopen(emb_path, "wb");
@@ -238,9 +295,10 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                     }
                     // Use the in-memory copy for this run
                     model->token_embd = temp_emb;
-                    model->vocab_size = 248320;
+                    model->vocab_size = (int)vocab;
                     model->use_embedding_file = false;
-                    printf("  Token embeddings: %ld MB (in-memory)\n", n_emb * sizeof(float) / (1024*1024));
+                    printf("  Token embeddings: %lld tokens x %d (%.0f MB in-memory)\n",
+                           (long long)vocab, D_MODEL, n_emb * sizeof(float) / (1024.0 * 1024.0));
                 } else {
                     if (temp_emb) free(temp_emb);
                     fprintf(stderr, "  Failed to extract embeddings\n");
@@ -257,7 +315,10 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     // Load output weight for logit projection — QUANTIZED-ONLY (Q4_K blob pointer)
     model->output_weight = NULL;
     gguf_tensor_info *t_out = gguf_find_tensor(ctx, "output.weight");
-    if (!t_out) { fprintf(stderr, "  ERROR: output.weight not found\n"); }
+    if (!t_out) {
+        t_out = gguf_find_tensor(ctx, "token_embd.weight");  /* tied */
+        if (!t_out) fprintf(stderr, "  ERROR: output.weight not found\n");
+    }
     
     // Allocate logit cache (reuses previous token's logits to skip output proj)
     model->logit_cache = (float *)calloc(model->vocab_size, sizeof(float));
@@ -293,7 +354,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             wubu_layer_t *layer = &model->layers[l];
             gguf_tensor_info *t;
             char name[256];
-            if (layer->is_ssm) {
+            if (layer->block_type == 0) {
                 snprintf(name, sizeof(name), "blk.%d.attn_qkv.weight", l);
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) { layer->ssm.attn_qkv_weight_q = blob + t->data_offset; layer->ssm.attn_qkv_weight_type = t->ggml_type; }
@@ -301,6 +362,14 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) { layer->ssm.attn_gate_weight_q = blob + t->data_offset; layer->ssm.attn_gate_weight_type = t->ggml_type; }
                 snprintf(name, sizeof(name), "blk.%d.ssm_out.weight", l);
+                t = gguf_find_tensor(ctx, name);
+                if (t && blob) { layer->ssm.ssm_out_weight_q = blob + t->data_offset; layer->ssm.ssm_out_weight_type = t->ggml_type; }
+            } else if (layer->block_type == 2) {
+                /* LFM shortconv: in_proj/out_proj ride the ssm blob slots */
+                snprintf(name, sizeof(name), "blk.%d.shortconv.in_proj.weight", l);
+                t = gguf_find_tensor(ctx, name);
+                if (t && blob) { layer->ssm.attn_qkv_weight_q = blob + t->data_offset; layer->ssm.attn_qkv_weight_type = t->ggml_type; }
+                snprintf(name, sizeof(name), "blk.%d.shortconv.out_proj.weight", l);
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) { layer->ssm.ssm_out_weight_q = blob + t->data_offset; layer->ssm.ssm_out_weight_type = t->ggml_type; }
             } else {
@@ -319,7 +388,31 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             }
         }
         gguf_tensor_info *t_out = gguf_find_tensor(ctx, "output.weight");
+        if (!t_out) {
+            /* tied embeddings (LFM2.5): logits = h @ token_embd^T — same
+             * [vocab][D] layout, same blob pointer works. */
+            t_out = gguf_find_tensor(ctx, "token_embd.weight");
+            if (t_out) fprintf(stderr, "  Tied embeddings: output proj <- token_embd.weight\n");
+        }
         if (t_out && blob) { model->output_weight_q = blob + t_out->data_offset; model->output_weight_type = t_out->ggml_type; }
+
+        // Dense SwiGLU FFN blob pointers (ffn_gate/up/down.weight) — bound
+        // for every block type; the forward wiring is the dense-FFN parity
+        // work (currently the forward pass-throughs when MoE is disabled).
+        for (int l = 0; l < model->n_layers; l++) {
+            wubu_layer_t *layer = &model->layers[l];
+            gguf_tensor_info *t;
+            char name[256];
+            snprintf(name, sizeof(name), "blk.%d.ffn_gate.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (t && blob) { layer->ffn_gate_q = blob + t->data_offset; layer->ffn_gate_type = t->ggml_type; }
+            snprintf(name, sizeof(name), "blk.%d.ffn_up.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (t && blob) { layer->ffn_up_q = blob + t->data_offset; layer->ffn_up_type = t->ggml_type; }
+            snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (t && blob) { layer->ffn_down_q = blob + t->data_offset; layer->ffn_down_type = t->ggml_type; }
+        }
 
         // Save MoE quantized pointers for each layer (routed + shared experts)
         for (int l = 0; l < model->n_layers; l++) {
@@ -377,13 +470,19 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         }
     }
     
-    printf("Model initialized: %d layers (%d SSM, %d GQA), %d vocab\n",
-           model->n_layers,
-           model->n_layers - model->n_layers/4,
-           model->n_layers/4,
-           model->vocab_size);
+    int n_ssm = 0, n_gqa = 0, n_scv = 0;
+    for (int l = 0; l < model->n_layers; l++) {
+        if (model->layers[l].block_type == 0) n_ssm++;
+        else if (model->layers[l].block_type == 1) n_gqa++;
+        else n_scv++;
+    }
+    printf("Model initialized: %d layers (%d SSM, %d GQA, %d shortconv), %d vocab\n",
+           model->n_layers, n_ssm, n_gqa, n_scv, model->vocab_size);
     
-    // Allocate GQA KV cache (10 GQA layers × runtime context × GQA_KV_DIM)
+    // Allocate GQA KV cache (ACTUAL GQA layer count × runtime context ×
+    // GQA_KV_DIM — the old hardcoded "10" sized 5.4GB on this box
+    // (10 × 524288 × 512 × 2B), OOMing/swapping with the model + embeddings
+    // resident. MiniCPM5 has 3 GQA, LFM2.5 has 8.)
     // Revolver S6: the active KV context cap is runtime-overridable via
     // WUBU_MAX_CTX (env), defaulting to GQA_MAX_CTX. The physical buffer
     // is the banked cylinder; gqa_max_ctx is the active rotation count.
@@ -393,7 +492,13 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         if (mc_env) { int mc = atoi(mc_env); if (mc > GQA_MAX_CTX/64 && mc <= GQA_MAX_CTX) runtime_max_ctx = mc; }
     }
     model->gqa_max_ctx = runtime_max_ctx;
-    int64_t cache_elems = (int64_t)10 * model->gqa_max_ctx * GQA_KV_DIM;
+    int n_gqa_layers = 0;
+    for (int l = 0; l < model->n_layers; l++)
+        if (model->layers[l].block_type == 1) n_gqa_layers++;
+    int64_t cache_elems = (int64_t)(n_gqa_layers > 0 ? n_gqa_layers : 1) * model->gqa_max_ctx * GQA_KV_DIM;
+    fprintf(stderr, "  GQA KV cache: %d layers x %d ctx x %d dims (%.0f MB)\n",
+            n_gqa_layers, model->gqa_max_ctx, GQA_KV_DIM,
+            cache_elems * 2.0 / (1024.0 * 1024.0));
     model->gqa_k_cache = malloc(kv_cache_alloc_size(cache_elems));
     model->gqa_v_cache = malloc(kv_cache_alloc_size(cache_elems));
     memset(model->gqa_k_cache, 0, kv_cache_alloc_size(cache_elems));
@@ -584,7 +689,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
         
         double t0 = wall_time();
         
-        if (layer->is_ssm) {
+        if (layer->block_type == 0) {
             float *ssm_state = model->ssm_states + l * SSM_V_HEADS * SSM_D_STATE * SSM_D_STATE;
             float *conv_state = model->conv_states + l * (CONV_KERNEL - 1) * CONV_DIM;
 #ifdef GPU_SUPPORT
@@ -639,8 +744,21 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             {
                 wubu_ssm_forward(normed, B, T, &layer->ssm,
                     ssm_state, conv_state, attn_out, NULL, NULL, ssm_ws);
-            }
-        } else {
+                }
+                } else if (layer->block_type == 2) {
+                /* LFM shortconv block — LOADED, but the forward math is not yet
+                 * ported (needs the reference implementation for the exact
+                 * in_proj/conv/out_proj semantics). Pass through + warn once so
+                 * the model runs without crashing; this is the LFM2.5 parity
+                 * work, not a silent correctness claim. */
+                static int scv_warned = 0;
+                if (!scv_warned) {
+                    fprintf(stderr, "  NOTE: LFM shortconv forward not ported yet — "
+                            "shortconv layers pass through (parity work queued)\n");
+                    scv_warned = 1;
+                }
+                memcpy(attn_out, normed, (size_t)N * D_MODEL * sizeof(float));
+                } else {
 #ifdef GPU_SUPPORT
             if (model->gpu_ctx) {
                 // Use cached GQA layer index to check if GPU attention is beneficial
@@ -671,7 +789,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             int l_gqa = 0;  // GQA layer index among GQA layers
             // Count GQA layers up to current to index into cache
             for (int li = 0; li < l; li++) {
-                if (!model->layers[li].is_ssm) l_gqa++;
+                if (model->layers[li].block_type == 1) l_gqa++;
             }
             int64_t layer_cache_off = (int64_t)l_gqa * model->gqa_max_ctx * GQA_KV_DIM;
             void *k_cache = (uint8_t *)model->gqa_k_cache + kv_cache_alloc_size(layer_cache_off);

@@ -68,12 +68,12 @@ void wubu_model_close(wubu_format_ctx_t *ctx) {
 /* Forward declarations — each adapter lives in its own .c file. */
 extern wubu_model_format_t wubu_format_gguf;
 extern wubu_model_format_t wubu_format_safetensors;
-/* ONNX adapter not yet implemented — registers as probe-only. */
-extern wubu_model_format_t wubu_format_onnx_stub;
+/* ONNX adapter: real protobuf initializer parser (wubu_model_format_onnx.c) */
+extern wubu_model_format_t wubu_format_onnx;
 
 void wubu_model_format_register_gguf(void)    { wubu_model_format_register(&wubu_format_gguf); }
 void wubu_model_format_register_safetensors(void) { wubu_model_format_register(&wubu_format_safetensors); }
-void wubu_model_format_register_onnx(void)      { wubu_model_format_register(&wubu_format_onnx_stub); }
+void wubu_model_format_register_onnx(void)      { wubu_model_format_register(&wubu_format_onnx); }
 
 void wubu_model_format_register_all(void) {
     wubu_model_format_register_gguf();

@@ -15,10 +15,24 @@ extern "C" {
 typedef struct wubu_layer_t {
     int layer_idx;
     bool is_ssm;  // false = GQA
+    int block_type;  /* 0=Gated-DeltaNet SSM, 1=GQA, 2=LFM shortconv
+                      * (tensor-driven at load — NOT the hardcoded (l+1)%4
+                      * pattern, which only matches Qwen3.5's 18/6 split) */
     
     // Weights (loaded from GGUF)
     ssm_layer_weights ssm;      // valid if is_ssm
     gqa_layer_weights gqa;      // valid if !is_ssm
+    
+    // LFM shortconv block (block_type 2): in_proj/out_proj ride the ssm
+    // struct's attn_qkv/ssm_out blob pointers (same shapes); the 1D conv
+    // kernel is F32.
+    float *scv_conv_weight;     // [3*D] F32 (shortconv.conv.weight)
+    
+    // Dense SwiGLU FFN (blob pointers — ffn_gate/up/down.weight). Bound for
+    // every block type; the forward wiring is the dense-FFN parity work.
+    const void *ffn_gate_q; int ffn_gate_type;
+    const void *ffn_up_q;   int ffn_up_type;
+    const void *ffn_down_q; int ffn_down_type;
     
     // Layer norm (pre-attention for all layers)
     float *attn_norm_weight;    // [D_MODEL], RMSNorm
