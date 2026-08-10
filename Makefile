@@ -2141,6 +2141,18 @@ test_vision_real: tools/test_vision_real.c $(MODEL_OBJ) src/wubu_dense_ffn.o $(C
 	$(CXX) $(CFLAGS) -DGPU_SUPPORT -o $@ tools/test_vision_real.c $(MODEL_OBJ) $(CUDA_OBJ) $(GPU_OBJ) $(LDFLAGS) -L$(CUDA_LIBDIR) -lcublas -lcudart
 	@echo "test_vision_real built (GPU vision + text)"
 
+# SigLIP vision encoder (SmolVLM2 mmproj) — CPU-only test
+test_siglip: tools/test_siglip.c src/wubu_siglip.o src/gguf_reader.o src/wubu_dims.o src/wubu_dims_gpu_stub.o
+	$(CC) $(CFLAGS) -o $@ tools/test_siglip.c src/wubu_siglip.o src/gguf_reader.o src/wubu_dims.o src/wubu_dims_gpu_stub.o $(LDFLAGS)
+	@echo "test_siglip built (SigLIP/SmolVLM2 vision encoder)"
+
+test_siglip_parity: tools/test_siglip_parity.c src/wubu_siglip.o src/gguf_reader.o src/wubu_dims.o src/wubu_dims_gpu_stub.o
+	$(CC) $(CFLAGS) -o $@ tools/test_siglip_parity.c src/wubu_siglip.o src/gguf_reader.o src/wubu_dims.o src/wubu_dims_gpu_stub.o $(LDFLAGS)
+	@echo "test_siglip_parity built (compares vs llama-mtmd-debug oracle)"
+
+src/wubu_siglip.o: src/wubu_siglip.c include/wubu_siglip.h include/gguf_reader.h
+	$(CC) $(CFLAGS) -o $@ -c $<
+
 infer_vision_text_gpu: tools/infer_vision_text_gpu_nvcc.o $(MODEL_OBJ) src/wubu_dense_ffn.o $(CUDA_OBJ) src/cuda_vision.o $(GPU_OBJ)
 	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ $^ $(LDFLAGS) $(CUDA_LIBS) -L$(CUDA_LIBDIR) -lcublas -lcudart -lstdc++
 
