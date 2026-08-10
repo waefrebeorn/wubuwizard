@@ -2131,7 +2131,7 @@ infer_moe_lazy: tools/infer_moe_lazy.c $(CORE_OBJ) src/wubu_dense_ffn.o
 infer_unified: tools/infer_unified.c $(MODEL_OBJ) src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-infer_vision: tools/infer_vision.c $(CORE_OBJ) src/wubu_dense_ffn.o
+infer_vision: tools/infer_vision.c $(filter-out src/wubu_dense_ffn.o src/gguf_reader.o,$(CORE_OBJ)) src/wubu_siglip.o src/gguf_reader.o src/wubu_dense_ffn.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 infer_vision_text: tools/infer_vision_text.c $(MODEL_OBJ) src/wubu_dense_ffn.o

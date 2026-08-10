@@ -15,7 +15,69 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <immintrin.h>  // AVX2/FMA intrinsics (l2_norm, rms_norm, conv1d)
+
+/* ---- Scalar polynomial exp, matching llama.cpp's ggml_v_expf ----
+ * llama.cpp uses a polynomial approximation of expf (from the Arm/LLVM
+ * optimized routine) in its SIMD silu/sigmoid paths. On x86 with AVX2,
+ * ggml_v_silu calls ggml_v_expf — NOT the libm expf. To match its
+ * floating-point results bit-for-bit, we use the same polynomial here.
+ * Max error: 1.45358 ulps + 0.5 ulps.
+ *
+ * This is the scalar port of the AVX2 ggml_v_expf (vec.h line 1215),
+ * using fmaf for the FMA operations. */
+static inline float wubu_poly_expf(float x) {
+    /* r = 2^23 + 0.5 — magic number for exponent extraction */
+    const float r = 0x1.8p23f;
+    /* z = log2(e) * x + r  (FMA) */
+    float z = fmaf(x, 0x1.715476p+0f, r);
+    /* n = z - r  (extracts integer part via float truncation) */
+    float n = z - r;
+    /* b = (x - n*ln2_hi) - n*ln2_lo, each step fused — MUST match
+     * llama.cpp's AVX2 chain `_mm256_fnmadd_ps(n, ln2_lo,
+     * _mm256_fnmadd_ps(n, ln2_hi, x))` exactly: hi term subtracted
+     * FIRST, both fused. The naive `x - n*lo - n*hi` form (plain
+     * multiplies, reversed order) mismatches the oracle in ~39% of
+     * inputs at 0.5-ulp — enough to flip near-tie logits. */
+    float b = fmaf(-n, 0x1.7f7d1cp-20f, fmaf(-n, 0x1.62e4p-1f, x));
+
+    /* e = reinterpret(z as uint32) << 23 — exponent bits */
+    union { float f; uint32_t u; } zu; zu.f = z;
+    uint32_t e = zu.u << 23;
+    /* k = float(e + 1.0f_bits) — = 2^n approximately */
+    union { float f; uint32_t u; } ku; ku.u = e + 0x3f800000u;
+    float k = ku.f;
+
+    /* c = |n| > 126  (overflow threshold) */
+    float n_abs = n < 0 ? -n : n;
+    uint32_t c = (n_abs > 126.0f) ? 0xffffffffu : 0u;
+
+    float u = b * b;
+    /* j = polynomial in u and b (scalar port of AVX2 vector j):
+     *   fma(fma(fma(c1, b, c2), u, fma(c3, b, c4)), u, c5*b)
+     * The "+1" is supplied by the final fmadd: k*(j + 1) = j*k + k. */
+    float j = fmaf(fmaf(fmaf(0x1.0e4020p-7f, b, 0x1.573e2ep-5f),
+                        u, fmaf(0x1.555e66p-3f, b, 0x1.fffdb6p-2f)),
+                    u, 0x1.ffffecp-1f * b);
+
+    if (c == 0) {
+        /* no overflow: return j * k + k  (fmadd) */
+        return fmaf(j, k, k);
+    }
+
+    /* overflow path */
+    uint32_t g = (n <= 0.0f) ? 0x82000000u : 0u;
+    union { float f; uint32_t u; } s1u; s1u.u = g + 0x7f000000u;
+    float s1 = s1u.f;
+    union { float f; uint32_t u; } s2u; s2u.u = e - g;
+    float s2 = s2u.f;
+    /* d = |n| > 192  (extreme overflow → infinity) */
+    uint32_t d = (n_abs > 192.0f) ? 0xffffffffu : 0u;
+    if (d) return s1 * s1;         /* infinity */
+    /* c true, not extreme: (s2 * j + s2) * s1 = (s2 * (j + 1)) * s1 */
+    return (s2 * j + s2) * s1;
+}
 
 /* ---- Global shared with wubu_ssm.c ---- */
 float g_ssm_l2_eps = 1e-6f;
@@ -50,7 +112,7 @@ void wubu_silu(int n, const float *x, float *out) {
     for (int i = 0; i < n; i++) {
         float v = x[i];
         if (v < -80.0f) out[i] = 0.0f;
-        else out[i] = v / (1.0f + expf(-v));
+        else out[i] = v / (1.0f + expf(-v));  /* A/B: expf vs poly */
     }
 }
 
@@ -60,7 +122,7 @@ void wubu_sigmoid(int n, const float *x, float *out) {
         float v = x[i];
         if (v < -80.0f) out[i] = 0.0f;
         else if (v > 80.0f) out[i] = 1.0f;
-        else out[i] = 1.0f / (1.0f + expf(-v));
+        else out[i] = 1.0f / (1.0f + expf(-v));  /* llama.cpp ggml_vec_sigmoid_f32 uses expf */
     }
 }
 
@@ -68,6 +130,7 @@ void wubu_silu_backward(int n, const float *x, const float *y,
                         const float *dy, float *dx) {
     for (int i = 0; i < n; i++) {
         float v = x[i];
+        /* silu backward uses sigmoid, which matches llama.cpp's expf path */
         float sig = 1.0f / (1.0f + expf(-v));
         float silu = y[i];
         float silu_grad = silu + sig * (1.0f - silu);

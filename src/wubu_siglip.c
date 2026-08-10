@@ -39,7 +39,7 @@ static void siglip_ln(const float *x, int n, int d,
         double var = 0.0;
         for (int i = 0; i < d; i++) { double dd = inp[i] - mean; var += dd * dd; }
         var /= d;
-        float inv_std = 1.0f / (sqrtf((float)var) + eps);
+        float inv_std = 1.0f / sqrtf((float)var + eps);
         for (int i = 0; i < d; i++)
             oup[i] = (inp[i] - (float)mean) * inv_std * weight[i] + (bias ? bias[i] : 0.0f);
     }
@@ -49,7 +49,12 @@ static void siglip_ln(const float *x, int n, int d,
 // GELU (tanh approximation — llama.cpp ggml_gelu)
 // ================================================================
 static inline float siglip_gelu(float x) {
-    return 0.5f * x * (1.0f + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
+    /* Match llama.cpp ggml_gelu_f32 exactly:
+     *   0.5f*x*(1.0f + tanhf(SQRT_2_OVER_PI*x*(1.0f + GELU_COEF_A*x*x)))
+     * NOT the factored x^3 form — the (1 + c*x^2) form lets the compiler
+     * emit an FMA for the inner expression under -ffp-contract=fast,
+     * matching llama.cpp's bit-exact rounding. */
+    return 0.5f * x * (1.0f + tanhf(0.79788456080286535587989211986876f * x * (1.0f + 0.044715f * x * x)));
 }
 
 // ================================================================

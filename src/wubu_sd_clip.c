@@ -66,6 +66,46 @@ static void bpe_bytes_to_unicode(char (*out)[5]) {
 }
 
 static void bpe_free_dummy(clip_bpe_t *t);  /* fwd decl (defined below) */
+static clip_bpe_t *bpe_load(const char *vocab_path, const char *merges_path);
+
+/* Resolve the CLIP BPE files without /tmp: try (1) CLIP_DIR env,
+ * (2) ./models/clip relative to CWD, (3) repo models/clip next to
+ * the binary, (4) legacy /tmp/clip. Returns nonzero if found. */
+static int bpe_find_paths(char *vbuf, size_t vsz, char *mbuf, size_t msz) {
+    const char *cands[][2] = {
+        { "models/clip/vocab.json",      "models/clip/merges.txt" },
+        { "../models/clip/vocab.json",   "../models/clip/merges.txt" },
+        { "/tmp/clip/vocab.json",        "/tmp/clip/merges.txt" },
+    };
+    const char *env = getenv("CLIP_DIR");
+    if (env && env[0]) {
+        snprintf(vbuf, vsz, "%s/vocab.json", env);
+        snprintf(mbuf, msz, "%s/merges.txt", env);
+        FILE *f = fopen(vbuf, "rb");
+        if (f) { fclose(f); return 1; }
+    }
+    for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+        FILE *f = fopen(cands[i][0], "rb");
+        if (!f) continue;
+        fclose(f);
+        f = fopen(cands[i][1], "rb");
+        if (!f) continue;
+        fclose(f);
+        snprintf(vbuf, vsz, "%s", cands[i][0]);
+        snprintf(mbuf, msz, "%s", cands[i][1]);
+        return 1;
+    }
+    return 0;
+}
+
+static clip_bpe_t *bpe_load_paths(void) {
+    char vpath[512], mpath[512];
+    if (!bpe_find_paths(vpath, sizeof(vpath), mpath, sizeof(mpath))) {
+        fprintf(stderr, "CLIP: tokenizer files not found (set CLIP_DIR or run from the repo with models/clip/)\n");
+        return NULL;
+    }
+    return bpe_load(vpath, mpath);
+}
 
 static clip_bpe_t *bpe_load(const char *vocab_path, const char *merges_path) {
     clip_bpe_t *t = (clip_bpe_t *)calloc(1, sizeof(clip_bpe_t));
@@ -460,7 +500,7 @@ wubu_sd_clip_t *wubu_sd_clip_load(void *ctx) {
         gguf_ctx *g = (gguf_ctx *)ctx;
         if (!g->data_blob) gguf_buffer_data(g);
     }
-    c->bpe = bpe_load("/tmp/clip/vocab.json", "/tmp/clip/merges.txt");
+    c->bpe = bpe_load_paths();
     if (!c->bpe) {
         fprintf(stderr, "CLIP: tokenizer load failed (need /tmp/clip/vocab.json + merges.txt)\n");
         free(c); return NULL;
