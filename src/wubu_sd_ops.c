@@ -503,9 +503,56 @@ void wubu_sd_upsample2x(const float *x, int N, int C, int H, int W, float *y)
         }
 }
 
+/* NEON exp2: 2^x = 2^i * 2^f — exponent insertion (exact) + degree-8
+ * Horner for e^(f*ln2) (sub-ULP). FEXPA is SVE-only (ARMv8.2+), A72
+ * has no SVE — this poly is the A72 fast path (~10 vector ops/4 elems
+ * vs a libm exp2f call per element). llama.cpp PR 7154 pattern. */
+static inline float32x4_t exp2q_f32(float32x4_t x) {
+    float32x4_t i = vrndnq_f32(x);
+    float32x4_t f = vsubq_f32(x, i);
+    int32x4_t ie = vcvtq_s32_f32(i);
+    ie = vshlq_n_s32(vaddq_s32(ie, vdupq_n_s32(127)), 23);
+    float32x4_t pow2i = vreinterpretq_f32_s32(ie);
+    float32x4_t u = vmulq_f32(f, vdupq_n_f32(0.6931471805599453f));
+    float32x4_t p = vdupq_n_f32(2.4801587301587302e-05f);
+    p = vfmaq_f32(vdupq_n_f32(1.984126984126984e-04f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(1.3888888888888888e-03f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(8.3333333333333332e-03f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(4.1666666666666666e-02f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(1.6666666666666666e-01f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(0.5f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(1.0f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(1.0f), p, u);
+    return vmulq_f32(pow2i, p);
+}
+
 void wubu_sd_silu(float *x, int n) {
+    /* exp2(x*log2e) — NEON polynomial on AArch64, 2x faster than
+     * software expf (llama.cpp PR 7154, sub-ULP accuracy). */
+    const float log2e = 1.4426950408889634f;
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    const float32x4_t le = vdupq_n_f32(log2e), one = vdupq_n_f32(1.0f);
+    int i = 0;
+    #pragma omp parallel for lastprivate(i)
+    for (i = 0; i <= n - 8; i += 8) {
+        float32x4_t s0 = vld1q_f32(x + i), s1 = vld1q_f32(x + i + 4);
+        float32x4_t e0 = exp2q_f32(vmulq_f32(vnegq_f32(s0), le));
+        float32x4_t e1 = exp2q_f32(vmulq_f32(vnegq_f32(s1), le));
+        vst1q_f32(x + i,     vdivq_f32(s0, vaddq_f32(one, e0)));
+        vst1q_f32(x + i + 4, vdivq_f32(s1, vaddq_f32(one, e1)));
+    }
     #pragma omp parallel for
-    for (int i = 0; i < n; i++) x[i] = x[i] / (1.0f + expf(-x[i]));
+    for (int j = i; j < n; j++) {
+        float s = x[j];
+        x[j] = s / (1.0f + exp2f(-s * log2e));
+    }
+#else
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        float s = x[i];
+        x[i] = s / (1.0f + exp2f(-s * log2e));
+    }
+#endif
 }
 
 /* ---- quantized linear (weights stay in the mmap'd blob) ----
@@ -1181,6 +1228,122 @@ static void wubu_sd_conv2d_q_wino(const float *x, int N, int C_in, int H, int W,
     free(V);
 }
 
+/* ============ Decoupled pixel-shuffle upsample (experimental) ===========
+ * us=2, 3x3 s1 p1 conv on the upscaled grid, decomposed into 4 PHASES:
+ * output (2i+di, 2j+dj) for phase (di,dj) reads only the 2x2 source
+ * window {i-1+di, i+di} x {j-1+dj, j+dj} — 4 taps instead of 9, with
+ * PHASE-SPECIFIC pre-summed weights (Turbo-VAED's "decoupled pixel
+ * shuffle": conv on the SMALL grid, not the upsampled one).
+ *   MACs: 4 phases x 4 taps = 16 per 2x2 block vs 36 direct = 2.25x fewer.
+ *   xcol: 4*C_in per pixel vs 9*C_in = 2.25x smaller build AND GEMM traffic.
+ * Parity RISK (like Winograd): weight pre-summing changes the FMA
+ * accumulation order — sum-of-products vs product-of-sums. Test against
+ * max diff=1. Enabled via SD_PIXELSHUFFLE=1.
+ * kh/kw -> (dr,dc) mapping per phase (derived from (2i+di+kh-1)>>1):
+ *   di=0: kh {0}->dr0, {1,2}->dr1      di=1: kh {0,1}->dr0, {2}->dr1
+ *   dj=0: kw {0}->dc0, {1,2}->dc1      dj=1: kw {0,1}->dc0, {2}->dc1 */
+static void wubu_sd_conv2d_q_pixshuf(const float *x, int N, int C_in, int H, int W,
+                                     const void *w, int wtype, const float *b,
+                                     int C_out, float *y) {
+    const int H_out_ = 2 * H, W_out_ = 2 * W;
+    const int W_half = W, H_half = H;            /* phase grid = source grid */
+    const int Kp = C_in * 4;                     /* 2x2 taps per phase */
+    float *w_f32 = sd_dequant_w(w, wtype, C_in * 9, C_out);
+    if (!w_f32) return;
+    /* phase weights W'[phase][co][ci*4 + dr*2 + dc] */
+    float *Wp = (float *)malloc((size_t)4 * C_out * Kp * sizeof(float));
+    if (!Wp) { free(w_f32); return; }
+    for (int co = 0; co < C_out; co++)
+        for (int ci = 0; ci < C_in; ci++) {
+            const float *W = w_f32 + (size_t)co * C_in * 9 + ci * 9;
+            /* W[kh*3+kw] */
+            float *w00 = Wp + (0 * C_out + co) * Kp + ci * 4;
+            float *w01 = Wp + (1 * C_out + co) * Kp + ci * 4;
+            float *w10 = Wp + (2 * C_out + co) * Kp + ci * 4;
+            float *w11 = Wp + (3 * C_out + co) * Kp + ci * 4;
+            w00[0] = W[0];             w00[1] = W[1] + W[2];
+            w00[2] = W[3] + W[6];      w00[3] = W[4] + W[5] + W[7] + W[8];
+            w01[0] = W[0] + W[1];      w01[1] = W[2];
+            w01[2] = W[3] + W[4] + W[6] + W[7];  w01[3] = W[5] + W[8];
+            w10[0] = W[0] + W[3];      w10[1] = W[1] + W[2] + W[4] + W[5];
+            w10[2] = W[6];             w10[3] = W[7] + W[8];
+            w11[0] = W[0] + W[1] + W[3] + W[4];  w11[1] = W[2] + W[5];
+            w11[2] = W[6] + W[7];      w11[3] = W[8];
+        }
+    free(w_f32);
+    /* tiles over phase rows (each tile = T output rows = T/2 source rows) */
+    int T = 8;
+    if ((size_t)(T / 2 + 1) * W * Kp * 2 > (12u << 20)) T = 4;
+    uint16_t *xcol = NULL;
+    float *yt = NULL;
+    size_t M_tile = ((size_t)T / 2 + 1) * W;     /* phase pixels per tile */
+    if (posix_memalign((void **)&xcol, 64, M_tile * Kp * sizeof(uint16_t)) != 0) xcol = NULL;
+    if (posix_memalign((void **)&yt, 64, 4 * M_tile * C_out * sizeof(float)) != 0) yt = NULL;
+    if (!xcol || !yt) { free(xcol); free(yt); free(Wp); return; }
+    for (int n = 0; n < N; n++) {
+        const float *xn = x + (size_t)n * C_in * H * W;
+        float *yn = y + (size_t)n * C_out * H_out_ * W_out_;
+        for (int oh0 = 0; oh0 < H_out_; oh0 += T) {
+            int T_eff = (oh0 + T < H_out_) ? T : (H_out_ - oh0);
+            int Ni = (T_eff + 1) / 2;            /* phase rows in this tile */
+            int i0 = oh0 / 2;
+            for (int ph = 0; ph < 4; ph++) {
+                int di = ph >> 1, dj = ph & 1;
+                int Mp = Ni * W;
+                /* im2col for this phase: xcol[p][ci*4+dr*2+dc] */
+                #pragma omp parallel for collapse(2) schedule(static)
+                for (int ii = 0; ii < Ni; ii++)
+                    for (int j = 0; j < W; j++) {
+                        uint16_t *xm = xcol + ((size_t)ii * W + j) * Kp;
+                        int srow = i0 + ii - 1 + di;   /* src base row */
+                        int scol = j - 1 + dj;         /* src base col */
+                        for (int ci = 0; ci < C_in; ci++) {
+                            const float *xci = xn + (size_t)ci * H * W;
+                            uint16_t *xk = xm + ci * 4;
+                            for (int dr = 0; dr < 2; dr++) {
+                                int r = srow + dr;
+                                for (int dc = 0; dc < 2; dc++) {
+                                    int c = scol + dc;
+                                    float v = (r >= 0 && r < H && c >= 0 && c < W)
+                                            ? xci[(size_t)r * W + c] : 0.0f;
+                                    xk[dr * 2 + dc] = wubu_sd_f32_to_f16(v);
+                                }
+                            }
+                        }
+                    }
+                wubu_sd_matmul_nt_f16(xcol, Wp + (size_t)ph * C_out * Kp,
+                                      Mp, Kp, C_out, yt + (size_t)ph * M_tile * C_out);
+            }
+            /* merge writeback: y[co][(2i+di)*W_out + 2j+dj] */
+            #pragma omp parallel for schedule(static)
+            for (int co = 0; co < C_out; co++) {
+                float bias = b ? b[co] : 0.0f;
+                float *yrow = yn + (size_t)co * H_out_ * W_out_;
+                for (int ii = 0; ii < Ni; ii++) {
+                    int oh_e = (i0 + ii) * 2;          /* even output row */
+                    int oh_o = oh_e + 1;
+                    float *re = yrow + (size_t)oh_e * W_out_;
+                    float *ro = (oh_o < H_out_) ? yrow + (size_t)oh_o * W_out_ : NULL;
+                    for (int j = 0; j < W; j++) {
+                        int p = ii * W + j;
+                        const float *y00 = yt + (0 * M_tile + p) * C_out + co;
+                        const float *y01 = yt + (1 * M_tile + p) * C_out + co;
+                        const float *y10 = yt + (2 * M_tile + p) * C_out + co;
+                        const float *y11 = yt + (3 * M_tile + p) * C_out + co;
+                        re[2 * j]     = *y00 + bias;
+                        re[2 * j + 1] = *y01 + bias;
+                        if (ro) {
+                            ro[2 * j]     = *y10 + bias;
+                            ro[2 * j + 1] = *y11 + bias;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    free(xcol); free(yt); free(Wp);
+}
+
 void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
                       const void *w, int wtype, const float *b,
                       int C_out, int KH, int KW, int stride,
@@ -1197,6 +1360,19 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
                               pad_h, pad_w, y, us);
         if (H_out) *H_out = (us > 0 ? H * us : H);
         if (W_out) *W_out = (us > 0 ? W * us : W);
+        return;
+    }
+    /* EXPERIMENTAL decoupled pixel-shuffle upsample (SD_PIXELSHUFFLE=1):
+     * us=2 3x3 s1 p1 only. 2.25x fewer MACs on the upsample convs (the
+     * biggest VAE cost), phase-specific pre-summed weights. Parity risk
+     * like Winograd — test against max diff=1 before enabling by default. */
+    static int ps_env = -1;
+    if (ps_env < 0) ps_env = getenv("SD_PIXELSHUFFLE") != NULL;
+    if (ps_env && us == 2 && KH == 3 && KW == 3 && stride == 1 &&
+        pad_h == 1 && pad_w == 1) {
+        wubu_sd_conv2d_q_pixshuf(x, N, C_in, H, W, w, wtype, b, C_out, y);
+        if (H_out) *H_out = 2 * H;
+        if (W_out) *W_out = 2 * W;
         return;
     }
     /* us = nearest upsample factor applied BEFORE the conv, fused into

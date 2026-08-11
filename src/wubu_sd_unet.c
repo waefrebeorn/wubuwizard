@@ -148,11 +148,61 @@ static int unet_conv_q(wubu_sd_unet_t *u, const char *wname, const char *bname,
     return 0;
 }
 
-/* silu in place */
+/* NEON exp2: 2^x = 2^i * 2^f, i = round(x), f in [-0.5,0.5].
+ * 2^i via exponent insertion (exact); 2^f = e^(f*ln2) via degree-8
+ * Horner (error ~9e-9 = sub-ULP vs F32 near 1.0). NOTE: the FEXPA
+ * hardware instruction is SVE-only (ARMv8.2+) — A72 has no SVE, so
+ * this poly is the fast path here (~10 NEON ops per 4 elements vs a
+ * libm exp2f call per element). llama.cpp PR 7154 pattern. */
+static inline float32x4_t exp2q_f32(float32x4_t x) {
+    float32x4_t i = vrndnq_f32(x);                    /* nearest int */
+    float32x4_t f = vsubq_f32(x, i);                  /* [-0.5,0.5] */
+    int32x4_t ie = vcvtq_s32_f32(i);
+    ie = vshlq_n_s32(vaddq_s32(ie, vdupq_n_s32(127)), 23);
+    float32x4_t pow2i = vreinterpretq_f32_s32(ie);    /* exact 2^i */
+    float32x4_t u = vmulq_f32(f, vdupq_n_f32(0.6931471805599453f)); /* f*ln2 */
+    float32x4_t p = vdupq_n_f32(2.4801587301587302e-05f); /* 1/8! */
+    p = vfmaq_f32(vdupq_n_f32(1.984126984126984e-04f), p, u); /* 1/7! */
+    p = vfmaq_f32(vdupq_n_f32(1.3888888888888888e-03f), p, u); /* 1/6! */
+    p = vfmaq_f32(vdupq_n_f32(8.3333333333333332e-03f), p, u); /* 1/5! */
+    p = vfmaq_f32(vdupq_n_f32(4.1666666666666666e-02f), p, u); /* 1/4! */
+    p = vfmaq_f32(vdupq_n_f32(1.6666666666666666e-01f), p, u); /* 1/3! */
+    p = vfmaq_f32(vdupq_n_f32(0.5f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(1.0f), p, u);
+    p = vfmaq_f32(vdupq_n_f32(1.0f), p, u);           /* e^u */
+    return vmulq_f32(pow2i, p);
+}
+
+/* silu in place — exp2(x*log2e). On AArch64 the NEON path uses the
+ * polynomial exp2q_f32 above (~10 vector ops / 4 elems vs a libm
+ * exp2f call per element). llama.cpp PR 7154: 2x on SiLU/SoftMax.
+ * Fallback: scalar exp2f (x86, non-NEON ARM). */
 static void unet_silu(float *x, int n) {
     double t0 = g_timing ? t_now() : 0;
+    const float log2e = 1.4426950408889634f;
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    const float32x4_t le = vdupq_n_f32(log2e), one = vdupq_n_f32(1.0f);
+    int i = 0;
+    #pragma omp parallel for lastprivate(i)
+    for (i = 0; i <= n - 8; i += 8) {
+        float32x4_t s0 = vld1q_f32(x + i), s1 = vld1q_f32(x + i + 4);
+        float32x4_t e0 = exp2q_f32(vmulq_f32(vnegq_f32(s0), le));
+        float32x4_t e1 = exp2q_f32(vmulq_f32(vnegq_f32(s1), le));
+        vst1q_f32(x + i,     vdivq_f32(s0, vaddq_f32(one, e0)));
+        vst1q_f32(x + i + 4, vdivq_f32(s1, vaddq_f32(one, e1)));
+    }
     #pragma omp parallel for
-    for (int i = 0; i < n; i++) x[i] = x[i] / (1.0f + expf(-x[i]));
+    for (int j = i; j < n; j++) {
+        float s = x[j];
+        x[j] = s / (1.0f + exp2f(-s * log2e));
+    }
+#else
+    #pragma omp parallel for
+    for (int i = 0; i < n; i++) {
+        float s = x[i];
+        x[i] = s / (1.0f + exp2f(-s * log2e));
+    }
+#endif
     if (g_timing) g_t[3] += t_now() - t0;
 }
 
