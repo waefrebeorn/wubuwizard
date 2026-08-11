@@ -30,6 +30,27 @@ static inline float wubu_sd_f16_to_f32(uint16_t h) {
     return v;
 }
 
+/* float32 -> float16 (round-to-nearest, same bit-exact behavior as the
+ * original conv2d xcol converter — DO NOT "improve" the rounding; the
+ * F16 xcol feeds the GEMM and any ULP change risks the max diff=1 bar). */
+static inline uint16_t wubu_sd_f32_to_f16(float f) {
+    union { float f; uint32_t u; } u = { f };
+    uint32_t x = u.u;
+    uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t e = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t m = x & 0x7FFFFFu;
+    if (e >= 31) return (uint16_t)(sign | 0x7C00u);          /* inf */
+    if (e <= 0) {                                            /* subnormal/zero */
+        if (e < -10) return (uint16_t)sign;
+        m |= 0x800000u;
+        m >>= (14 - e);
+        return (uint16_t)(sign | (m >> 13));
+    }
+    uint32_t half = sign | ((uint32_t)e << 10) | (m >> 13);
+    if (m & 0x1000u) half++;                                 /* round */
+    return (uint16_t)half;
+}
+
 /* y[M,N] = x[M,K] @ W^T[K,N] (nn.Linear convention, W row-major [N,K]).
  * OpenMP-parallel over M; the workhorse linear for CLIP/UNet. */
 void wubu_sd_matmul_nt(const float *x, const float *W, int M, int K, int N,

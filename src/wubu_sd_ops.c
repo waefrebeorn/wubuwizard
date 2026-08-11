@@ -503,6 +503,7 @@ void wubu_sd_upsample2x(const float *x, int N, int C, int H, int W, float *y)
         }
 }
 
+#if defined(__ARM_NEON) && defined(__aarch64__)
 /* NEON exp2: 2^x = 2^i * 2^f — exponent insertion (exact) + degree-8
  * Horner for e^(f*ln2) (sub-ULP). FEXPA is SVE-only (ARMv8.2+), A72
  * has no SVE — this poly is the A72 fast path (~10 vector ops/4 elems
@@ -525,6 +526,7 @@ static inline float32x4_t exp2q_f32(float32x4_t x) {
     p = vfmaq_f32(vdupq_n_f32(1.0f), p, u);
     return vmulq_f32(pow2i, p);
 }
+#endif /* __ARM_NEON && __aarch64__ */
 
 void wubu_sd_silu(float *x, int n) {
     /* exp2(x*log2e) — NEON polynomial on AArch64, 2x faster than
@@ -712,25 +714,6 @@ __attribute__((constructor)) static void sd_mxcsr_ftz(void) {
     __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
 }
 #endif
-
-/* f32 -> f16 (round-to-nearest-even), for F16 xcol/scratch paths. */
-static inline uint16_t wubu_sd_f32_to_f16(float f) {
-    union { float f; uint32_t u; } u = { f };
-    uint32_t x = u.u;
-    uint32_t sign = (x >> 16) & 0x8000u;
-    int32_t e = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t m = x & 0x7FFFFFu;
-    if (e >= 31) return (uint16_t)(sign | 0x7C00u);          /* inf */
-    if (e <= 0) {                                            /* subnormal/zero */
-        if (e < -10) return (uint16_t)sign;
-        m |= 0x800000u;
-        m >>= (14 - e);
-        return (uint16_t)(sign | (m >> 13));
-    }
-    uint32_t half = sign | ((uint32_t)e << 10) | (m >> 13);
-    if (m & 0x1000u) half++;                                 /* round */
-    return (uint16_t)half;
-}
 
 /* ---- Quantized GEMM: weights stay in the RAW mmap'd blob, never dequantized
  * to a scratch. F16 weights are read as f16 (cvtph on load); Q4_0 blocks are
@@ -1311,8 +1294,22 @@ static void wubu_sd_conv2d_q_pixshuf(const float *x, int N, int C_in, int H, int
                             }
                         }
                     }
+#if defined(__ARM_NEON) && defined(__aarch64__)
                 wubu_sd_matmul_nt_f16(xcol, Wp + (size_t)ph * C_out * Kp,
                                       Mp, Kp, C_out, yt + (size_t)ph * M_tile * C_out);
+#else
+                {
+                    /* x86: convert F16 xcol -> F32 scratch, F32 matmul */
+                    size_t mk = (size_t)Mp * Kp;
+                    float *xf_buf = (float *)malloc(mk * sizeof(float));
+                    if (!xf_buf) { free(xcol); free(yt); free(Wp); return; }
+                    for (size_t k = 0; k < mk; k++)
+                        xf_buf[k] = wubu_sd_f16_to_f32(xcol[k]);
+                    wubu_sd_matmul_nt(xf_buf, Wp + (size_t)ph * C_out * Kp,
+                                      Mp, Kp, C_out, yt + (size_t)ph * M_tile * C_out);
+                    free(xf_buf);
+                }
+#endif
             }
             /* merge writeback: y[co][(2i+di)*W_out + 2j+dj] */
             #pragma omp parallel for schedule(static)

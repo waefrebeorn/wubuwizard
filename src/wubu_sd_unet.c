@@ -148,6 +148,7 @@ static int unet_conv_q(wubu_sd_unet_t *u, const char *wname, const char *bname,
     return 0;
 }
 
+#if defined(__ARM_NEON) && defined(__aarch64__)
 /* NEON exp2: 2^x = 2^i * 2^f, i = round(x), f in [-0.5,0.5].
  * 2^i via exponent insertion (exact); 2^f = e^(f*ln2) via degree-8
  * Horner (error ~9e-9 = sub-ULP vs F32 near 1.0). NOTE: the FEXPA
@@ -172,6 +173,7 @@ static inline float32x4_t exp2q_f32(float32x4_t x) {
     p = vfmaq_f32(vdupq_n_f32(1.0f), p, u);           /* e^u */
     return vmulq_f32(pow2i, p);
 }
+#endif /* __ARM_NEON && __aarch64__ */
 
 /* silu in place — exp2(x*log2e). On AArch64 the NEON path uses the
  * polynomial exp2q_f32 above (~10 vector ops / 4 elems vs a libm

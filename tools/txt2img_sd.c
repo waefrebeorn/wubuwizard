@@ -5,6 +5,7 @@
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "wubu_sd_vae.h"
+#include "wubu_sd_taesd.h"
 #include "gguf_reader.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,10 +165,47 @@ int main(int argc, char **argv) {
      * SD1.5 latent scale: x must be multiplied by 1/0.18215 before decode
      * (the vae_scale_factor — missing this produces garbage/noise). */
     wubu_sd_unet_clear_cache(unet);
+    float *img = (float *)malloc(3 * 512 * 512 * sizeof(float));
+    if (getenv("SD_DUMP_LATENT")) {
+        /* debug: dump the pre-scale latent for reference comparison */
+        FILE *df = fopen(getenv("SD_DUMP_LATENT"), "wb");
+        if (df) { fwrite(x, sizeof(float), 4 * 64 * 64, df); fclose(df); }
+    }
+    if (getenv("SD_TAESD")) {
+        /* Tiny AutoEncoder fast decode (preview quality, [0,1] output).
+         * TAESD's latent scale_factor is 1 (no 1/0.18215 multiply). */
+        const char *tap = getenv("SD_TAESD_MODEL");
+        if (!tap) tap = "taesd_decoder.safetensors";
+        wubu_sd_taesd_t *taesd = wubu_sd_taesd_load(tap);
+        if (!taesd) { fprintf(stderr, "taesd load failed\n"); free(img); return 1; }
+        if (wubu_sd_taesd_decode(taesd, x, 64, 64, img) != 0) {
+            fprintf(stderr, "taesd decode failed\n");
+            wubu_sd_taesd_free(taesd); free(img); return 1;
+        }
+        wubu_sd_taesd_free(taesd);
+        fprintf(stderr, "[txt2img] taesd done\n");
+        /* PPM from [0,1] */
+        FILE *f = fopen(outpath, "wb");
+        if (!f) { fprintf(stderr, "cannot write %s\n", outpath); free(img); return 1; }
+        fprintf(f, "P6\n512 512\n255\n");
+        for (int p = 0; p < 512 * 512; p++) {
+            float r = img[p], gr = img[512 * 512 + p], b = img[2 * 512 * 512 + p];
+            unsigned char pr = (unsigned char)fminf(255.0f, fmaxf(0.0f, r * 255.0f));
+            unsigned char pg = (unsigned char)fminf(255.0f, fmaxf(0.0f, gr * 255.0f));
+            unsigned char pb = (unsigned char)fminf(255.0f, fmaxf(0.0f, b * 255.0f));
+            fputc(pr, f); fputc(pg, f); fputc(pb, f);
+        }
+        fclose(f);
+        fprintf(stderr, "[txt2img] wrote %s (taesd)\n", outpath);
+        wubu_sd_clip_free(clip);
+        wubu_sd_unet_free(unet);
+        wubu_sd_vae_free(vae);
+        free(img);
+        return 0;
+    }
     const float vae_scale = 1.0f / 0.18215f;
     #pragma omp parallel for
     for (int i = 0; i < 4 * 64 * 64; i++) x[i] *= vae_scale;
-    float *img = (float *)malloc(3 * 512 * 512 * sizeof(float));
     if (wubu_sd_vae_decode(vae, x, 64, 64, img) != 0) {
         fprintf(stderr, "vae decode failed\n"); return 1;
     }

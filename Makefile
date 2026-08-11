@@ -689,8 +689,11 @@ test_enc_h3: tools/test_enc_h3.c src/wubu_enc_h3.o src/wubu_rotate.o src/wubu_fp
 
 # SD1.5 txt2img (SD-port agent, d8668bb) — quantized-only inference.
 # Wired into the shared build: both agents, one trunk.
-txt2img_sd: tools/txt2img_sd.c src/wubu_sd_clip.o src/wubu_sd_unet.o src/wubu_sd_vae.o src/wubu_sd_ops.o src/gguf_reader.o
-	$(CC) $(CFLAGS) -I include -o $@ tools/txt2img_sd.c src/wubu_sd_clip.o src/wubu_sd_unet.o src/wubu_sd_vae.o src/wubu_sd_ops.o src/gguf_reader.o $(LDFLAGS)
+txt2img_sd: tools/txt2img_sd.c src/wubu_sd_clip.o src/wubu_sd_unet.o src/wubu_sd_vae.o src/wubu_sd_ops.o src/wubu_sd_taesd.o src/gguf_reader.o src/safetensors_reader.o src/wubu_dequant_nf4.o
+	$(CC) $(CFLAGS) -I include -o $@ tools/txt2img_sd.c src/wubu_sd_clip.o src/wubu_sd_unet.o src/wubu_sd_vae.o src/wubu_sd_ops.o src/wubu_sd_taesd.o src/gguf_reader.o src/safetensors_reader.o src/wubu_dequant_nf4.o $(LDFLAGS)
+
+src/wubu_sd_taesd.o: src/wubu_sd_taesd.c include/wubu_sd_taesd.h include/wubu_sd_ops.h include/safetensors_reader.h
+	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_taesd.c
 
 src/wubu_sd_clip.o: src/wubu_sd_clip.c include/wubu_sd_clip.h include/wubu_sd_ops.h include/gguf_reader.h
 	$(CC) $(CFLAGS) -I include -c -o $@ src/wubu_sd_clip.c
