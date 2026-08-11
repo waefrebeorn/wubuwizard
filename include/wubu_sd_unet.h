@@ -28,6 +28,11 @@ void wubu_sd_unet_set_pass(wubu_sd_unet_t *u, int pass);
  * mirroring the paper's non-uniform quad-center schedule. */
 void wubu_sd_unet_set_dc_schedule(wubu_sd_unet_t *u, const int *full_map, int n);
 
+/* Set the latent spatial resolution (HxW, both multiples of 8). Smaller
+ * latent = proportionally fewer UNet FLOPs (e.g. 30x52 for the 240x416
+ * display vs the 64x64 default). 0 on success, -1 if dims invalid. */
+int wubu_sd_unet_set_resolution(wubu_sd_unet_t *u, int h, int w);
+
 /* Denoise one step:
  *   latent  [4][64][64] (noisy latent at timestep t)
  *   t       diffusion timestep (int, e.g. from the sampler's schedule)

@@ -84,6 +84,7 @@ struct wubu_sd_unet {
     int dc_pass;         /* 0=cond, 1=uncond (set per call) */
     int *dc_sched_full;  /* per-step full-pass map (1=full), or NULL */
     int dc_sched_n;      /* number of steps in the map */
+    int lat_h, lat_w;    /* latent spatial dims (default 64x64) */
 };
 
 /* raw (quantized, never-dequantized) weight descriptor */
@@ -836,6 +837,7 @@ wubu_sd_unet_t *wubu_sd_unet_load(void *ctx) {
     wubu_sd_unet_t *u = (wubu_sd_unet_t *)calloc(1, sizeof(wubu_sd_unet_t));
     if (!u) return NULL;
     u->gguf = (gguf_ctx *)ctx;
+    u->lat_h = 64; u->lat_w = 64;  /* default; override via set_resolution */
     /* mmap the data blob — quantized path reads weights straight from it */
     {
         gguf_ctx *g = (gguf_ctx *)ctx;
@@ -896,65 +898,67 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     }
     if (dc_cached) {
         /* ---- cached (cheap) pass ---- */
-        float *x = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        const int LH = u->lat_h, LW = u->lat_w;
+        const size_t AREA = (size_t)LH * LW;
+        float *x = (float *)malloc((size_t)320 * AREA * sizeof(float));
         if (unet_conv_q(u, "model.diffusion_model.input_blocks.0.0.weight",
                         "model.diffusion_model.input_blocks.0.0.bias",
-                        latent, 4, 64, 64, 320, 3, 3, 1, 1, 1, x, 0) != 0) { free(x); return -1; }
+                        latent, 4, LH, LW, 320, 3, 3, 1, 1, 1, x, 0) != 0) { free(x); return -1; }
         /* reference cached pass: also run input_blocks.1 (res+attn); block
          * 11's skip = in1 (the truncated down path's last sample) */
-        float *rb = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        float *rb = (float *)malloc((size_t)320 * AREA * sizeof(float));
         float temb[U_TIME];
         unet_time_embed(u, t, temb);
         if (unet_resblock(u, "model.diffusion_model.input_blocks.1.0",
-                          x, 320, 320, 64, 64, temb, rb) != 0) { free(x); free(rb); return -1; }
+                          x, 320, 320, LH, LW, temb, rb) != 0) { free(x); free(rb); return -1; }
         if (unet_transformer(u, "model.diffusion_model.input_blocks.1.1",
-                             rb, 320, 64, 64, ctx) != 0) { free(x); free(rb); return -1; }
+                             rb, 320, LH, LW, ctx) != 0) { free(x); free(rb); return -1; }
         /* output_blocks.11: concat(cached deep feat + in1) -> res -> attn.
          * Full pass feeds block 11 with cur (block 10's post-attn output)
          * + skips[0] (conv_in) — the reference cached pass instead uses
          * in1 (input_blocks.1 output) as block 11's skip (paper's cheap
          * approximation). */
-        float *cat = (float *)malloc((size_t)640 * 64 * 64 * sizeof(float));
+        float *cat = (float *)malloc((size_t)640 * AREA * sizeof(float));
         #pragma omp parallel for
-        for (int p = 0; p < 64 * 64; p++) {
+        for (size_t p = 0; p < AREA; p++) {
             for (int c = 0; c < 320; c++)
-                cat[(size_t)c * 4096 + p] = u->dc_feat[u->dc_pass][(size_t)c * 4096 + p];
+                cat[(size_t)c * AREA + p] = u->dc_feat[u->dc_pass][(size_t)c * AREA + p];
             for (int c = 0; c < 320; c++)
-                cat[(size_t)(320 + c) * 4096 + p] = rb[(size_t)c * 4096 + p];
+                cat[(size_t)(320 + c) * AREA + p] = rb[(size_t)c * AREA + p];
         }
         free(x);
         if (getenv("SD_DC_DEBUG")) {
-            double sx = 0; for (int z = 0; z < 320*4096; z++) sx += rb[z]*rb[z];
-            fprintf(stderr, "[dc] CACHED rb(in1) rms=%.4f\n", sqrt(sx/(320.0*4096)));
+            double sx = 0; for (size_t z = 0; z < 320*AREA; z++) sx += rb[z]*rb[z];
+            fprintf(stderr, "[dc] CACHED rb(in1) rms=%.4f\n", sqrt(sx/(320.0*AREA)));
             double st = 0; for (int z = 0; z < U_TIME; z++) st += temb[z]*temb[z];
-            fprintf(stderr, "[dc] CACHED temb rms=%.4f | cat[0..3]=%.6f %.6f %.6f %.6f cat[320*4096..]=%.6f %.6f %.6f %.6f\n",
+            fprintf(stderr, "[dc] CACHED temb rms=%.4f | cat[0..3]=%.6f %.6f %.6f %.6f cat[320*AREA..]=%.6f %.6f %.6f %.6f\n",
                 sqrt(st/U_TIME),
                 cat[0], cat[1], cat[2], cat[3],
-                cat[(size_t)320*4096], cat[(size_t)320*4096+1],
-                cat[(size_t)320*4096+2], cat[(size_t)320*4096+3]);
+                cat[(size_t)320*AREA], cat[(size_t)320*AREA+1],
+                cat[(size_t)320*AREA+2], cat[(size_t)320*AREA+3]);
         }
-        float *o11 = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        float *o11 = (float *)malloc((size_t)320 * AREA * sizeof(float));
         if (unet_resblock(u, "model.diffusion_model.output_blocks.11.0",
-                          cat, 640, 320, 64, 64, temb, o11) != 0) { free(cat); free(rb); free(o11); return -1; }
+                          cat, 640, 320, LH, LW, temb, o11) != 0) { free(cat); free(rb); free(o11); return -1; }
         free(cat);
         if (getenv("SD_DC_DEBUG")) {
-            double s = 0; for (int z = 0; z < 320*4096; z++) s += o11[z]*o11[z];
-            fprintf(stderr, "[dc] CACHED o11 pre-attn rms=%.4f (full=3.0749)\n", sqrt(s/(320.0*4096)));
+            double s = 0; for (size_t z = 0; z < 320*AREA; z++) s += o11[z]*o11[z];
+            fprintf(stderr, "[dc] CACHED o11 pre-attn rms=%.4f (full=3.0749)\n", sqrt(s/(320.0*AREA)));
         }
         if (unet_transformer(u, "model.diffusion_model.output_blocks.11.1",
-                             o11, 320, 64, 64, ctx) != 0) { free(rb); free(o11); return -1; }
+                             o11, 320, LH, LW, ctx) != 0) { free(rb); free(o11); return -1; }
         free(rb);
         if (unet_transformer(u, "model.diffusion_model.output_blocks.11.1",
-                             o11, 320, 64, 64, ctx) != 0) { free(o11); return -1; }
+                             o11, 320, LH, LW, ctx) != 0) { free(o11); return -1; }
         /* out: gn -> silu -> conv */
         float *gn_w = unet_get_f32(u, "model.diffusion_model.out.0.weight");
         float *gn_b = unet_get_f32(u, "model.diffusion_model.out.0.bias");
         if (!gn_w) { free(o11); return -1; }
-        unet_gn(o11, 320, 64 * 64, gn_w, gn_b);
-        unet_silu(o11, 320 * 64 * 64);
+        unet_gn(o11, 320, (int)AREA, gn_w, gn_b);
+        unet_silu(o11, (int)(320 * AREA));
         int rc = unet_conv_q(u, "model.diffusion_model.out.2.weight",
                              "model.diffusion_model.out.2.bias",
-                             o11, 320, 64, 64, 4, 3, 3, 1, 1, 1, out, 0);
+                             o11, 320, LH, LW, 4, 3, 3, 1, 1, 1, out, 0);
         free(o11);
         return rc;
     }
@@ -967,17 +971,17 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     }
 
     /* conv_in: 4 -> 320 */
-    float *x = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+    float *x = (float *)malloc((size_t)320 * u->lat_h * u->lat_w * sizeof(float));
     if (unet_conv_q(u, "model.diffusion_model.input_blocks.0.0.weight",
                     "model.diffusion_model.input_blocks.0.0.bias",
-                    latent, 4, 64, 64, 320, 3, 3, 1, 1, 1, x, 0) != 0) return -1;
+                    latent, 4, u->lat_h, u->lat_w, 320, 3, 3, 1, 1, 1, x, 0) != 0) return -1;
 
     /* input blocks. Ownership: skips[i] OWNS its buffer; `cur` borrows
      * skips[i] until the next block replaces it. */
     float *skips[12];
     memset(skips, 0, sizeof(skips));
-    int H = 64, W = 64;
-    float *cur = x;   /* after conv_in, cur = x (320ch @ 64x64) */
+    int H = u->lat_h, W = u->lat_w;
+    float *cur = x;   /* after conv_in, cur = x (320ch @ latent) */
     for (int i = 0; i < 12; i++) {
         char prefix[128];
         int type = IN_TYPE[i];
@@ -1082,12 +1086,12 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
          * (320ch @ 64x64) INCLUDING its attention — the cached pass
          * resumes from here. Indexed by CFG pass (cond/uncond). */
         if (u->dc_interval > 0 && i == 10 && u->dc_feat[u->dc_pass] &&
-            C == 320 && H == 64 && W == 64) {
-            memcpy(u->dc_feat[u->dc_pass], cur, (size_t)320 * 64 * 64 * sizeof(float));
+            C == 320 && H == u->lat_h && W == u->lat_w) {
+            memcpy(u->dc_feat[u->dc_pass], cur, (size_t)320 * H * W * sizeof(float));
             if (getenv("SD_DC_DEBUG")) {
-                double s = 0; for (int z = 0; z < 320*4096; z++) s += cur[z]*cur[z];
+                double s = 0; for (int z = 0; z < 320*H*W; z++) s += cur[z]*cur[z];
                 fprintf(stderr, "[dc] captured feat@i10 pass=%d rms=%.4f\n",
-                        u->dc_pass, sqrt(s/(320.0*4096)));
+                        u->dc_pass, sqrt(s/(320.0*H*W)));
             }
         }
         if (cfg->attn) {
@@ -1098,12 +1102,12 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
             /* DeepCache: block 10's feature is captured AFTER attn too —
              * the cached pass feeds block 11 with block 10's full output. */
             if (u->dc_interval > 0 && i == 10 && u->dc_feat[u->dc_pass] &&
-                C == 320 && H == 64 && W == 64) {
-                memcpy(u->dc_feat[u->dc_pass], cur, (size_t)320 * 64 * 64 * sizeof(float));
+                C == 320 && H == u->lat_h && W == u->lat_w) {
+                memcpy(u->dc_feat[u->dc_pass], cur, (size_t)320 * H * W * sizeof(float));
                 if (getenv("SD_DC_DEBUG")) {
-                    double s = 0; for (int z = 0; z < 320*4096; z++) s += cur[z]*cur[z];
+                    double s = 0; for (int z = 0; z < 320*H*W; z++) s += cur[z]*cur[z];
                     fprintf(stderr, "[dc] captured feat@i10 POST-attn pass=%d rms=%.4f\n",
-                            u->dc_pass, sqrt(s/(320.0*4096)));
+                            u->dc_pass, sqrt(s/(320.0*H*W)));
                 }
             }
         }
@@ -1121,13 +1125,13 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     float *gn_w = unet_get_f32(u, "model.diffusion_model.out.0.weight");
     float *gn_b = unet_get_f32(u, "model.diffusion_model.out.0.bias");
     if (!gn_w) return -1;
-    if (g_stage_capture & 8) memcpy(g_stage_out[3], cur, (size_t)320 * 64 * 64 * sizeof(float));
-    unet_gn(cur, 320, 64 * 64, gn_w, gn_b);
-    unet_silu(cur, 320 * 64 * 64);
+    if (g_stage_capture & 8) memcpy(g_stage_out[3], cur, (size_t)320 * H * W * sizeof(float));
+    unet_gn(cur, 320, H * W, gn_w, gn_b);
+    unet_silu(cur, 320 * H * W);
     if (unet_conv_q(u, "model.diffusion_model.out.2.weight",
                     "model.diffusion_model.out.2.bias",
-                    cur, 320, 64, 64, 4, 3, 3, 1, 1, 1, out, 0) != 0) return -1;
-    if (g_stage_capture & 16) memcpy(g_stage_out[4], out, (size_t)4 * 64 * 64 * sizeof(float));
+                    cur, 320, H, W, 4, 3, 3, 1, 1, 1, out, 0) != 0) return -1;
+    if (g_stage_capture & 16) memcpy(g_stage_out[4], out, (size_t)4 * H * W * sizeof(float));
     free(cur);
     for (int i = 0; i < 12; i++) free(skips[i]);
     /* DeepCache: full pass completed — cache is valid */
@@ -1159,4 +1163,28 @@ void wubu_sd_unet_set_dc_schedule(wubu_sd_unet_t *u, const int *full_map, int n)
     if (!u->dc_sched_full) { u->dc_sched_n = 0; return; }
     memcpy(u->dc_sched_full, full_map, (size_t)n * sizeof(int));
     u->dc_sched_n = n;
+}
+
+/* Set the latent spatial resolution (HxW, both multiples of 8). The UNet
+ * conv/attn kernels are spatial-agnostic (they take H/W as args), so a
+ * smaller latent — e.g. 30x52 for the 240x416 display instead of the
+ * default 64x64 — cuts UNet FLOPs ~proportionally to the pixel area.
+ * DeepCache features are reallocated to the new area. Returns 0 ok. */
+int wubu_sd_unet_set_resolution(wubu_sd_unet_t *u, int h, int w)
+{
+    if (!u || h <= 0 || w <= 0) return -1;
+    if (h % 8 != 0 || w % 8 != 0) return -1;  /* mid-block downsamples by 8 */
+    u->lat_h = h;
+    u->lat_w = w;
+    if (u->dc_interval > 0) {
+        size_t area = (size_t)h * (size_t)w;
+        free(u->dc_feat[0]); free(u->dc_feat[1]);
+        u->dc_feat[0] = (float *)malloc((size_t)320 * area * sizeof(float));
+        u->dc_feat[1] = (float *)malloc((size_t)320 * area * sizeof(float));
+        if (!u->dc_feat[0] || !u->dc_feat[1]) {
+            free(u->dc_feat[0]); free(u->dc_feat[1]);
+            u->dc_feat[0] = NULL; u->dc_feat[1] = NULL; u->dc_interval = 0;
+        }
+    }
+    return 0;
 }

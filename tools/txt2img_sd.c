@@ -39,6 +39,14 @@ int main(int argc, char **argv) {
     uint64_t seed = strtoull(argv[4], NULL, 10);
     const char *outpath = argv[5];
     const char *noise_path = argc > 6 ? argv[6] : NULL;
+    /* resolution knob: SD_H/SD_W latent dims (default 64x64 = 512x512 out).
+     * Smaller latent = ~proportional UNet FLOP cut. Both must be multiples
+     * of 8 (UNet mid-block downsamples by 8). For the 240x416 display use
+     * SD_H=32 SD_W=48 -> 256x384 output (~2.67x fewer UNet FLOPs than 512^2). */
+    int LH = getenv("SD_H") ? atoi(getenv("SD_H")) : 64;
+    int LW = getenv("SD_W") ? atoi(getenv("SD_W")) : 64;
+    if (LH % 8 != 0 || LW % 8 != 0) { fprintf(stderr, "SD_H/SD_W must be multiples of 8\n"); return 1; }
+    size_t LAREA = (size_t)LH * LW;
 
     gguf_ctx *g = gguf_open(model);
     if (!g) return 1;
@@ -52,6 +60,10 @@ int main(int argc, char **argv) {
     double t3 = (double)clock() / CLOCKS_PER_SEC;
     fprintf(stderr, "[load] clip %.2fs unet %.2fs vae %.2fs\n", t1 - t0, t2 - t1, t3 - t2);
     if (!clip || !unet || !vae) { fprintf(stderr, "module load failed\n"); return 1; }
+    if (wubu_sd_unet_set_resolution(unet, LH, LW) != 0) {
+        fprintf(stderr, "unet resolution %dx%d rejected\n", LH, LW); return 1;
+    }
+    fprintf(stderr, "[txt2img] latent %dx%d (output %dx%d)\n", LH, LW, LH * 8, LW * 8);
 
     /* CLIP encode */
     float ctx[77 * 768];
@@ -64,18 +76,18 @@ int main(int argc, char **argv) {
      * (2.9GB F32 UNet cache + CLIP + VAE exceeds the 5.8GB box) */
     wubu_sd_clip_clear_cache(clip);
 
-    /* init latent: gaussian noise, 4x64x64 (or load sd.cpp's EXACT noise) */
-    float *x = (float *)malloc(4 * 64 * 64 * sizeof(float));
+    /* init latent: gaussian noise, 4xLHxLW (or load sd.cpp's EXACT noise) */
+    float *x = (float *)malloc(4 * LAREA * sizeof(float));
     rng_state = seed;
     if (noise_path) {
         FILE *nf = fopen(noise_path, "rb");
-        if (!nf || fread(x, sizeof(float), 4 * 64 * 64, nf) != (size_t)(4 * 64 * 64)) {
+        if (!nf || fread(x, sizeof(float), 4 * LAREA, nf) != (size_t)(4 * LAREA)) {
             fprintf(stderr, "noise file read failed\n"); return 1;
         }
         fclose(nf);
         fprintf(stderr, "[txt2img] loaded sd.cpp noise from %s\n", noise_path);
     } else {
-        for (int i = 0; i < 4 * 64 * 64; i++) x[i] = (float)rng_gauss();
+        for (int i = 0; i < 4 * LAREA; i++) x[i] = (float)rng_gauss();
     }
 
     /* SD1.5 sampler matching stable-diffusion.cpp exactly:
@@ -100,7 +112,7 @@ int main(int argc, char **argv) {
     for (int t = 0; t < 1000; t++) sigmas[t] = sqrtf((1.0f - alpha_bar[t]) / alpha_bar[t]);
     /* scale initial noise to sigma_max (noise_scaling) */
     const float sigma_max = sigmas[999];
-    for (int i = 0; i < 4 * 64 * 64; i++) x[i] *= sigma_max;
+    for (int i = 0; i < 4 * LAREA; i++) x[i] *= sigma_max;
     /* even t-spacing (LinearScheduler): t = 999 - step*999/(steps-1), then 0 */
     float sched[13]; /* steps+1 */
     for (int s = 0; s < steps; s++)
@@ -180,16 +192,16 @@ int main(int argc, char **argv) {
             wubu_sd_unet_set_dc_schedule(unet, full_map, steps);
             free(full_map);
         }
-        float *nc = (float *)malloc(4 * 64 * 64 * sizeof(float));
+        float *nc = (float *)malloc(4 * LAREA * sizeof(float));
         if (!nc) return 1;
         for (int s = 0; s < steps; s++) {
             wubu_sd_unet_set_step(unet, s);
             float sigma = sched[s], sigma_to = sched[s + 1];
             int t = (int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1));
             float c_in = 1.0f / sqrtf(sigma * sigma + 1.0f);
-            float *noise = (float *)malloc(4 * 64 * 64 * sizeof(float));
-            float *xscaled = (float *)malloc(4 * 64 * 64 * sizeof(float));
-            for (int i = 0; i < 4 * 64 * 64; i++) xscaled[i] = x[i] * c_in;
+            float *noise = (float *)malloc(4 * LAREA * sizeof(float));
+            float *xscaled = (float *)malloc(4 * LAREA * sizeof(float));
+            for (int i = 0; i < 4 * LAREA; i++) xscaled[i] = x[i] * c_in;
             if (wubu_sd_unet_forward(unet, xscaled, t, ctx, noise) != 0) {
                 fprintf(stderr, "unet step %d failed\n", s); return 1;
             }
@@ -198,23 +210,23 @@ int main(int argc, char **argv) {
                 if (wubu_sd_unet_forward(unet, xscaled, t, empty_ctx, nc) != 0) return 1;
             }
             wubu_sd_unet_set_pass(unet, 0);
-            for (int i = 0; i < 4 * 64 * 64; i++) noise[i] = nc[i] + 7.5f * (noise[i] - nc[i]);
+            for (int i = 0; i < 4 * LAREA; i++) noise[i] = nc[i] + 7.5f * (noise[i] - nc[i]);
             /* denoised = x - sigma*eps; x = (sigma_to/sigma)*x + (1-sigma_to/sigma)*denoised */
             float ratio = (sigma_to > 0.0f) ? sigma_to / sigma : 0.0f;
             #pragma omp parallel for
-            for (int i = 0; i < 4 * 64 * 64; i++) {
+            for (int i = 0; i < 4 * LAREA; i++) {
                 float denoised = x[i] - sigma * noise[i];
                 x[i] = ratio * x[i] + (1.0f - ratio) * denoised;
             }
             free(noise); free(xscaled);
             double rms = 0.0;
-            for (int i = 0; i < 4 * 64 * 64; i++) rms += (double)x[i] * x[i];
-            rms = sqrt(rms / (4.0 * 64.0 * 64.0));
+            for (int i = 0; i < 4 * LAREA; i++) rms += (double)x[i] * x[i];
+            rms = sqrt(rms / (4.0 * LAREA));
             double means[4] = {0};
         for (int c = 0; c < 4; c++) {
             double m = 0.0;
-            for (int i = 0; i < 64 * 64; i++) m += x[c * 64 * 64 + i];
-            means[c] = m / (64.0 * 64.0);
+            for (int i = 0; i < LAREA; i++) m += x[c * LAREA + i];
+            means[c] = m / (double)LAREA;
         }
         fprintf(stderr, "[txt2img] step %d/%d (t=%d sigma=%.4f): rms=%.4f ch-means=[%.3f %.3f %.3f %.3f]\n",
                 s + 1, steps, t, sigma, rms, means[0], means[1], means[2], means[3]);
@@ -229,11 +241,13 @@ int main(int argc, char **argv) {
      * SD1.5 latent scale: x must be multiplied by 1/0.18215 before decode
      * (the vae_scale_factor — missing this produces garbage/noise). */
     wubu_sd_unet_clear_cache(unet);
-    float *img = (float *)malloc(3 * 512 * 512 * sizeof(float));
+    const int OH = LH * 8, OW = LW * 8;   /* VAE 8x spatial upsample */
+    const size_t OAREA = (size_t)OH * OW;
+    float *img = (float *)malloc(3 * OAREA * sizeof(float));
     if (getenv("SD_DUMP_LATENT")) {
         /* debug: dump the pre-scale latent for reference comparison */
         FILE *df = fopen(getenv("SD_DUMP_LATENT"), "wb");
-        if (df) { fwrite(x, sizeof(float), 4 * 64 * 64, df); fclose(df); }
+        if (df) { fwrite(x, sizeof(float), 4 * LAREA, df); fclose(df); }
     }
     if (getenv("SD_TAESD")) {
         /* Tiny AutoEncoder fast decode (preview quality, [0,1] output).
@@ -242,7 +256,7 @@ int main(int argc, char **argv) {
         if (!tap) tap = "taesd_decoder.safetensors";
         wubu_sd_taesd_t *taesd = wubu_sd_taesd_load(tap);
         if (!taesd) { fprintf(stderr, "taesd load failed\n"); free(img); return 1; }
-        if (wubu_sd_taesd_decode(taesd, x, 64, 64, img) != 0) {
+        if (wubu_sd_taesd_decode(taesd, x, LH, LW, img) != 0) {
             fprintf(stderr, "taesd decode failed\n");
             wubu_sd_taesd_free(taesd); free(img); return 1;
         }
@@ -251,9 +265,9 @@ int main(int argc, char **argv) {
         /* PPM from [0,1] */
         FILE *f = fopen(outpath, "wb");
         if (!f) { fprintf(stderr, "cannot write %s\n", outpath); free(img); return 1; }
-        fprintf(f, "P6\n512 512\n255\n");
-        for (int p = 0; p < 512 * 512; p++) {
-            float r = img[p], gr = img[512 * 512 + p], b = img[2 * 512 * 512 + p];
+        fprintf(f, "P6\n%d %d\n255\n", OW, OH);
+        for (int p = 0; p < OAREA; p++) {
+            float r = img[p], gr = img[OAREA + p], b = img[2 * OAREA + p];
             unsigned char pr = (unsigned char)fminf(255.0f, fmaxf(0.0f, r * 255.0f));
             unsigned char pg = (unsigned char)fminf(255.0f, fmaxf(0.0f, gr * 255.0f));
             unsigned char pb = (unsigned char)fminf(255.0f, fmaxf(0.0f, b * 255.0f));
@@ -269,8 +283,8 @@ int main(int argc, char **argv) {
     }
     const float vae_scale = 1.0f / 0.18215f;
     #pragma omp parallel for
-    for (int i = 0; i < 4 * 64 * 64; i++) x[i] *= vae_scale;
-    if (wubu_sd_vae_decode(vae, x, 64, 64, img) != 0) {
+    for (int i = 0; i < 4 * LAREA; i++) x[i] *= vae_scale;
+    if (wubu_sd_vae_decode(vae, x, LH, LW, img) != 0) {
         fprintf(stderr, "vae decode failed\n"); return 1;
     }
     fprintf(stderr, "[txt2img] vae done\n");
@@ -278,9 +292,9 @@ int main(int argc, char **argv) {
     /* write PPM (P6) */
     FILE *f = fopen(outpath, "wb");
     if (!f) { fprintf(stderr, "cannot write %s\n", outpath); return 1; }
-    fprintf(f, "P6\n512 512\n255\n");
-    for (int p = 0; p < 512 * 512; p++) {
-        float r = img[p], gr = img[512 * 512 + p], b = img[2 * 512 * 512 + p];
+    fprintf(f, "P6\n%d %d\n255\n", OW, OH);
+    for (int p = 0; p < OAREA; p++) {
+        float r = img[p], gr = img[OAREA + p], b = img[2 * OAREA + p];
         /* SD VAE output is in [-1,1] -> [0,255] */
         unsigned char pr = (unsigned char)fminf(255.0f, fmaxf(0.0f, (r + 1.0f) * 127.5f));
         unsigned char pg = (unsigned char)fminf(255.0f, fmaxf(0.0f, (gr + 1.0f) * 127.5f));
