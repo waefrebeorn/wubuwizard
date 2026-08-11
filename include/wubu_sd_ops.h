@@ -34,6 +34,12 @@ static inline float wubu_sd_f16_to_f32(uint16_t h) {
  * OpenMP-parallel over M; the workhorse linear for CLIP/UNet. */
 void wubu_sd_matmul_nt(const float *x, const float *W, int M, int K, int N,
                        float *y);
+/* F16-x variant: x is uint16_t halves, W is F32 (pre-dequantized).
+ * NEON-only; conv2d_q xcol path reads half the x bytes. */
+#if defined(__ARM_NEON)
+void wubu_sd_matmul_nt_f16(const uint16_t *x, const float *W, int M, int K,
+                           int N, float *y);
+#endif
 void wubu_sd_matmul_q(const void *x, int xf16, const void *W, int wtype,
                       int M, int K, int N, float *y);
 

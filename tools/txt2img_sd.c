@@ -40,6 +40,7 @@ int main(int argc, char **argv) {
 
     gguf_ctx *g = gguf_open(model);
     if (!g) return 1;
+    if (getenv("SD_TIMING")) g_timing = 1;
     double t0 = (double)clock() / CLOCKS_PER_SEC;
     wubu_sd_clip_t *clip = wubu_sd_clip_load(g);
     double t1 = (double)clock() / CLOCKS_PER_SEC;
@@ -152,6 +153,9 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "[txt2img] step %d/%d (t=%d sigma=%.4f): rms=%.4f ch-means=[%.3f %.3f %.3f %.3f]\n",
                 s + 1, steps, t, sigma, rms, means[0], means[1], means[2], means[3]);
+        if (g_timing)
+            fprintf(stderr, "[unet-time] conv=%.1fs lin=%.1fs gn=%.1fs silu=%.1fs attn=%.1fs ffn=%.1fs\n",
+                    g_t[0], g_t[1], g_t[2], g_t[3], g_t[4], g_t[5]);
         }
         free(nc);
     }

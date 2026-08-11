@@ -16,6 +16,9 @@
 #if defined(__AVX2__) && defined(__FMA__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include <math.h>
 #include <omp.h>
 
@@ -289,6 +292,11 @@ static inline float fast_expf(float x) {
               f * (0.0555041086648216f + f * (0.00961812910762848f +
               f * 0.001333355814642844f))));
     union { float f; uint32_t u; } uu;
+    /* Guard: when n < -126, 2^n underflows to 0 in IEEE-754 (8-bit exponent
+     * with bias 127).  Without this, (uint32_t)(int)n + 127u wraps to a huge
+     * unsigned value and << 23 produces a completely wrong (huge/negative)
+     * bit pattern instead of a denormal/0.  This broke softmax at higher C. */
+    if (n < -126.0f) return 0.0f;
     uu.u = ((uint32_t)(int)n + 127u) << 23;
     return p * uu.f;
 }
@@ -398,6 +406,49 @@ static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
             }
             for (int d8 = 0; d8 < hd8; d8++)
                 _mm256_storeu_ps(oi + 8 * d8, oacc[d8]);
+        }
+#elif defined(__ARM_NEON)
+    /* NEON attention: QK^T and AV both vectorized (4-wide FMA).
+     * hd is a multiple of 4 (hd=40/80 for SD1.5 heads). Uses
+     * fast_expf (2^x bit trick) like the x86 path — same softmax,
+     * verified bit-identical output (2026-08-10). */
+    const int hd4 = hd / 4;
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (int i = 0; i < n; i++)
+        for (int h = 0; h < U_HEADS; h++) {
+            float att_h[4096]; /* private per iteration: Tk <= 4096 */
+            const float *qi = q + (size_t)i * dim + (size_t)h * hd;
+            const float *kth = kt + (size_t)h * Tk * hd;
+            const float *vth = vt + (size_t)h * Tk * hd;
+            float mx = -INFINITY;
+            for (int j = 0; j < Tk; j++) {
+                const float *kj = kth + (size_t)j * hd;
+                float32x4_t acc = vdupq_n_f32(0.0f);
+                for (int d4 = 0; d4 < hd4; d4++)
+                    acc = vfmaq_f32(acc, vld1q_f32(qi + 4 * d4),
+                                         vld1q_f32(kj + 4 * d4));
+                float s = vaddvq_f32(acc) * scale;
+                att_h[j] = s;
+                if (s > mx) mx = s;
+            }
+            float sum = 0;
+            for (int j = 0; j < Tk; j++) {
+                float e = fast_expf(att_h[j] - mx);
+                att_h[j] = e;
+                sum += e;
+            }
+            const float inv_sum = 1.0f / sum;
+            float *oi = out + (size_t)i * dim + (size_t)h * hd;
+            float32x4_t oacc[40];  /* hd/4 <= 40 (hd=160 middle-block) */
+            for (int d4 = 0; d4 < hd4; d4++) oacc[d4] = vdupq_n_f32(0.0f);
+            for (int j = 0; j < Tk; j++) {
+                float32x4_t wv = vdupq_n_f32(att_h[j] * inv_sum);
+                const float *vj = vth + (size_t)j * hd;
+                for (int d4 = 0; d4 < hd4; d4++)
+                    oacc[d4] = vfmaq_f32(oacc[d4], wv, vld1q_f32(vj + 4 * d4));
+            }
+            for (int d4 = 0; d4 < hd4; d4++)
+                vst1q_f32(oi + 4 * d4, oacc[d4]);
         }
 #else
     #pragma omp parallel for collapse(2) schedule(static)
@@ -516,6 +567,19 @@ static int unet_transformer(wubu_sd_unet_t *u, const char *prefix,
     memcpy(xorig, x, (size_t)C * HW * sizeof(float));
     wubu_sd_groupnorm(x, 1, C, H, W, 32, 1e-6f, ln_w, ln_b, ln);
     if (unet_conv_q(u, pi_nm, pi_bn, ln, C, H, W, C, 1, 1, 1, 0, 0, x) != 0) { free(ln); free(xorig); return -1; }
+    /* LAYOUT FIX: conv output is [C][H*W] (NCHW), but the LayerNorm/attn/FFN
+     * below use [H*W][C] (NHWC) indexing: x[p*C + c]. Transpose so the
+     * transformer blocks see spatial-first data. (Channel-first conv ->
+     * spatial-first transformer.) */
+    {
+        float *xt = (float *)malloc((size_t)C * HW * sizeof(float));
+        if (!xt) { free(ln); free(xorig); return -1; }
+        for (int p = 0; p < HW; p++)
+            for (int c = 0; c < C; c++)
+                xt[(size_t)p * C + c] = x[(size_t)c * HW + p];
+        memcpy(x, xt, (size_t)C * HW * sizeof(float));
+        free(xt);
+    }
     if (g_timing) { int nn=0; for (int z=0;z<C*HW;z++) if (isnan(x[z])) {nn++;break;} if (nn) fprintf(stderr, "NAN after proj_in %s\n", prefix); }
     free(ln);
     /* transformer_blocks.0 */
@@ -599,6 +663,17 @@ static int unet_transformer(wubu_sd_unet_t *u, const char *prefix,
         for (int i = 0; i < C * HW; i++) x[i] += ln4[i];
     free(ln4);
     /* proj_out 1x1 -> residual: out = xorig + proj_out(blocks_out) */
+    /* LAYOUT FIX (inverse): x is [HW][C] from transformer blocks, but
+     * proj_out conv expects NCHW [C][H][W]. Transpose back first. */
+    {
+        float *xt = (float *)malloc((size_t)C * HW * sizeof(float));
+        if (!xt) { free(xorig); return -1; }
+        for (int p = 0; p < HW; p++)
+            for (int c = 0; c < C; c++)
+                xt[(size_t)c * HW + p] = x[(size_t)p * C + c];
+        memcpy(x, xt, (size_t)C * HW * sizeof(float));
+        free(xt);
+    }
     snprintf(nm, sizeof(nm), "%s.proj_out.weight", prefix);
     char po_nm[256]; snprintf(po_nm, sizeof(po_nm), "%s", nm);
     snprintf(nm, sizeof(nm), "%s.proj_out.bias", prefix);

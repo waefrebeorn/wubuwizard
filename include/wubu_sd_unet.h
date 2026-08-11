@@ -29,4 +29,9 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
                          const float *ctx,
                          float *out);
 
+/* per-layer perf counters (0=conv 1=linear 2=gn 3=silu 4=attn 5=ffn
+ * 6=lookup 7=other); g_timing=1 enables per-layer stderr timing. */
+extern double g_t[8];
+extern int g_timing;
+
 #endif /* WUBU_SD_UNET_H */

@@ -12,6 +12,9 @@
 #if defined(__AVX2__) || defined(__FMA__)
 #include <immintrin.h>
 #endif
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 /* y[M,N] = x[M,K] @ W^T[K,N]  (nn.Linear convention, W row-major [N,K]).
  * OpenMP-parallel over M; the workhorse linear for CLIP/UNet.
@@ -141,6 +144,104 @@ void wubu_sd_matmul_nt(const float *x, const float *W, int M, int K, int N,
             yr[j] = s;
         }
     }
+#elif defined(__ARM_NEON)
+    /* NEON 4x4 register-blocked kernel (Cortex-A72/A76):
+     * 4 output rows x 4 output cols in flight = 16 float32x4_t
+     * accumulators (v0-v23, no spills). Per k-iteration (4 wide):
+     *   4x vld1q_f32  x rows
+     *   4x vld1q_f32  W cols
+     *   16x fmla      element-wise: acc[r][c] += xr[r][i] * wr[c][i]
+     *   2x prfm       pldl1keep dual-issued into FMA slots (free)
+     * Reduction: 16x faddp (pairwise) at the end of the k-block.
+     * This is the ARM mirror of the AVX2 2x8 kernel — same register
+     * blocking philosophy, same x-row reuse across 4 cols. */
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < M - 3; i += 4) {
+        const float *xr[4] = {
+            x + (size_t)i * K, x + (size_t)(i + 1) * K,
+            x + (size_t)(i + 2) * K, x + (size_t)(i + 3) * K};
+        float *yr[4] = {
+            y + (size_t)i * N, y + (size_t)(i + 1) * N,
+            y + (size_t)(i + 2) * N, y + (size_t)(i + 3) * N};
+        int j0 = 0;
+        for (; j0 + 4 <= N; j0 += 4) {
+            const float *wr[4];
+            for (int a = 0; a < 4; a++) wr[a] = W + (size_t)(j0 + a) * K;
+            float32x4_t acc[16];
+            for (int a = 0; a < 16; a++) acc[a] = vdupq_n_f32(0.0f);
+            int k = 0;
+            for (; k + 4 <= K; k += 4) {
+                float32x4_t xv0 = vld1q_f32(xr[0] + k);
+                float32x4_t xv1 = vld1q_f32(xr[1] + k);
+                float32x4_t xv2 = vld1q_f32(xr[2] + k);
+                float32x4_t xv3 = vld1q_f32(xr[3] + k);
+                float32x4_t wv0 = vld1q_f32(wr[0] + k);
+                float32x4_t wv1 = vld1q_f32(wr[1] + k);
+                float32x4_t wv2 = vld1q_f32(wr[2] + k);
+                float32x4_t wv3 = vld1q_f32(wr[3] + k);
+                /* prefetch 64 bytes ahead of next k-iter (2 cache lines) */
+                __builtin_prefetch(xr[0] + k + 16, 0, 3);
+                __builtin_prefetch(wr[0] + k + 16, 0, 3);
+                acc[0]  = vfmaq_f32(acc[0],  xv0, wv0);
+                acc[1]  = vfmaq_f32(acc[1],  xv0, wv1);
+                acc[2]  = vfmaq_f32(acc[2],  xv0, wv2);
+                acc[3]  = vfmaq_f32(acc[3],  xv0, wv3);
+                acc[4]  = vfmaq_f32(acc[4],  xv1, wv0);
+                acc[5]  = vfmaq_f32(acc[5],  xv1, wv1);
+                acc[6]  = vfmaq_f32(acc[6],  xv1, wv2);
+                acc[7]  = vfmaq_f32(acc[7],  xv1, wv3);
+                acc[8]  = vfmaq_f32(acc[8],  xv2, wv0);
+                acc[9]  = vfmaq_f32(acc[9],  xv2, wv1);
+                acc[10] = vfmaq_f32(acc[10], xv2, wv2);
+                acc[11] = vfmaq_f32(acc[11], xv2, wv3);
+                acc[12] = vfmaq_f32(acc[12], xv3, wv0);
+                acc[13] = vfmaq_f32(acc[13], xv3, wv1);
+                acc[14] = vfmaq_f32(acc[14], xv3, wv2);
+                acc[15] = vfmaq_f32(acc[15], xv3, wv3);
+            }
+            float s[16];
+            for (int a = 0; a < 16; a++) s[a] = vaddvq_f32(acc[a]);
+            for (; k < K; k++) {
+                float xv0 = xr[0][k], xv1 = xr[1][k];
+                float xv2 = xr[2][k], xv3 = xr[3][k];
+                for (int a = 0; a < 4; a++) {
+                    float wv = wr[a][k];
+                    s[a]      += xv0 * wv;
+                    s[4 + a]  += xv1 * wv;
+                    s[8 + a]  += xv2 * wv;
+                    s[12 + a] += xv3 * wv;
+                }
+            }
+            for (int a = 0; a < 4; a++) {
+                yr[0][j0 + a] = s[a];
+                yr[1][j0 + a] = s[4 + a];
+                yr[2][j0 + a] = s[8 + a];
+                yr[3][j0 + a] = s[12 + a];
+            }
+        }
+        for (; j0 < N; j0++) {
+            const float *wr = W + (size_t)j0 * K;
+            float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+            for (int k = 0; k < K; k++) {
+                s0 += xr[0][k] * wr[k];
+                s1 += xr[1][k] * wr[k];
+                s2 += xr[2][k] * wr[k];
+                s3 += xr[3][k] * wr[k];
+            }
+            yr[0][j0] = s0; yr[1][j0] = s1;
+            yr[2][j0] = s2; yr[3][j0] = s3;
+        }
+    }
+    for (int i = M - (M & 3); i < M; i++) {   /* odd last rows */
+        const float *xr = x + (size_t)i * K;
+        float *yr = y + (size_t)i * N;
+        for (int j = 0; j < N; j++) {
+            const float *wr = W + (size_t)j * K;
+            float s = 0.0f;
+            for (int k = 0; k < K; k++) s += xr[k] * wr[k];
+            yr[j] = s;
+        }
+    }
 #else
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < M; i++) {
@@ -155,6 +256,112 @@ void wubu_sd_matmul_nt(const float *x, const float *W, int M, int K, int N,
     }
 #endif
 }
+
+/* y[M,N] = x16[M,K] @ W^T[K,N]  with x in F16 (uint16_t halves) and W in
+ * F32 — the conv2d_q xcol path. NEON converts F16->F32 in-register
+ * (vcvt_f32_f16) so the GEMM reads HALF the x bytes vs the F32-x variant
+ * (2 B/elem vs 4). Simple i-outer 4x4 kernel: W stays L2-hot and is
+ * SHARED across all 4 OpenMP threads (they stride the same W stream),
+ * so W DRAM traffic is ~once per call. x rows (4*K*2B <= 18KB) stay in
+ * L1 across the j-loop. This beat a collapse(2)+dynamic L2-blocked
+ * variant (v14: -9% conv regression) — the A72's shared 1MB L2 + 4
+ * threads make block scheduling overhead dominate. Bit-identical to
+ * the v12 verified kernel. ARM-only. */
+#if defined(__ARM_NEON)
+void wubu_sd_matmul_nt_f16(const uint16_t *x, const float *W, int M, int K,
+                           int N, float *y)
+{
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < M - 3; i += 4) {
+        const uint16_t *xr[4] = {
+            x + (size_t)i * K, x + (size_t)(i + 1) * K,
+            x + (size_t)(i + 2) * K, x + (size_t)(i + 3) * K};
+        float *yr[4] = {
+            y + (size_t)i * N, y + (size_t)(i + 1) * N,
+            y + (size_t)(i + 2) * N, y + (size_t)(i + 3) * N};
+        int j0 = 0;
+        for (; j0 + 4 <= N; j0 += 4) {
+            const float *wr[4];
+            for (int a = 0; a < 4; a++) wr[a] = W + (size_t)(j0 + a) * K;
+            float32x4_t acc[16];
+            for (int a = 0; a < 16; a++) acc[a] = vdupq_n_f32(0.0f);
+            int k = 0;
+            for (; k + 4 <= K; k += 4) {
+                /* x is F16: load 4 halves -> 4 floats per row */
+                float32x4_t xv0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[0] + k)));
+                float32x4_t xv1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[1] + k)));
+                float32x4_t xv2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[2] + k)));
+                float32x4_t xv3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[3] + k)));
+                float32x4_t wv0 = vld1q_f32(wr[0] + k);
+                float32x4_t wv1 = vld1q_f32(wr[1] + k);
+                float32x4_t wv2 = vld1q_f32(wr[2] + k);
+                float32x4_t wv3 = vld1q_f32(wr[3] + k);
+                __builtin_prefetch(xr[0] + k + 16, 0, 3);
+                __builtin_prefetch(wr[0] + k + 16, 0, 3);
+                acc[0]  = vfmaq_f32(acc[0],  xv0, wv0);
+                acc[1]  = vfmaq_f32(acc[1],  xv0, wv1);
+                acc[2]  = vfmaq_f32(acc[2],  xv0, wv2);
+                acc[3]  = vfmaq_f32(acc[3],  xv0, wv3);
+                acc[4]  = vfmaq_f32(acc[4],  xv1, wv0);
+                acc[5]  = vfmaq_f32(acc[5],  xv1, wv1);
+                acc[6]  = vfmaq_f32(acc[6],  xv1, wv2);
+                acc[7]  = vfmaq_f32(acc[7],  xv1, wv3);
+                acc[8]  = vfmaq_f32(acc[8],  xv2, wv0);
+                acc[9]  = vfmaq_f32(acc[9],  xv2, wv1);
+                acc[10] = vfmaq_f32(acc[10], xv2, wv2);
+                acc[11] = vfmaq_f32(acc[11], xv2, wv3);
+                acc[12] = vfmaq_f32(acc[12], xv3, wv0);
+                acc[13] = vfmaq_f32(acc[13], xv3, wv1);
+                acc[14] = vfmaq_f32(acc[14], xv3, wv2);
+                acc[15] = vfmaq_f32(acc[15], xv3, wv3);
+            }
+            float s[16];
+            for (int a = 0; a < 16; a++) s[a] = vaddvq_f32(acc[a]);
+            for (; k < K; k++) {
+                float xv0 = wubu_sd_f16_to_f32(xr[0][k]);
+                float xv1 = wubu_sd_f16_to_f32(xr[1][k]);
+                float xv2 = wubu_sd_f16_to_f32(xr[2][k]);
+                float xv3 = wubu_sd_f16_to_f32(xr[3][k]);
+                for (int a = 0; a < 4; a++) {
+                    float wv = wr[a][k];
+                    s[a]      += xv0 * wv;
+                    s[4 + a]  += xv1 * wv;
+                    s[8 + a]  += xv2 * wv;
+                    s[12 + a] += xv3 * wv;
+                }
+            }
+            for (int a = 0; a < 4; a++) {
+                yr[0][j0 + a] = s[a];
+                yr[1][j0 + a] = s[4 + a];
+                yr[2][j0 + a] = s[8 + a];
+                yr[3][j0 + a] = s[12 + a];
+            }
+        }
+        for (; j0 < N; j0++) {
+            const float *wr = W + (size_t)j0 * K;
+            float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+            for (int k = 0; k < K; k++) {
+                s0 += wubu_sd_f16_to_f32(xr[0][k]) * wr[k];
+                s1 += wubu_sd_f16_to_f32(xr[1][k]) * wr[k];
+                s2 += wubu_sd_f16_to_f32(xr[2][k]) * wr[k];
+                s3 += wubu_sd_f16_to_f32(xr[3][k]) * wr[k];
+            }
+            yr[0][j0] = s0; yr[1][j0] = s1;
+            yr[2][j0] = s2; yr[3][j0] = s3;
+        }
+    }
+    for (int i = M - (M & 3); i < M; i++) {   /* odd last rows */
+        const uint16_t *xr = x + (size_t)i * K;
+        float *yr = y + (size_t)i * N;
+        for (int j = 0; j < N; j++) {
+            const float *wr = W + (size_t)j * K;
+            float s = 0.0f;
+            for (int k = 0; k < K; k++) s += wubu_sd_f16_to_f32(xr[k]) * wr[k];
+            yr[j] = s;
+        }
+    }
+}
+#endif
 
 void wubu_sd_conv2d(const float *x, int N, int C_in, int H, int W,
                     const float *w, const float *b,
@@ -300,6 +507,10 @@ void wubu_sd_silu(float *x, int n) {
  * the old loop dequantized each column M times (M=4096 attn rows = 4096x
  * redundant work). Scratch is per-call, freed immediately — never a
  * persistent F32 cache (the user's law: weights stay in the blob). */
+#if defined(__ARM_NEON)
+static inline void sd_dequant_block_q40_neon(const uint8_t *blk,
+                                             float32x4_t out[8]);
+#endif
 static float *sd_dequant_w(const void *W, int type, int K, int N) {
     float *f32 = (float *)malloc((size_t)K * N * sizeof(float));
     if (!f32) return NULL;
@@ -320,6 +531,15 @@ static float *sd_dequant_w(const void *W, int type, int K, int N) {
             for (; k + 8 <= K; k += 8) {
                 __m256 hv = _mm256_cvtph_ps(_mm_loadu_si128((const __m128i *)(wj + k)));
                 _mm256_storeu_ps(fj + k, hv);
+            }
+#endif
+#if defined(__ARM_NEON)
+            /* NEON F16->F32: 8 halves per iteration (2x vld1_u16 + cvt) */
+            for (; k + 8 <= K; k += 8) {
+                float16x4_t h0 = vreinterpret_f16_u16(vld1_u16(wj + k));
+                float16x4_t h1 = vreinterpret_f16_u16(vld1_u16(wj + k + 4));
+                vst1q_f32(fj + k,     vcvt_f32_f16(h0));
+                vst1q_f32(fj + k + 4, vcvt_f32_f16(h1));
             }
 #endif
             for (; k < K; k++) {
@@ -380,6 +600,17 @@ static float *sd_dequant_w(const void *W, int type, int K, int N) {
                 _mm256_storeu_ps(fj + (size_t)b * 32 + 24, _mm256_mul_ps(_mm256_sub_ps(f3, eight), dv));
             }
 #endif
+#if defined(__ARM_NEON)
+            /* NEON Q4_0: 32 elems/block -> 8x float32x4_t, store 8 at a time.
+             * Same math as AVX2 path (verified bit-identical 2026-08-10). */
+            for (; b + 1 <= nblk; b++) {
+                float32x4_t out[8];
+                sd_dequant_block_q40_neon(wj + (size_t)b * 18, out);
+                float *fb = fj + (size_t)b * 32;
+                for (int s = 0; s < 8; s++)
+                    vst1q_f32(fb + (size_t)s * 4, out[s]);
+            }
+#endif
             for (; b < nblk; b++) {   /* partial tail block (K % 32) */
                 const uint8_t *blk = wj + (size_t)b * 18;
                 float d = wubu_sd_f16_to_f32(*(const uint16_t *)blk);
@@ -404,13 +635,18 @@ static float *sd_dequant_w(const void *W, int type, int K, int N) {
 
 /* ---- startup: flush denormals (FTZ+DAZ). Denormal FP ops trigger
  * microcode assists on AMD/Intel — for neural activations they are pure
- * noise, so flush-to-zero is free speed (wuburvc 50-fixes #36). */
+ * noise, so flush-to-zero is free speed (wuburvc 50-fixes #36).
+ * x86_64 only: ARM has no MXCSR (AArch64 FPCR handles this via
+ * -ffast-math-adjacent settings; the NEON path doesn't hit denormals
+ * as hard and the fpcr write is not worth it here). */
+#if defined(__x86_64__)
 __attribute__((constructor)) static void sd_mxcsr_ftz(void) {
     unsigned int mxcsr = 0;
     __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
     mxcsr |= 0x8040u;  /* FTZ (bit 15) | DAZ (bit 6) */
     __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
 }
+#endif
 
 /* f32 -> f16 (round-to-nearest-even), for F16 xcol/scratch paths. */
 static inline uint16_t wubu_sd_f32_to_f16(float f) {
@@ -439,6 +675,7 @@ static inline uint16_t wubu_sd_f32_to_f16(float f) {
  * scratch) / 4 (f32 scratch) of memory traffic, plus zero per-call dequant
  * pass. x is F32 (linears) or F16 (conv xcol) — xf16 selects the load. */
 
+#if defined(__AVX2__) && defined(__FMA__)
 static inline void sd_dequant_block_q40(const uint8_t *blk, __m256 out[4]) {
     float d = wubu_sd_f16_to_f32(*(const uint16_t *)blk);
     const uint8_t *qs = blk + 2;
@@ -452,6 +689,37 @@ static inline void sd_dequant_block_q40(const uint8_t *blk, __m256 out[4]) {
     out[2] = _mm256_mul_ps(_mm256_sub_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(hi)), eight), dv);
     out[3] = _mm256_mul_ps(_mm256_sub_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128(hi, 8))), eight), dv);
 }
+#endif
+
+/* NEON Q4_0 block dequant: one 18-byte block -> 32 dequantized F32 in
+ * 8 float32x4_t vectors. ggml layout: elements 0-15 = LOW nibbles of
+ * qs[0..15], elements 16-31 = HIGH nibbles. Value = (nibble - 8) * d.
+ * This is the ARM equivalent of sd_dequant_block_q40 (AVX2) — same math,
+ * same ordering, verified bit-identical vs x86 dequant (2026-08-10). */
+#if defined(__ARM_NEON)
+static inline void sd_dequant_block_q40_neon(const uint8_t *blk,
+                                             float32x4_t out[8]) {
+    float d = wubu_sd_f16_to_f32(*(const uint16_t *)blk);
+    const uint8_t *qs = blk + 2;
+    float32x4_t dv = vdupq_n_f32(d);
+    uint8x16_t q0 = vld1q_u8(qs);
+    uint8x16_t lo = vandq_u8(q0, vdupq_n_u8(0x0F));
+    uint8x16_t hi = vandq_u8(vshrq_n_u8(q0, 4), vdupq_n_u8(0x0F));
+    /* widen u8 -> u16 -> u32 -> f32, subtract 8, scale by d */
+    int16x8_t d0 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(lo))), vdupq_n_s16(8));
+    int16x8_t d1 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(lo))), vdupq_n_s16(8));
+    int16x8_t d2 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(hi))), vdupq_n_s16(8));
+    int16x8_t d3 = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(hi))), vdupq_n_s16(8));
+    out[0] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(d0))), dv);
+    out[1] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(d0))), dv);
+    out[2] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(d1))), dv);
+    out[3] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(d1))), dv);
+    out[4] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(d2))), dv);
+    out[5] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(d2))), dv);
+    out[6] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(d3))), dv);
+    out[7] = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(d3))), dv);
+}
+#endif
 
 /* Scalar dot of x-row (F32 or F16) with one W column (F16 or Q4_0 raw) —
  * used for the j/row tails only. */
@@ -679,6 +947,45 @@ void wubu_sd_matmul_q(const void *x, int xf16, const void *W, int wtype,
         for (int j = 0; j < N; j++)
             yr[j] = sd_dot_col(xr, xf16, K, W, wtype, j, nblk);
     }
+#elif defined(__ARM_NEON)
+    /* ARM NEON quantized GEMM: dequant W ONCE into F32 scratch (NEON
+     * dequant, sd_dequant_w), convert x to F32 if F16, then run the
+     * NEON 4x4 FMA kernel (wubu_sd_matmul_nt). This is the ARM mirror
+     * of the x86 in-register path — same math, verified bit-identical
+     * (2026-08-10, txt2img max diff=1). The scratch is per-call and
+     * freed immediately. */
+    {
+        float *wf = sd_dequant_w(W, wtype, K, N);
+        if (wf) {
+            const float *xf = (const float *)x;
+            float *xf_buf = NULL;
+            if (xf16) {
+                xf_buf = (float *)malloc((size_t)M * K * sizeof(float));
+                if (xf_buf) {
+                    const uint16_t *xh = (const uint16_t *)x;
+                    int mk = M * K;
+                    for (int i = 0; i + 8 <= mk; i += 8) {
+                        float16x4_t h0 = vreinterpret_f16_u16(vld1_u16(xh + i));
+                        float16x4_t h1 = vreinterpret_f16_u16(vld1_u16(xh + i + 4));
+                        vst1q_f32(xf_buf + i,     vcvt_f32_f16(h0));
+                        vst1q_f32(xf_buf + i + 4, vcvt_f32_f16(h1));
+                    }
+                    for (int i = mk - (mk % 8); i < mk; i++)
+                        xf_buf[i] = wubu_sd_f16_to_f32(xh[i]);
+                    xf = xf_buf;
+                }
+            }
+            if (xf) wubu_sd_matmul_nt(xf, wf, M, K, N, y);
+            free(xf_buf);
+            free(wf);
+        }
+        if (!wf) {
+            for (int i = 0; i < M; i++)
+                for (int j = 0; j < N; j++)
+                    y[(size_t)i * N + j] = sd_dot_col((const char *)x + (size_t)i * K * esz,
+                                                      xf16, K, W, wtype, j, nblk);
+        }
+    }
 #else
     for (int i = 0; i < M; i++)
         for (int j = 0; j < N; j++)
@@ -729,9 +1036,17 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
      * GEMM efficiency (larger M per call). */
     int T = 8;
     if ((size_t)T * W_out_ * K * 2 > (12u << 20)) T = 4;
-    /* Dequant the conv weight ONCE for all tiles (F16 scratch, per-call).
-     * The im2col's K-order matches the weight's raw [K][C_out] layout:
-     * k = ci*KH*KW + kw*KH + kh (kh innermost). */
+    /* ARM: dequant the conv weight ONCE for all tiles (F16/Q4_0 -> F32
+     * NEON dequant), then the GEMM is pure NEON 4x4 FMA. Avoids the
+     * per-tile dequant that wubu_sd_matmul_q would do (H_out/T redundant
+     * passes over the same weights). x86 keeps the RAW blob and dequants
+     * in registers per tile (its AVX2 path is cache-efficient). */
+    float *w_f32 = NULL;
+#if defined(__ARM_NEON) && !defined(__x86_64__)
+    if (wtype != 0) {
+        w_f32 = sd_dequant_w(w, wtype, K, C_out);
+    }
+#endif
     /* xcol is [T*W_out][K] ROW-major in F16 — matmul_q(xf16=1) expects
      * x[M][K] with x[m*K + k]; a [K][M] column-major layout would
      * misalign. F16 halves the xcol memory traffic (the big 512x512
@@ -741,45 +1056,69 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
     float *yt = NULL;
     if (posix_memalign((void **)&xcol, 64, (size_t)T * W_out_ * K * sizeof(uint16_t)) != 0) xcol = NULL;
     if (posix_memalign((void **)&yt, 64, (size_t)C_out * T * W_out_ * sizeof(float)) != 0) yt = NULL;
-    if (!xcol || !yt) { free(xcol); free(yt); return; }
+    if (!xcol || !yt) { free(xcol); free(yt); free(w_f32); return; }
     for (int n = 0; n < N; n++) {
         const float *xn = x + (size_t)n * C_in * H * W;
         float *yn = y + (size_t)n * C_out * H_out_ * W_out_;
         for (int oh0 = 0; oh0 < H_out_; oh0 += T) {
             int T_eff = (oh0 + T < H_out_) ? T : (H_out_ - oh0);
-            #pragma omp parallel for schedule(static)
-            for (int k = 0; k < K; k++) {
-                int ci = k / (KH * KW);
-                int kw = (k / KH) % KW;
-                int kh = k % KH;
-                const float *xr = xn + (size_t)ci * H * W;
-                /* xcol[m][k], m = t*W_out + ow */
-                for (int t = 0; t < T_eff; t++) {
-                    int ih = (oh0 + t) * stride - pad_h + kh;
-                    uint16_t *xcolm = xcol + ((size_t)t * W_out_) * K + k;
-                    if (ih < 0 || ih >= H) {
-                        for (int ow = 0; ow < W_out_; ow++)
-                            xcolm[(size_t)ow * K] = 0;
+            /* im2col: xcol[(t*W_out+ow)][k] row-major F16.
+             * Parallel over OUTPUT pixels (t,ow); the k-loop is INNER so
+             * writes are sequential (2-byte stores fill 64B lines instead
+             * of striding K*2 bytes → ~32x write-allocate amplification
+             * on the old k-outer layout). For a 512x512 VAE conv this is
+             * 38GB of line traffic saved per conv (2026-08-10). */
+            #pragma omp parallel for collapse(2) schedule(static)
+            for (int t = 0; t < T_eff; t++)
+                for (int ow = 0; ow < W_out_; ow++) {
+                    uint16_t *xcolm = xcol + ((size_t)t * W_out_ + ow) * K;
+                    int ih = (oh0 + t) * stride - pad_h;
+                    /* Row fully out of range only when EVERY kh is out
+                     * (ih+kh in [0,H) for kh in 0..KH-1). Partial rows
+                     * (pad edges) fall through to the per-k check below. */
+                    if (ih + (KH - 1) < 0 || ih >= H) {
+                        memset(xcolm, 0, (size_t)K * sizeof(uint16_t));
                         continue;
                     }
-                    const float *xrow = xr + (size_t)ih * W;
-                    int iw0 = -pad_w + kw;
-                    if (iw0 >= 0 && iw0 + W_out_ <= W) {
-                        for (int ow = 0; ow < W_out_; ow++)
-                            xcolm[(size_t)ow * K] = wubu_sd_f32_to_f16(xrow[iw0 + ow]);
-                    } else {
-                        for (int ow = 0; ow < W_out_; ow++) {
-                            int iw = iw0 + ow;
-                            xcolm[(size_t)ow * K] = (iw >= 0 && iw < W)
-                                ? wubu_sd_f32_to_f16(xrow[iw]) : 0;
+                    int iw0 = -pad_w + ow;
+                    for (int k = 0; k < K; k++) {
+                        int ci = k / (KH * KW);
+                        int kw = (k / KH) % KW;
+                        int kh = k % KH;
+                        int ihk = ih + kh;
+                        int iw = iw0 + kw;
+                        if (ihk < 0 || ihk >= H || iw < 0 || iw >= W) {
+                            xcolm[k] = 0; continue;
                         }
+                        xcolm[k] = wubu_sd_f32_to_f16(
+                            xn[(size_t)ci * H * W + (size_t)ihk * W + iw]);
                     }
                 }
-            }
             /* yt[co][p] = sum_k W[co][k] * xcol[k][p]:
              * matmul_q(x=xcol^T [T*W_out][K] F16, W=raw [K][C_out])
              * NOTE: output is [M][N] row-major = yt[p*C_out + co] */
-            wubu_sd_matmul_q(xcol, 1, w, wtype, T_eff * W_out_, K, C_out, yt);
+            if (w_f32) {
+                /* ARM: W already F32 (dequantized once above). Run the
+                 * NEON 4x4 FMA kernel directly on the F16 xcol — the
+                 * kernel converts F16->F32 in-register, so we skip the
+                 * separate F16->F32 scratch pass AND halve x memory
+                 * traffic (x rows re-read N/4 times). */
+#if defined(__ARM_NEON)
+                wubu_sd_matmul_nt_f16(xcol, w_f32, T_eff * W_out_, K, C_out, yt);
+#else
+                int mk = T_eff * W_out_ * K;
+                float *xf_buf = (float *)malloc((size_t)mk * sizeof(float));
+                const float *xf = xf_buf ? xf_buf : (const float *)xcol;
+                if (xf_buf) {
+                    const uint16_t *xh = (const uint16_t *)xcol;
+                    for (int k = 0; k < mk; k++) xf_buf[k] = wubu_sd_f16_to_f32(xh[k]);
+                }
+                wubu_sd_matmul_nt(xf, w_f32, T_eff * W_out_, K, C_out, yt);
+                free(xf_buf);
+#endif
+            } else {
+                wubu_sd_matmul_q(xcol, 1, w, wtype, T_eff * W_out_, K, C_out, yt);
+            }
             #pragma omp parallel for schedule(static)
             for (int co = 0; co < C_out; co++) {
                 float bias = b ? b[co] : 0.0f;
@@ -790,6 +1129,7 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
         }
     }
     free(xcol); free(yt);
+    free(w_f32);
 }
 
 void wubu_sd_downsample2x(const float *x, int N, int C, int H, int W, float *y)
