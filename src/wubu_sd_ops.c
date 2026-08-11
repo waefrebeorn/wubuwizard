@@ -1032,12 +1032,173 @@ void wubu_sd_linear_qb(const float *x, const void *W, int type,
     }
 }
 
+/* ================= Winograd F(2,3) 3x3 conv (experimental) =============
+ * 2x2 output tile from a 4x4 input tile: 16 mults vs 36 direct (2.25x
+ * fewer MACs). Transforms (Lavin F(2,3), exact F32 adds — the parity
+ * RISK is accumulation-order change vs direct im2col GEMM):
+ *   U = B^T d B     (input tile d 4x4 -> U 4x4, 64 adds)
+ *   V = G g G^T     (filter g 3x3 -> V 4x4, precomputed per conv)
+ *   M = sum_ci U ⊙ V   (16 MACs per (co,ci,tile))
+ *   Y = A^T M A     (4x4 -> 2x2 output, 24 adds)
+ * B^T = [1 0 -1 0; 0 1 1 0; 0 -1 1 0; 0 1 0 -1]
+ * G    = [1 0 0; .5 .5 .5; .5 -.5 .5; 0 0 1]
+ * A^T  = [1 1 1 0; 0 1 -1 -1]
+ * Blocking (A72 1MB shared L2): serial co-chunk OUTER (V-chunk
+ * L2-resident, shared by all threads — the j-chunk lesson), tiles
+ * PARALLEL inner (U per tile stays L1). Enabled via SD_WINOGRAD=1.
+ * Handles us>0 (fused nearest upsample: bounds on upscaled grid,
+ * read source at coord>>us_sh). */
+#define WINO_BT { { 1, 0, -1, 0 }, { 0, 1, 1, 0 }, { 0, -1, 1, 0 }, { 0, 1, 0, -1 } }
+#define WINO_AT { { 1, 1, 1, 0 }, { 0, 1, -1, -1 } }
+
+static void wino_filter_transform(const float g[3][3], float V[4][4]) {
+    /* V = G g G^T; G rows */
+    const float G[4][3] = { {1,0,0}, {.5f,.5f,.5f}, {.5f,-.5f,.5f}, {0,0,1} };
+    float Gg[4][3];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 3; j++) {
+            float s = 0;
+            for (int k = 0; k < 3; k++) s += G[i][k] * g[k][j];
+            Gg[i][j] = s;
+        }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            float s = 0;
+            for (int k = 0; k < 3; k++) s += Gg[i][k] * G[j][k];
+            V[i][j] = s;
+        }
+}
+
+/* Y = A^T M A for one 4x4 M -> 2x2 Y */
+static inline void wino_output(const float M[4][4], float y[2][2]) {
+    float P[4][2];
+    for (int l = 0; l < 4; l++) {
+        P[l][0] = M[l][0] + M[l][1] + M[l][2];
+        P[l][1] = M[l][1] - M[l][2] - M[l][3];
+    }
+    y[0][0] = P[0][0] + P[1][0] + P[2][0];
+    y[0][1] = P[0][1] + P[1][1] + P[2][1];
+    y[1][0] = P[1][0] - P[2][0] - P[3][0];
+    y[1][1] = P[1][1] - P[2][1] - P[3][1];
+}
+
+/* U = B^T d B for one 4x4 input tile */
+static inline void wino_input(const float d[4][4], float U[4][4]) {
+    float T[4][4];
+    for (int j = 0; j < 4; j++) {
+        T[0][j] = d[0][j] - d[2][j];
+        T[1][j] = d[1][j] + d[2][j];
+        T[2][j] = d[2][j] - d[1][j];
+        T[3][j] = d[1][j] - d[3][j];
+    }
+    for (int i = 0; i < 4; i++) {
+        U[i][0] = T[i][0] - T[i][2];
+        U[i][1] = T[i][1] + T[i][2];
+        U[i][2] = T[i][2] - T[i][1];
+        U[i][3] = T[i][1] - T[i][3];
+    }
+}
+
+/* 3x3 stride-1 conv (with optional fused us upsample) via Winograd.
+ * x [N][C_in][H][W]; y [N][C_out][H_out][W_out]. Same call shape as
+ * wubu_sd_conv2d_q for KH=KW=3, stride=1. */
+static void wubu_sd_conv2d_q_wino(const float *x, int N, int C_in, int H, int W,
+                                  const void *w, int wtype, const float *b,
+                                  int C_out, int pad_h, int pad_w,
+                                  float *y, int us) {
+    const int Hs = (us > 0) ? H * us : H, Ws = (us > 0) ? W * us : W;
+    const int H_out_ = Hs, W_out_ = Ws;   /* 3x3 s1 p1: out == in */
+    const int us_sh = (us == 2) ? 1 : (us == 4) ? 2 : 0;
+    const int KH = 3, KW = 3;
+    /* dequant weights -> w_f[co][k] F32 ([N][K] row-major) */
+    const int K = C_in * KH * KW;
+    float *w_f = sd_dequant_w(w, wtype, K, C_out);
+    if (!w_f) return;
+    /* precompute V[co][ci][4][4] */
+    float *V = (float *)malloc((size_t)C_out * C_in * 16 * sizeof(float));
+    if (!V) { free(w_f); return; }
+    for (int co = 0; co < C_out; co++)
+        for (int ci = 0; ci < C_in; ci++) {
+            float g[3][3];
+            for (int kh = 0; kh < 3; kh++)
+                for (int kw = 0; kw < 3; kw++)
+                    g[kh][kw] = w_f[co * K + ci * 9 + kw * 3 + kh];
+            float Vv[4][4];
+            wino_filter_transform(g, Vv);
+            memcpy(V + (co * C_in + ci) * 16, Vv, 64);
+        }
+    free(w_f);
+    /* tiles: output 2x2 blocks */
+    const int TH = H_out_ / 2, TW = W_out_ / 2;
+    /* co-chunk: V slice 32co x C_in x 16 x 4B <= 512KB for C_in<=256 */
+    int COB = 32;
+    if ((size_t)COB * C_in * 16 * 4 > (512u << 10)) COB = 16;
+    if ((size_t)COB * C_in * 16 * 4 > (512u << 10)) COB = 8;
+    for (int n = 0; n < N; n++) {
+        const float *xn = x + (size_t)n * C_in * H * W;
+        float *yn = y + (size_t)n * C_out * H_out_ * W_out_;
+        for (int cob = 0; cob < C_out; cob += COB) {
+            int coe = (cob + COB < C_out) ? cob + COB : C_out;
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < TH * TW; t++) {
+                int oh0 = (t / TW) * 2, ow0 = (t % TW) * 2;
+                float U[C_in][4][4];   /* 16KB @ C_in=256 — L1 */
+                for (int ci = 0; ci < C_in; ci++) {
+                    float d[4][4];
+                    const float *xci = xn + (size_t)ci * H * W;
+                    for (int r = 0; r < 4; r++)
+                        for (int c = 0; c < 4; c++) {
+                            int ih = oh0 - pad_h + r, iw = ow0 - pad_w + c;
+                            if (ih < 0 || ih >= Hs || iw < 0 || iw >= Ws)
+                                d[r][c] = 0.0f;
+                            else
+                                d[r][c] = xci[(size_t)(ih >> us_sh) * W + (iw >> us_sh)];
+                        }
+                    wino_input(d, U[ci]);
+                }
+                for (int co = cob; co < coe; co++) {
+                    float M[4][4] = {{0}};
+                    const float *Vc = V + (size_t)co * C_in * 16;
+                    for (int ci = 0; ci < C_in; ci++) {
+                        const float *Vv = Vc + (size_t)ci * 16;
+                        const float (*Uv)[4] = U[ci];
+                        for (int r = 0; r < 4; r++)
+                            for (int c = 0; c < 4; c++)
+                                M[r][c] += Uv[r][c] * Vv[r * 4 + c];
+                    }
+                    float y2[2][2];
+                    wino_output(M, y2);
+                    float bias = b ? b[co] : 0.0f;
+                    float *yrow = yn + (size_t)co * H_out_ * W_out_;
+                    yrow[(size_t)oh0 * W_out_ + ow0]     = y2[0][0] + bias;
+                    yrow[(size_t)oh0 * W_out_ + ow0 + 1] = y2[0][1] + bias;
+                    yrow[(size_t)(oh0 + 1) * W_out_ + ow0]     = y2[1][0] + bias;
+                    yrow[(size_t)(oh0 + 1) * W_out_ + ow0 + 1] = y2[1][1] + bias;
+                }
+            }
+        }
+    }
+    free(V);
+}
+
 void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
                       const void *w, int wtype, const float *b,
                       int C_out, int KH, int KW, int stride,
                       int pad_h, int pad_w,
                       float *y, int *H_out, int *W_out,
                       int us) {
+    /* EXPERIMENTAL Winograd F(2,3) path (SD_WINOGRAD=1): 2.25x fewer
+     * MACs on 3x3 stride-1 convs, but the accumulation order differs
+     * from direct im2col GEMM — parity risk (may break max diff=1). */
+    static int wino_env = -1;
+    if (wino_env < 0) wino_env = getenv("SD_WINOGRAD") != NULL;
+    if (wino_env && KH == 3 && KW == 3 && stride == 1) {
+        wubu_sd_conv2d_q_wino(x, N, C_in, H, W, w, wtype, b, C_out,
+                              pad_h, pad_w, y, us);
+        if (H_out) *H_out = (us > 0 ? H * us : H);
+        if (W_out) *W_out = (us > 0 ? W * us : W);
+        return;
+    }
     /* us = nearest upsample factor applied BEFORE the conv, fused into
      * im2col: the conv logically runs on a (H*us)x(W*us) input where
      * every us x us block repeats one source pixel (x[i][j]). We never
