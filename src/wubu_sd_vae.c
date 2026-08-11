@@ -62,22 +62,23 @@ static float *vae_get_f32(wubu_sd_vae_t *v, const char *name) {
     return f;
 }
 
-/* quantized conv2d helper: fetch raw weight, run conv2d_q. */
+/* quantized conv2d helper: fetch raw weight, run conv2d_q.
+ * us>0 = fused nearest-upsample factor (see wubu_sd_conv2d_q). */
 static int vae_conv_q(wubu_sd_vae_t *v, const char *wname, const char *bname,
                       const float *x, int C_in, int H, int W,
                       int C_out, int KH, int KW, int stride,
-                      int pad_h, int pad_w, float *y) {
+                      int pad_h, int pad_w, float *y, int us) {
     double t0 = 0;
     if (getenv("SD_VAE_TIMING")) t0 = (double)clock() / CLOCKS_PER_SEC;
     vae_raw_t w = vae_get_raw(v, wname);
     if (!w.found) return -1;
     float *b = bname ? vae_get_f32(v, bname) : NULL;
     wubu_sd_conv2d_q(x, 1, C_in, H, W, w.ptr, w.type, b, C_out, KH, KW,
-                     stride, pad_h, pad_w, y, NULL, NULL);
+                     stride, pad_h, pad_w, y, NULL, NULL, us);
     free(b);
     if (getenv("SD_VAE_TIMING"))
-        fprintf(stderr, "  [vae-conv] %s %dx%d C%d->%d k%dx%d s%d: %.3fs\n",
-                wname, W, H, C_in, C_out, KH, KW, stride,
+        fprintf(stderr, "  [vae-conv] %s %dx%d C%d->%d k%dx%d s%d us%d: %.3fs\n",
+                wname, W, H, C_in, C_out, KH, KW, stride, us,
                 (double)clock() / CLOCKS_PER_SEC - t0);
     return 0;
 }
@@ -117,7 +118,7 @@ static int vae_resnet(wubu_sd_vae_t *v, const char *prefix,
     memcpy(h, x, (size_t)C * HW_ * sizeof(float));
     vae_gn(h, C, HW_, n1w, n1b);
     wubu_sd_silu(h, C * HW_);
-    if (vae_conv_q(v, c1_nm, c1_bn, h, C, H, W, Cout, 3, 3, 1, 1, 1, h2) != 0) return -1;
+    if (vae_conv_q(v, c1_nm, c1_bn, h, C, H, W, Cout, 3, 3, 1, 1, 1, h2, 0) != 0) return -1;
     /* conv2 */
     snprintf(nm, sizeof(nm), "%s.norm2.weight", prefix);
     float *n2w = vae_get_f32(v, nm);
@@ -130,14 +131,14 @@ static int vae_resnet(wubu_sd_vae_t *v, const char *prefix,
     if (!n2w) return -1;
     vae_gn(h2, Cout, HW_, n2w, n2b);
     wubu_sd_silu(h2, Cout * HW_);
-    if (vae_conv_q(v, c2_nm, c2_bn, h2, Cout, H, W, Cout, 3, 3, 1, 1, 1, h3) != 0) return -1;
+    if (vae_conv_q(v, c2_nm, c2_bn, h2, Cout, H, W, Cout, 3, 3, 1, 1, 1, h3, 0) != 0) return -1;
     /* shortcut */
     if (C != Cout) {
         snprintf(nm, sizeof(nm), "%s.nin_shortcut.weight", prefix);
         char sw_nm[256]; snprintf(sw_nm, sizeof(sw_nm), "%s", nm);
         snprintf(nm, sizeof(nm), "%s.nin_shortcut.bias", prefix);
         char sw_bn[256]; snprintf(sw_bn, sizeof(sw_bn), "%s", nm);
-        if (vae_conv_q(v, sw_nm, sw_bn, x, C, H, W, Cout, 1, 1, 1, 0, 0, sx) != 0) return -1;
+        if (vae_conv_q(v, sw_nm, sw_bn, x, C, H, W, Cout, 1, 1, 1, 0, 0, sx, 0) != 0) return -1;
     } else {
         memcpy(sx, x, (size_t)Cout * HW_ * sizeof(float));
     }
@@ -182,9 +183,9 @@ static int vae_attn(wubu_sd_vae_t *v, const char *prefix,
     char v_nm[256]; snprintf(v_nm, sizeof(v_nm), "%s", nm);
     snprintf(nm, sizeof(nm), "%s.v.bias", prefix);
     char v_bn[256]; snprintf(v_bn, sizeof(v_bn), "%s", nm);
-    if (vae_conv_q(v, q_nm, q_bn, h, C, H, W, C, 1, 1, 1, 0, 0, q) != 0) return -1;
-    if (vae_conv_q(v, k_nm, k_bn, h, C, H, W, C, 1, 1, 1, 0, 0, k) != 0) return -1;
-    if (vae_conv_q(v, v_nm, v_bn, h, C, H, W, C, 1, 1, 1, 0, 0, v_) != 0) return -1;
+    if (vae_conv_q(v, q_nm, q_bn, h, C, H, W, C, 1, 1, 1, 0, 0, q, 0) != 0) return -1;
+    if (vae_conv_q(v, k_nm, k_bn, h, C, H, W, C, 1, 1, 1, 0, 0, k, 0) != 0) return -1;
+    if (vae_conv_q(v, v_nm, v_bn, h, C, H, W, C, 1, 1, 1, 0, 0, v_, 0) != 0) return -1;
     /* softmax attention, single head, scale 1/sqrt(C) */
     const float scale = 1.0f / sqrtf((float)C);
     float *att = (float *)malloc((size_t)n * n * sizeof(float));
@@ -218,7 +219,7 @@ static int vae_attn(wubu_sd_vae_t *v, const char *prefix,
     char po_nm[256]; snprintf(po_nm, sizeof(po_nm), "%s", nm);
     snprintf(nm, sizeof(nm), "%s.proj_out.bias", prefix);
     char po_bn[256]; snprintf(po_bn, sizeof(po_bn), "%s", nm);
-    if (vae_conv_q(v, po_nm, po_bn, out, C, H, W, C, 1, 1, 1, 0, 0, h) != 0) return -1;
+    if (vae_conv_q(v, po_nm, po_bn, out, C, H, W, C, 1, 1, 1, 0, 0, h, 0) != 0) return -1;
     #pragma omp parallel for
     for (int i = 0; i < C * n; i++) x[i] += h[i];
     free(h); free(q); free(k); free(v_); free(out);
@@ -226,7 +227,14 @@ static int vae_attn(wubu_sd_vae_t *v, const char *prefix,
     return 0;
 }
 
-/* upsample: nearest 2x + 3x3 conv. prefix = "...up.N.upsample" */
+/* upsample: nearest 2x + 3x3 conv, FUSED. prefix = "...up.N.upsample".
+ * The 2x nearest upsample is folded into the conv's im2col (us=2): the
+ * conv bounds-checks on the upscaled grid and reads the SOURCE at /2 —
+ * no 4x-buffer materialized. This was the #1 VAE hotspot (up.1.upsample
+ * 132.6s + up.2.upsample 125.6s = 258s of ~580s); fusing kills the
+ * 268MB write+read AND each source pixel is reused by 4 (2x2) outputs
+ * from L1/L2 instead of streaming the upsampled copy. Bit-identical to
+ * materialize-then-conv (nearest repeats source values exactly). */
 static int vae_upsample(wubu_sd_vae_t *v, const char *prefix,
                         float *x, int C, int H, int W, float *out) {
     char nm[256];
@@ -234,12 +242,8 @@ static int vae_upsample(wubu_sd_vae_t *v, const char *prefix,
     char up_nm[256]; snprintf(up_nm, sizeof(up_nm), "%s", nm);
     snprintf(nm, sizeof(nm), "%s.conv.bias", prefix);
     char up_bn[256]; snprintf(up_bn, sizeof(up_bn), "%s", nm);
-    float *up = (float *)malloc((size_t)C * (2 * H) * (2 * W) * sizeof(float));
-    if (!up) return -1;
-    wubu_sd_upsample2x(x, 1, C, H, W, up);
-    int rc = vae_conv_q(v, up_nm, up_bn, up, C, 2 * H, 2 * W, C, 3, 3, 1, 1, 1, out);
-    free(up);
-    return rc;
+    return vae_conv_q(v, up_nm, up_bn, x, C, H, W, C, 3, 3, 1, 1, 1, out,
+                      /* us = */ 2);
 }
 
 wubu_sd_vae_t *wubu_sd_vae_load(void *ctx) {
@@ -271,7 +275,7 @@ int wubu_sd_vae_decode(wubu_sd_vae_t *v, const float *latent, int H, int W,
     float *cur = (float *)malloc((size_t)512 * H * W * sizeof(float));
     if (!cur) return -1;
     if (vae_conv_q(v, VAE_PREFIX ".conv_in.weight", VAE_PREFIX ".conv_in.bias",
-                   latent, 4, H, W, 512, 3, 3, 1, 1, 1, cur) != 0) { free(cur); return -1; }
+                   latent, 4, H, W, 512, 3, 3, 1, 1, 1, cur, 0) != 0) { free(cur); return -1; }
 
     /* mid: resnet -> attn -> resnet (512) */
     float *m1 = (float *)malloc((size_t)512 * H * W * sizeof(float));
@@ -316,7 +320,7 @@ int wubu_sd_vae_decode(wubu_sd_vae_t *v, const float *latent, int H, int W,
     vae_gn(cur, 128, H * W, nw, nb);
     wubu_sd_silu(cur, 128 * H * W);
     if (vae_conv_q(v, VAE_PREFIX ".conv_out.weight", VAE_PREFIX ".conv_out.bias",
-                   cur, 128, H, W, 3, 3, 3, 1, 1, 1, out) != 0) { free(cur); return -1; }
+                   cur, 128, H, W, 3, 3, 3, 1, 1, 1, out, 0) != 0) { free(cur); return -1; }
     free(cur);
     return 0;
 }

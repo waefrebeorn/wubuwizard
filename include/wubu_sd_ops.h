@@ -98,7 +98,8 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
                       const void *w, int wtype, const float *b,
                       int C_out, int KH, int KW, int stride,
                       int pad_h, int pad_w,
-                      float *y, int *H_out, int *W_out);
+                      float *y, int *H_out, int *W_out,
+                      int us);
 
 /* 2x2 maxpool stride 2: [N][C][H][W] -> [N][C][H/2][W/2] */
 void wubu_sd_downsample2x(const float *x, int N, int C, int H, int W, float *y);

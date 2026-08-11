@@ -125,17 +125,18 @@ static float *unet_get_f32(wubu_sd_unet_t *u, const char *name) {
     return f;
 }
 
-/* quantized conv2d helper: fetch raw weight, run conv2d_q. */
+/* quantized conv2d helper: fetch raw weight, run conv2d_q.
+ * us>0 = fused nearest-upsample factor (see wubu_sd_conv2d_q). */
 static int unet_conv_q(wubu_sd_unet_t *u, const char *wname, const char *bname,
                        const float *x, int C_in, int H, int W,
                        int C_out, int KH, int KW, int stride,
-                       int pad_h, int pad_w, float *y) {
+                       int pad_h, int pad_w, float *y, int us) {
     unet_raw_t w = unet_get_raw(u, wname);
     if (!w.found) return -1;
     float *b = bname ? unet_get_f32(u, bname) : NULL;
     double t0 = g_timing ? t_now() : 0;
     wubu_sd_conv2d_q(x, 1, C_in, H, W, w.ptr, w.type, b, C_out, KH, KW,
-                     stride, pad_h, pad_w, y, NULL, NULL);
+                     stride, pad_h, pad_w, y, NULL, NULL, us);
     if (g_timing) {
         double dt = t_now() - t0;
         g_t[0] += dt;
@@ -217,7 +218,7 @@ static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
     unet_gn(xn, C, HW, gn_w, gn_b);
     unet_silu(xn, C * HW);
     if (unet_conv_q(u, conv_nm, conv_bn, xn, C, H, W, Cout, 3, 3, 1, 1, 1,
-                    scratch) != 0) { free(scratch); free(xn); return -1; }
+                    scratch, 0) != 0) { free(scratch); free(xn); return -1; }
     if (g_timing) { int nn=0; for (int z=0;z<Cout*H*W;z++) if (isnan(scratch[z])) {nn++;break;} if (nn) fprintf(stderr, "NAN after conv1 %s\n", prefix); }
     free(xn);
 
@@ -253,7 +254,7 @@ static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
     unet_gn(scratch, Cout, HW, gn2_w, gn2_b);
     unet_silu(scratch, Cout * HW);
     if (unet_conv_q(u, conv2_nm, conv2_bn, scratch, Cout, H, W, Cout, 3, 3, 1, 1, 1,
-                    out) != 0) { free(scratch); return -1; }
+                    out, 0) != 0) { free(scratch); return -1; }
 
     /* skip_connection: 1x1 conv C->Cout (only present when C != Cout) */
     if (C != Cout) {
@@ -264,7 +265,7 @@ static int unet_resblock(wubu_sd_unet_t *u, const char *prefix,
         float *sx = (float *)malloc((size_t)Cout * HW * sizeof(float));
         if (!sx) { free(scratch); return -1; }
         if (unet_conv_q(u, skip_nm, skip_bn, x, C, H, W, Cout, 1, 1, 1, 0, 0,
-                        sx) != 0) { free(sx); free(scratch); return -1; }
+                        sx, 0) != 0) { free(sx); free(scratch); return -1; }
         #pragma omp parallel for
         for (int i = 0; i < Cout * HW; i++) out[i] += sx[i];
         free(sx);
@@ -618,7 +619,7 @@ static int unet_transformer(wubu_sd_unet_t *u, const char *prefix,
     if (!xorig) { free(ln); return -1; }
     memcpy(xorig, x, (size_t)C * HW * sizeof(float));
     wubu_sd_groupnorm(x, 1, C, H, W, 32, 1e-6f, ln_w, ln_b, ln);
-    if (unet_conv_q(u, pi_nm, pi_bn, ln, C, H, W, C, 1, 1, 1, 0, 0, x) != 0) { free(ln); free(xorig); return -1; }
+    if (unet_conv_q(u, pi_nm, pi_bn, ln, C, H, W, C, 1, 1, 1, 0, 0, x, 0) != 0) { free(ln); free(xorig); return -1; }
     /* LAYOUT FIX: conv output is [C][H*W] (NCHW), but the LayerNorm/attn/FFN
      * below use [H*W][C] (NHWC) indexing: x[p*C + c]. Transpose so the
      * transformer blocks see spatial-first data. (Channel-first conv ->
@@ -732,7 +733,7 @@ static int unet_transformer(wubu_sd_unet_t *u, const char *prefix,
     char po_bn[256]; snprintf(po_bn, sizeof(po_bn), "%s", nm);
     float *po = (float *)malloc((size_t)C * HW * sizeof(float));
     memcpy(po, x, (size_t)C * HW * sizeof(float));
-    if (unet_conv_q(u, po_nm, po_bn, po, C, H, W, C, 1, 1, 1, 0, 0, x) != 0) { free(po); free(xorig); return -1; }
+    if (unet_conv_q(u, po_nm, po_bn, po, C, H, W, C, 1, 1, 1, 0, 0, x, 0) != 0) { free(po); free(xorig); return -1; }
     #pragma omp parallel for
     for (int i = 0; i < C * HW; i++) x[i] += xorig[i];
     free(po); free(xorig);
@@ -749,11 +750,13 @@ static int unet_downsample(wubu_sd_unet_t *u, const char *prefix,
     char op_nm[256]; snprintf(op_nm, sizeof(op_nm), "%s", nm);
     snprintf(nm, sizeof(nm), "%s.op.bias", prefix);
     char op_bn[256]; snprintf(op_bn, sizeof(op_bn), "%s", nm);
-    return unet_conv_q(u, op_nm, op_bn, x, C, H, W, C, 3, 3, 2, 1, 1, out);
+    return unet_conv_q(u, op_nm, op_bn, x, C, H, W, C, 3, 3, 2, 1, 1, out, 0);
 }
 
 /* upsample: nearest2x + conv 3x3 at prefix.<up_sub>.conv — the subblock
- * index varies by block (1 for out.2, 2 for out.5/out.8). */
+ * index varies by block (1 for out.2, 2 for out.5/out.8). Fused into
+ * the conv's im2col (us=2) — no 4x buffer materialized (same win as
+ * the VAE upsample). */
 static int unet_upsample(wubu_sd_unet_t *u, const char *prefix, int up_sub,
                          float *x, int C, int H, int W, float *out) {
     char nm[256];
@@ -761,12 +764,8 @@ static int unet_upsample(wubu_sd_unet_t *u, const char *prefix, int up_sub,
     char up_nm[256]; snprintf(up_nm, sizeof(up_nm), "%s", nm);
     snprintf(nm, sizeof(nm), "%s.%d.conv.bias", prefix, up_sub);
     char up_bn[256]; snprintf(up_bn, sizeof(up_bn), "%s", nm);
-    float *up = (float *)malloc((size_t)C * (2 * H) * (2 * W) * sizeof(float));
-    if (!up) return -1;
-    wubu_sd_upsample2x(x, 1, C, H, W, up);
-    int rc = unet_conv_q(u, up_nm, up_bn, up, C, 2 * H, 2 * W, C, 3, 3, 1, 1, 1, out);
-    free(up);
-    return rc;
+    return unet_conv_q(u, up_nm, up_bn, x, C, H, W, C, 3, 3, 1, 1, 1, out,
+                       /* us = */ 2);
 }
 
 wubu_sd_unet_t *wubu_sd_unet_load(void *ctx) {
@@ -803,7 +802,7 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     float *x = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
     if (unet_conv_q(u, "model.diffusion_model.input_blocks.0.0.weight",
                     "model.diffusion_model.input_blocks.0.0.bias",
-                    latent, 4, 64, 64, 320, 3, 3, 1, 1, 1, x) != 0) return -1;
+                    latent, 4, 64, 64, 320, 3, 3, 1, 1, 1, x, 0) != 0) return -1;
 
     /* input blocks. Ownership: skips[i] OWNS its buffer; `cur` borrows
      * skips[i] until the next block replaces it. */
@@ -915,7 +914,7 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     unet_silu(cur, 320 * 64 * 64);
     if (unet_conv_q(u, "model.diffusion_model.out.2.weight",
                     "model.diffusion_model.out.2.bias",
-                    cur, 320, 64, 64, 4, 3, 3, 1, 1, 1, out) != 0) return -1;
+                    cur, 320, 64, 64, 4, 3, 3, 1, 1, 1, out, 0) != 0) return -1;
     if (g_stage_capture & 16) memcpy(g_stage_out[4], out, (size_t)4 * 64 * 64 * sizeof(float));
     free(cur);
     for (int i = 0; i < 12; i++) free(skips[i]);

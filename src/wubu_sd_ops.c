@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 #if defined(__AVX2__) || defined(__FMA__)
 #include <immintrin.h>
 #endif
@@ -271,93 +272,110 @@ void wubu_sd_matmul_nt(const float *x, const float *W, int M, int K, int N,
 void wubu_sd_matmul_nt_f16(const uint16_t *x, const float *W, int M, int K,
                            int N, float *y)
 {
-    #pragma omp parallel for schedule(static)
-    for (int i = 0; i < M - 3; i += 4) {
-        const uint16_t *xr[4] = {
-            x + (size_t)i * K, x + (size_t)(i + 1) * K,
-            x + (size_t)(i + 2) * K, x + (size_t)(i + 3) * K};
-        float *yr[4] = {
-            y + (size_t)i * N, y + (size_t)(i + 1) * N,
-            y + (size_t)(i + 2) * N, y + (size_t)(i + 3) * N};
-        int j0 = 0;
-        for (; j0 + 4 <= N; j0 += 4) {
-            const float *wr[4];
-            for (int a = 0; a < 4; a++) wr[a] = W + (size_t)(j0 + a) * K;
-            float32x4_t acc[16];
-            for (int a = 0; a < 16; a++) acc[a] = vdupq_n_f32(0.0f);
-            int k = 0;
-            for (; k + 4 <= K; k += 4) {
-                /* x is F16: load 4 halves -> 4 floats per row */
-                float32x4_t xv0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[0] + k)));
-                float32x4_t xv1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[1] + k)));
-                float32x4_t xv2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[2] + k)));
-                float32x4_t xv3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[3] + k)));
-                float32x4_t wv0 = vld1q_f32(wr[0] + k);
-                float32x4_t wv1 = vld1q_f32(wr[1] + k);
-                float32x4_t wv2 = vld1q_f32(wr[2] + k);
-                float32x4_t wv3 = vld1q_f32(wr[3] + k);
-                __builtin_prefetch(xr[0] + k + 16, 0, 3);
-                __builtin_prefetch(wr[0] + k + 16, 0, 3);
-                acc[0]  = vfmaq_f32(acc[0],  xv0, wv0);
-                acc[1]  = vfmaq_f32(acc[1],  xv0, wv1);
-                acc[2]  = vfmaq_f32(acc[2],  xv0, wv2);
-                acc[3]  = vfmaq_f32(acc[3],  xv0, wv3);
-                acc[4]  = vfmaq_f32(acc[4],  xv1, wv0);
-                acc[5]  = vfmaq_f32(acc[5],  xv1, wv1);
-                acc[6]  = vfmaq_f32(acc[6],  xv1, wv2);
-                acc[7]  = vfmaq_f32(acc[7],  xv1, wv3);
-                acc[8]  = vfmaq_f32(acc[8],  xv2, wv0);
-                acc[9]  = vfmaq_f32(acc[9],  xv2, wv1);
-                acc[10] = vfmaq_f32(acc[10], xv2, wv2);
-                acc[11] = vfmaq_f32(acc[11], xv2, wv3);
-                acc[12] = vfmaq_f32(acc[12], xv3, wv0);
-                acc[13] = vfmaq_f32(acc[13], xv3, wv1);
-                acc[14] = vfmaq_f32(acc[14], xv3, wv2);
-                acc[15] = vfmaq_f32(acc[15], xv3, wv3);
-            }
-            float s[16];
-            for (int a = 0; a < 16; a++) s[a] = vaddvq_f32(acc[a]);
-            for (; k < K; k++) {
-                float xv0 = wubu_sd_f16_to_f32(xr[0][k]);
-                float xv1 = wubu_sd_f16_to_f32(xr[1][k]);
-                float xv2 = wubu_sd_f16_to_f32(xr[2][k]);
-                float xv3 = wubu_sd_f16_to_f32(xr[3][k]);
+    /* j-CHUNKED (serial outer over W chunks, i-parallel inner):
+     * the i-outer kernel sweeps ALL of W per i-block — for the 512x512
+     * VAE upsample conv (N=256, W=K*N*4=2.4MB > 1MB L2) that re-reads
+     * W from DRAM M/4=512x per tile (~1.2GB). Chunking N into blocks
+     * whose W slice fits L2 (~590KB) and keeping the chunk SERIAL means
+     * all 4 threads share ONE W-chunk resident in L2 across their
+     * i-ranges — W DRAM drops to ~once per tile. v14's
+     * collapse(2)+dynamic failed because threads ran on DIFFERENT
+     * j-chunks simultaneously (4×590KB > 1MB L2, thrash); serial-j
+     * fixes that. Same 4x4 FMA kernel per (i,j) block — bit-identical
+     * accumulation order. */
+    int JC = 4 * ((590 * 1024) / (4 * K * 4));  /* ~590KB W slice */
+    if (JC < 4) JC = 4;
+    JC = (JC / 4) * 4;
+    for (int jc = 0; jc < N; jc += JC) {
+        int jlim = (jc + JC < N) ? jc + JC : N;
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < M - 3; i += 4) {
+            const uint16_t *xr[4] = {
+                x + (size_t)i * K, x + (size_t)(i + 1) * K,
+                x + (size_t)(i + 2) * K, x + (size_t)(i + 3) * K};
+            float *yr[4] = {
+                y + (size_t)i * N, y + (size_t)(i + 1) * N,
+                y + (size_t)(i + 2) * N, y + (size_t)(i + 3) * N};
+            int j0 = jc;
+            for (; j0 + 4 <= jlim; j0 += 4) {
+                const float *wr[4];
+                for (int a = 0; a < 4; a++) wr[a] = W + (size_t)(j0 + a) * K;
+                float32x4_t acc[16];
+                for (int a = 0; a < 16; a++) acc[a] = vdupq_n_f32(0.0f);
+                int k = 0;
+                for (; k + 4 <= K; k += 4) {
+                    /* x is F16: load 4 halves -> 4 floats per row */
+                    float32x4_t xv0 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[0] + k)));
+                    float32x4_t xv1 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[1] + k)));
+                    float32x4_t xv2 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[2] + k)));
+                    float32x4_t xv3 = vcvt_f32_f16(vreinterpret_f16_u16(vld1_u16(xr[3] + k)));
+                    float32x4_t wv0 = vld1q_f32(wr[0] + k);
+                    float32x4_t wv1 = vld1q_f32(wr[1] + k);
+                    float32x4_t wv2 = vld1q_f32(wr[2] + k);
+                    float32x4_t wv3 = vld1q_f32(wr[3] + k);
+                    __builtin_prefetch(xr[0] + k + 16, 0, 3);
+                    __builtin_prefetch(wr[0] + k + 16, 0, 3);
+                    acc[0]  = vfmaq_f32(acc[0],  xv0, wv0);
+                    acc[1]  = vfmaq_f32(acc[1],  xv0, wv1);
+                    acc[2]  = vfmaq_f32(acc[2],  xv0, wv2);
+                    acc[3]  = vfmaq_f32(acc[3],  xv0, wv3);
+                    acc[4]  = vfmaq_f32(acc[4],  xv1, wv0);
+                    acc[5]  = vfmaq_f32(acc[5],  xv1, wv1);
+                    acc[6]  = vfmaq_f32(acc[6],  xv1, wv2);
+                    acc[7]  = vfmaq_f32(acc[7],  xv1, wv3);
+                    acc[8]  = vfmaq_f32(acc[8],  xv2, wv0);
+                    acc[9]  = vfmaq_f32(acc[9],  xv2, wv1);
+                    acc[10] = vfmaq_f32(acc[10], xv2, wv2);
+                    acc[11] = vfmaq_f32(acc[11], xv2, wv3);
+                    acc[12] = vfmaq_f32(acc[12], xv3, wv0);
+                    acc[13] = vfmaq_f32(acc[13], xv3, wv1);
+                    acc[14] = vfmaq_f32(acc[14], xv3, wv2);
+                    acc[15] = vfmaq_f32(acc[15], xv3, wv3);
+                }
+                float s[16];
+                for (int a = 0; a < 16; a++) s[a] = vaddvq_f32(acc[a]);
+                for (; k < K; k++) {
+                    float xv0 = wubu_sd_f16_to_f32(xr[0][k]);
+                    float xv1 = wubu_sd_f16_to_f32(xr[1][k]);
+                    float xv2 = wubu_sd_f16_to_f32(xr[2][k]);
+                    float xv3 = wubu_sd_f16_to_f32(xr[3][k]);
+                    for (int a = 0; a < 4; a++) {
+                        float wv = wr[a][k];
+                        s[a]      += xv0 * wv;
+                        s[4 + a]  += xv1 * wv;
+                        s[8 + a]  += xv2 * wv;
+                        s[12 + a] += xv3 * wv;
+                    }
+                }
                 for (int a = 0; a < 4; a++) {
-                    float wv = wr[a][k];
-                    s[a]      += xv0 * wv;
-                    s[4 + a]  += xv1 * wv;
-                    s[8 + a]  += xv2 * wv;
-                    s[12 + a] += xv3 * wv;
+                    yr[0][j0 + a] = s[a];
+                    yr[1][j0 + a] = s[4 + a];
+                    yr[2][j0 + a] = s[8 + a];
+                    yr[3][j0 + a] = s[12 + a];
                 }
             }
-            for (int a = 0; a < 4; a++) {
-                yr[0][j0 + a] = s[a];
-                yr[1][j0 + a] = s[4 + a];
-                yr[2][j0 + a] = s[8 + a];
-                yr[3][j0 + a] = s[12 + a];
+            for (; j0 < jlim; j0++) {
+                const float *wr = W + (size_t)j0 * K;
+                float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
+                for (int k = 0; k < K; k++) {
+                    s0 += wubu_sd_f16_to_f32(xr[0][k]) * wr[k];
+                    s1 += wubu_sd_f16_to_f32(xr[1][k]) * wr[k];
+                    s2 += wubu_sd_f16_to_f32(xr[2][k]) * wr[k];
+                    s3 += wubu_sd_f16_to_f32(xr[3][k]) * wr[k];
+                }
+                yr[0][j0] = s0; yr[1][j0] = s1;
+                yr[2][j0] = s2; yr[3][j0] = s3;
             }
         }
-        for (; j0 < N; j0++) {
-            const float *wr = W + (size_t)j0 * K;
-            float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
-            for (int k = 0; k < K; k++) {
-                s0 += wubu_sd_f16_to_f32(xr[0][k]) * wr[k];
-                s1 += wubu_sd_f16_to_f32(xr[1][k]) * wr[k];
-                s2 += wubu_sd_f16_to_f32(xr[2][k]) * wr[k];
-                s3 += wubu_sd_f16_to_f32(xr[3][k]) * wr[k];
+        for (int i = M - (M & 3); i < M; i++) {   /* odd last rows */
+            const uint16_t *xr = x + (size_t)i * K;
+            float *yr = y + (size_t)i * N;
+            for (int j = jc; j < jlim; j++) {
+                const float *wr = W + (size_t)j * K;
+                float s = 0.0f;
+                for (int k = 0; k < K; k++) s += wubu_sd_f16_to_f32(xr[k]) * wr[k];
+                yr[j] = s;
             }
-            yr[0][j0] = s0; yr[1][j0] = s1;
-            yr[2][j0] = s2; yr[3][j0] = s3;
-        }
-    }
-    for (int i = M - (M & 3); i < M; i++) {   /* odd last rows */
-        const uint16_t *xr = x + (size_t)i * K;
-        float *yr = y + (size_t)i * N;
-        for (int j = 0; j < N; j++) {
-            const float *wr = W + (size_t)j * K;
-            float s = 0.0f;
-            for (int k = 0; k < K; k++) s += wubu_sd_f16_to_f32(xr[k]) * wr[k];
-            yr[j] = s;
         }
     }
 }
@@ -1018,9 +1036,21 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
                       const void *w, int wtype, const float *b,
                       int C_out, int KH, int KW, int stride,
                       int pad_h, int pad_w,
-                      float *y, int *H_out, int *W_out) {
-    const int H_out_ = (H + 2 * pad_h - KH) / stride + 1;
-    const int W_out_ = (W + 2 * pad_w - KW) / stride + 1;
+                      float *y, int *H_out, int *W_out,
+                      int us) {
+    /* us = nearest upsample factor applied BEFORE the conv, fused into
+     * im2col: the conv logically runs on a (H*us)x(W*us) input where
+     * every us x us block repeats one source pixel (x[i][j]). We never
+     * materialize that buffer — the im2col bounds-checks on the
+     * upscaled grid and reads the SOURCE at (coord/us). For the VAE
+     * upsample convs (up.1 132.6s + up.2 125.6s = 258s of the ~580s
+     * VAE) this kills the 4x-buffer write+read AND each 2x2 output
+     * block reuses one source value for 4 (or 9 with 3x3 taps)
+     * outputs — the source stays L2/L1-hot instead of streaming a
+     * 268MB upsampled copy. */
+    const int Hs = (us > 0) ? H * us : H, Ws = (us > 0) ? W * us : W;
+    const int H_out_ = (Hs + 2 * pad_h - KH) / stride + 1;
+    const int W_out_ = (Ws + 2 * pad_w - KW) / stride + 1;
     if (H_out) *H_out = H_out_;
     if (W_out) *W_out = W_out_;
     /* im2col in the WEIGHT's k-order (ggml 4D column-major: element
@@ -1057,43 +1087,58 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
     if (posix_memalign((void **)&xcol, 64, (size_t)T * W_out_ * K * sizeof(uint16_t)) != 0) xcol = NULL;
     if (posix_memalign((void **)&yt, 64, (size_t)C_out * T * W_out_ * sizeof(float)) != 0) yt = NULL;
     if (!xcol || !yt) { free(xcol); free(yt); free(w_f32); return; }
+    double ph_build = 0, ph_gemm = 0, ph_wb = 0;
+    const int ph_on = getenv("SD_PHASE_TIMING") != NULL;
     for (int n = 0; n < N; n++) {
         const float *xn = x + (size_t)n * C_in * H * W;
         float *yn = y + (size_t)n * C_out * H_out_ * W_out_;
         for (int oh0 = 0; oh0 < H_out_; oh0 += T) {
             int T_eff = (oh0 + T < H_out_) ? T : (H_out_ - oh0);
+            double tA = ph_on ? (double)clock() / CLOCKS_PER_SEC : 0;
             /* im2col: xcol[(t*W_out+ow)][k] row-major F16.
              * Parallel over OUTPUT pixels (t,ow); the k-loop is INNER so
              * writes are sequential (2-byte stores fill 64B lines instead
              * of striding K*2 bytes → ~32x write-allocate amplification
              * on the old k-outer layout). For a 512x512 VAE conv this is
-             * 38GB of line traffic saved per conv (2026-08-10). */
+             * 38GB of line traffic saved per conv (2026-08-10).
+             * With us>0: bounds-check on the UPSCALED grid (Hs x Ws),
+             * read the source at /us — fused nearest upsample. */
             #pragma omp parallel for collapse(2) schedule(static)
             for (int t = 0; t < T_eff; t++)
                 for (int ow = 0; ow < W_out_; ow++) {
                     uint16_t *xcolm = xcol + ((size_t)t * W_out_ + ow) * K;
                     int ih = (oh0 + t) * stride - pad_h;
                     /* Row fully out of range only when EVERY kh is out
-                     * (ih+kh in [0,H) for kh in 0..KH-1). Partial rows
+                     * (ih+kh in [0,Hs) for kh in 0..KH-1). Partial rows
                      * (pad edges) fall through to the per-k check below. */
-                    if (ih + (KH - 1) < 0 || ih >= H) {
+                    if (ih + (KH - 1) < 0 || ih >= Hs) {
                         memset(xcolm, 0, (size_t)K * sizeof(uint16_t));
                         continue;
                     }
                     int iw0 = -pad_w + ow;
+                    /* Incremental tap walk: k = ci*KH*KW + kw*KH + kh with
+                     * kh innermost. Tracks (ci,kh,kw) with add/compare
+                     * instead of 3 integer divisions per element — the
+                     * old k/(KH*KW), (k/KH)%KW, k%KH did ~1.8 G divs per
+                     * 512x512 conv (runtime divisors = real divs). */
+                    int us_sh = (us == 2) ? 1 : (us == 4) ? 2 : 0;
+                    int ci = 0, kw = 0, kh = 0;
                     for (int k = 0; k < K; k++) {
-                        int ci = k / (KH * KW);
-                        int kw = (k / KH) % KW;
-                        int kh = k % KH;
                         int ihk = ih + kh;
                         int iw = iw0 + kw;
-                        if (ihk < 0 || ihk >= H || iw < 0 || iw >= W) {
-                            xcolm[k] = 0; continue;
+                        if (ihk < 0 || ihk >= Hs || iw < 0 || iw >= Ws) {
+                            xcolm[k] = 0;
+                        } else {
+                            xcolm[k] = wubu_sd_f32_to_f16(
+                                xn[(size_t)ci * H * W +
+                                   (size_t)(ihk >> us_sh) * W +
+                                   (iw >> us_sh)]);
                         }
-                        xcolm[k] = wubu_sd_f32_to_f16(
-                            xn[(size_t)ci * H * W + (size_t)ihk * W + iw]);
+                        if (++kh == KH) { kh = 0; if (++kw == KW) { kw = 0; ++ci; } }
                     }
                 }
+            if (ph_on) ph_build += (double)clock() / CLOCKS_PER_SEC - tA;
+            double tB = ph_on ? (double)clock() / CLOCKS_PER_SEC : 0;
             /* yt[co][p] = sum_k W[co][k] * xcol[k][p]:
              * matmul_q(x=xcol^T [T*W_out][K] F16, W=raw [K][C_out])
              * NOTE: output is [M][N] row-major = yt[p*C_out + co] */
@@ -1119,6 +1164,8 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
             } else {
                 wubu_sd_matmul_q(xcol, 1, w, wtype, T_eff * W_out_, K, C_out, yt);
             }
+            if (ph_on) ph_gemm += (double)clock() / CLOCKS_PER_SEC - tB;
+            double tC = ph_on ? (double)clock() / CLOCKS_PER_SEC : 0;
             #pragma omp parallel for schedule(static)
             for (int co = 0; co < C_out; co++) {
                 float bias = b ? b[co] : 0.0f;
@@ -1126,8 +1173,12 @@ void wubu_sd_conv2d_q(const float *x, int N, int C_in, int H, int W,
                 for (int p = 0; p < T_eff * W_out_; p++)
                     yrow[p] = yt[(size_t)p * C_out + co] + bias;
             }
+            if (ph_on) ph_wb += (double)clock() / CLOCKS_PER_SEC - tC;
         }
     }
+    if (ph_on)
+        fprintf(stderr, "  [conv-phases] build=%.2fs gemm=%.2fs wb=%.2fs\n",
+                ph_build, ph_gemm, ph_wb);
     free(xcol); free(yt);
     free(w_f32);
 }
