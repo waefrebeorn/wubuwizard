@@ -72,6 +72,18 @@ static const out_cfg_t OUT_CFG[12] = {
 struct wubu_sd_unet {
     gguf_ctx *gguf;
     /* no F32 weight cache — weights stay in the mmap'd blob */
+    /* DeepCache (SD_DEEPCACHE=1): cached 64x64 feature from the last
+     * full pass (output of output_blocks.10, 320ch). Two slots: CFG
+     * cond/uncond passes have different deep features. On cached steps
+     * the UNet runs conv_in + input_blocks.1 + output_blocks.11 +
+     * conv_out only (paper: 2.3x, 0.05 CLIP drop). */
+    float *dc_feat[2];   /* [pass] 320*64*64 cached deep feature */
+    int dc_valid;
+    int dc_interval;     /* full pass every N steps (default 5) */
+    int dc_step;         /* current step counter (set per step) */
+    int dc_pass;         /* 0=cond, 1=uncond (set per call) */
+    int *dc_sched_full;  /* per-step full-pass map (1=full), or NULL */
+    int dc_sched_n;      /* number of steps in the map */
 };
 
 /* raw (quantized, never-dequantized) weight descriptor */
@@ -829,11 +841,28 @@ wubu_sd_unet_t *wubu_sd_unet_load(void *ctx) {
         gguf_ctx *g = (gguf_ctx *)ctx;
         if (!g->data_blob) gguf_buffer_data(g);
     }
+    /* DeepCache: SD_DEEPCACHE=1 enables (interval SD_DEEPCACHE_INTERVAL,
+     * default 5 — the paper's sweet spot). */
+    if (getenv("SD_DEEPCACHE")) {
+        u->dc_interval = getenv("SD_DEEPCACHE_INTERVAL")
+                       ? atoi(getenv("SD_DEEPCACHE_INTERVAL")) : 5;
+        if (u->dc_interval < 2) u->dc_interval = 5;
+        u->dc_feat[0] = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        u->dc_feat[1] = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        if (!u->dc_feat[0] || !u->dc_feat[1]) {
+            free(u->dc_feat[0]); free(u->dc_feat[1]);
+            u->dc_feat[0] = NULL; u->dc_feat[1] = NULL; u->dc_interval = 0;
+        }
+        fprintf(stderr, "[unet] DeepCache enabled (interval=%d)\n", u->dc_interval);
+    }
     return u;
 }
 
 void wubu_sd_unet_free(wubu_sd_unet_t *u) {
     if (!u) return;
+    free(u->dc_feat[0]);
+    free(u->dc_feat[1]);
+    free(u->dc_sched_full);
     free(u);
 }
 
@@ -846,9 +875,96 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
                          const float *latent, int t,
                          const float *ctx,
                          float *out) {
+    /* DeepCache: on cached steps run only conv_in + input_blocks.1 +
+     * output_blocks.11 + conv_out, reusing the deep feature cached by
+     * the last full pass (output of output_blocks.10, 320ch @ 64x64)
+     * and the cached skip[1]. Training-free (paper arXiv 2312.00858):
+     * 2.3x with ~0.05 CLIP-score drop. Full pass every dc_interval
+     * steps. NOTE: changes the output vs the full UNet (that's the
+     * quality/speed tradeoff). Cadence is per STEP (the caller sets
+     * dc_step once per step via wubu_sd_unet_set_step — both CFG
+     * calls of one step share the same decision). */
+    /* DeepCache cached-pass decision: cached iff (a) a schedule array is
+     * installed and this step is NOT a full step, or (b) no schedule and
+     * step % interval != 0 (uniform fallback). */
+    int dc_cached = 0;
+    if (u->dc_interval > 0 && u->dc_valid) {
+        if (u->dc_sched_n > 0)
+            dc_cached = !u->dc_sched_full[u->dc_step];
+        else
+            dc_cached = (u->dc_step % u->dc_interval) != 0;
+    }
+    if (dc_cached) {
+        /* ---- cached (cheap) pass ---- */
+        float *x = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        if (unet_conv_q(u, "model.diffusion_model.input_blocks.0.0.weight",
+                        "model.diffusion_model.input_blocks.0.0.bias",
+                        latent, 4, 64, 64, 320, 3, 3, 1, 1, 1, x, 0) != 0) { free(x); return -1; }
+        /* reference cached pass: also run input_blocks.1 (res+attn); block
+         * 11's skip = in1 (the truncated down path's last sample) */
+        float *rb = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        float temb[U_TIME];
+        unet_time_embed(u, t, temb);
+        if (unet_resblock(u, "model.diffusion_model.input_blocks.1.0",
+                          x, 320, 320, 64, 64, temb, rb) != 0) { free(x); free(rb); return -1; }
+        if (unet_transformer(u, "model.diffusion_model.input_blocks.1.1",
+                             rb, 320, 64, 64, ctx) != 0) { free(x); free(rb); return -1; }
+        /* output_blocks.11: concat(cached deep feat + in1) -> res -> attn.
+         * Full pass feeds block 11 with cur (block 10's post-attn output)
+         * + skips[0] (conv_in) — the reference cached pass instead uses
+         * in1 (input_blocks.1 output) as block 11's skip (paper's cheap
+         * approximation). */
+        float *cat = (float *)malloc((size_t)640 * 64 * 64 * sizeof(float));
+        #pragma omp parallel for
+        for (int p = 0; p < 64 * 64; p++) {
+            for (int c = 0; c < 320; c++)
+                cat[(size_t)c * 4096 + p] = u->dc_feat[u->dc_pass][(size_t)c * 4096 + p];
+            for (int c = 0; c < 320; c++)
+                cat[(size_t)(320 + c) * 4096 + p] = rb[(size_t)c * 4096 + p];
+        }
+        free(x);
+        if (getenv("SD_DC_DEBUG")) {
+            double sx = 0; for (int z = 0; z < 320*4096; z++) sx += rb[z]*rb[z];
+            fprintf(stderr, "[dc] CACHED rb(in1) rms=%.4f\n", sqrt(sx/(320.0*4096)));
+            double st = 0; for (int z = 0; z < U_TIME; z++) st += temb[z]*temb[z];
+            fprintf(stderr, "[dc] CACHED temb rms=%.4f | cat[0..3]=%.6f %.6f %.6f %.6f cat[320*4096..]=%.6f %.6f %.6f %.6f\n",
+                sqrt(st/U_TIME),
+                cat[0], cat[1], cat[2], cat[3],
+                cat[(size_t)320*4096], cat[(size_t)320*4096+1],
+                cat[(size_t)320*4096+2], cat[(size_t)320*4096+3]);
+        }
+        float *o11 = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
+        if (unet_resblock(u, "model.diffusion_model.output_blocks.11.0",
+                          cat, 640, 320, 64, 64, temb, o11) != 0) { free(cat); free(rb); free(o11); return -1; }
+        free(cat);
+        if (getenv("SD_DC_DEBUG")) {
+            double s = 0; for (int z = 0; z < 320*4096; z++) s += o11[z]*o11[z];
+            fprintf(stderr, "[dc] CACHED o11 pre-attn rms=%.4f (full=3.0749)\n", sqrt(s/(320.0*4096)));
+        }
+        if (unet_transformer(u, "model.diffusion_model.output_blocks.11.1",
+                             o11, 320, 64, 64, ctx) != 0) { free(rb); free(o11); return -1; }
+        free(rb);
+        if (unet_transformer(u, "model.diffusion_model.output_blocks.11.1",
+                             o11, 320, 64, 64, ctx) != 0) { free(o11); return -1; }
+        /* out: gn -> silu -> conv */
+        float *gn_w = unet_get_f32(u, "model.diffusion_model.out.0.weight");
+        float *gn_b = unet_get_f32(u, "model.diffusion_model.out.0.bias");
+        if (!gn_w) { free(o11); return -1; }
+        unet_gn(o11, 320, 64 * 64, gn_w, gn_b);
+        unet_silu(o11, 320 * 64 * 64);
+        int rc = unet_conv_q(u, "model.diffusion_model.out.2.weight",
+                             "model.diffusion_model.out.2.bias",
+                             o11, 320, 64, 64, 4, 3, 3, 1, 1, 1, out, 0);
+        free(o11);
+        return rc;
+    }
     /* timestep embedding */
     float temb[U_TIME];
     unet_time_embed(u, t, temb);
+    if (getenv("SD_DC_DEBUG")) {
+        double st = 0; for (int z = 0; z < U_TIME; z++) st += temb[z]*temb[z];
+        fprintf(stderr, "[dc] FULL temb rms=%.4f (cached=0.2902)\n", sqrt(st/U_TIME));
+    }
 
     /* conv_in: 4 -> 320 */
     float *x = (float *)malloc((size_t)320 * 64 * 64 * sizeof(float));
@@ -941,11 +1057,55 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
             memcpy(g_stage_out[0], cur, (size_t)C * H * W * sizeof(float));
             g_stage_count = C * H * W;
         }
+        /* debug: compare full-pass block 11 pre-attn with cached */
+        if (getenv("SD_DC_DEBUG") && i == 11) {
+            double s = 0; for (int z = 0; z < C*H*W; z++) s += cur[z]*cur[z];
+            fprintf(stderr, "[dc] FULL o11 pre-attn rms=%.4f\n", sqrt(s/(double)(C*H*W)));
+            double s2 = 0; for (int z = 0; z < cfg->skip_ch*H*W; z++) s2 += skips[cfg->skip][z]*skips[cfg->skip][z];
+            fprintf(stderr, "[dc] FULL o11 skip[%d] rms=%.4f\n", cfg->skip, sqrt(s2/(double)(cfg->skip_ch*H*W)));
+            double s3 = 0; for (int z = 0; z < 320*4096; z++) s3 += u->dc_feat[u->dc_pass][z]*u->dc_feat[u->dc_pass][z];
+            fprintf(stderr, "[dc] FULL o11 dc_feat rms=%.4f | cur(pre-res)[0..3]=%.6f %.6f %.6f %.6f\n", sqrt(s3/(320.0*4096)),
+                cur[0], cur[1], cur[2], cur[3]);
+        }
+        /* dc_feat sanity: after block 10's attn, dc_feat must equal cur */
+        if (getenv("SD_DC_DEBUG") && i == 10) {
+            double s = 0; for (int z = 0; z < 320*4096; z++) s += u->dc_feat[u->dc_pass][z]*u->dc_feat[u->dc_pass][z];
+            fprintf(stderr, "[dc] dc_feat[%d] rms=%.4f cur rms=", u->dc_pass, sqrt(s/(320.0*4096)));
+            double s2 = 0; for (int z = 0; z < C*H*W; z++) s2 += cur[z]*cur[z];
+            fprintf(stderr, "%.4f | cur[0..3]=%.6f %.6f %.6f %.6f dc_feat[0..3]=%.6f %.6f %.6f %.6f\n",
+                sqrt(s2/(double)(C*H*W)),
+                cur[0], cur[1], cur[2], cur[3],
+                u->dc_feat[u->dc_pass][0], u->dc_feat[u->dc_pass][1],
+                u->dc_feat[u->dc_pass][2], u->dc_feat[u->dc_pass][3]);
+        }
+        /* DeepCache: capture the deep feature after output_blocks.10
+         * (320ch @ 64x64) INCLUDING its attention — the cached pass
+         * resumes from here. Indexed by CFG pass (cond/uncond). */
+        if (u->dc_interval > 0 && i == 10 && u->dc_feat[u->dc_pass] &&
+            C == 320 && H == 64 && W == 64) {
+            memcpy(u->dc_feat[u->dc_pass], cur, (size_t)320 * 64 * 64 * sizeof(float));
+            if (getenv("SD_DC_DEBUG")) {
+                double s = 0; for (int z = 0; z < 320*4096; z++) s += cur[z]*cur[z];
+                fprintf(stderr, "[dc] captured feat@i10 pass=%d rms=%.4f\n",
+                        u->dc_pass, sqrt(s/(320.0*4096)));
+            }
+        }
         if (cfg->attn) {
             snprintf(prefix, sizeof(prefix), "model.diffusion_model.output_blocks.%d.1", i);
             if (unet_transformer(u, prefix, cur, C, H, W, ctx) != 0) return -1;
             if (g_stage_capture == 6 && g_stage_block == i)
                 memcpy(g_stage_out[0], cur, (size_t)C * H * W * sizeof(float));
+            /* DeepCache: block 10's feature is captured AFTER attn too —
+             * the cached pass feeds block 11 with block 10's full output. */
+            if (u->dc_interval > 0 && i == 10 && u->dc_feat[u->dc_pass] &&
+                C == 320 && H == 64 && W == 64) {
+                memcpy(u->dc_feat[u->dc_pass], cur, (size_t)320 * 64 * 64 * sizeof(float));
+                if (getenv("SD_DC_DEBUG")) {
+                    double s = 0; for (int z = 0; z < 320*4096; z++) s += cur[z]*cur[z];
+                    fprintf(stderr, "[dc] captured feat@i10 POST-attn pass=%d rms=%.4f\n",
+                            u->dc_pass, sqrt(s/(320.0*4096)));
+                }
+            }
         }
         if (cfg->up) {
             /* upsample conv subblock varies (1 for block 2, 2 for 5/8) */
@@ -970,5 +1130,33 @@ int wubu_sd_unet_forward(wubu_sd_unet_t *u,
     if (g_stage_capture & 16) memcpy(g_stage_out[4], out, (size_t)4 * 64 * 64 * sizeof(float));
     free(cur);
     for (int i = 0; i < 12; i++) free(skips[i]);
+    /* DeepCache: full pass completed — cache is valid */
+    if (u->dc_interval > 0) u->dc_valid = 1;
     return 0;
+}
+
+/* DeepCache cadence control: caller sets the STEP index (0-based) once
+ * per denoising step, before the forward calls. Both CFG calls of one
+ * step share the same decision. */
+void wubu_sd_unet_set_step(wubu_sd_unet_t *u, int step) {
+    if (u) u->dc_step = step;
+}
+
+/* DeepCache CFG pass selector: 0 = cond (text-conditional), 1 = uncond.
+ * Set before each forward call; the cached deep feature is per-pass. */
+void wubu_sd_unet_set_pass(wubu_sd_unet_t *u, int pass) {
+    if (u) u->dc_pass = (pass != 0) ? 1 : 0;
+}
+
+/* DeepCache schedule: install a per-step full-pass map (1 = run the full
+ * UNet, 0 = cached pass). Mirrors the paper's non-uniform quad-center
+ * schedule (full passes concentrated at early high-noise steps). The
+ * caller frees the array after installing (we copy it). */
+void wubu_sd_unet_set_dc_schedule(wubu_sd_unet_t *u, const int *full_map, int n) {
+    if (!u || !full_map || n <= 0) return;
+    free(u->dc_sched_full);
+    u->dc_sched_full = (int *)malloc((size_t)n * sizeof(int));
+    if (!u->dc_sched_full) { u->dc_sched_n = 0; return; }
+    memcpy(u->dc_sched_full, full_map, (size_t)n * sizeof(int));
+    u->dc_sched_n = n;
 }

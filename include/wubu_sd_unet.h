@@ -18,6 +18,16 @@ void wubu_sd_unet_free(wubu_sd_unet_t *u);
 /* release weight cache — call between UNet phase and VAE phase */
 void wubu_sd_unet_clear_cache(wubu_sd_unet_t *u);
 
+/* DeepCache cadence: set the denoising STEP index (0-based) before the
+ * forward calls of that step. Full passes run when step % interval == 0
+ * (or the first call after enable); cached passes reuse the deep feature. */
+void wubu_sd_unet_set_step(wubu_sd_unet_t *u, int step);
+/* DeepCache CFG pass selector: 0 = cond, 1 = uncond (per forward call). */
+void wubu_sd_unet_set_pass(wubu_sd_unet_t *u, int pass);
+/* DeepCache schedule: per-step full-pass map (1 = full, 0 = cached),
+ * mirroring the paper's non-uniform quad-center schedule. */
+void wubu_sd_unet_set_dc_schedule(wubu_sd_unet_t *u, const int *full_map, int n);
+
 /* Denoise one step:
  *   latent  [4][64][64] (noisy latent at timestep t)
  *   t       diffusion timestep (int, e.g. from the sampler's schedule)

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <complex.h>
 #include <time.h>
 
 /* xorshift64 PRNG for reproducible init noise */
@@ -119,9 +120,70 @@ int main(int argc, char **argv) {
         int cfg_every = 1;
         if (argc > 7) cfg_every = atoi(argv[7]);
         if (cfg_every < 1) cfg_every = 1;
+        /* DeepCache schedule: mirror the paper's non-uniform quad-center
+         * schedule (full passes concentrated early, cached late). Faithful
+         * port of sample_from_quad_center (numpy semantics: complex pow,
+         * int32 truncation, unique, sorted). Only installed when
+         * SD_DEEPCACHE=1. */
+        if (getenv("SD_DEEPCACHE")) {
+            int n_slow = steps / 5 + (steps % 5 ? 1 : 0);
+            int *full_map = (int *)calloc(steps, sizeof(int));
+            double pow_ = 1.4;
+            int ok = 0;
+            while (pow_ > 1.0) {
+                /* x_values = linspace((-c)^(1/p), (N-c)^(1/p), n+1);
+                 * int32(complex) truncates the REAL part */
+                double _Complex a = cpow(-15.0 + 0.0 * I, 1.0 / pow_);
+                double _Complex b = cpow((double)(steps - 15) + 0.0 * I, 1.0 / pow_);
+                int vals[1024];
+                int nvals = 0;
+                for (int k = 0; k <= n_slow; k++) {
+                    double _Complex xv = a + (b - a) * ((double)k / (double)n_slow);
+                    double _Complex xp = cpow(xv, pow_);
+                    int iv = (int)creal(xp); /* np.int32 truncation of real part */
+                    if (getenv("SD_DC_DEBUG"))
+                        fprintf(stderr, "[dc] k=%d real=%.6f imag=%.6f int=%d\n",
+                                k, creal(xp), cimag(xp), iv);
+                    if (iv >= -steps && iv <= steps) vals[nvals++] = iv;
+                }
+                /* np.unique (sort + dedupe) */
+                for (int i = 0; i < nvals; i++)
+                    for (int j = i + 1; j < nvals; j++)
+                        if (vals[j] < vals[i]) { int tmp = vals[i]; vals[i] = vals[j]; vals[j] = tmp; }
+                int uniq[1024], nu = 0;
+                for (int i = 0; i < nvals; i++)
+                    if (nu == 0 || vals[i] != uniq[nu - 1]) uniq[nu++] = vals[i];
+                if (getenv("SD_DC_DEBUG")) {
+                    fprintf(stderr, "[dc] pow=%.2f nvals=%d n_slow=%d steps=%d vals:", pow_, nvals, n_slow, steps);
+                    for (int i = 0; i < nvals && i < 16; i++) fprintf(stderr, " %d", vals[i]);
+                    fprintf(stderr, "\n");
+                }
+                /* indices = [0] + unique[1:-1] + center */
+                int cnt = 0;
+                if (nu >= 3) {
+                    full_map[0] = 1;
+                    for (int k = 1; k < nu - 1; k++) {
+                        int iv = uniq[k] + 15;
+                        if (iv > 0 && iv < steps) { full_map[iv] = 1; cnt++; }
+                    }
+                }
+                if (cnt >= n_slow - 2) { ok = 1; break; }
+                if (getenv("SD_DC_DEBUG")) fprintf(stderr, "[dc] pow=%.2f cnt=%d nu=%d\n", pow_, cnt, nu);
+                pow_ -= 0.02;
+            }
+            if (!ok) { full_map[0] = 1; full_map[steps / 2] = 1; }
+            if (getenv("SD_DC_DEBUG")) {
+                fprintf(stderr, "[dc] schedule pow=%.2f full steps:", pow_);
+                for (int s = 0; s < steps; s++) if (full_map[s]) fprintf(stderr, " %d", s);
+                fprintf(stderr, "\n");
+            }
+            wubu_sd_unet_set_dc_schedule(unet, full_map, steps);
+            free(full_map);
+        }
         float *nc = (float *)malloc(4 * 64 * 64 * sizeof(float));
         if (!nc) return 1;
         for (int s = 0; s < steps; s++) {
+            wubu_sd_unet_set_step(unet, s);
             float sigma = sched[s], sigma_to = sched[s + 1];
             int t = (int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1));
             float c_in = 1.0f / sqrtf(sigma * sigma + 1.0f);
@@ -131,9 +193,11 @@ int main(int argc, char **argv) {
             if (wubu_sd_unet_forward(unet, xscaled, t, ctx, noise) != 0) {
                 fprintf(stderr, "unet step %d failed\n", s); return 1;
             }
+            wubu_sd_unet_set_pass(unet, 1);
             if (s % cfg_every == 0) {
                 if (wubu_sd_unet_forward(unet, xscaled, t, empty_ctx, nc) != 0) return 1;
             }
+            wubu_sd_unet_set_pass(unet, 0);
             for (int i = 0; i < 4 * 64 * 64; i++) noise[i] = nc[i] + 7.5f * (noise[i] - nc[i]);
             /* denoised = x - sigma*eps; x = (sigma_to/sigma)*x + (1-sigma_to/sigma)*denoised */
             float ratio = (sigma_to > 0.0f) ? sigma_to / sigma : 0.0f;
