@@ -123,9 +123,22 @@ int main(int argc, char **argv) {
         /* uncond context = REAL CLIP embedding of the empty prompt "" —
          * encoded ONCE (hoisted out of the step loop; was 12 wasted CLIP
          * forwards per image). */
+        /* guidance scale: SD_CFG env (default 7.5). When SD_CFG=1 the
+         * classifier-free-guidance uncond pass is SKIPPED entirely — one
+         * UNet forward per step instead of two (2x on the UNet budget).
+         * Requires a distilled/low-cfg model (LCM-LoRA, SD-Turbo) for
+         * quality at low steps; for the base model keep cfg 7.5. */
+        float cfg_scale = getenv("SD_CFG") ? (float)atof(getenv("SD_CFG")) : 7.5f;
+        if (cfg_scale < 1.0f) cfg_scale = 1.0f;
+        int use_cfg = cfg_scale > 1.0001f;
+        /* uncond context = REAL CLIP embedding of the empty prompt "" —
+         * encoded ONCE (hoisted out of the step loop; was 12 wasted CLIP
+         * forwards per image). Skipped entirely when SD_CFG=1. */
         float empty_ctx[77 * 768];
         float empty_pool[768];
-        if (wubu_sd_clip_encode(clip, "", empty_ctx, empty_pool) != 0) return 1;
+        if (use_cfg) {
+            if (wubu_sd_clip_encode(clip, "", empty_ctx, empty_pool) != 0) return 1;
+        }
         /* cfg_every: run the uncond only every N steps and reuse the last
          * uncond eps for the skipped steps (standard CFG-skip trick, ~25%
          * off the UNet budget at N=2). Default 1 = full CFG, unchanged. */
@@ -206,11 +219,12 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "unet step %d failed\n", s); return 1;
             }
             wubu_sd_unet_set_pass(unet, 1);
-            if (s % cfg_every == 0) {
+            if (use_cfg && (s % cfg_every == 0)) {
                 if (wubu_sd_unet_forward(unet, xscaled, t, empty_ctx, nc) != 0) return 1;
             }
             wubu_sd_unet_set_pass(unet, 0);
-            for (int i = 0; i < 4 * LAREA; i++) noise[i] = nc[i] + 7.5f * (noise[i] - nc[i]);
+            if (use_cfg)
+                for (int i = 0; i < 4 * LAREA; i++) noise[i] = nc[i] + cfg_scale * (noise[i] - nc[i]);
             /* denoised = x - sigma*eps; x = (sigma_to/sigma)*x + (1-sigma_to/sigma)*denoised */
             float ratio = (sigma_to > 0.0f) ? sigma_to / sigma : 0.0f;
             #pragma omp parallel for
