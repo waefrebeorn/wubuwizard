@@ -408,15 +408,67 @@ static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
                 _mm256_storeu_ps(oi + 8 * d8, oacc[d8]);
         }
 #elif defined(__ARM_NEON)
-    /* NEON attention: QK^T and AV both vectorized (4-wide FMA).
-     * hd is a multiple of 4 (hd=40/80 for SD1.5 heads). Uses
-     * fast_expf (2^x bit trick) like the x86 path — same softmax,
-     * verified bit-identical output (2026-08-10). */
+    /* NEON attention, i-BATCHED x4 for QK^T: the QK^T dot reads kth[j]
+     * once per 4 i's (kth 655KB/head was re-read once per i → 21GB/call
+     * of L2 traffic at ~32GB/s shared); batching cuts that 4x. The AV
+     * pass stays per-i (oacc[40] register window, no spills — a 4x-i AV
+     * batch would need 160 live accumulators). collapse(2) over (i4,h)
+     * keeps all threads on the same kth/vth stream (shared L2 hits).
+     * fast_expf softmax = x86 path, bit-identical (verified 2026-08-10). */
     const int hd4 = hd / 4;
+    const int ni = (n / 4) * 4;
     #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < n; i++)
+    for (int i4 = 0; i4 < ni; i4 += 4)
         for (int h = 0; h < U_HEADS; h++) {
-            float att_h[4096]; /* private per iteration: Tk <= 4096 */
+            float att_h[4][4096]; /* private: 4 i's x Tk (Tk <= 4096) */
+            const float *qi[4];
+            for (int a = 0; a < 4; a++)
+                qi[a] = q + (size_t)(i4 + a) * dim + (size_t)h * hd;
+            const float *kth = kt + (size_t)h * Tk * hd;
+            const float *vth = vt + (size_t)h * Tk * hd;
+            float mx[4] = { -INFINITY, -INFINITY, -INFINITY, -INFINITY };
+            for (int j = 0; j < Tk; j++) {
+                const float *kj = kth + (size_t)j * hd;
+                float32x4_t acc[4] = { vdupq_n_f32(0.0f), vdupq_n_f32(0.0f),
+                                       vdupq_n_f32(0.0f), vdupq_n_f32(0.0f) };
+                for (int d4 = 0; d4 < hd4; d4++) {
+                    float32x4_t kjv = vld1q_f32(kj + 4 * d4);
+                    for (int a = 0; a < 4; a++)
+                        acc[a] = vfmaq_f32(acc[a], vld1q_f32(qi[a] + 4 * d4), kjv);
+                }
+                for (int a = 0; a < 4; a++) {
+                    float s = vaddvq_f32(acc[a]) * scale;
+                    att_h[a][j] = s;
+                    if (s > mx[a]) mx[a] = s;
+                }
+            }
+            float sum[4] = { 0, 0, 0, 0 };
+            for (int j = 0; j < Tk; j++)
+                for (int a = 0; a < 4; a++) {
+                    float e = fast_expf(att_h[a][j] - mx[a]);
+                    att_h[a][j] = e;
+                    sum[a] += e;
+                }
+            float inv_sum[4];
+            for (int a = 0; a < 4; a++) inv_sum[a] = 1.0f / sum[a];
+            for (int a = 0; a < 4; a++) {   /* AV per-i (register window) */
+                float *oi = out + (size_t)(i4 + a) * dim + (size_t)h * hd;
+                float32x4_t oacc[40];  /* hd/4 <= 40 (hd=160 middle-block) */
+                for (int d4 = 0; d4 < hd4; d4++) oacc[d4] = vdupq_n_f32(0.0f);
+                const float inv = inv_sum[a];
+                for (int j = 0; j < Tk; j++) {
+                    const float *vj = vth + (size_t)j * hd;
+                    float w = att_h[a][j] * inv;
+                    for (int d4 = 0; d4 < hd4; d4++)
+                        oacc[d4] = vfmaq_n_f32(oacc[d4], vld1q_f32(vj + 4 * d4), w);
+                }
+                for (int d4 = 0; d4 < hd4; d4++)
+                    vst1q_f32(oi + 4 * d4, oacc[d4]);
+            }
+        }
+    for (int i = ni; i < n; i++)   /* odd last i rows (n % 4) */
+        for (int h = 0; h < U_HEADS; h++) {
+            float att_h[4096];
             const float *qi = q + (size_t)i * dim + (size_t)h * hd;
             const float *kth = kt + (size_t)h * Tk * hd;
             const float *vth = vt + (size_t)h * Tk * hd;
@@ -439,7 +491,7 @@ static int unet_attn(wubu_sd_unet_t *u, const char *prefix,
             }
             const float inv_sum = 1.0f / sum;
             float *oi = out + (size_t)i * dim + (size_t)h * hd;
-            float32x4_t oacc[40];  /* hd/4 <= 40 (hd=160 middle-block) */
+            float32x4_t oacc[40];
             for (int d4 = 0; d4 < hd4; d4++) oacc[d4] = vdupq_n_f32(0.0f);
             for (int j = 0; j < Tk; j++) {
                 float32x4_t wv = vdupq_n_f32(att_h[j] * inv_sum);
