@@ -115,9 +115,29 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4 * LAREA; i++) x[i] *= sigma_max;
     /* even t-spacing (LinearScheduler): t = 999 - step*999/(steps-1), then 0 */
     float sched[13]; /* steps+1 */
-    for (int s = 0; s < steps; s++)
-        sched[s] = sigmas[(int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1))];
-    sched[steps] = 0.0f;
+    int use_tcd = getenv("SD_TCD") != NULL;  /* TCD/trailing spacing (Hyper-SD, LCM) */
+    if (use_tcd) {
+        /* trailing timestep spacing (DDIMScheduler timestep_spacing="trailing",
+         * the Hyper-SD/LCM requirement): t = ceil(999 * s/steps).. floor(...),
+         * denser near the high-noise end, x0 predicted at the last step. */
+        for (int s = 0; s < steps; s++) {
+            int t;
+            if (steps == 1 && getenv("SD_TCD_STEP")) {
+                t = atoi(getenv("SD_TCD_STEP"));  /* e.g. 800 for Hyper-SD 1-step */
+            } else {
+                t = (int)ceilf(999.0f * (float)(s + 1) / (float)steps);
+            }
+            if (t > 999) t = 999;
+            if (t < 0) t = 0;
+            sched[s] = sigmas[t];
+        }
+        sched[steps] = 0.0f;
+        fprintf(stderr, "[txt2img] TCD trailing-spacing, %d steps\n", steps);
+    } else {
+        for (int s = 0; s < steps; s++)
+            sched[s] = sigmas[(int)lrintf(999.0f - 999.0f * (float)s / (float)(steps - 1))];
+        sched[steps] = 0.0f;
+    }
     /* uncond guidance: eps = uncond + g*(cond - uncond), g=7.5 */
     {
         /* uncond context = REAL CLIP embedding of the empty prompt "" —
