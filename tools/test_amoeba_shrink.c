@@ -20,6 +20,34 @@
 #include <string.h>
 #include <math.h>
 
+/* Provide a minimal runtime dims for this isolated test.
+ * The test uses hardcoded dimension macros (WUBU_DIM, etc.) but wubu.h
+ * redefines them in terms of WUBU_RUNTIME_DIMS. We provide a static
+ * instance with the default WuBu-35M geometry and call the initializer. */
+#include "wubu_runtime_dims.h"
+static wubu_runtime_dims_t g_wubu_test_dims;
+wubu_runtime_dims_t WUBU_RUNTIME_DIMS;  /* the extern expected by wubu.h */
+
+void wubu_runtime_dims_default(void) {
+    WUBU_RUNTIME_DIMS.vocab = 16384;
+    WUBU_RUNTIME_DIMS.dim = 448;
+    WUBU_RUNTIME_DIMS.layers = 12;
+    WUBU_RUNTIME_DIMS.heads = 7;
+    WUBU_RUNTIME_DIMS.kv_heads = 1;
+    WUBU_RUNTIME_DIMS.head_dim = 64;
+    WUBU_RUNTIME_DIMS.rope_dim = 32;
+    WUBU_RUNTIME_DIMS.ffn_dim = 1228;
+    WUBU_RUNTIME_DIMS.max_seq = 2048;
+    WUBU_RUNTIME_DIMS.local_win = 256;
+    WUBU_RUNTIME_DIMS.full_every = 4;
+    WUBU_RUNTIME_DIMS.select_every = 4;
+    WUBU_RUNTIME_DIMS.clip = 10.0f;
+    WUBU_RUNTIME_DIMS.eps = 1e-6f;
+    WUBU_RUNTIME_DIMS.selectors = 3;
+    WUBU_RUNTIME_DIMS.rope_theta = 10000.0f;
+    WUBU_RUNTIME_DIMS.params = 35072768;
+}
+
 #include "wubu.h"
 #include "wubu_grow.h"
 #include "wubu_shrink.h"
