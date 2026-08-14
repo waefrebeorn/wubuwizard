@@ -1,5 +1,6 @@
 #include "wubu_ssm.h"
 #include "wubu_mobius.h"
+#include "wubu_ssm_utils.h"
 #include "gguf_reader.h"
 #include "thread_pool.h"
 #include "wubu_model.h"  // for kv_cache_read_head / kv_cache_write_head
@@ -99,70 +100,17 @@ void wubu_gpu_ssm_recurrence(
 // State decay: h[i][j] *= gg for all i,j in [0,SSM_D_STATE)
 // h: [SSM_D_STATE, SSM_D_STATE] row-major = 16384 floats
 // gg: scalar multiplier (exp(gate))
-static inline void avx2_state_decay(float *h, float gg) {
-    const int n = SSM_STATE_STRIDE * SSM_STATE_STRIDE;  // 16384
-    const __m256 v_gg = _mm256_set1_ps(gg);
-    for (int i = 0; i < n; i += 8) {
-        _mm256_storeu_ps(h + i, _mm256_mul_ps(_mm256_loadu_ps(h + i), v_gg));
-    }
-}
 
 // h @ k: hk[i] = sum_j h[i][j] * k[j]
 // h:  [SSM_D_STATE, SSM_D_STATE]
 // k:  [SSM_D_STATE]
 // hk: [SSM_D_STATE] output (must be zeroed before call)
-static inline void avx2_hk(const float *h, const float *k, float *hk) {
-    const int d = SSM_STATE_STRIDE;
-    for (int i = 0; i < d; i++) {
-        const float *h_row = h + i * d;
-        __m256 sum = _mm256_setzero_ps();
-        for (int j = 0; j < d; j += 8) {
-            sum = _mm256_fmadd_ps(_mm256_loadu_ps(h_row + j),
-                                  _mm256_loadu_ps(k + j), sum);
-        }
-        // Horizontal reduction
-        __m128 lo = _mm256_castps256_ps128(sum);
-        __m128 hi = _mm256_extractf128_ps(sum, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        hk[i] = _mm_cvtss_f32(lo);
-    }
-}
 
 // State update: h[i][j] += k[i] * diff[j] * bg
 // Equivalent to outer product: h += k ⊗ (diff * bg)
-static inline void avx2_state_update(float *h, const float *k,
-                                      const float *diff, float bg) {
-    const int d = SSM_STATE_STRIDE;
-    for (int i = 0; i < d; i++) {
-        float k_bg = k[i] * bg;
-        float *h_row = h + i * d;
-        for (int j = 0; j < d; j++) {
-            h_row[j] += k_bg * diff[j];
-        }
-    }
-}
 
 // h @ q: out[i] = sum_j h[i][j] * q[j]
 // Same pattern as h @ k
-static inline void avx2_hq(const float *h, const float *q, float *out) {
-    const int d = SSM_STATE_STRIDE;
-    for (int i = 0; i < d; i++) {
-        const float *h_row = h + i * d;
-        __m256 sum = _mm256_setzero_ps();
-        for (int j = 0; j < d; j += 8) {
-            sum = _mm256_fmadd_ps(_mm256_loadu_ps(h_row + j),
-                                  _mm256_loadu_ps(q + j), sum);
-        }
-        __m128 lo = _mm256_castps256_ps128(sum);
-        __m128 hi = _mm256_extractf128_ps(sum, 1);
-        lo = _mm_add_ps(lo, hi);
-        lo = _mm_hadd_ps(lo, lo);
-        lo = _mm_hadd_ps(lo, lo);
-        out[i] = _mm_cvtss_f32(lo);
-    }
-}
 
 // ============================================================
 // Utility: Activation Functions
@@ -175,21 +123,6 @@ static inline void avx2_hq(const float *h, const float *q, float *out) {
 // Otherwise falls back to the provided F32 weight with a column loop.
 // x: [n_rows] input, W_f32: [n_rows*n_cols] F32 or NULL, W_q: quantized or NULL
 // out: [n_cols] output
-static void proj_matmul(const float *x, int64_t n_rows, int64_t n_cols,
-                         const float *W_f32, const uint8_t *W_q, int weight_type,
-                         float *out) {
-    if (W_q && weight_type != GGML_TYPE_F32 && n_cols > 0) {
-        quantized_matmul(x, W_q, weight_type, n_rows, n_cols, 0, out);
-    } else {
-        #pragma omp parallel for if(n_cols > 4)
-        for (int64_t j = 0; j < n_cols; j++) {
-            double sum = 0.0;
-            for (int64_t i = 0; i < n_rows; i++)
-                sum += (double)x[i] * (double)W_f32[j * n_rows + i];
-            out[j] = (float)sum;
-        }
-    }
-}
 
 
 
@@ -209,23 +142,6 @@ static void proj_matmul(const float *x, int64_t n_rows, int64_t n_cols,
 // Utility: Matrix multiply (simple, non-optimized)
 // ============================================================
 
-static void matmul_nt(int M, int N, int K,
-                      const float *A, const float *B,
-                      float *C) {
-    // C[M,N] = A[M,K] @ B[N,K]^T  (B is stored NxK but we use it as KxN internally)
-    // Non-atomic: each thread writes to C[m, 0:N] for its assigned m range
-    long long ops = (long long)M * N * K;
-    #pragma omp parallel for if(ops > 500000)
-    for (int m = 0; m < M; m++) {
-        for (int n = 0; n < N; n++) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; k++) {
-                sum += A[m * K + k] * B[n * K + k];  // B[N,K] stored row-major
-            }
-            C[m * N + n] = sum;
-        }
-    }
-}
 
 // ============================================================
 // Utility: 1D Convolution (depthwise, causal)
@@ -238,16 +154,7 @@ static void matmul_nt(int M, int N, int K,
 #define TGT_PI      3.14159265358979323846f
 #define TGT_BOUNDARY (2.0f * TGT_PI)
 
-static inline float tgt_wrap(float x) {
-    return fmodf(x + TGT_PI, TGT_BOUNDARY) - TGT_PI;
-}
 
-static inline float tgt_safe_expf(float x) {
-    // Clamp to avoid float32 overflow: expf(89) ≈ 5e38 ≈ overflow
-    if (x > 80.0f) x = 80.0f;
-    if (x < -80.0f) return 0.0f;
-    return expf(x);
-}
 
 // ============================================================
 // SSM Layer Forward Pass (Euclidean)
@@ -1915,244 +1822,6 @@ void wubu_ssm_backward_gated_norm_weight(
 //
 // Backward processes timesteps in reverse (BPTT).
 // Requires per-timestep saved states from forward pass.
-void wubu_ssm_backward_recurrence(
-    int B, int T,
-    const float *saved_states,      // [T+1, SSM_V_HEADS, SSM_D_STATE, SSM_D_STATE]
-                                    // saved_states[t] = state after timestep t
-                                    // saved_states[0] = initial state (before any timestep)
-    const float *q_norm,            // [N, SSM_K_HEADS, SSM_D_STATE]
-    const float *k_norm,            // [N, SSM_K_HEADS, SSM_D_STATE]
-    const float *v_conv,            // [N, SSM_V_HEADS, SSM_D_STATE]
-    const float *beta_flat,         // [N, DT_RANK]
-    const float *gate_flat,         // [N, DT_RANK]
-    const float *d_output,          // [N, VALUE_DIM] grad from gated norm (dL/d(delta_out))
-    float *d_q_norm,                // [N, SSM_K_HEADS, SSM_D_STATE] output grad
-    float *d_k_norm,                // [N, SSM_K_HEADS, SSM_D_STATE] output grad
-    float *d_v_conv,                // [N, SSM_V_HEADS, SSM_D_STATE] output grad
-    float *d_beta_flat,             // [N, DT_RANK] output grad
-    float *d_gate_flat,             // [N, DT_RANK] output grad
-    float *d_state_init)            // [SSM_V_HEADS, SSM_D_STATE, SSM_D_STATE] BPTT to initial state
-{
-    const int d = SSM_D_STATE;     // 128
-    const int n_vh = SSM_V_HEADS;  // 32
-    const int n_kh = SSM_K_HEADS;  // 16
-    const int repeat = n_vh / n_kh;
-    const int N = B * T;
-    const int state_sz = n_vh * d * d;
-    
-    // BPTT: process timesteps in reverse
-    // d_h_next accumulates the gradient w.r.t. h_new from future timesteps
-    float *d_h_next = (float *)calloc(state_sz, sizeof(float));
-    if (!d_h_next) {
-        fprintf(stderr, "backward_recurrence: d_h_next alloc failed\n");
-        return;
-    }
-    
-    for (int t = T - 1; t >= 0; t--) {
-        for (int b = 0; b < B; b++) {
-            int s = b * T + t;  // flat token index
-            
-            // Get saved states: h_old = state before this timestep, h_new = state after
-            const float *h_old = saved_states + t * state_sz;
-            const float *h_new = saved_states + (t + 1) * state_sz;
-            
-            // d_h_new = d_output[t] @ q^T + d_h_next (BPTT from t+1)
-            // d_output[t]: [VALUE_DIM] = [n_vh * d]
-            // For each vh: output[i] = sum_j h_new[i,j] * q[j]
-            // dL/dh_new[i,j] += d_output[t][i] * q[j]
-            
-            float *d_h_new = (float *)calloc(state_sz, sizeof(float));
-            if (!d_h_new) { free(d_h_next); return; }
-            
-            // dL/dh_new += d_output @ q^T
-            for (int vh = 0; vh < n_vh; vh++) {
-                int kh = vh / repeat;
-                const float *q_vh = q_norm + (s * n_kh + kh) * d;
-                const float *do_vh = d_output + (s * n_vh + vh) * d;
-                
-                for (int i = 0; i < d; i++) {
-                    float *dh = d_h_new + vh * d * d + i * d;
-                    float do_i = do_vh[i];
-                    for (int j = 0; j < d; j++) {
-                        dh[j] += do_i * q_vh[j];
-                    }
-                }
-            }
-            
-            // Add BPTT term from future timesteps
-            for (int i = 0; i < state_sz; i++) {
-                d_h_new[i] += d_h_next[i];
-            }
-            
-            // Now compute dL/dh_old from d_h_new through the recurrence
-            // h_new[i,j] = h_old[i,j] * gg + k[i] * (v[j] - gg * sum_p h_old[p,j] * k[p]) * bg
-            // dL/dh_old[i,j] = d_h_new[i,j] * gg
-            //                   - gg * k[i] * bg * sum_m d_h_new[m,j] * k[m]
-            
-            for (int vh = 0; vh < n_vh; vh++) {
-                int kh = vh / repeat;
-                const float *k_vh = k_norm + (s * n_kh + kh) * d;
-                float bg = beta_flat[s * DT_RANK + kh];
-                float gg = expf(gate_flat[s * DT_RANK + kh]);
-                
-                // For each column j of h_new, compute:
-                // dL/dh_old[i,j] = d_h_new[i,j] * gg - gg * k_vh[i] * bg * sum_m d_h_new[m,j] * k_vh[m]
-                
-                for (int j = 0; j < d; j++) {
-                    // Compute S[j] = sum_m d_h_new[m,j] * k_vh[m]
-                    double S = 0.0;
-                    for (int m = 0; m < d; m++) {
-                        S += (double)d_h_new[vh * d * d + m * d + j] * (double)k_vh[m];
-                    }
-                    float factor = gg * bg * (float)S;
-                    
-                    for (int i = 0; i < d; i++) {
-                        float grad = d_h_new[vh * d * d + i * d + j] * gg;
-                        grad -= k_vh[i] * factor;
-                        
-                        if (t > 0) {
-                            // Accumulate to d_h_prev (for BPTT to t-1)
-                            d_h_next[vh * d * d + i * d + j] = grad;
-                        } else if (d_state_init) {
-                            // First timestep: accumulate to d_state_init
-                            d_state_init[vh * d * d + i * d + j] += grad;
-                        }
-                    }
-                }
-            }
-            
-            // Now compute gradients w.r.t. k, q, v, gg, bg
-            // output[i] = sum_j h_new[i,j] * q[j]
-            // dL/dq[j] += sum_i d_output[t][i] * h_new[i,j]
-            for (int vh = 0; vh < n_vh; vh++) {
-                int kh = vh / repeat;
-                const float *h_new_vh = h_new + vh * d * d;
-                const float *do_vh = d_output + (s * n_vh + vh) * d;
-                float *dq_vh = d_q_norm + (s * n_kh + kh) * d;
-                
-                // dL/dq[j] = sum_i d_output[i] * h_new[i,j]
-                for (int j = 0; j < d; j++) {
-                    double sum = 0.0;
-                    for (int i = 0; i < d; i++) {
-                        sum += (double)do_vh[i] * (double)h_new_vh[i * d + j];
-                    }
-                    dq_vh[j] += (float)sum;
-                }
-            }
-            
-            // Gradient through recurrence w.r.t. k, v, gg, bg
-            for (int vh = 0; vh < n_vh; vh++) {
-                int kh = vh / repeat;
-                const float *k_vh = k_norm + (s * n_kh + kh) * d;
-                const float *v_vh = v_conv + (s * n_vh + vh) * d;
-                const float *h_old_vh = h_old + vh * d * d;
-                float bg = beta_flat[s * DT_RANK + kh];
-                float gg = expf(gate_flat[s * DT_RANK + kh]);
-                float *dk_vh = d_k_norm + (s * n_kh + kh) * d;
-                float *dv_vh = d_v_conv + (s * n_vh + vh) * d;
-                
-                // h_new[i,j] = h_old[i,j]*gg + k_vh[i]*(v_vh[j] - gg * sum_p h_old[p,j]*k_vh[p])*bg
-                // output[i] = sum_j h_new[i,j] * q_vh[j]
-                // dL/dk_vh[i] = ...
-                //   k appears in: h_new[:,j] contribution [+], h_old @ k term [from diff computation]
-                
-                // h_new[i,j] = h_old[i,j]*gg + k_vh[i]*v_vh[j]*bg - k_vh[i]*gg*bg*sum_p h_old[p,j]*k_vh[p]
-                // 
-                // dL/dk_vh[i] = sum_m,n d_h_new[m,n] * d(h_new[m,n])/d(k_vh[i])
-                // d(h_new[m,n])/d(k_vh[i]) = 
-                //   term1: v_vh[n]*bg if m==i, else 0
-                //   term2: -gg*bg * [h_old[i,n]*k_vh[i] + sum_p h_old[p,n]*k_vh[p]]  ... 
-                //   Actually: -k_vh[m] * gg * bg * (h_old[i,n] * delta_mi + k_vh[i] * h_old[m,n]?)
-                //   
-                // Let me redo: the term is -k_vh[m]*gg*bg*sum_p h_old[p,n]*k_vh[p]
-                // d/d(k_vh[i]): -delta_mi*gg*bg*sum_p h_old[p,n]*k_vh[p] - k_vh[m]*gg*bg*h_old[i,n]
-                // So: dL/dk_vh[i] = 
-                //   sum_n d_h_new[i,n] * v_vh[n] * bg     [from v*bg term, m=i path]
-                //   - sum_n d_h_new[i,n] * gg*bg * sum_p h_old[p,n]*k_vh[p]  [from - sum_p term, m=i path]
-                //   - sum_m,n d_h_new[m,n] * k_vh[m]*gg*bg*h_old[i,n]  [from -k*h_old term, m!=i path]
-                // = gg*bg * [
-                //   sum_n d_h_new[i,n] * (v_vh[n] - sum_p h_old[p,n]*k_vh[p])  
-                //   - sum_m,n d_h_new[m,n] * k_vh[m] * h_old[i,n]
-                // ]
-                
-                // First compute diff[n] = v_vh[n] - sum_p h_old[p,n]*k_vh[p]
-                float diff[SSM_D_STATE];
-                for (int n = 0; n < d; n++) {
-                    double hk = 0.0;
-                    for (int p = 0; p < d; p++)
-                        hk += (double)h_old_vh[p * d + n] * (double)k_vh[p];
-                    diff[n] = v_vh[n] - gg * (float)hk;
-                }
-                
-                // dL/dk_vh[i]
-                for (int i = 0; i < d; i++) {
-                    double grad_k = 0.0;
-                    
-                    // sum_n d_h_new[i,n] * diff[n] * bg
-                    for (int n = 0; n < d; n++) {
-                        grad_k += (double)d_h_new[vh * d * d + i * d + n] * (double)diff[n] * (double)bg;
-                    }
-                    
-                    // - gg * bg * sum_m,n d_h_new[m,n] * k_vh[m] * h_old[i,n]
-                    for (int m = 0; m < d; m++) {
-                        for (int n = 0; n < d; n++) {
-                            grad_k -= (double)gg * (double)bg 
-                                    * (double)d_h_new[vh * d * d + m * d + n] 
-                                    * (double)k_vh[m] * (double)h_old_vh[i * d + n];
-                        }
-                    }
-                    
-                    dk_vh[i] += (float)grad_k;
-                }
-                
-                // dL/dv_vh[j] = sum_i d_h_new[i,j] * k_vh[i] * bg
-                for (int j = 0; j < d; j++) {
-                    double grad_v = 0.0;
-                    for (int i = 0; i < d; i++) {
-                        grad_v += (double)d_h_new[vh * d * d + i * d + j] 
-                                * (double)k_vh[i] * (double)bg;
-                    }
-                    dv_vh[j] += (float)grad_v;
-                }
-                
-                // dL/dbg = sum_i,j d_h_new[i,j] * k_vh[i] * (v_vh[j] - gg*sum_p h_old[p,j]*k_vh[p])
-                {
-                    double grad_bg = 0.0;
-                    for (int i = 0; i < d; i++) {
-                        for (int j = 0; j < d; j++) {
-                            grad_bg += (double)d_h_new[vh * d * d + i * d + j]
-                                     * (double)k_vh[i] * (double)diff[j];
-                        }
-                    }
-                    d_beta_flat[s * DT_RANK + kh] += (float)grad_bg;
-                }
-                
-                // dL/dgg where gg = exp(gate)
-                // h_new[i,j] = h_old[i,j]*gg + k_vh[i]*v_vh[j]*bg - k_vh[i]*gg*bg*sum_p h_old[p,j]*k_vh[p]
-                // 
-                // d(h_new[i,j])/dgg = h_old[i,j] - k_vh[i]*bg*sum_p h_old[p,j]*k_vh[p]
-                //
-                // dL/dgg = sum_i,j d_h_new[i,j] * (h_old[i,j] - k_vh[i]*bg*hk_pred[j])
-                // where hk_pred[j] = sum_p h_old[p,j]*k_vh[p]
-                {
-                    double grad_gg = 0.0;
-                    for (int i = 0; i < d; i++) {
-                        for (int j = 0; j < d; j++) {
-                            grad_gg += (double)d_h_new[vh * d * d + i * d + j]
-                                     * (double)(h_old_vh[i * d + j] - k_vh[i] * bg * diff[j]);
-                        }
-                    }
-                    // gg = exp(gate), so dL/dgate = dL/dgg * gg
-                    d_gate_flat[s * DT_RANK + kh] += (float)(grad_gg * gg);
-                }
-            }
-            
-            free(d_h_new);
-        }
-    }
-    
-    free(d_h_next);
-}
 
 // ============================================================
 // Backward Pass — Generic MatMul backward helper
@@ -2161,30 +1830,6 @@ void wubu_ssm_backward_recurrence(
 // Backward:
 //   d_input[s,i] += sum_j d_output[s,j] * W[i,j]
 //   dW[i,j] += sum_s input[s,i] * d_output[s,j]
-static void backward_matmul_nt(int N, int Din, int Dout,
-                               const float *input, const float *d_output,
-                               const float *W, float *d_input, float *dW) {
-    // d_input = d_output @ W^T  [N,Din] += [N,Dout] @ [Din,Dout]^T
-    for (int s = 0; s < N; s++) {
-        for (int i = 0; i < Din; i++) {
-            double sum = 0.0;
-            for (int j = 0; j < Dout; j++)
-                sum += (double)d_output[s * Dout + j] * (double)W[i * Dout + j];
-            d_input[s * Din + i] += (float)sum;
-        }
-    }
-    // dW = input^T @ d_output (only if requested)
-    if (dW) {
-        for (int i = 0; i < Din; i++) {
-            for (int j = 0; j < Dout; j++) {
-                double sum = 0.0;
-                for (int s = 0; s < N; s++)
-                    sum += (double)input[s * Din + i] * (double)d_output[s * Dout + j];
-                dW[i * Dout + j] += (float)sum;
-            }
-        }
-    }
-}
 
 // ============================================================
 // Backward Pass — Conv1D backward
@@ -2193,39 +1838,6 @@ static void backward_matmul_nt(int N, int Din, int Dout,
 // Backward:
 //   d_input[t+ki,c] += d_output[t,c] * kernel[ki,c]
 //   d_kernel[ki,c] += sum_t d_output[t,c] * input[t+ki,c]
-static void backward_conv1d(int B, int T, int C, int k,
-                            const float *input, // [B, T+k-1, C]
-                            const float *d_output, // [B, T, C]
-                            const float *kernel, // [k, C]
-                            float *d_input, // [B, T+k-1, C]
-                            float *d_kernel) { // [k, C]
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            for (int c = 0; c < C; c++) {
-                float do_val = d_output[(b * T + t) * C + c];
-                for (int ki = 0; ki < k; ki++) {
-                    int t_in = t + ki;
-                    // d_input[t+ki,c] += d_output[t,c] * kernel[ki,c]
-                    d_input[(b * (T + k - 1) + t_in) * C + c] += do_val * kernel[ki * C + c];
-                }
-            }
-        }
-    }
-    // d_kernel
-    for (int ki = 0; ki < k; ki++) {
-        for (int c = 0; c < C; c++) {
-            double sum = 0.0;
-            for (int b = 0; b < B; b++) {
-                for (int t = 0; t < T; t++) {
-                    int t_in = t + ki;
-                    sum += (double)d_output[(b * T + t) * C + c] 
-                         * (double)input[(b * (T + k - 1) + t_in) * C + c];
-                }
-            }
-            if (d_kernel) d_kernel[ki * C + c] += (float)sum;
-        }
-    }
-}
 
 // ============================================================
 // Full SSM Layer Backward Pass
@@ -2796,65 +2408,3 @@ cleanup_gqa:
 // ============================================================
 // Sequential SSM recurrence (extracted for chunked verification)
 // ============================================================
-void wubu_ssm_sequential_recurrence(int B, int T,
-                                     const float *q_norm,
-                                     const float *k_norm,
-                                     const float *v_conv,
-                                     const float *beta_flat,
-                                     const float *gate_flat,
-                                     float *ssm_state,
-                                     float *delta_out)
-{
-    const int d  = SSM_D_STATE;
-    const int hk = SSM_K_HEADS;
-    const int hv = SSM_V_HEADS;
-    const int rf = hv / hk;
-    const float q_scale = 1.0f / sqrtf((float)d);
-
-    for (int b = 0; b < B; b++) {
-        for (int t = 0; t < T; t++) {
-            int s = b * T + t;
-            const float *beta_s = beta_flat + s * hv;
-            const float *gate_s = gate_flat + s * hv;
-
-            for (int vh = 0; vh < hv; vh++) {
-                int kh = vh / rf;
-                float bg = beta_s[vh];
-                float gg = tgt_safe_expf(gate_s[vh]);
-
-                const float *q_vh = q_norm + (s * hk + kh) * d;
-                const float *k_vh = k_norm + (s * hk + kh) * d;
-                const float *v_vh = v_conv + (s * hv + vh) * d;
-                float *h = ssm_state + (vh * d * d);
-
-                float q_scaled[d];
-                for (int i = 0; i < d; i++)
-                    q_scaled[i] = q_vh[i] * q_scale;
-
-                for (int i = 0; i < d; i++)
-                    for (int j = 0; j < d; j++)
-                        h[i * d + j] *= gg;
-
-                float hk_v[d];
-                memset(hk_v, 0, sizeof(hk_v));
-                for (int i = 0; i < d; i++)
-                    for (int j = 0; j < d; j++)
-                        hk_v[i] += h[i * d + j] * k_vh[j];
-
-                float diff[d];
-                for (int i = 0; i < d; i++)
-                    diff[i] = v_vh[i] - hk_v[i];
-
-                for (int i = 0; i < d; i++)
-                    for (int j = 0; j < d; j++)
-                        h[i * d + j] += k_vh[j] * diff[i] * bg;
-
-                float *out = delta_out + (s * hv + vh) * d;
-                memset(out, 0, d * sizeof(float));
-                for (int i = 0; i < d; i++)
-                    for (int j = 0; j < d; j++)
-                        out[i] += h[i * d + j] * q_scaled[j];
-            }
-        }
-    }
-}
