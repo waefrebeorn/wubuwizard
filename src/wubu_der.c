@@ -4,6 +4,7 @@
 #include "wubu_der.h"
 #include <string.h>
 #include <math.h>
+#include "wubu_activations.h"
 
 int wubu_der_push(wubu_der_buffer_t *b, const float *teacher_logits, int ndim)
 {
@@ -15,18 +16,7 @@ int wubu_der_push(wubu_der_buffer_t *b, const float *teacher_logits, int ndim)
     return 0;
 }
 
-/* stable softmax of a logits vector (temperature-scaled) */
-static void softmax_t(const float *logits, int n, float temp, float *out)
-{
-    float m = logits[0];
-    for (int i = 1; i < n; i++) if (logits[i] > m) m = logits[i];
-    float sum = 0;
-    for (int i = 0; i < n; i++) {
-        out[i] = expf((logits[i] - m) / (temp > 0 ? temp : 1.0f));
-        sum += out[i];
-    }
-    for (int i = 0; i < n; i++) out[i] /= sum;
-}
+/* softmax: use wubu_activations.h */
 
 float wubu_der_loss(const wubu_der_buffer_t *b, const float *student_logits,
                     int ndim, float temperature)

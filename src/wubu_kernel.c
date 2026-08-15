@@ -31,6 +31,7 @@ static wubu_gemv_fn      g_cpu_gemv     = NULL;
 static wubu_attn_fn      g_cpu_attn     = NULL;
 static wubu_rope_fn      g_cpu_rope     = NULL;
 static wubu_softmax_fn   g_cpu_softmax  = NULL;
+#include "wubu_activations.h"
 static wubu_rmsnorm_fn   g_cpu_rmsnorm  = NULL;
 static wubu_quantize_fn  g_cpu_quantize = NULL;
 static wubu_dequantize_fn g_cpu_dequantize = NULL;
@@ -72,18 +73,7 @@ static void cpu_gemv(const float *A, const float *x, float *y,
 }
 
 static void cpu_softmax(float *logits, int M, int N) {
-    for (int i = 0; i < M; i++) {
-        float *row = logits + (size_t)i * N;
-        float max_val = row[0];
-        for (int j = 1; j < N; j++)
-            if (row[j] > max_val) max_val = row[j];
-        float sum = 0.0f;
-        for (int j = 0; j < N; j++) {
-            row[j] = expf(row[j] - max_val);
-            sum += row[j];
-        }
-        for (int j = 0; j < N; j++) row[j] /= sum;
-    }
+    wubu_softmax_rows(logits, M, N);
 }
 
 static void cpu_rmsnorm(float *x, const float *gamma,

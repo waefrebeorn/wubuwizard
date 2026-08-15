@@ -25,12 +25,9 @@
 #include <math.h>
 #include <omp.h>
 #include "wubu_core_dumps.h"
+#include "wubu_activations.h"
 
-static void softmax_inplace(float *x, int n) {
-    float mx = x[0]; for (int i=1;i<n;i++) if(x[i]>mx)mx=x[i];
-    float s=0; for(int i=0;i<n;i++){x[i]=expf(x[i]-mx);s+=x[i];}
-    float iv=1.0f/(s+1e-30f); for(int i=0;i<n;i++)x[i]*=iv;
-}
+/* softmax: use wubu_activations.h */
 
 int main(int argc, char **argv) {
     wubu_disable_core_dumps();

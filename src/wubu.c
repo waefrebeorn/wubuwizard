@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "wubu_activations.h"
 
 /* ---- tiny helpers (freestanding-friendly) ---- */
 static float rms_norm_value(float *out, const float *x, const float *w,
@@ -39,7 +40,7 @@ static float rms_norm_value(float *out, const float *x, const float *w,
     return r;
 }
 
-static float silu(float v) { return v / (1.0f + expf(-v)); }
+/* silu: use wubu_activations.h */
 
 /* the partial RoPE table (matching the reference exactly). */
 static void build_rope_tables(float *cos_tbl, float *sin_tbl, int max_seq,

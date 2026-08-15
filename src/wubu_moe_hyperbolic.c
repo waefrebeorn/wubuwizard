@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <assert.h>
+#include "wubu_activations.h"
 
 // ============================================================
 // Helper: map Euclidean vector to Poincaré ball via exp_map

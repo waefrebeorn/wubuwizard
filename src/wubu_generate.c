@@ -13,6 +13,7 @@
 #include "wubu_kv_styx.h"
 #include <stdlib.h>
 #include <string.h>
+#include "wubu_activations.h"
 #include <math.h>
 
 static int argmaxf(const float *a, int n) {
@@ -32,12 +33,7 @@ static uint32_t grng_u32(void) {
 }
 static float grng_uni(void) { return (float)grng_u32() / (float)0xFFFFFFFFu; }
 
-/* softmax in place */
-static void softmaxf(float *a, int n) {
-    float mx = a[0]; for (int i = 1; i < n; i++) if (a[i] > mx) mx = a[i];
-    float s = 0; for (int i = 0; i < n; i++) { a[i] = expf(a[i] - mx); s += a[i]; }
-    float inv = s > 0 ? 1.0f/s : 0; for (int i = 0; i < n; i++) a[i] *= inv;
-}
+/* softmax: use wubu_activations.h */
 
 int wubu_generate(wubu_model_t *model, const int *prompt, int n_prompt,
                   const wubu_generate_cfg_t *cfg, int *out) {

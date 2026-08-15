@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include "wubu_activations.h"
 
 #define EPS 1e-5f
 #define TM 4
@@ -11,13 +12,7 @@
 #define TN 6
 
 static void nref_softmax(float *logits, int M, int N) {
-    for (int i = 0; i < M; i++) {
-        float *row = logits + i * N;
-        float maxv = row[0];
-        for (int j = 1; j < N; j++) if (row[j] > maxv) maxv = row[j];
-        float sum = 0.0f;
-        for (int j = 0; j < N; j++) { row[j] = expf(row[j] - maxv); sum += row[j]; }
-        for (int j = 0; j < N; j++) row[j] /= sum;
+    wubu_softmax_rows(logits, M, N);
     }
 }
 

@@ -10,20 +10,13 @@
 #include <string.h>
 #include <math.h>
 #include <stdbool.h>
+#include "wubu_activations.h"
 #if !defined(_WIN32)
 #include <sys/resource.h>
 #include <sys/prctl.h>
 #endif
 
-static inline float silu_f(float x) {
-    if (x < -80.0f) return 0.0f;
-    return x / (1.0f + expf(-x));
-}
-
-static inline float silu_deriv(float x, float silu_x) {
-    float sig = 1.0f / (1.0f + expf(-x));
-    return silu_x + sig * (1.0f - silu_x);
-}
+/* silu, silu_deriv: use wubu_activations.h */
 
 // Recompute router: logits -> softmax -> top-k with normalized weights
 static void moe_router_backward_prep(const float *x, int B, int T,

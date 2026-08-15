@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include "wubu_activations.h"
 #include <stdio.h>
 
 /* --- MD01: image preprocessing --- */
@@ -56,10 +57,7 @@ int wubu_md3_encode(const wubu_image_t *img, float *tokens, int max_tokens)
 }
 
 /* --- MD03: MoE forward (9B core: shared + expert FFNs) --- */
-static float gelu(float x)
-{
-    return 0.5f * x * (1.0f + tanf(0.7978845608f * (x + 0.044715f * x * x * x)));
-}
+/* gelu: use wubu_activations.h */
 
 int wubu_md3_moe_forward(const float *tokens, int n_tokens, const int *expert_ids,
                          int n_experts, float *out, int d_model)
@@ -71,7 +69,7 @@ int wubu_md3_moe_forward(const float *tokens, int n_tokens, const int *expert_id
         float scale = 1.0f + 0.1f * (float)expert;
         for (int d = 0; d < d_model; d++) {
             float shared = 0.5f * tokens[t * d_model + d];
-            float exp_val = gelu(tokens[t * d_model + d] * scale);
+            float exp_val = wubu_gelu(tokens[t * d_model + d] * scale);
             out[t * d_model + d] = shared + exp_val;
         }
     }

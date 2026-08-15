@@ -25,6 +25,7 @@
 #include <string.h>
 #include <math.h>
 #include <omp.h>
+#include "wubu_activations.h"
 
 #define CLIP_DMODEL   768
 #define CLIP_HEADS    12
@@ -426,10 +427,7 @@ static float *clip_get_f32(wubu_sd_clip_t *c, const char *name, int64_t *n_elems
     return f;
 }
 
-static float quick_gelu(float x) {
-    /* x * sigmoid(1.702 x) */
-    return x / (1.0f + expf(-1.702f * x));
-}
+/* quick_gelu: use wubu_activations.h */
 
 /* causal self-attention, 77 tokens, 12 heads x 64. x in [77, 768].
  * q/k/v/o weights are RAW blob pointers (F16 or Q4_0) — quantized matmul. */

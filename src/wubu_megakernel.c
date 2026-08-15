@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "wubu_activations.h"
 
 struct wubu_megakernel {
     wubu_megakernel_cfg_t cfg;
@@ -34,10 +35,7 @@ void wubu_megakernel_free(wubu_megakernel_t *mk) {
     free(mk);
 }
 
-/* GELU activation: x * Phi(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715*x^3))) */
-static inline float gelu_fast(float x) {
-    return 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-}
+/* gelu_fast: use wubu_activations.h */
 
 /* Fused single-token decode — the Photon 2.0 megakernel hot path.
  * All sub-operations are inlined into one function call. */

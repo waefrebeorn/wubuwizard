@@ -4,6 +4,7 @@
 #include "wubu_imgenc.h"
 #include <math.h>
 #include <string.h>
+#include "wubu_activations.h"
 
 static float lcg_randf(unsigned *seed) {
     *seed = (*seed * 1103515245U + 12345U) & 0x7fffffff;
@@ -33,9 +34,7 @@ static void layernorm(float *v, int dim) {
     for (int i = 0; i < dim; i++) v[i] = (v[i] - mean) / std;
 }
 
-static float gelu(float x) {
-    return 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-}
+/* gelu: use wubu_activations.h */
 
 int wubu_imgenc_init(wubu_imgenc_t *v, unsigned seed) {
     if (!v) return -1;

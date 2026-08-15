@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "wubu_activations.h"
 
 /* the GPU dispatch (the wubu_model.h pattern, same as wubu.c):
  * the trainer rides cuBLAS when the GPU is present and falls back to
@@ -154,12 +155,7 @@ static float rms_norm(float *out, const float *x, const float *w, int n)
     return r;
 }
 
-static float silu(float v) { return v / (1.0f + expf(-v)); }
-static float silu_deriv(float v)   /* v = the CLIPPED pre-activation */
-{
-    float s = 1.0f / (1.0f + expf(-v));
-    return s * (1.0f + v * (1.0f - s));
-}
+/* silu, silu_deriv: use wubu_activations.h */
 static float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 
 /* out[s, o] = sum_i w[o, i] * x[s, i]  (w is [out, in] row-major).
