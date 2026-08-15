@@ -1,6 +1,6 @@
 /* unet_mag.c -- feed pure noise (RMS 1) at t=999, check eps RMS.
  * Correct UNet: eps ~ x (RMS ~1). Broken: RMS >> 1 or << 1. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"
 #include <stdio.h>

@@ -1,7 +1,7 @@
 /* cross_probe.c -- verify the cross-attn k/v path: project ctx (cond vs
  * empty) through to_k/to_v of attn2 in block 1.1, compare outputs.
  * If k_cond == k_empty, the CLIP context is wrong. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "gguf_reader.h"
 #include "wubu_sd_ops.h"

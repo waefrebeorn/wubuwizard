@@ -10,7 +10,7 @@
  * C11, self-contained.
  */
 #include "wubu_orbits.h"
-#include "wubu_std.h"        /* M_PI without _GNU_SOURCE (no GNU dep) */
+#include "wubu_std.h"        /* M_PI without WUBU_HOSTED (no GNU dep) */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>

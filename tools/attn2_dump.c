@@ -1,6 +1,6 @@
 /* attn2_dump.c -- capture attn2 output for cond vs uncond ctx at t=500
  * (mid-schedule where the prompt should matter), via the debug hook. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

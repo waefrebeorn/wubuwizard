@@ -1,7 +1,7 @@
 /* empty_prompt.c -- CLIP encode of "" vs a normal prompt: check stats.
  * The uncond embedding must look like a real text embedding (not zeros,
  * not garbage). sd.cpp uses the same "" encoding for CFG. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "gguf_reader.h"
 #include <stdio.h>

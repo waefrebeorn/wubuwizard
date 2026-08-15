@@ -1,5 +1,5 @@
 /* out_block_types.c -- dump types of the out.* tensors in the UNet GGUF */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "gguf_reader.h"
 #include <stdio.h>
 #include <string.h>

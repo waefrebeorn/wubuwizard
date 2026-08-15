@@ -1,5 +1,5 @@
 /* temb_rms.c -- full time-embed diagnostic: output rms + diff for t values */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "gguf_reader.h"
 #include <stdio.h>
 #include <stdlib.h>

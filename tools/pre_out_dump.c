@@ -1,7 +1,7 @@
 /* pre_out_dump.c -- capture OUR pre-out activation (stage 3) on zero input
  * and dump per-channel means/rms, for direct comparison with sd.cpp's
  * wz_pre_out capture (rms 3.83, per-channel means +/- 1-2). */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_unet.h"
 #include "wubu_sd_ops.h"
 #include "gguf_reader.h"

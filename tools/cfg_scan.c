@@ -1,7 +1,7 @@
 /* cfg_scan.c -- cond vs uncond eps diff across the whole schedule.
  * At t=999 (max noise) prompt influence is small; it must GROW at
  * mid/low t where the prompt guides structure. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

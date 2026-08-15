@@ -1,6 +1,6 @@
 /* outblock_trace.c -- trace the cond-vs-uncond signal through the 12
  * output blocks (after each resblock + after each transformer). */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

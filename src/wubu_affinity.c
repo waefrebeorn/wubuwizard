@@ -6,7 +6,8 @@
  *   - Hugepage allocation for KV arena (item K.99)
  * Falls back gracefully when sched_getaffinity / libnuma are unavailable.
  */
-#define _GNU_SOURCE            /* must precede any system header for CPU_SET macros */
+#define WUBU_HOSTED            /* must precede any system header for CPU_SET macros */
+#include "wubu_gnu_compat.h"
 #include "wubu_affinity.h"
 #include <stdlib.h>
 #include <stdio.h>

@@ -1,5 +1,5 @@
 /* tok_ids.c -- dump our BPE token IDs for the test prompt. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "gguf_reader.h"
 #include <stdio.h>

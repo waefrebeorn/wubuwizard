@@ -1,7 +1,7 @@
 /* latent_structure.c -- dump the final DDIM latent and measure spatial
  * autocorrelation. A correct latent has structure (corr > 0.5 at dx=1);
  * pure noise has ~0. Also save the latent to /tmp/final_latent.bin. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

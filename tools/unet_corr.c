@@ -1,6 +1,6 @@
 /* unet_corr.c -- feed noise x, check corr(x, eps). Working UNet at t=999
  * predicts ~the noise itself: corr > 0.5. Broken: corr ~ 0. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"
 #include <stdio.h>

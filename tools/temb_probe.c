@@ -1,5 +1,5 @@
 /* temb_probe.c -- dump time embedding for t=0 vs t=999 */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"
 #include <stdio.h>

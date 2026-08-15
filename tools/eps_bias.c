@@ -1,7 +1,7 @@
 /* eps_bias.c -- UNet eps per-channel mean for zero + noise inputs.
  * A correct UNet: eps per-channel mean ~0 for zero input (just bias).
  * Large channel means = bias leak (missing bias, wrong norm, etc). */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"
 #include <stdio.h>

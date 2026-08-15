@@ -1,7 +1,7 @@
 /* unet_eps_dump.c -- run OUR C11 UNet on the exact same input as the
  * sd.cpp harness (noise file, sigma_max*c_in scaling, t=999, ZERO context)
  * and dump eps + stats for direct comparison. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_unet.h"
 #include "wubu_sd_ops.h"
 #include "gguf_reader.h"

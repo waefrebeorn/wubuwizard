@@ -7,7 +7,7 @@
  * Run:   sudo chrt -f 99 taskset -c 3 ./trefi_probe
  */
 
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

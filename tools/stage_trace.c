@@ -1,7 +1,7 @@
 /* stage_trace.c -- trace where the cond-vs-uncond signal dies:
  * stage 1 = middle-block input, 2 = after middle transformer,
  * 3 = final pre-conv (out.0 input), 4 = eps (out.2 output). */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

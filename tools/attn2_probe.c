@@ -1,7 +1,7 @@
 /* attn2_probe.c -- compute attn2 (cross) output for cond vs empty ctx on
  * a REAL intermediate. If outputs are nearly identical, the attention is
  * degenerate (flat softmax or wrong scale). */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "gguf_reader.h"
 #include "wubu_sd_ops.h"

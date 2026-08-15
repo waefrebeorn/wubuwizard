@@ -1,6 +1,6 @@
 /* final_means.c -- reproduce the sampler, print FINAL latent channel means.
  * If means are ~0, the latent is fine and the bug is in VAE decode. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

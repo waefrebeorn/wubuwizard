@@ -1,5 +1,5 @@
 /* tok_ids2.c -- compile the clip .c INLINE to access bpe_encode internals. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "../src/wubu_sd_clip.c"  /* pull in the static internals */
 
 int main(int argc, char **argv) {

@@ -1,7 +1,7 @@
 /* cfg_diff.c -- compare cond vs uncond eps pointwise at t=999.
  * Working CFG: large differences (prompt guides the denoise).
  * Dead cross-attn: cond == uncond. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

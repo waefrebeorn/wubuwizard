@@ -1,6 +1,6 @@
 /* l1_probe.c -- compare sd_dequant (via linear_q) vs gguf_read_tensor_f32
  * for time_embed.0.weight: if they differ, the dequant path is broken. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "gguf_reader.h"
 #include "wubu_sd_ops.h"
 #include <stdio.h>

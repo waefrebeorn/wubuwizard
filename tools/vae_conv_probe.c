@@ -1,7 +1,7 @@
 /* vae_conv_probe.c -- verify conv2d_q vs canonical for a REAL VAE conv
  * (up.0.block.0.conv1: 256->128, 3x3, at 512x512 would take forever —
  * use a 32x32 crop). Also test conv_in 4->512. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_ops.h"
 #include "gguf_reader.h"
 #include <stdio.h>

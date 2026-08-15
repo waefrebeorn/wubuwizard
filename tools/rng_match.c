@@ -1,7 +1,7 @@
 /* rng_match.c -- replicate std::default_random_engine (libstdc++ =
  * minstd_rand0, LCG a=16807 m=2147483647) + std::normal_distribution
  * (libstdc++ Marsaglia polar method) to match sd.cpp's initial noise. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

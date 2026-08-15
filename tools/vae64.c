@@ -1,6 +1,6 @@
 /* vae64.c -- conv2d_q (conv_in 4->512) at the REAL 64x64 size, vs manual.
  * Tiling T=8 runs 8 tiles — catches stale-xcol bugs the 16x16 test missed. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_ops.h"
 #include "gguf_reader.h"
 #include <stdio.h>

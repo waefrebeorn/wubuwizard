@@ -1,5 +1,5 @@
 /* tok_probe.c -- print token IDs for the prompt and "". */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "gguf_reader.h"
 #include <stdio.h>

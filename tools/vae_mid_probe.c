@@ -1,6 +1,6 @@
 /* vae_mid_probe.c -- decode constant latent, dump mid output (64x64, 512ch)
  * to check for stripes BEFORE the up blocks. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_vae.h"
 #include "gguf_reader.h"
 #include "wubu_sd_ops.h"

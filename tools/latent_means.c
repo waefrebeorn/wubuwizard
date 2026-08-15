@@ -1,6 +1,6 @@
 /* latent_means.c -- run the sigma sampler, print final latent channel means
  * + eps per-channel means at each step. Isolates DC source. */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
 #include "wubu_sd_clip.h"
 #include "wubu_sd_unet.h"
 #include "gguf_reader.h"

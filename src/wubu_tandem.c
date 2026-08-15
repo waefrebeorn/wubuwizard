@@ -3,7 +3,8 @@
  * Two stages (A=prefill/RSP, B=decode/RDP) run in tandem over a ring handoff.
  * Self-contained C11 + POSIX threads.
  */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
+#include "wubu_gnu_compat.h"
 #include "wubu_tandem.h"
 #include "wubu_hwcaps.h"
 #include <stdlib.h>

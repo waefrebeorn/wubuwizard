@@ -2,7 +2,8 @@
  * wubu_thread_spec.c — CPU thread-specialization analog (doc H02).
  * Two pinned thread pools (prefill / decode). See header. Self-contained C11.
  */
-#define _GNU_SOURCE
+#define WUBU_HOSTED
+#include "wubu_gnu_compat.h"
 #include "wubu_thread_spec.h"
 #include <stdlib.h>
 #include <string.h>
