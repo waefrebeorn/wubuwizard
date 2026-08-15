@@ -1,41 +1,43 @@
-# WuBu Project Topology — the master map of BOTH repositories
+# WuBu Project Topology — the master map
 
-> 2026-08-03. The user's directive: "start cohesively organizing our
-> project between our two repositories." This is the authoritative
-> map: what lives where, the layer boundaries, the data flow, and the
-> canonical placement rules. It supersedes scattered READMEs when they
-> conflict.
+> 2026-08-15. The authoritative map of the WuBu project across all
+> three repositories. It supersedes scattered READMEs when they conflict.
 
 ```
 ╔══════════════════════════════════════════════════════════════════╗
 ║                    THE WUBU UNIVERSE                              ║
 ║                                                                  ║
-║   ┌──────────────────────────┐   ┌──────────────────────────┐    ║
-║   │   wubuwizard (THE BRAIN) │   │    wubuos (THE BODY)     │    ║
-║   │   inference + training   │   │   kernel + shell + GUI   │    ║
-║   │   research + math vault  │   │   firmware + attestation │    ║
-║   └──────────┬───────────────┘   └──────────┬───────────────┘    ║
-║              │  trained weights,            │                    ║
-║              │  model cards, evals          │  Live Colonel      ║
-║              ▼                              ▼  (ring-0 REPL)     ║
-║   WuBu-35M (HF) ◄──────────────►  WuBuOS metal (measured boot)   ║
+║   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐  ║
+║   │  wubuwizard      │  │    wubuos        │  │   wubunos    │  ║
+║   │  THE BRAIN       │  │    THE BODY      │  │   COMPILER   │  ║
+║   │  218,100 LOC     │  │    472,955 LOC   │  │   14,115 LOC │  ║
+║   │  1167 C · 37 CUDA│  │    2463 C        │  │   33 C       │  ║
+║   │  93 research     │  │    414 tests     │  │   11 ISA     │  ║
+║   └────────┬─────────┘  └────────┬─────────┘  └──────┬───────┘  ║
+║            │                     │                    │          ║
+│            └─────────────────────┼────────────────────┘          ║
+║                                  │                                ║
+║                   WuBuOS links both as submodules:                ║
+║                   src/brain/ → wubuwizard                        ║
+║                   src/compiler/ → wubunos                         ║
 ║                                                                  ║
-║   satellites: BearRL, WuBuContainer, multi-device-os,            ║
-║   mythos-fable, reactos-study, gnome-study, mujoco_local,        ║
-║   physics, bytropix-*, VulkanShaderCUDA                          ║
+║                   TOTAL: 705,170 LOC · 3 repos · 1 AGI           ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
 ## THE ONE-SENTENCE SPLIT
 
-**wubuwizard = the BRAIN** (everything that thinks: model code,
-training, research, math, inference engines, the corpus pipeline).
-**wubuos = the BODY** (everything that acts: the kernel, the shell,
-the GUI, the firmware that boots it, the measured-boot chain, the
-recovery substrate, the container isolation).
+**wubuwizard = the BRAIN** (everything that thinks: inference, training,
+research, math, encoders, the amoeba model).
 
-The Brain trains; the Body runs. The Live Colonel (ring-0 REPL in
-wubuos) is where the Body hosts the Brain.
+**wubuos = the BODY** (everything that acts: the kernel, the shell,
+the GUI, the firmware, the drivers, the measured-boot chain).
+
+**wubunos = the COMPILER** (the toolchain that builds: HolyC frontend,
+MIR optimizer, 11 ISA backends, self-hosting battery).
+
+The Brain trains; the Body runs; the Compiler builds. The Live Colonel
+(ring-0 REPL in wubuos) is where the Body hosts the Brain.
 
 ---
 
@@ -45,58 +47,52 @@ wubuos) is where the Body hosts the Brain.
 
 | Path | Role | Contents |
 |---|---|---|
-| `src/` + `include/` | the ENGINE | **305 C modules / 21 CUDA / 302 headers** — every algorithm, every kernel, every data structure. Opaque structs, minimal includes, pure C11. |
-| `tools/*.c` | the CLI + tests | **553 C tools** (348 `test_<module>.c`) — one test per module, operational CLIs (`wubu_train_cli`, `gen_text*`, `infer_*`), `repodoc/` (doc generator). |
-| `tools/*.py` | the harnesses | **87 Python tools** — corpus fetch/extract (`wubu_*`), API clients (`nvidia_nim`, `openrouter_rlhf`), viz. |
-| `research/` | the paper library | **45 research notes** (`001-…` to `059-…`) — each with Triple-DA, implementation status (`wired`/gap), ties. `INDEX.md` = the ledger (AN01-AN11). |
-| `THEORY/` | our own papers | the WuBu Nesting (層疊嵌套) papers, foundational philosophy, axiomatic emergent theory, `papers/` (DeepSeek lineage, Möbius transformers, …). |
-| `MATH/` | the proof vault | `lean/wubu_proofs/` — the Lean-verified theorems (Poincaré ball, Möbius, gyration, MLA compression). |
-| `WUBUNEST_V2/` | python training prototypes | the numpy/torch nesting experiments that became the C11 `wubu_nest`. |
-| `docs/` | the brain's docs | model blueprint, model card, live-stream/free-API ledger, improvement plans. |
-| `vault/` | collected references | api-server notes, quantization formats, bins/tools. |
-| `manifests/` | model configs | `Qwen_Qwen3.6-27B`, `Kwaipilot_KAT*`, `InternScience*` — the bigger-brother line. |
-| `models/` | local weights | `wubu/` (the WuBu seed: safetensors + tokenizer), the reference checkpoints. |
-| `python/` | small helpers | tokenizer extraction etc. |
-| `DEMOS/ DRAFT/ DIAGRAMS/` | sketches | the early prototyping (kept for lineage; most logic now lives in `src/`). |
+| `src/` | the ENGINE | **1,167 C modules / 37 CUDA / 420 headers** — every algorithm, every kernel, every data structure. Opaque structs, minimal includes, pure C11. |
+| `include/` | the API | Public headers — opaque types + function decls |
+| `tools/` | CLI + tests | CLI tools (`gen_text`, `wubu_cli`, `bench_*`) and test drivers |
+| `research/` | the paper library | **93 research notes** (`001-…` to `093-…`) — each with Triple-DA, implementation status, Kevin-Bacon 7-hop convergence. `INDEX.md` = the ledger. |
+| `THEORY/` | our own papers | **50 theory docs** — foundational philosophy, axiomatic emergent theory, KV-cache filesystem, ecosystem of spheres, scale-to-fit, revolver doctrine |
+| `MATH/` | the proof vault | `lean/wubu_proofs/` — Lean-verified theorems (Poincaré ball, Möbius, gyration) |
+| `docs/` | the brain's docs | Architecture, topology, model blueprint, model card, improvement plans, ADRs |
+| `models/` | local weights | WuBu seed (safetensors + tokenizer), reference checkpoints |
+| `manifests/` | model configs | Bigger-brother line configs |
 
-### 1.2 The engine modules (the 305)
+### 1.2 The engine module clusters
 
-The `src/wubu_*.c` modules cluster by theme (the naming convention:
-`wubu_<theme>_<thing>.c`):
+The `src/wubu_*.c` modules cluster by theme:
 
-| Cluster | Modules (representative) |
-|---|---|
-| **attention** | `wubu_attn_kernels`, `wubu_attn_gate`, `wubu_attn_tune`, `wubu_attnres`, `wubu_cross_attn`, `wubu_mla` (latent KV) |
-| **KV cache** (11+) | `wubu_kv_cache`, `wubu_kv_evict`, `wubu_kv_compress`, `wubu_kv_tier`, `wubu_kv_quant`, `wubu_paged_kv`, `wubu_4kv`, `wubu_ring_attn` |
-| **MoE** (8+) | `wubu_moe`, `wubu_moe2`, `wubu_moe_grouped`, `wubu_moe_hyperbolic`, `wubu_latentmoe`, `wubu_ssd_moe`, `wubu_hashrouter`, `wubu_expert_choice` |
-| **SSM** (4+) | `wubu_ssm_scan`, `wubu_ssm_recurrence`, `wubu_nested_ssm`, `wubu_chunked_ssm` |
-| **speculative** (4+) | `wubu_spec_decode`, `wubu_spec_tuner`, `wubu_spec_variants`, `wubu_medusa` |
-| **quantization** | `quantized_matmul`, `quantized_dot_generic`, `wubu_awq`, `wubu_gptq`, `wubu_smoothquant`, `wubu_nf4`, `wubu_mxfp4`, `dequant_iq2_xxs`, `wubu_tensor_store` (mixed per-role export), `gguf_reader` (TurboQuant Q2_0/TQ3_1S/TQ4_1S) |
-| **hyperbolic/nesting** | `wubu_hyper`, `wubu_nest`, `wubu_mobius_linear`, `wubu_poincare_gqa`, `wubu_hyperbolic_output_proj`, `rsgd` |
-| **model core** | `wubu` (the seed), `wubu_train`, `wubu_backprop`, `wubu_model`, `wubu_gemma4`, `wubu_tokenizer_hf` |
-| **the AGI organs** | `wubu_hive` (memory), `wubu_moe2` (agents), `wubu_prover2` (verifier), `wubu_agi` (the loop), `wubu_deltanet` (linear mixer), `wubu_dsa` (indexer), `wubu_mhc`/`wubu_mhc_mh` (hyper-connections) |
-| **agentic OS** | `wubu_agentic_kv`, `wubu_agentic_mem`, `wubu_agentic_os`, `wubu_agentauth`, `wubu_agentid` |
-| **misc** | `wubu_arena`, `wubu_audio`, `wubu_bandit`, `wubu_actor_critic`, `wubu_ecs`, `wubu_hopfield`, `wubu_energy`, `wubu_freeenergy`, `thread_pool`, `tile_manager` |
+| Cluster | Purpose | Key modules |
+|---------|---------|-------------|
+| **Attention** | Multi-head, latent, cross, gated, ring | `wubu_attn_kernels`, `wubu_mla`, `wubu_attn_gate`, `wubu_attn_tune`, `wubu_ring_attn`, `wubu_cross_attn` |
+| **KV Cache** | Compression, tiering, eviction, paging, coherence | `wubu_kv_evict`, `wubu_kv_compress`, `wubu_kv_tier`, `wubu_kv_quant`, `wubu_paged_kv`, `wubu_4kv`, `wubu_kv_coherence_diag` |
+| **MoE** | Mixture of experts, routing, grouping, hyperbolic | `wubu_moe`, `wubu_moe_grouped`, `wubu_moe_hyperbolic`, `wubu_latentmoe`, `wubu_ssd_moe`, `wubu_hashrouter`, `wubu_expert_choice` |
+| **SSM** | State space models, scan, recurrence, chunked | `wubu_ssm_scan`, `wubu_ssm_recurrence`, `wubu_nested_ssm`, `wubu_ssm_chunked`, `wubu_ssm_delta` |
+| **Speculative** | Speculative decoding, Medusa, tuning | `wubu_spec_decode`, `wubu_spec_tuner`, `wubu_spec_variants`, `wubu_medusa`, `wubu_mtp` |
+| **Quantization** | AWQ, GPTQ, SmoothQuant, NF4, FP8, MXFP4, AWQ | `wubu_awq`, `wubu_gptq`, `wubu_smoothquant`, `wubu_nf4`, `wubu_fp8`, `wubu_mxfp4`, `dequant_iq2_xxs`, `quantized_matmul` |
+| **Hyperbolic/Nesting** | Poincaré ball, Möbius, RSGD, ecosystem | `wubu_hyper`, `wubu_nest`, `wubu_mobius_linear`, `wubu_poincare_gqa`, `rsgd`, `wubu_ecosystem` |
+| **Model Core** | Seed model, training, backprop, tokenizer | `wubu`, `wubu_train`, `wubu_backprop`, `wubu_model`, `wubu_gemma4_model`, `wubu_tokenizer_hf` |
+| **AGI Organs** | Hive memory, prover, AGI loop, indexer | `wubu_hive`, `wubu_prover2`, `wubu_agi`, `wubu_dsa`, `wubu_deltanet`, `wubu_mhc` |
+| **Agentic OS** | Agent KV, agent memory, agent auth | `wubu_agentic_kv`, `wubu_agentic_mem`, `wubu_agentic_os`, `wubu_agentauth`, `wubu_agentid` |
+| **Encoders** | Image, audio, video, PDF, office | `wubu_imgenc`, `wubu_audio`, `wubu_jpeg`, `wubu_png`, `wubu_pdf`, `wubu_video` |
+| **RL** | PPO, GRPO, actor-critic, bandits | `wubu_ppo`, `wubu_traj_grpo`, `wubu_actor_critic`, `wubu_bandit`, `wubu_reinforce` |
 
-The machine-generated full table (every module + purpose) is
-[docs/MODULES.md](MODULES.md).
-
-### 1.3 The AGI brain pipeline (the flow)
+### 1.3 The AGI brain pipeline
 
 ```
-corpus (SD card: /home/wubu/sdcard/corpus/)
-  ├─ text/        raw Cosmopedia shards (wubu_extract.py)
-  ├─ tokens/      .tok uint16 streams (wubu_tokenc C11 BPE)
-  ├─ finemath-live.tok / openmath-live.tok   (wubu_stream.py live)
-  └─ checkpoints/ seed.st-NNN.st (every 10 steps, the 5+1 slots)
+corpus (HF datasets, user files, SD card)
+  ├─ text/        raw text shards
+  ├─ tokens/      .tok uint16 streams (BPE tokenizer)
+  ├─ images/      ingested into encoder space
+  └─ checkpoints/ seed.st (safetensors)
 
-trainer (tools/wubu_train_cli.c + src/wubu_train.c
-         + src/wubu_backprop.c)
-  └─ WuBu-35M safetensors -> trained .st checkpoints -> HF
-       (WaefreBeorn/WuBu-35M, weights + tokenizer + LICENSE + card)
+trainer (wubu_train.c + wubu_backprop.c)
+  └─ WuBu-35M safetensors → trained .st checkpoints → HF
 
-oracles (tools/nvidia_nim.py, tools/openrouter_rlhf.py)
-  └─ the RLHF reward: WuBu drafts -> frontier scores -> trainer
+inference (wubu.c + wubu_model.c)
+  └─ GGUF/SafeTensors/ONNX load → KV cache (filesystem) → generate
+
+oracles (RLHF reward)
+  └─ WuBu drafts → frontier model scores → trainer
 ```
 
 ---
@@ -107,16 +103,21 @@ oracles (tools/nvidia_nim.py, tools/openrouter_rlhf.py)
 
 | Path | Role | Contents |
 |---|---|---|
-| `src/kernel/` | the KERNEL | **~90 modules**: boot/crt0, memory, tasking, interrupts (APIC/PIC/PIT), AHCI, FAT32 family (10 modules), TXFS, VMM, SMP, klog, libc, serial, swap, sync, WDT, TSS, vdso, the human HX family (`wubu_psych`, `wubu_tutor`, `wubu_bonzi_study`), the recovery (`wubu_recovery`), the AGI kernel (`wubu_agi_kernel`), the hive port (`wubu_hive`), the math (`wubu_math`). |
-| `src/firmware/` | WuBuFW | the UEFI firmware from scratch (no EDK2): fw_* modules (PCI, NVMe, AHCI, XHCI, GOP, TPM, secureboot, sha256, acpi), `fw_agi` + attestation, the chainloader, `wubufw.fd` — **the measured boot chain (28/28 conformance, real kernel boots)**. |
-| `src/apps/` | the GUI apps | canvas (full editor), explorer, notepad, calc, regedit, taskmgr, repl, the bonzi/comfy/cmd/control suites, the Tandem shared-desktop window. |
-| `src/gui/` | the windowing | Win98/XP chrome, theme engine (`wubu_theme`), rendering. |
-| `src/bridge/` | the VSL bridge | the ReactOS NT syscall -> VSL transliteration, the syscall handlers. |
-| `src/compiler/` | the HolyC compiler | lexer, parser, codegen, PTX — "My Seed" (the compiler that compiles). |
-| `src/runtime/ src/hosted/ src/shell/` | the hosted layer | the scaffold for Linux/Windows/macOS parity, the 9P namespace. |
-| `src/worldsim/ src/bear/` | the RL world | cartpole physics, GAAD training, curriculum. |
-| `docs/compendium/` | the institutional memory | 00-philosophy, 01-reference (GENERATED by make docs), 02-architecture, 03-learned (the prestige ledger: worked/didn't-work), 04-roadmap, 05-sources. |
-| `holyc-include/` `vendor/` `reference/` | the reference | ZealOS headers, upstream comparisons. |
+| `src/kernel/` | the KERNEL | Memory, tasking, interrupts, AHCI, FAT32, TXFS, VMM, klog, libc, 20+ hardware drivers |
+| `src/firmware/` | WuBuFW | UEFI from scratch: PCI, NVMe, AHCI, GOP, TPM, secureboot, chainloader |
+| `src/compiler/` | HolyC compiler | WuBuNOS submodule (lexer, parser, codegen, 11 ISA backends) |
+| `src/brain/` | wubuwizard | The Brain submodule (inference, training, encoders) |
+| `src/jit/` | JIT engine | x86-64 encoder, regalloc, minic expression compiler |
+| `src/runtime/` | Runtime | Styx/9P, VSL, containers, Arch, network, DOS emulator, archd, holyd |
+| `src/gui/` | Windowing | Win98/XP chrome, theme engine, rendering |
+| `src/apps/` | GUI apps | Editor, canvas, calc, notepad, cmd, music, todo, notes, explorer |
+| `src/audio/` | Audio | DAW, Furnace tracker, TinySoundFont, AI plugins |
+| `src/bear/` | RL world | Cartpole physics, GAAD training |
+| `src/hosted/` | Hosted leg | DRM/KMS, Vulkan, Metal, main entry |
+| `src/bridge/` | VSL bridge | Syscall bridge, DOS flip |
+| `src/worldsim/` | World sim | GAAD world state, physics, terrain |
+| `tools/` | Tools | Benchmarks, dev utilities, ISA tests, research |
+| `docs/` | Docs | ADRs, compendium, research, reference |
 
 ### 2.2 The boot chain (the verified spine)
 
@@ -127,112 +128,118 @@ WuBuFW (src/firmware) measures the kernel
   -> SHA-256 -> attestation handoff in low RAM
   -> ExitBootServices -> crt0 -> kernel_main
   -> AGI supervisor with the root-of-trust gate LIVE
-     (verified: make test_agi_metal = PASS, measured boot green)
+     (verified: make test_agi_metal = PASS)
 ```
 
 ### 2.3 The kernel's AGI organs
 
 | Module | Role |
 |---|---|
-| `wubu_recovery` | the 5+1 rollback (five slots + the Jesus state) — mistakes are safe |
-| `wubu_psych` | the HX-A user model + HX-B adaptive timing |
+| `wubu_recovery` | The 5+1 rollback (five slots + the Jesus state) — mistakes are safe |
+| `wubu_psych` | The HX-A user model + HX-B adaptive timing |
 | `wubu_tutor` | HX-C learning/education |
-| `wubu_bonzi_study` | HX-D companion |
-| `wubu_agi_kernel` | the AGI supervisor (ring-0, attestation-gated) |
-| `wubu_hive` | the hive port (the AGI's memory, kernel-side) |
-| `wubu_verifier` | the DA-2 fail-closed verification |
-| `wubu_attest` | the root-of-trust attestation |
-| `wubu_hid/input` | the human's mouse + keyboard (the human keeps control) |
+| `wubu_hive` | The AGI's memory, kernel-side |
+| `wubu_bonzi_study` | The study daemon (bonzi assistant) |
+
+### 2.4 Hardware driver registry
+
+| Driver class | Modules |
+|--------------|---------|
+| GPU | `wubu_drv_gpu`, `wubu_navi10`, `wubu_nvidia_*`, `wubu_radeon_*`, `wubu_ampere` |
+| Storage | `wubu_nvme_gen4`, `wubu_nvme_gen5`, `wubu_ahci`, `fat32`, `txfs` |
+| Network | `wubu_drv_net`, `wubu_wifi7`, `wubu_nicoffload` |
+| Audio | `wubu_drv_hda`, `wubu_intel_*` |
+| Display | `wubu_drm`, `wubu_drmx`, `wubu_fbcon`, `wubu_backlight` |
+| Power | `wubu_drv_battery`, `wubu_power`, `wubu_pm` |
+| USB | `wubu_xhci`, `wubu_usb4`, `wubu_uas` |
+| Thermal | `wubu_thermal`, `wubu_thermalthrottle` |
 
 ---
 
-## 3. THE BOUNDARIES (what goes where)
+## 3. wubunos (THE COMPILER) — /home/wubu/wubunos
 
-**The Brain owns (wubuwizard only):**
-- ALL model code (forward/backward/training), ALL quantization, ALL
-  inference engines, the tokenizer, the oracles (NVIDIA/OpenRouter),
-  the corpus pipeline, the research, the math proofs.
-- The hive lives HERE as the reference implementation (`src/wubu_hive.c`).
+### 3.1 The compilation pipeline
 
-**The Body owns (wubuos only):**
-- The kernel, the firmware, the boot chain, the GUI, the shell, the
-  compiler, the container isolation, the recovery substrate.
-- The hive lives HERE as the metal port (`src/kernel/wubu_hive.c`) —
-  same API, no-heap (the kernel allocator), for the ring-0 brain.
+```
+HolyC Source
+     │
+     ▼
+┌─────────────────────────────────────────┐
+│  FRONTEND  (holyc_*.c/h)                │
+│  Lexer → Parser → AST → MIR Emitter     │
+└─────────────────┬───────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────┐
+│  MID-LEVEL IR  (wubu_mir*.c/h)          │
+│  3-address code, virtual registers      │
+│  Optimizer: fold, strength, DCE, CSE,   │
+│    LICM, unroll, combine                │
+│  Register allocation: linear-scan SSA   │
+└─────────────────┬───────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────┐
+│  BACKENDS  (wubu_isa_*.c)               │
+│  11 ISA drivers consuming the same MIR  │
+│  Native JITs: x86-64, ARM64, PTX        │
+│  Interpreters: RISC-V, MIPS, 68k,       │
+│    8086, 6502, Z80, 8051, AVR          │
+└─────────────────────────────────────────┘
+```
 
-**The bridge (both):**
-- `WuBu-35M` weights flow Brain -> HF -> (Body hosts them on metal).
-- The Live Colonel (Body, ring-0) loads the Brain's model file.
-- The 9P namespace (`/n/kv/`, `/n/models/`) exposes the Brain's state
-  to the Body's tools (per WUBUOS_INTEGRATION.md).
-- `wubu_agi` (Brain: the learning loop) and `wubu_agi_kernel` (Body:
-  the supervisor) are the two halves of the same AGI: the Brain
-  learns, the Body protects and acts.
+### 3.2 File map
 
-**Satellite repos (context, not core):**
-- `BearRL` — RL training experiments (the cartpole GAAD work).
-- `WuBuContainer` — container isolation prototypes (now in kernel).
-- `multi-device-os`, `mythos-fable` — kernel lineage studies.
-- `reactos-study`, `gnome-study` — upstream gap analyses.
-- `physics`, `mujoco_local` — physics/RL grounding.
-- `bytropix-*` — the bytropix integration work.
-- `VulkanShaderCUDA` — the Vulkan compute path.
+| Path | Purpose |
+|------|---------|
+| `holyc_*.c/h` | HolyC frontend (lexer, parser, codegen) |
+| `wubu_mir*.c/h` | Mid-level IR + optimizer |
+| `wubu_isa_*.c` | 11 ISA backends |
+| `wubu_preproc.c/h` | C preprocessor |
+| `x86_peephole.c` | x86-64 peephole optimizer |
+| `brainfuck.c` | Brainfuck → x86-64 JIT (proof) |
+| `test_isa_driver.c` | Differential ISA tests |
 
 ---
 
-## 4. THE PLACEMENT RULES (canonical)
+## 4. Integration points
 
-1. **A new algorithm goes in wubuwizard** `src/wubu_<theme>.c` +
-   `include/wubu_<theme>.h` + `tools/test_<theme>.c`. No exceptions.
-2. **A new kernel primitive goes in wubuos** `src/kernel/wubu_*.c`.
-   If it must also run in the Brain, port it (same API, metal impl).
-3. **Research notes** go in `wubuwizard/research/NNN-name.md` with the
-   Triple-DA + `wired`/gap status. Papers go in `THEORY/papers/`.
-   Proofs go in `MATH/lean/wubu_proofs/`.
-4. **The prestige ledger** (worked/didn't-work) goes in
-   `wubuos/docs/compendium/03-learned/`.
-5. **Model artifacts** (weights, cards) go on HuggingFace under
-   `WaefreBeorn/`; the local copies live in `wubuwizard/models/`.
-6. **Corpus data**: ACTIVE working copies live on the SSD at
-   `/home/wubu/models/corpus/` (master manifest `CORPUS.md` there:
-   Tier 0 pretrain tokens, Tier 1 SFT pack, Tier 2 agentic pack).
-   The SD card (`/home/wubu/sdcard/corpus/`) is the COLD raw archive;
-   `/home/wubu/sdcard/archive/` holds finalized cold tarballs
-   (research ponds, qwen36 embeddings). Never clone git or write
-   active work on the SD card (drvfs has no chmod; 256KB clusters).
-   Nothing corpus goes in a repo.
-7. **Secrets** live in `~/.hermes/profiles/mind-palace/secrets/`
-   (0600), NEVER in any repo.
-8. **Test binaries** are never committed (gitignore covers `/test_*`).
-9. **The research ponds** (701 MB pure text, 7 ponds × 100 MB) are the
-   READING substrate — `/home/wubu/research-ponds-work/` (SSD active,
-   SD `archive/` cold). PONDS.md is the catalog; grep the ponds for
-   the failing subject, sources.json maps file → paper/repo.
+### How wubuos integrates both repos
 
-## 5. THE AUDIT FINDINGS (2026-08-03, from the full-repo survey)
+```
+wubuos/
+  src/brain/     → git submodule → wubuwizard (THE BRAIN)
+  src/compiler/  → git submodule → wubunos (THE COMPILER)
+  src/jit/       → native JIT (shared with wubunos encoders)
+  src/bear/      → RL training (shared with wubuwizard algorithms)
+```
 
-1. **No topology doc existed** — this file fixes that. The repo roots
-   had grown organically; the boundaries were implicit.
-2. **The Brain's training core had 3 real gaps** (found by reading
-   `src/wubu_train.c` on 2026-08-03) — since CLOSED: `wubu_backprop` (real
-   backward) landed, the SFT run completed (loss 8.04 → 7.32 @ step 2000),
-   and the Muon path is wired into `wubu_train`/`wubu_train_gpu`.
-3. **The Body is healthy**: 468+ C files / 91 test targets / measured
-   boot verified / monoliths dissolved. The Brain's `test_*` binaries
-   are gitignored correctly.
-4. **The hive exists in BOTH repos** — intentional (reference vs metal
-   port), now documented as the boundary contract.
+### Data flow
 
-## 6. NEXT ACTIONS (the cohesive path)
+```
+wubuwizard (Brain)                    wubuos (Body)
+  ├─ trained weights ──────────────►  src/brain/ loads for inference
+  ├─ encoder space ───────────────►  Styx namespace (/wubu/enc)
+  ├─ KV cache ────────────────────►  KV filesystem (src/kvfs)
+  └─ research ────────────────────►  docs/research/
 
-1. Wire the DeepSeek-V4 Config-I forward (`wubu_deepseek4.c`: MLA + 256-expert
-   MoE + hash router + mHC + DSA from the mapped 1328 tensors — load gate
-   already PASSED) and the multi-split data reader.
-2. Wire the RLHF oracle rewards (NVIDIA/OpenRouter) into the trainer — the
-   Brain's RLHF loop.
-3. Port the trained WuBu checkpoints to the Body (Live Colonel loads the
-   weights via the 9P namespace) — the Brain→Body bridge.
-4. Run `make docs` so `wubuos/docs/compendium/01-reference` regenerates with
-   the new modules; re-run `tools/repodoc/repodoc.py` in both repos after
-   every code wave.
+wubunos (Compiler)                    wubuos (Body)
+  ├─ compiled HolyC ──────────────►  ring-0 execution on kernel
+  ├─ ISA backends ────────────────►  JIT engine (src/jit)
+  └─ self-hosting proof ──────────►  test gate (make test_holyc)
+```
 
+---
+
+## 5. Project statistics (verified 2026-08-15)
+
+| Metric | wubuos | wubuwizard | wubunos | TOTAL |
+|--------|--------|------------|---------|-------|
+| C files | 2,463 | 1,167 | 33 | 3,663 |
+| H files | 1,006 | 420 | 16 | 1,442 |
+| CUDA kernels | 0 | 37 | 0 | 37 |
+| Total LOC | 472,955 | 218,100 | 14,115 | 705,170 |
+| Test targets | 414 | ~150 | 1 | 565+ |
+| Research docs | 60 | 93 | 0 | 153 |
+| Theory papers | 0 | 50 | 0 | 50 |
+| ISA backends | — | — | 11 | 11 |
