@@ -5,7 +5,7 @@
 > three repos: this Brain (thinks) + `wubuos` (the Body: kernel, GUI) +
 > `wubunos` (the Compiler: 11 ISA backends).
 
-**Stats:** 1,167 C files · 420 H files · 37 CUDA files · 218,100 LOC
+**Stats:** 1,167 C files · 420 H files · 37 CUDA files · 218,985 LOC · 720 C tools + 108 Python tools
 
 ---
 

@@ -10,7 +10,7 @@
 ║   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────┐  ║
 ║   │  wubuwizard      │  │    wubuos        │  │   wubunos    │  ║
 ║   │  THE BRAIN       │  │    THE BODY      │  │   COMPILER   │  ║
-║   │  218,100 LOC     │  │    472,955 LOC   │  │   14,115 LOC │  ║
+║   │  218,985 LOC     │  │    472,955 LOC   │  │   14,115 LOC │  ║
 ║   │  1167 C · 37 CUDA│  │    2463 C        │  │   33 C       │  ║
 ║   │  93 research     │  │    414 tests     │  │   11 ISA     │  ║
 ║   └────────┬─────────┘  └────────┬─────────┘  └──────┬───────┘  ║
@@ -238,7 +238,7 @@ wubunos (Compiler)                    wubuos (Body)
 | C files | 2,463 | 1,167 | 33 | 3,663 |
 | H files | 1,006 | 420 | 16 | 1,442 |
 | CUDA kernels | 0 | 37 | 0 | 37 |
-| Total LOC | 472,955 | 218,100 | 14,115 | 705,170 |
+| Total LOC | 472,955 | 218,985 | 14,115 | 705,055 |
 | Test targets | 414 | ~150 | 1 | 565+ |
 | Research docs | 60 | 93 | 0 | 153 |
 | Theory papers | 0 | 50 | 0 | 50 |
