@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "wubu_fp16.h"
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
@@ -44,16 +45,7 @@ static void gemv_f32(const float *W, const float *x, float *y, int n_out, int n_
     }
 }
 
-/* BF16 <-> F32 helpers (bit-cast; BF16 = FP32 top 16 bits). */
-static unsigned short f32_to_bf16(float v) {
-    unsigned int u; memcpy(&u, &v, 4);
-    return (unsigned short)(u >> 16);
-}
-static float bf16_to_f32(unsigned short h) {
-    unsigned int u = ((unsigned int)h) << 16;
-    float f; memcpy(&f, &u, 4);
-    return f;
-}
+/* BF16 <-> F32: use wubu_fp16.h */
 
 int wubu_bf16_gemv(const float *W_f32, const float *x, float *y,
                    int n_out, int n_in, int *used_bf16) {

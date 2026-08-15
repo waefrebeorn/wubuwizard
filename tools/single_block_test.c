@@ -18,6 +18,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
+#include "wubu_fp16.h"
 
 extern "C" {
 #include "ggml.h"
@@ -28,21 +29,7 @@ extern "C" void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_el
 // Our static dequant functions — we call gguf_dequantize instead
 // but for single-block detail, we inline our logic
 
-static float f16_to_f32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    if (exp == 0) {
-        uint32_t normal_f32 = (sign << 31) | ((1 + 112) << 23) | (mant << 13);
-        float normal_val;
-        memcpy(&normal_val, &normal_f32, 4);
-        return normal_val - 6.103515625e-5f;  // 2^(-14)
-    }
-    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
-}
+/* f16_to_f32: use wubu_fp16.h */
 
 #define Q5_K_BLOCK_SIZE 176
 #define QK_K 256

@@ -15,36 +15,11 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "wubu_fp16.h"
 
-// IQ2 block constants
+/* IQ2 block constants */
 #define IQ2_XXS_BLOCK_SIZE 66
 #define QK_K 256
-
-// Float16 → Float32 (local copy so we don't depend on gguf_reader.c internals)
-static float f16_to_f32_local(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    uint32_t f32;
-    if (exp == 0) {
-        /* Subnormal: value = mant * 2^-24. Normalize (HIVE 2026-08-04: the
-           old 113<<23 branch treated the subnormal mantissa as normal,
-           off by ~6x on tiny scales). */
-        if (mant == 0) { f32 = sign << 31; }
-        else {
-            uint32_t e = 112, m = mant;
-            while ((m & 0x400) == 0) { m <<= 1; e--; }
-            f32 = (sign << 31) | (e << 23) | ((m & 0x3FF) << 13);
-        }
-    } else if (exp == 31) {
-        f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-    } else {
-        f32 = (sign << 31) | ((uint32_t)(127 - 15 + exp) << 23) | (mant << 13);
-    }
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
-}
 
 // ============================================================
 // IQ2_XXS grid and sign tables

@@ -3,30 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "wubu_fp16.h"
 
 #define QK_K 256
-
-static float f16_to_f32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    if (exp == 0) {
-        uint32_t normal_f32 = (sign << 31) | ((1 + 112) << 23) | (mant << 13);
-        float normal_val;
-        memcpy(&normal_val, &normal_f32, 4);
-        return sign ? normal_val + 6.103515625e-5f : normal_val - 6.103515625e-5f;
-    }
-    if (exp == 31) {
-        uint32_t f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-        float result;
-        memcpy(&result, &f32, 4);
-        return result;
-    }
-    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
-}
 
 int main() {
     gguf_ctx *ctx = gguf_open("/models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf");

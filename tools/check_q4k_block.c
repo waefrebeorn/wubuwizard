@@ -2,23 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-
-float f16_to_f32(uint16_t h) {
-    uint32_t s = (h >> 15) & 1;
-    uint32_t e = (h >> 10) & 0x1f;
-    uint32_t m = h & 0x3ff;
-    uint32_t out;
-    if (e == 0) {
-        out = (s << 31) | (0x70 + 23) << 23 | m << 13;
-    } else if (e == 31) {
-        out = (s << 31) | 0xff << 23 | m << 13;
-    } else {
-        out = (s << 31) | (e - 15 + 127) << 23 | m << 13;
-    }
-    float f;
-    memcpy(&f, &out, 4);
-    return f;
-}
+#include "wubu_fp16.h"
 
 int main() {
     FILE *f = fopen("/models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf", "rb");

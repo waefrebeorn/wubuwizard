@@ -4,18 +4,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
-
-// Local copy of f16_to_f32 (static in gguf_reader.c)
-static float f16_to_f32_local(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    if (exp == 0) return 0.0f;
-    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
-}
+#include "wubu_fp16.h"
 
 // Copied from gguf_reader.c for local use
 #define QK_K 256
@@ -28,7 +17,7 @@ static uint64_t iq2s_grid[1024] = {
 static void reference_dequant_iq2s_block(const uint8_t *block, float *output) {
     uint16_t d_bits;
     memcpy(&d_bits, block, 2);
-    float d = f16_to_f32_local(d_bits);
+    float d = wubu_f16_to_f32(d_bits);
     
     const uint8_t *qs = block + 2;        // 64 bytes
     const uint8_t *qh = block + 66;       // 8 bytes
@@ -105,7 +94,7 @@ int main(int argc, char **argv) {
         const uint8_t *block = raw;
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32_local(d_bits);
+        float d = wubu_f16_to_f32(d_bits);
         printf("d_bits=0x%04x, d=%f\n", d_bits, d);
         
         printf("raw[0..81] hex: ");
@@ -174,7 +163,7 @@ int main(int argc, char **argv) {
         
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32_local(d_bits);
+        float d = wubu_f16_to_f32(d_bits);
         
         float *bout = malloc(256 * sizeof(float));
         reference_dequant_iq2s_block(block, bout);

@@ -3,24 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-
-static float f16_to_f32_cpu(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    if (exp == 0) {
-        uint32_t normal_f32 = (sign << 31) | ((1 + 112) << 23) | (mant << 13);
-        float normal_val; memcpy(&normal_val, &normal_f32, 4);
-        if (sign) return normal_val + 6.103515625e-5f;
-        else return normal_val - 6.103515625e-5f;
-    }
-    if (exp == 31) {
-        uint32_t f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-        float result; memcpy(&result, &f32, 4); return result;
-    }
-    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-    float result; memcpy(&result, &f32, 4); return result;
-}
+#include "wubu_fp16.h"
 
 int main() {
     const char *path = "/home/wubu/models/gemma4/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf";

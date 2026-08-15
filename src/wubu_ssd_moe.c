@@ -28,16 +28,7 @@
 #define SSD_MOE_MAX_LAYERS 256
 #define SSD_MOE_MAX_SLOTS  256
 
-/* BF16 <-> F32. BF16 is the top 16 bits of an F32. */
-static inline uint16_t f32_to_bf16(float v) {
-    uint32_t bits; memcpy(&bits, &v, 4);
-    return (uint16_t)(bits >> 16);
-}
-static inline float bf16_to_f32(uint16_t h) {
-    uint32_t bits = (uint32_t)h << 16;
-    float v; memcpy(&v, &bits, 4);
-    return v;
-}
+/* BF16 <-> F32: use wubu_fp16.h */
 
 typedef struct {
     int      expert;      /* which expert currently occupies this slot, or -1 */

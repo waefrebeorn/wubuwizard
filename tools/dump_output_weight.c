@@ -3,26 +3,11 @@
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
+#include "wubu_fp16.h"
 
-// Q4_K dequant helper (replicated from wubuwizard gguf_reader.c)
+/* Q4_K dequant helper (replicated from wubuwizard gguf_reader.c) */
 #define QK_K 256
 #define Q4_K_BLOCK_SIZE 144
-
-static float f16_to_f32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    if (exp == 0) {
-        uint32_t normal_f32 = (sign << 31) | ((1 + 112) << 23) | (mant << 13);
-        float normal_val;
-        memcpy(&normal_val, &normal_f32, 4);
-        return normal_val - 0x1p-14f;
-    }
-    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
-}
 
 static inline void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t *m) {
     if (j < 4) {

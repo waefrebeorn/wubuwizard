@@ -7,24 +7,9 @@
 #include <string.h>
 #include <math.h>
 #include "gguf_reader.h"
+#include "wubu_fp16.h"
 
-// CPU IQ2_XXS dot (from dequant_iq2_xxs.c)
-static float f16_to_f32_local(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t mant = h & 0x03FF;
-    uint32_t f32;
-    if (exp == 0) {
-        f32 = (sign << 31) | ((uint32_t)(127 - 15 + 1) << 23) | (mant << 13);
-    } else if (exp == 31) {
-        f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-    } else {
-        f32 = (sign << 31) | ((uint32_t)(127 - 15 + exp) << 23) | (mant << 13);
-    }
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
-}
+/* f16_to_f32: use wubu_fp16.h */
 
 static const uint64_t iq2xxs_grid[256] = {
     #include "iq2xxs_grid_data.inc"
