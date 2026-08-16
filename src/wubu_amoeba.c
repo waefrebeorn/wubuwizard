@@ -96,7 +96,7 @@ int wubu_amoeba_diagnose(wubu_amoeba_t *am)
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
-            if (blk->skip[s] == 0) {
+            if (!hive_skip_get(blk, s)) {
                 void *p = blk->slots[s];
                 int is_mine = 0;
                 for (int i = 0; i < am->cfg.max_cells; i++)
@@ -120,7 +120,7 @@ int wubu_amoeba_diagnose(wubu_amoeba_t *am)
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
-            if (blk->skip[s] == 0) {
+            if (!hive_skip_get(blk, s)) {
                 void *p = blk->slots[s];
                 int is_mine = 0;
                 for (int i = 0; i < am->cfg.max_cells; i++)
@@ -180,7 +180,7 @@ static void grow_cell(wubu_amoeba_t *am, int parent_idx)
         for (wubu_hive_block_t *blk = am->tissue->head; blk && !in_hive;
              blk = blk->next)
             for (size_t s = 0; s < blk->cap && !in_hive; s++)
-                if (blk->skip[s] == 0 &&
+                if (!hive_skip_get(blk, s) &&
                     blk->slots[s] == (void *)&am->cells[i])
                     in_hive = 1;
         if (!in_hive) { daughter = &am->cells[i]; break; }
@@ -221,7 +221,7 @@ static int amoeba_live_cells(const wubu_amoeba_t *am)
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
-            if (blk->skip[s]) continue;
+            if (hive_skip_get(blk, s)) continue;
             const void *p = blk->slots[s];
             for (int i = 0; i < am->cfg.max_cells; i++) {
                 if (p == (const void *)&am->cells[i]) { n++; break; }
@@ -246,7 +246,7 @@ int wubu_amoeba_mutate(wubu_amoeba_t *am)
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
-            if (blk->skip[s]) continue;
+            if (hive_skip_get(blk, s)) continue;
             void *p = blk->slots[s];
             /* the DA type-check: the mean is over the amoeba's OWN
              * cells only (the shared tissue holds skills/traj/fitness/
@@ -277,7 +277,7 @@ int wubu_amoeba_mutate(wubu_amoeba_t *am)
     for (wubu_hive_block_t *blk = am->tissue->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
-            if (blk->skip[s]) continue;
+            if (hive_skip_get(blk, s)) continue;
             void *p = blk->slots[s];
             /* the type check: is this one of the amoeba's cells? */
             int is_mine = 0;

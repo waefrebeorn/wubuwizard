@@ -287,7 +287,7 @@ int wubu_diag_snapshot(wubu_diag_t *d, const char *json_path)
     int first_cell = 1;
     for (wubu_hive_block_t *blk = d->hive->head; blk; blk = blk->next) {
         for (size_t i = 0; i < blk->cap; i++) {
-            if (blk->skip[i]) continue;
+            if (hive_skip_get(blk, i)) continue;
             wubu_diag_cell *c = (wubu_diag_cell *)blk->slots[i];
             fprintf(f, "%s    {\"kind\": \"%s\", \"step\": %lld, \"cell\": %d, "
                        "\"value\": %.6g, \"meta\": %.6g}",
@@ -317,7 +317,7 @@ void wubu_diag_free(wubu_diag_t *d)
     (void)fcp;
     for (wubu_hive_block_t *blk = d->hive->head; blk; blk = blk->next)
         for (size_t i = 0; i < blk->cap; i++)
-            if (!blk->skip[i]) free(blk->slots[i]);
+            if (!hive_skip_get(blk, i)) free(blk->slots[i]);
     wubu_hive_clear(d->hive);
     free(d);
 }

@@ -71,7 +71,7 @@ void wubu_orbits_free(wubu_orbits_t *o)
      * to clear — we only free our payloads) */
     for (wubu_hive_block_t *blk = o->hive->head; blk; blk = blk->next)
         for (size_t i = 0; i < blk->cap; i++) {
-            if (blk->skip[i]) continue;
+            if (hive_skip_get(blk, i)) continue;
             orbit_slot_t *s = (orbit_slot_t *)blk->slots[i];
             slot_addr_free(&s->addr);
             free(s);
@@ -185,7 +185,7 @@ void *wubu_orbits_read(const wubu_orbits_t *o, const wubu_orbit_addr_t *addr)
     /* walk the hive for a slot whose address matches at every level */
     for (wubu_hive_block_t *blk = o->hive->head; blk; blk = blk->next) {
         for (size_t i = 0; i < blk->cap; i++) {
-            if (blk->skip[i]) continue;
+            if (hive_skip_get(blk, i)) continue;
             orbit_slot_t *s = (orbit_slot_t *)blk->slots[i];
             int match = s->addr.n_levels == addr->n_levels;
             for (int l = 0; l < addr->n_levels && match; l++) {
