@@ -2560,3 +2560,7 @@ test_nf4: tools/test_nf4.c src/wubu_nf4.o
 test_ring_attn: tools/test_ring_attn.c src/wubu_ring_attn.o
 	$(CC) $(CFLAGS) -fopenmp -I include -o $@ $^ -lm
 	./$@
+
+test_kv_cache: tools/test_kv_cache.c src/wubu_kv_cache.o
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_kv_cache.c src/wubu_kv_cache.o $(LDFLAGS)
+	./$@
