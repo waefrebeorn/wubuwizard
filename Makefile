@@ -2564,3 +2564,11 @@ test_ring_attn: tools/test_ring_attn.c src/wubu_ring_attn.o
 test_kv_cache: tools/test_kv_cache.c src/wubu_kv_cache.o
 	$(CC) $(CFLAGS) -I include -o $@ tools/test_kv_cache.c src/wubu_kv_cache.o $(LDFLAGS)
 	./$@
+
+test_flash_attn: tools/test_flash_attn.c src/wubu_flash_attn.o
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_flash_attn.c src/wubu_flash_attn.o $(LDFLAGS) -fopenmp
+	./$@
+
+test_flash_attn: tools/test_flash_attn.c src/wubu_flash_attn.o
+	$(CC) $(CFLAGS) -I include -o $@ tools/test_flash_attn.c src/wubu_flash_attn.o $(LDFLAGS) -fopenmp
+	./$@
