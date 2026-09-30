@@ -1,17 +1,20 @@
 {
-  "counted_from": "writing-room *.md, CHANNEL: <name> in fenced prompts",
-  "channels": {
-    "news": 6,
-    "originals": 13,
-    "satire": 8,
-    "labs": 6,
-    "media_school": 6,
-    "public_access": 6,
-    "puppet": 6,
-    "network": 6,
-    "archive": 6
-  },
-  "channels_written": 9,
-  "grid_size": 9,
-  "total_prompts": 63
+ "counted_from": "writing-room SCRIPTS_*.md, derived by tools/launch_slate.py (file-derived, regenerated 2026-09-30)",
+ "channels": {
+  "news": 14,
+  "originals": 19,
+  "satire": 18,
+  "labs": 6,
+  "media_school": 6,
+  "public_access": 10,
+  "puppet": 16,
+  "network": 6,
+  "archive": 6
+ },
+ "channels_written": 9,
+ "grid_size": 9,
+ "total_prompts": 101,
+ "target": 100,
+ "supersedes": "a hand-kept file that still said 63 while the writing room held 101",
+ "note": "101 not 100. The target was a floor. The extra is ORIGINAL O-21 plus the relocated non-canon seeds, which moved inside the nine-channel grid rather than adding to it."
 }
