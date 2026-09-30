@@ -184,8 +184,10 @@ tools/agent_gauntlet/download_colonels.out
 /ENCODERS/hash-mind/c/train
 *.o
 # model weights (canonical copies on HF WaefreBeorn/WuBu-35M; tensor store rebuilds)
-/models/wubu/*.safetensors
-/models/wubu/model-mixed.gguf
+# models/ is 4.9GB of local gguf that is re-downloadable, and `git add -A` will
+# happily hash all of it and stall for minutes. Ignore the whole directory
+# rather than enumerating files one at a time.
+/models/
 fixture*.safetensors
 # personal agent profile (mind palace) — not part of the repo
 /.hermes/
