@@ -1,0 +1,17 @@
+{
+  "counted_from": "writing-room *.md, CHANNEL: <name> in fenced prompts",
+  "channels": {
+    "news": 6,
+    "originals": 13,
+    "satire": 8,
+    "labs": 6,
+    "media_school": 6,
+    "public_access": 6,
+    "puppet": 6,
+    "network": 6,
+    "archive": 6
+  },
+  "channels_written": 9,
+  "grid_size": 9,
+  "total_prompts": 63
+}
