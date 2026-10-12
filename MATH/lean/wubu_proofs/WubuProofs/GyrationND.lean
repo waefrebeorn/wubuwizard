@@ -292,16 +292,90 @@ theorem gyr_cf_inner_preserving_diag {n : ℕ} (c : ℝ)
     inner ℝ (gyr_cf c u v w) (gyr_cf c u v w) = inner ℝ w w := by
   simpa [real_inner_self_eq_norm_sq] using gyr_cf_norm_preserving c u v w hd
 
-/-! ## Future work: the full two-vector inner-product preservation
+/-- Gyration preserves the inner product — the FULL form of "gyration is a
+    rotation" (Ungar 2005, eq. 1.32). For the closed-form gyration with
+    d ≠ 0:
 
-The complete Ungar 1.32 statement `⟨gyr[u,v]w1, gyr[u,v]w2⟩ = ⟨w1,w2⟩`
-reduces, by the same inner-product bilinearity used throughout this file,
-to the scalar identity `gyr_inner_scalar_identity` (proven above). The
-remaining step is the vector-level expansion of
-`⟨w1 + (2/d)N1, w2 + (2/d)N2⟩` with the two independent coefficient sets
-(a1,b1) and (a2,b2). The `set`-atom vs raw-expression mismatch (the same
-pitfall noted in the project's lean4-pitfalls reference) makes the naive
-`simp`/`rw` expansion resistant; the robust route is to restate the
-theorem with plain hypotheses `(ha1 : a1 = ...)` instead of `set`-atoms,
-exactly as `gyr_scalar_identity` and `gyr_inner_scalar_identity` do.
+        ⟨gyr[u,v]w1, gyr[u,v]w2⟩ = ⟨w1, w2⟩
+
+    Proof (mirrors `gyr_cf_norm_preserving`): write
+    gyr_cf c u v w = w + (2/d)·(a_w·u + b_w·v) with the SAME d (depends only
+    on u,v) but INDEPENDENT coefficient sets (a1,b1) for w1 and (a2,b2) for
+    w2. Expanding ⟨w1 + tN1, w2 + tN2⟩ (t = 2/d) through inner-product
+    bilinearity:
+
+        ⟨w1,w2⟩ + t·(⟨w1,N2⟩ + ⟨N1,w2⟩) + t²·⟨N1,N2⟩
+
+    The two cross terms give (2/d)·[(a2·p1 + b2·q1) + (a1·p2 + b1·q2)] and
+    the norm term gives (4/d²)·(a1·a2·A + (a1·b2 + a2·b1)·r + b1·b2·B).
+    Their sum is (2/d²)·[d·(cross) + 2·(normterm)] = 0 by
+    `gyr_inner_scalar_identity`. Hence the inner product is unchanged.
 -/
+theorem gyr_cf_inner_preserving {n : ℕ} (c : ℝ)
+    (u v w1 w2 : EuclideanSpace ℝ (Fin n))
+    (hd : 1 + 2 * c * inner ℝ u v + c ^ 2 * ‖u‖ ^ 2 * ‖v‖ ^ 2 ≠ 0) :
+    inner ℝ (gyr_cf c u v w1) (gyr_cf c u v w2) = inner ℝ w1 w2 := by
+  -- shared scalar pieces (depend only on u, v)
+  set r := inner ℝ u v with hr
+  set A := ‖u‖ ^ 2 with hA
+  set B := ‖v‖ ^ 2 with hB
+  set d := 1 + 2 * c * r + c ^ 2 * A * B with hd_def
+  -- independent coefficient sets for w1 and w2
+  set p1 := inner ℝ u w1 with hp1
+  set q1 := inner ℝ v w1 with hq1
+  set p2 := inner ℝ u w2 with hp2
+  set q2 := inner ℝ v w2 with hq2
+  set a1 := -c ^ 2 * p1 * B + c * q1 + 2 * c ^ 2 * r * q1 with ha1
+  set b1 := -c ^ 2 * q1 * A - c * p1 with hb1
+  set a2 := -c ^ 2 * p2 * B + c * q2 + 2 * c ^ 2 * r * q2 with ha2
+  set b2 := -c ^ 2 * q2 * A - c * p2 with hb2
+  -- both gyrations unfold to w + (2/d)•(a•u + b•v) with their own coeffs
+  have hgyr1 : gyr_cf c u v w1 = w1 + (2 / d) • (a1 • u + b1 • v) := by
+    unfold gyr_cf; rw [hd_def, ha1, hb1]
+  have hgyr2 : gyr_cf c u v w2 = w2 + (2 / d) • (a2 • u + b2 • v) := by
+    unfold gyr_cf; rw [hd_def, ha2, hb2]
+  -- inner products with the generators (both directions)
+  have hw1u : inner ℝ w1 u = p1 := by rw [real_inner_comm u w1]
+  have hw1v : inner ℝ w1 v = q1 := by rw [real_inner_comm v w1]
+  have huw2 : inner ℝ u w2 = p2 := rfl
+  have hvw2 : inner ℝ v w2 = q2 := rfl
+  have huu : inner ℝ u u = A := (real_inner_self_eq_norm_sq u).trans hA.symm
+  have hvv : inner ℝ v v = B := (real_inner_self_eq_norm_sq v).trans hB.symm
+  -- cross term 1: ⟨w1, (2/d)•(a2·u + b2·v)⟩ = (2/d)·(a2·p1 + b2·q1)
+  have hcross1 : inner ℝ w1 ((2 / d) • (a2 • u + b2 • v)) = (2 / d) * (a2 * p1 + b2 * q1) := by
+    rw [inner_smul_right w1 (a2 • u + b2 • v) (2 / d)]
+    rw [inner_add_right, inner_smul_right, inner_smul_right, hw1u, hw1v]
+  -- cross term 2: ⟨(2/d)•(a1·u + b1·v), w2⟩ = (2/d)·(a1·p2 + b1·q2)
+  have hcross2 : inner ℝ ((2 / d) • (a1 • u + b1 • v)) w2 = (2 / d) * (a1 * p2 + b1 * q2) := by
+    rw [inner_smul_left (a1 • u + b1 • v) w2 (2 / d)]
+    have hs : (starRingEnd ℝ) (2 / d) = 2 / d := rfl
+    have hsa1 : (starRingEnd ℝ) a1 = a1 := rfl
+    have hsb1 : (starRingEnd ℝ) b1 = b1 := rfl
+    rw [hs, inner_add_left, inner_smul_left, inner_smul_left, huw2, hvw2, hsa1, hsb1]
+  -- norm term: ⟨(2/d)•N1, (2/d)•N2⟩ = (2/d)²·(a1·a2·A + (a1·b2+a2·b1)·r + b1·b2·B)
+  have hnnorm : inner ℝ ((2 / d) • (a1 • u + b1 • v)) ((2 / d) • (a2 • u + b2 • v))
+      = (2 / d) ^ 2 * (a1 * a2 * A + (a1 * b2 + a2 * b1) * r + b1 * b2 * B) := by
+    rw [inner_smul_left (a1 • u + b1 • v) ((2 / d) • (a2 • u + b2 • v)) (2 / d),
+        inner_smul_right (a1 • u + b1 • v) (a2 • u + b2 • v) (2 / d)]
+    have hs : (starRingEnd ℝ) (2 / d) = 2 / d := rfl
+    have hsa1 : (starRingEnd ℝ) a1 = a1 := rfl
+    have hsb1 : (starRingEnd ℝ) b1 = b1 := rfl
+    have hsa2 : (starRingEnd ℝ) a2 = a2 := rfl
+    have hsb2 : (starRingEnd ℝ) b2 = b2 := rfl
+    rw [hs]
+    simp only [inner_add_left, inner_add_right, inner_smul_left, inner_smul_right,
+      huu, hvv, hr, huw2, hvw2, hsa1, hsb1, hsa2, hsb2, real_inner_comm v u]
+    ring
+  -- the scalar cancellation (instantiate gyr_inner_scalar_identity)
+  have hcancel :
+      d * ((a2 * p1 + b2 * q1) + (a1 * p2 + b1 * q2))
+        + 2 * (a1 * a2 * A + (a1 * b2 + a2 * b1) * r + b1 * b2 * B) = 0 := by
+    exact gyr_inner_scalar_identity c p1 q1 p2 q2 A B r a1 b1 a2 b2 d
+      ha1 hb1 ha2 hb2 hd_def
+  -- finish: split ⟨w1+tN1, w2+tN2⟩ = ⟨w1,w2⟩ + ⟨w1,tN2⟩ + ⟨tN1,w2⟩ + ⟨tN1,tN2⟩
+  -- via inner_add_right then inner_add_left (each fires once on the current
+  -- outermost sum; the smul terms stay intact so hcross/hnnorm match).
+  rw [hgyr1, hgyr2, inner_add_right, inner_add_left, inner_add_left]
+  rw [hcross1, hcross2, hnnorm]
+  field_simp [hd]
+  nlinarith [hcancel, mul_self_nonneg d]
