@@ -12,5 +12,6 @@ claims underpinning the WuBu Nesting framework:
 
 import WubuProofs.PoincareBall
 import WubuProofs.MobiusAdd
+import WubuProofs.MobiusAddND
 import WubuProofs.MLACompression
 import WubuProofs.HyperbolicGyration
