@@ -11,24 +11,25 @@
 | `VAULT/core-math.md` | every formula with code-matched conventions, stability rules, the nesting operator | complete |
 | `VAULT/overlap-ledger.md` | 20+ claims with provenance, verdict (ORIGINAL/STANDARD/NOVEL COMBINATION/UNVERIFIED/DISCREPANCY), and Lean status table | complete |
 | `VAULT/openai-math-index.md` | 722-manuscript corpus cloned (1.9G, depth-1) + searched: **zero content overlap**; toolchain leverage documented; false-positive traps listed | complete |
+| `VAULT/klein-nesting-paper-design.md` | THE NOVEL PAPER: nested Klein manifolds as movable storage containers, the Gauss–Bonnet constraint (stated up front, routed around via patches), storage-theft mechanism, orientation machinery, novelty table, and Lean targets | complete |
 | `VAULT/klein-movable-manifolds.md` | arXiv:2410.16813 Klein HNN analysis + the movable-manifold / non-orientable / storage-adaptive proposal | complete |
 
 ## Key findings
 
-1. **nD Möbius ball preservation — PROVEN (2026-10-11).** The critical gap
-   is closed. `WubuProofs/MobiusAddND.lean` proves, for all n: if
-   ‖x‖², ‖y‖² < 1/c then ‖x ⊕_c y‖² < 1/c. Load-bearing identity:
-   `D² − c‖N‖² = (1−ca)(1−cb)·[(1+cp)² + c²(ab−p²)]` — the naive
-   `(1−ca)(1−cb)(1+cp)²` is FALSE in nD (silently assumes p² = ab,
-   Cauchy–Schwarz equality, true only in 1D). The `c²(ab−p²)` term is the
-   Cauchy–Schwarz slack.
-2. **MLA Frobenius error bound — PROVEN (2026-10-11).**
-   `mla_compression_error_bound`: `‖H·W_K − H·W_DKV·U_K‖_F ≤
-   ‖H‖_F·‖W_K − W_DKV·U_K‖_F` via mathlib's `frobenius_norm_mul` (works
-   for rectangular matrices — the old "mathlib restricts to square" note
-   was wrong). Eckart–Young optimality still unproven (needs SVD library).
-3. Remaining unproven: MLA Eckart–Young optimality, nD
-   gyration-as-rotation, fiber-bundle claim.
+1. **nD Möbius ball preservation — PROVEN (2026-10-11).** `10c3b98`
+2. **MLA Frobenius error bound — PROVEN (2026-10-11).** `8ea0dff`
+3. **Gyration norm formula + ball preservation + norm preservation — PROVEN
+   (2026-10-11).** `79aac83`, `2293e75`. The norm-preservation theorem
+   `‖gyr[u,v]w‖² = ‖w‖²` is what establishes "gyration is a rotation"
+   (Ungar 1.33).
+4. **Klein bottle deck bookkeeping — PROVEN (2026-10-11).** `c9bad8c`.
+   Deck group A(x,y)=(x+1,y), B(x,y)=(−x,y+1); B² orientation-preserving
+   (the non-orientable bookkeeping enabler); deck relation ABA=B;
+   translation composition for movable-manifold storage.
+5. Remaining unproven: MLA Eckart–Young optimality (externally blocked —
+   FLYWHEEL toolchain mismatch), fiber-bundle claim (numerical only),
+   gyration closed-form≡loop equivalence (heavy rational identity),
+   `⟨gyr a, gyr b⟩ = ⟨a,b⟩` (same expansion twice).
 
 2. **A real internal discrepancy exists** (logged as D1 in the ledger): the
    exponential map has a `/2` in MATH/README.md and the Python docstring but
@@ -71,16 +72,21 @@
   now gives ~4-5 min single-file checks).
 - Next Lean targets in priority order:
   1. **Gyration inner-product preservation** `⟨gyr[u,v]a, gyr[u,v]b⟩ =
-     ⟨a,b⟩` (the full "gyration is a rotation" claim — needs the explicit
-     gyrator matrix `gyr[u,v]w = w + Au + Bv` with Ungar's coefficients),
-  2. **MLA Eckart–Young optimality** (blocked: FLYWHEEL has full SVD +
+     ⟨a,b⟩` (the full inner-product form of "gyration is a rotation" —
+     same expansion as the norm proof, applied to two vectors),
+  2. **Gyration closed-form ≡ loop-definition equivalence** (rational-
+     function identity in 5 inner-product variables — heavy but
+     mechanical; would let the closed-form theorems transfer to the loop
+     definition the paper states),
+  3. **MLA Eckart–Young optimality** (blocked: FLYWHEEL has full SVD +
      Eckart–Young in Lean 4 but pins toolchain v4.26 while we're on
      v4.29.1 — either wait for FLYWHEEL to bump, or port the Frobenius
      tail-sum argument ourselves),
-  3. **Fiber-bundle/connection claim** (math_viz/05 — highest-value
-     formalization target, currently numerical only),
-  4. Klein paper Lean targets (deck transformation is an involution,
-     T² orientation-preserving, patch metric well-definedness).
+  4. **Fiber-bundle/connection claim** (math_viz/05 — currently numerical
+     only),
+  5. Klein storage capacity bound (needs a rigorous "stored bits"
+     definition + the capacity-ratio experiment first — see
+     klein-nesting-paper-design.md §5).
 
 ## Not done (roadmap)
 
