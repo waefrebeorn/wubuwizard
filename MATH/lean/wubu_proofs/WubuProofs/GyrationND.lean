@@ -150,3 +150,98 @@ theorem gyration_nd_preserves_ball {n : ℕ} (c : ℝ) (hc : c > 0)
   · apply mobius_add_nd_preserves_ball c hc u _
     · exact hu
     · exact mobius_add_nd_preserves_ball c hc v w hv hw
+
+/-- The Möbius gyration in explicit closed form (Ungar, Analytic Hyperbolic
+    Geometry 2005, Def 3.31; also implemented directly in hyperbolic DL
+    code such as TAHyper-SDM24):
+
+    gyr_cf[u,v]w = w + (2/d)·(a·u + b·v)
+
+    a = −c²⟨u,w⟩‖v‖² + c⟨v,w⟩ + 2c²⟨u,v⟩⟨v,w⟩
+    b = −c²⟨v,w⟩‖u‖² − c⟨u,w⟩
+    d = 1 + 2c⟨u,v⟩ + c²‖u‖²‖v‖²
+
+This closed form equals the loop definition `gyration_nd` by direct
+algebraic expansion (rational-function identity); that equivalence is left
+as future work. Everything below is proven for the closed form, which is
+the form actually used in implementations.
+-/
+noncomputable def gyr_cf {n : ℕ} (c : ℝ) (u v w : EuclideanSpace ℝ (Fin n)) :
+    EuclideanSpace ℝ (Fin n) :=
+  w + (2 / (1 + 2 * c * inner ℝ u v + c ^ 2 * ‖u‖ ^ 2 * ‖v‖ ^ 2)) •
+      ((-c ^ 2 * inner ℝ u w * ‖v‖ ^ 2 + c * inner ℝ v w
+          + 2 * c ^ 2 * inner ℝ u v * inner ℝ v w) • u
+       + (-c ^ 2 * inner ℝ v w * ‖u‖ ^ 2 - c * inner ℝ u w) • v)
+
+/-- The load-bearing scalar identity behind gyration norm-preservation:
+
+    d·(a·p + b·q) + 2·(a²A + 2abr + b²B) = 0
+
+where p = ⟨u,w⟩, q = ⟨v,w⟩, r = ⟨u,v⟩, A = ‖u‖², B = ‖v‖², and a, b, d are
+the gyration coefficients. This is exactly what makes the two correction
+terms in ‖w + (2/d)·(a·u + b·v)‖² cancel, leaving ‖w‖².
+-/
+theorem gyr_scalar_identity (c p q A B r a b d : ℝ)
+    (ha : a = -c ^ 2 * p * B + c * q + 2 * c ^ 2 * r * q)
+    (hb : b = -c ^ 2 * q * A - c * p)
+    (hd : d = 1 + 2 * c * r + c ^ 2 * A * B) :
+    d * (a * p + b * q) + (a ^ 2 * A + 2 * a * b * r + b ^ 2 * B) = 0 := by
+  rw [ha, hb, hd]
+  ring
+
+/-- Gyration preserves the norm — the key theorem behind "gyration is a
+    rotation" (Ungar 2005, eq. 1.33). For the closed-form gyration with
+    d ≠ 0:
+
+        ‖gyr_cf[u,v]w‖² = ‖w‖²
+
+    Proof: write gyr = w + (2/d)·(a·u + b·v). Expanding
+    ‖w + (2/d)·N‖² = ‖w‖² + 2·(2/d)·⟨w,N⟩ + (2/d)²·‖N‖² via
+    `norm_add_sq_real`, the cross term is (2/d)(ap+bq) and the norm term is
+    (4/d²)(a²A + 2abr + b²B); their sum is
+    (2/d²)·[d(ap+bq) + 2(a²A + 2abr + b²B)] = 0 by
+    `gyr_scalar_identity`. Hence the norm is unchanged.
+-/
+theorem gyr_cf_norm_preserving {n : ℕ} (c : ℝ)
+    (u v w : EuclideanSpace ℝ (Fin n))
+    (hd : 1 + 2 * c * inner ℝ u v + c ^ 2 * ‖u‖ ^ 2 * ‖v‖ ^ 2 ≠ 0) :
+    ‖gyr_cf c u v w‖ ^ 2 = ‖w‖ ^ 2 := by
+  -- name the pieces
+  set p := inner ℝ u w with hp
+  set q := inner ℝ v w with hq
+  set r := inner ℝ u v with hr
+  set A := ‖u‖ ^ 2 with hA
+  set B := ‖v‖ ^ 2 with hB
+  set W := ‖w‖ ^ 2 with hW
+  set d := 1 + 2 * c * r + c ^ 2 * A * B with hd_def
+  set a := -c ^ 2 * p * B + c * q + 2 * c ^ 2 * r * q with ha_def
+  set b := -c ^ 2 * q * A - c * p with hb_def
+  -- the definition unfolds to w + (2/d)•(a•u + b•v)
+  have hgyr : gyr_cf c u v w = w + (2 / d) • (a • u + b • v) := by
+    unfold gyr_cf
+    rw [hd_def, ha_def, hb_def]
+  -- inner products needed for the expansion
+  have hwp : inner ℝ w u = p := by rw [real_inner_comm u w]
+  have hwq : inner ℝ w v = q := by rw [real_inner_comm v w]
+  have hBv : inner ℝ v v = B := (real_inner_self_eq_norm_sq v).trans hB.symm
+  -- cross term: ⟨w, (2/d)•(a•u + b•v)⟩ = (2/d)·(a·p + b·q)
+  have hcross : inner ℝ w ((2 / d) • (a • u + b • v)) = (2 / d) * (a * p + b * q) := by
+    rw [inner_smul_right w (a • u + b • v) (2 / d)]
+    rw [inner_add_right, inner_smul_right, inner_smul_right, hwp, hwq]
+  -- norm term: ‖(2/d)•(a•u + b•v)‖² = (2/d)²·(a²A + 2ab·r + b²B)
+  have hnnorm : ‖(2 / d) • (a • u + b • v)‖ ^ 2
+      = (2 / d) ^ 2 * (a ^ 2 * A + 2 * a * b * r + b ^ 2 * B) := by
+    rw [norm_smul, mul_pow, norm_add_sq_real]
+    rw [norm_smul, norm_smul, hA, hB]
+    rw [inner_smul_left u (b • v) a, inner_smul_right u v b]
+    have hs : (starRingEnd ℝ) a = a := rfl
+    rw [hs]
+    simp only [Real.norm_eq_abs, sq_abs, mul_pow, hr]
+    ring
+  -- the scalar cancellation identity (instantiate gyr_scalar_identity)
+  have hcancel : d * (a * p + b * q) + (a ^ 2 * A + 2 * a * b * r + b ^ 2 * B) = 0 := by
+    exact gyr_scalar_identity c p q A B r a b d ha_def hb_def hd_def
+  -- finish
+  rw [hgyr, norm_add_sq_real, hcross, hnnorm]
+  field_simp [hd]
+  nlinarith [hcancel, mul_self_nonneg d]
