@@ -291,3 +291,17 @@ theorem gyr_cf_inner_preserving_diag {n : ℕ} (c : ℝ)
     (hd : 1 + 2 * c * inner ℝ u v + c ^ 2 * ‖u‖ ^ 2 * ‖v‖ ^ 2 ≠ 0) :
     inner ℝ (gyr_cf c u v w) (gyr_cf c u v w) = inner ℝ w w := by
   simpa [real_inner_self_eq_norm_sq] using gyr_cf_norm_preserving c u v w hd
+
+/-! ## Future work: the full two-vector inner-product preservation
+
+The complete Ungar 1.32 statement `⟨gyr[u,v]w1, gyr[u,v]w2⟩ = ⟨w1,w2⟩`
+reduces, by the same inner-product bilinearity used throughout this file,
+to the scalar identity `gyr_inner_scalar_identity` (proven above). The
+remaining step is the vector-level expansion of
+`⟨w1 + (2/d)N1, w2 + (2/d)N2⟩` with the two independent coefficient sets
+(a1,b1) and (a2,b2). The `set`-atom vs raw-expression mismatch (the same
+pitfall noted in the project's lean4-pitfalls reference) makes the naive
+`simp`/`rw` expansion resistant; the robust route is to restate the
+theorem with plain hypotheses `(ha1 : a1 = ...)` instead of `set`-atoms,
+exactly as `gyr_scalar_identity` and `gyr_inner_scalar_identity` do.
+-/
