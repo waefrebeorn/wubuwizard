@@ -6,11 +6,13 @@ Prints a status summary of all proofs and their current state.
 
 import WubuProofs
 
+def hr : String := String.join (List.replicate 60 "=")
+
 def main : IO Unit := do
-  IO.println "=" * 60
+  IO.println hr
   IO.println "  Wubu Nesting Formal Proofs — Status"
   IO.println "  Lean 4.29.1 + mathlib4"
-  IO.println "=" * 60
+  IO.println hr
   IO.println ""
   IO.println "  📐 Proof 1: PoincaréBall.lean"
   IO.println "     Theorem: exp_0^c(log_0^c(y)) = y"
