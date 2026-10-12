@@ -180,9 +180,22 @@ Consequences:
 | Gyroassociativity (1D) | HyperbolicGyration.lean | ✅ proven |
 | 1D gyration = identity | HyperbolicGyration.lean | ✅ proven |
 | MLA factor identity | MLACompression.lean | ✅ proven (algebra only) |
-| MLA error bound (Eckart–Young) | MLACompression.lean | 📝 sketch only |
+| **MLA Frobenius error bound** | **MLACompression.lean** | ✅ **proven (2026-10-11, via `frobenius_norm_mul`)** |
+| MLA error bound optimality (Eckart–Young) | — | ❌ needs SVD library (FLYWHEEL pins Lean 4.26; we're on 4.29) |
 | nD gyration is rotation | HyperbolicGyration.lean | 📝 sketch only |
 | Fiber-bundle/connection claim | — | ❌ no Lean file |
+
+**Second critical gap closed 2026-10-11: the MLA Frobenius error bound.**
+`mla_compression_error_bound`: for any hidden-state matrix H,
+```
+‖H·W_K − H·W_DKV·U_K‖_F ≤ ‖H‖_F · ‖W_K − W_DKV·U_K‖_F
+```
+via the factor identity + mathlib's `frobenius_norm_mul` — which handles
+RECTANGULAR matrices (the old sketch note claiming mathlib restricted to
+square matrices was wrong). Eckart–Young *optimality* (that truncated SVD
+minimizes the error among all rank-d_c factorizations) is still unproven —
+it needs an SVD library; FLYWHEEL has it but pins Lean 4.26 while we're on
+4.29. The one-sided bound is what WuBu's argument actually needs.
 
 **The nD Möbius preservation theorem — the critical gap the entire
 WuBuNesting paper rests on — is now closed.** Proof structure (all
@@ -207,8 +220,8 @@ machine-checked, Lean 4.29.1 + mathlib):
    Cauchy–Schwarz + `ab < 1/c²`).
 7. Finish via `div_lt_div_iff₀` + `linarith`.
 
-Remaining gaps: MLA error bound, nD gyration-is-rotation, the fiber-bundle
-claim.
+Remaining gaps: MLA Eckart–Young optimality (needs SVD library), nD
+gyration-is-rotation, the fiber-bundle claim.
 
 Everything machine-checked is now either algebra or the full nD ball
 invariant (MobiusAddND.lean, proven 2026-10-11). The remaining unproven

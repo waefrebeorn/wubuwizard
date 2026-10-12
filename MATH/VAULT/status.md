@@ -21,7 +21,13 @@
    `D² − c‖N‖² = (1−ca)(1−cb)·[(1+cp)² + c²(ab−p²)]` — the naive
    `(1−ca)(1−cb)(1+cp)²` is FALSE in nD (silently assumes p² = ab,
    Cauchy–Schwarz equality, true only in 1D). The `c²(ab−p²)` term is the
-   Cauchy–Schwarz slack. Remaining unproven: MLA error bound, nD
+   Cauchy–Schwarz slack.
+2. **MLA Frobenius error bound — PROVEN (2026-10-11).**
+   `mla_compression_error_bound`: `‖H·W_K − H·W_DKV·U_K‖_F ≤
+   ‖H‖_F·‖W_K − W_DKV·U_K‖_F` via mathlib's `frobenius_norm_mul` (works
+   for rectangular matrices — the old "mathlib restricts to square" note
+   was wrong). Eckart–Young optimality still unproven (needs SVD library).
+3. Remaining unproven: MLA Eckart–Young optimality, nD
    gyration-as-rotation, fiber-bundle claim.
 
 2. **A real internal discrepancy exists** (logged as D1 in the ledger): the
@@ -66,7 +72,10 @@
 - Next Lean targets in priority order:
   1. **nD gyration is a rotation** (HyperbolicGyration.lean — currently a
      sketch; needs the gyrator matrix shown orthogonal),
-  2. **MLA compression error bound** (Eckart–Young via mathlib SVD),
+  2. **MLA Eckart–Young optimality** (blocked: FLYWHEEL has full SVD +
+     Eckart–Young in Lean 4 but pins toolchain v4.26.0-rc2 while we're on
+     v4.29.1 — either wait for FLYWHEEL to bump, or port the Frobenius
+     tail-sum argument ourselves),
   3. **Fiber-bundle/connection claim** (math_viz/05 — highest-value
      formalization target, currently numerical only),
   4. Klein paper Lean targets (deck transformation is an involution,
