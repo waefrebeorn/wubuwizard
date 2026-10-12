@@ -17,3 +17,4 @@ import WubuProofs.MLACompression
 import WubuProofs.HyperbolicGyration
 import WubuProofs.GyrationND
 import WubuProofs.KleinDeck
+import WubuProofs.QuaternionRotation
