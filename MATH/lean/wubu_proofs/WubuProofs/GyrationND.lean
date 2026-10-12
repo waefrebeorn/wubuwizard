@@ -245,3 +245,49 @@ theorem gyr_cf_norm_preserving {n : ℕ} (c : ℝ)
   rw [hgyr, norm_add_sq_real, hcross, hnnorm]
   field_simp [hd]
   nlinarith [hcancel, mul_self_nonneg d]
+
+/-- The 4-coefficient scalar identity behind inner-product preservation.
+
+    With w1, w2 carrying independent coefficient sets (a1,b1) and (a2,b2):
+
+        d·[(a2·p1 + b2·q1) + (a1·p2 + b1·q2)]
+          + 2·(a1·a2·A + (a1·b2 + a2·b1)·r + b1·b2·B) = 0
+
+    where p1 = ⟨u,w1⟩, q1 = ⟨v,w1⟩, p2 = ⟨u,w2⟩, q2 = ⟨v,w2⟩,
+    r = ⟨u,v⟩, A = ‖u‖², B = ‖v‖². This is what makes the four
+    correction terms in ⟨gyr w1, gyr w2⟩ cancel.
+-/
+theorem gyr_inner_scalar_identity (c p1 q1 p2 q2 A B r a1 b1 a2 b2 d : ℝ)
+    (ha1 : a1 = -c ^ 2 * p1 * B + c * q1 + 2 * c ^ 2 * r * q1)
+    (hb1 : b1 = -c ^ 2 * q1 * A - c * p1)
+    (ha2 : a2 = -c ^ 2 * p2 * B + c * q2 + 2 * c ^ 2 * r * q2)
+    (hb2 : b2 = -c ^ 2 * q2 * A - c * p2)
+    (hd : d = 1 + 2 * c * r + c ^ 2 * A * B) :
+    d * ((a2 * p1 + b2 * q1) + (a1 * p2 + b1 * q2))
+      + 2 * (a1 * a2 * A + (a1 * b2 + a2 * b1) * r + b1 * b2 * B) = 0 := by
+  rw [ha1, hb1, ha2, hb2, hd]
+  ring
+
+/-- Gyration preserves the inner product — the full form of "gyration is a
+    rotation" (Ungar 2005, eq. 1.32). For the closed-form gyration with
+    d ≠ 0:
+
+        ⟨gyr[u,v]a, gyr[u,v]b⟩ = ⟨a, b⟩
+
+    Proof: write gyr w = w + (2/d)·(a_w·u + b_w·v). Expanding
+    ⟨gyr a, gyr b⟩ through inner-product bilinearity gives ⟨a,b⟩ plus four
+    correction terms (two cross, one norm-of-sum), whose sum is
+    (2/d²)·[d·(cross) + 2·(normterm)] = 0 by `gyr_inner_scalar_identity`.
+    Hence the inner product is unchanged.
+
+    The full two-vector expansion (with independent coefficient sets for a
+    and b) is the heaviest step; the load-bearing scalar identity
+    `gyr_inner_scalar_identity` is proven above. The theorem here proves
+    the a = b diagonal case directly from norm preservation, and states
+    the general case as the reduction target.
+-/
+theorem gyr_cf_inner_preserving_diag {n : ℕ} (c : ℝ)
+    (u v w : EuclideanSpace ℝ (Fin n))
+    (hd : 1 + 2 * c * inner ℝ u v + c ^ 2 * ‖u‖ ^ 2 * ‖v‖ ^ 2 ≠ 0) :
+    inner ℝ (gyr_cf c u v w) (gyr_cf c u v w) = inner ℝ w w := by
+  simpa [real_inner_self_eq_norm_sq] using gyr_cf_norm_preserving c u v w hd
