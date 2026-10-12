@@ -1,0 +1,152 @@
+import Mathlib
+import WubuProofs.MobiusAddND
+open Real InnerProductSpace EuclideanSpace
+
+set_option maxHeartbeats 0
+
+/-
+GyrationND.lean — n-dimensional gyration machinery.
+
+The Möbius gyration gyr_c[u,v] (Ungar's gyroautomorphism) is defined by the
+loop
+
+    gyr_c[u,v] w = (−(u ⊕_c v)) ⊕_c (u ⊕_c (v ⊕_c w))
+
+Ungar's theorem (Analytic Hyperbolic Geometry, 2005, eq. 1.32–1.33): the
+gyration preserves the inner product, hence the norm:
+
+    ⟨gyr[u,v]a, gyr[u,v]b⟩ = ⟨a, b⟩,    ‖gyr[u,v]w‖ = ‖w‖
+
+so gyr[u,v] is a rotation of the ball about the origin.
+
+This file proves the foundation everything else rests on: the Möbius norm
+formula
+
+    ‖a ⊕_c b‖² = (‖a‖² + ‖b‖² + 2⟨a,b⟩) / (1 + 2c⟨a,b⟩ + c²‖a‖²‖b‖²)
+
+which is a pure polynomial identity after expanding ‖N‖² through
+inner-product linearity (same expansion as MobiusAddND.lean), plus the
+consequent gyration ball-preservation: every gyration argument stays inside
+the ball, because gyr[u,v]w is built entirely from Möbius additions of
+in-ball points and Möbius addition preserves the ball (MobiusAddND.lean).
+
+The full inner-product preservation ⟨gyr[u,v]a, gyr[u,v]b⟩ = ⟨a,b⟩ requires
+the explicit gyrator matrix (Ungar's closed form gyr[u,v]w = w + Au + Bv
+with the A, B, D coefficients) and is left as future work.
+-/
+
+/-- The Möbius gyration: gyr_c[u,v]w = (−(u⊕v)) ⊕ (u ⊕ (v⊕w)). -/
+noncomputable def gyration_nd {n : ℕ} (c : ℝ) (u v w : EuclideanSpace ℝ (Fin n)) :
+    EuclideanSpace ℝ (Fin n) :=
+  mobius_add_nd c (-(mobius_add_nd c u v)) (mobius_add_nd c u (mobius_add_nd c v w))
+
+/-- Möbius norm formula: ‖a ⊕_c b‖² has a closed form.
+
+    ‖a ⊕_c b‖² = (‖a‖² + ‖b‖² + 2⟨a,b⟩) / (1 + 2c⟨a,b⟩ + c²‖a‖²‖b‖²)
+
+The proof is the same inner-product expansion as MobiusAddND.lean; the
+key algebraic identity (verified by `ring`) is
+
+    ‖N‖² = (a + b + 2p)·D
+
+where N = αa + βb, α = 1+2cp+cb, β = 1−ca, D = 1+2cp+c²ab,
+a = ‖a‖², b = ‖b‖², p = ⟨a,b⟩.
+-/
+theorem mobius_norm_formula {n : ℕ} (c : ℝ) (hc : c > 0)
+    (a b : EuclideanSpace ℝ (Fin n)) (ha : ‖a‖ ^ 2 < 1 / c) (hb : ‖b‖ ^ 2 < 1 / c) :
+    ‖mobius_add_nd c a b‖ ^ 2
+      = (‖a‖ ^ 2 + ‖b‖ ^ 2 + 2 * inner ℝ a b)
+        / (1 + 2 * c * inner ℝ a b + c ^ 2 * ‖a‖ ^ 2 * ‖b‖ ^ 2) := by
+  -- rename the pieces
+  set p := inner ℝ a b with hp
+  set A := ‖a‖ ^ 2 with hA
+  set B := ‖b‖ ^ 2 with hB
+  set D := 1 + 2 * c * p + c ^ 2 * A * B with hD
+  -- the definition, once unfolded, is (1/D) • (α • a + β • b)
+  have hN : mobius_add_nd c a b = (1 / D) • ((1 + 2 * c * p + c * B) • a + (1 - c * A) • b) := by
+    unfold mobius_add_nd
+    rw [hD, hA, hB, hp]
+  -- basic inner-product facts
+  have hA_eq : inner ℝ a a = A := (real_inner_self_eq_norm_sq a).trans hA.symm
+  have hB_eq : inner ℝ b b = B := (real_inner_self_eq_norm_sq b).trans hB.symm
+  -- (1) ‖(1/D) • N‖² = ‖N‖² / D²
+  have hDpos : D > 0 := by
+    have hcs : p ^ 2 ≤ A * B := by
+      have h := real_inner_mul_inner_self_le a b
+      rw [← hp, hA_eq, hB_eq] at h
+      simpa [pow_two] using h
+    have h1 : D = (1 + c * p) ^ 2 + c ^ 2 * (A * B - p ^ 2) := by unfold D; ring
+    rw [h1]
+    have h2 : c ^ 2 * (A * B - p ^ 2) ≥ 0 := by
+      apply mul_nonneg (sq_nonneg c)
+      linarith [hcs]
+    have h3 : (1 + c * p) ^ 2 ≥ 0 := sq_nonneg _
+    by_contra hD
+    push Not at hD
+    have h4 : (1 + c * p) ^ 2 = 0 := by linarith
+    have h5 : c * p = -1 := by nlinarith [h4]
+    have h6 : p ^ 2 = 1 / c ^ 2 := by
+      have h7 : p = -1 / c := by
+        have h8 : c * p = -1 := h5
+        field_simp at h8 ⊢
+        linarith
+      rw [h7]
+      ring
+    have hca : c * A < 1 := by
+      have h1 : c * A < c * (1 / c) := mul_lt_mul_of_pos_left ha hc
+      rwa [mul_one_div_cancel hc.ne'] at h1
+    have hcb : c * B < 1 := by
+      have h1 : c * B < c * (1 / c) := mul_lt_mul_of_pos_left hb hc
+      rwa [mul_one_div_cancel hc.ne'] at h1
+    have hn1 : 0 ≤ c * A := by positivity
+    have hn2 : 0 ≤ c * B := by positivity
+    have hab_lt : A * B < 1 / c ^ 2 := by nlinarith [mul_nonneg hn1 hn2]
+    linarith [h6]
+  have hnorm_div :
+      ‖(1 / D) • ((1 + 2 * c * p + c * B) • a + (1 - c * A) • b)‖ ^ 2
+        = ‖(1 + 2 * c * p + c * B) • a + (1 - c * A) • b‖ ^ 2 / D ^ 2 := by
+    rw [norm_smul, norm_div, norm_one, Real.norm_of_nonneg (le_of_lt hDpos)]
+    ring
+  -- (2) expand ‖N‖² through inner-product linearity
+  have hN_expand :
+      ‖(1 + 2 * c * p + c * B) • a + (1 - c * A) • b‖ ^ 2
+        = (1 + 2 * c * p + c * B) ^ 2 * A
+          + 2 * (1 + 2 * c * p + c * B) * (1 - c * A) * p + (1 - c * A) ^ 2 * B := by
+    rw [norm_add_sq_real]
+    rw [norm_smul, norm_smul, hA, hB]
+    rw [inner_smul_left a ((1 - c * A) • b) (1 + 2 * c * p + c * B),
+        inner_smul_right a b (1 - c * A)]
+    have h1 : (starRingEnd ℝ) (1 + 2 * c * p + c * B) = 1 + 2 * c * p + c * B := rfl
+    rw [h1]
+    rw [Real.norm_eq_abs, Real.norm_eq_abs]
+    rw [mul_pow, mul_pow, sq_abs, sq_abs, ← hp]
+    ring
+  -- (3) the algebraic identity: ‖N‖² = (A + B + 2p)·D
+  have halg :
+      (1 + 2 * c * p + c * B) ^ 2 * A
+          + 2 * (1 + 2 * c * p + c * B) * (1 - c * A) * p + (1 - c * A) ^ 2 * B
+        = (A + B + 2 * p) * D := by
+    unfold D
+    ring
+  -- finish
+  rw [hN, hnorm_div, hN_expand, halg]
+  field_simp [hDpos.ne']
+
+/-- Gyration preserves the ball: every argument of the gyration loop stays
+    inside the ball, so gyr_c[u,v] maps the ball to itself.
+
+    Proof: gyr[u,v]w = (−(u⊕v)) ⊕ (u ⊕ (v⊕w)). Each ⊕ argument is a Möbius
+    sum of in-ball points, and Möbius addition preserves the ball
+    (mobius_add_nd_preserves_ball), so each intermediate result is in-ball,
+    and the outer addition preserves the ball again.
+-/
+theorem gyration_nd_preserves_ball {n : ℕ} (c : ℝ) (hc : c > 0)
+    (u v w : EuclideanSpace ℝ (Fin n))
+    (hu : ‖u‖ ^ 2 < 1 / c) (hv : ‖v‖ ^ 2 < 1 / c) (hw : ‖w‖ ^ 2 < 1 / c) :
+    ‖gyration_nd c u v w‖ ^ 2 < 1 / c := by
+  unfold gyration_nd
+  apply mobius_add_nd_preserves_ball c hc
+  · simpa using mobius_add_nd_preserves_ball c hc u v hu hv
+  · apply mobius_add_nd_preserves_ball c hc u _
+    · exact hu
+    · exact mobius_add_nd_preserves_ball c hc v w hv hw

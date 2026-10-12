@@ -182,8 +182,23 @@ Consequences:
 | MLA factor identity | MLACompression.lean | ✅ proven (algebra only) |
 | **MLA Frobenius error bound** | **MLACompression.lean** | ✅ **proven (2026-10-11, via `frobenius_norm_mul`)** |
 | MLA error bound optimality (Eckart–Young) | — | ❌ needs SVD library (FLYWHEEL pins Lean 4.26; we're on 4.29) |
-| nD gyration is rotation | HyperbolicGyration.lean | 📝 sketch only |
+| nD gyration is rotation | GyrationND.lean | ✅ **ball preservation proven (2026-10-11); inner-product preservation future work** |
 | Fiber-bundle/connection claim | — | ❌ no Lean file |
+
+**Third result 2026-10-11: GyrationND.lean.** Two theorems:
+
+1. **Möbius norm formula (nD)**: `‖a ⊕_c b‖² = (‖a‖² + ‖b‖² + 2⟨a,b⟩) /
+   (1 + 2c⟨a,b⟩ + c²‖a‖²‖b‖²)` — proven via the same inner-product
+   expansion as MobiusAddND plus the algebraic identity
+   `‖N‖² = (A+B+2p)·D` (verified by `ring`).
+2. **Gyration preserves the ball (nD)**: `gyr_c[u,v]w` maps the ball to
+   itself — every gyration argument is a Möbius sum of in-ball points and
+   Möbius addition preserves the ball, so the whole loop stays in-ball.
+
+Ungar's full claim `⟨gyr[u,v]a, gyr[u,v]b⟩ = ⟨a,b⟩` (which implies
+"gyration is a rotation") needs the explicit gyrator matrix
+(`gyr[u,v]w = w + Au + Bv` with Ungar's A, B, D coefficients) — future
+work, documented in the file header.
 
 **Second critical gap closed 2026-10-11: the MLA Frobenius error bound.**
 `mla_compression_error_bound`: for any hidden-state matrix H,

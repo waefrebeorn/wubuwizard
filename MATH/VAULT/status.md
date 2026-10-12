@@ -70,10 +70,11 @@
 - mathlib4 cache is fully built (one-time cost paid; `fastcheck.sh <file>`
   now gives ~4-5 min single-file checks).
 - Next Lean targets in priority order:
-  1. **nD gyration is a rotation** (HyperbolicGyration.lean — currently a
-     sketch; needs the gyrator matrix shown orthogonal),
+  1. **Gyration inner-product preservation** `⟨gyr[u,v]a, gyr[u,v]b⟩ =
+     ⟨a,b⟩` (the full "gyration is a rotation" claim — needs the explicit
+     gyrator matrix `gyr[u,v]w = w + Au + Bv` with Ungar's coefficients),
   2. **MLA Eckart–Young optimality** (blocked: FLYWHEEL has full SVD +
-     Eckart–Young in Lean 4 but pins toolchain v4.26.0-rc2 while we're on
+     Eckart–Young in Lean 4 but pins toolchain v4.26 while we're on
      v4.29.1 — either wait for FLYWHEEL to bump, or port the Frobenius
      tail-sum argument ourselves),
   3. **Fiber-bundle/connection claim** (math_viz/05 — highest-value
