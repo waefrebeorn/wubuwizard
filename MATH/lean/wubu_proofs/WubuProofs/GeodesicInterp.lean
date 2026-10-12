@@ -38,26 +38,23 @@ left-cancellation identity — heavier, documented as the next step.
 /-- Möbius additive identity: x ⊕_c 0 = x. -/
 theorem mobius_add_nd_zero {n : ℕ} (c : ℝ) (x : EuclideanSpace ℝ (Fin n)) :
     mobius_add_nd c x 0 = x := by
-  show (1 / (1 + 2 * c * inner ℝ x 0 + c ^ 2 * ‖x‖ ^ 2 * ‖0‖ ^ 2)) •
-      ((1 + 2 * c * inner ℝ x 0 + c * ‖0‖ ^ 2) • x + (1 - c * ‖x‖ ^ 2) • 0) = x
-  simp only [inner_zero_right, norm_zero, mul_zero, add_zero, zero_pow zero_lt_two,
-    one_div]
-  -- denominator 1, second term 0•... = 0, first term 1•x = x
+  unfold mobius_add_nd
   simp
 
 /-- Möbius scalar multiplication (w ≠ 0 case).
-    r ⊗_c w = (1/√c) · tanh(r · artanh(√c·‖w‖)) · w/‖w‖. -/
+    r ⊗_c w = (1/√c) · tanh(r · artanh(√c·‖w‖)) · (‖w‖⁻¹ • w).
+    NOTE: EuclideanSpace has NO HDiv instance — scale via `(1/‖w‖) • w`. -/
 noncomputable def mobiusScalarMul {n : ℕ} (c : ℝ) (r : ℝ)
     (w : EuclideanSpace ℝ (Fin n)) (hw : w ≠ 0) : EuclideanSpace ℝ (Fin n) :=
-  (1 / Real.sqrt c) * Real.tanh (r * Real.artanh (Real.sqrt c * ‖w‖)) •
-    (w / ‖w‖)
+  (((1 / Real.sqrt c) * Real.tanh (r * Real.artanh (Real.sqrt c * ‖w‖))) : ℝ) •
+    ((1 / ‖w‖) • w)
 
 /-- Zero scalar annihilates: 0 ⊗_c w = 0.  (tanh 0 = 0 kills the scalar.) -/
 theorem mobiusScalarMul_zero {n : ℕ} (c : ℝ) (hc : c > 0)
     (w : EuclideanSpace ℝ (Fin n)) (hw : w ≠ 0) :
     mobiusScalarMul c 0 w hw = 0 := by
   unfold mobiusScalarMul
-  simp only [zero_mul, Real.tanh_zero, mul_zero, zero_smul]
+  simp
 
 /-- The geodesic direction: ⊖_c x ⊕_c y = x ⊕_c (-x) ⊕_c y is written
     here as the two-step mobius_add_nd composition the standard formula uses.
@@ -87,10 +84,9 @@ noncomputable def geodesicInterp {n : ℕ} (c : ℝ) (hc : c > 0)
 theorem geodesicInterp_zero {n : ℕ} (c : ℝ) (hc : c > 0)
     (x y : EuclideanSpace ℝ (Fin n)) :
     geodesicInterp c hc x y 0 = x := by
-  unfold geodesicInterp geodesicDir
-  split
+  simp only [geodesicInterp, geodesicDir]
+  split_ifs with hd
   · rfl
-  · rename_i hd
-    have hsmul : mobiusScalarMul c 0 (mobius_add_nd c (-x) y) hd = 0 :=
+  · have hsmul : mobiusScalarMul c 0 (mobius_add_nd c (-x) y) hd = 0 :=
       mobiusScalarMul_zero c hc _ hd
     rw [hsmul, mobius_add_nd_zero]
