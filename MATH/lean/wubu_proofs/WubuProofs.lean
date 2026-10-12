@@ -18,3 +18,10 @@ import WubuProofs.HyperbolicGyration
 import WubuProofs.GyrationND
 import WubuProofs.KleinDeck
 import WubuProofs.QuaternionRotation
+import WubuProofs.FiberBundle
+import WubuProofs.NestedHyperbolicSpaces
+import WubuProofs.HolographicOptimizer
+-- PowerTower.lean NOT imported: it was written against a different mathlib
+-- version and does not compile on 4.29.1 (Real.rpow_lt_rpow_of_exponent_lt
+-- argument order + type mismatches at lines 68,91,92,96,97,101,111,112).
+-- Left in the tree for a future mathlib-port; see VAULT/github-agent-assessment.md.
