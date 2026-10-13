@@ -53,6 +53,29 @@ theorem expMap0_norm {n : ℕ} (c : ℝ) (hc : c > 0)
   rw [Real.norm_eq_abs, abs_div, abs_of_pos hden]
   field_simp [hsc.ne.symm, hvpos.ne.symm]
 
+/-- BALL PRESERVATION (v ≠ 0 case): the origin exponential map lands strictly
+    inside the ball, i.e. c·‖exp_0^c(v)‖² < 1.
+
+    Proof: ‖exp_0^c(v)‖ = |tanh(‖v‖√c)|/√c < 1/√c (since |tanh| < 1), so
+    c·‖exp_0^c(v)‖² < c·(1/√c)² = c·(1/c) = 1.
+
+    This is the on-manifold guarantee for the probability-flow ODE integrator
+    (GAP C002): each Euler/Heun step exp_{x_t}(−h·v) stays in the manifold. -/
+theorem expMap0_in_ball {n : ℕ} (c : ℝ) (hc : c > 0)
+    (v : EuclideanSpace ℝ (Fin n)) (hv : v ≠ 0) :
+    c * ‖expMap0 c v hv‖ ^ 2 < 1 := by
+  rw [expMap0_norm c hc v hv]
+  have hsc : Real.sqrt c > 0 := Real.sqrt_pos.mpr hc
+  have hlt : |Real.tanh (‖v‖ * Real.sqrt c)| < 1 := abs_tanh_lt_one _
+  have h1 : (|Real.tanh (‖v‖ * Real.sqrt c)| / Real.sqrt c) ^ 2 < (1 / Real.sqrt c) ^ 2 := by
+    rw [div_pow, div_pow, one_pow]
+    apply div_lt_div_of_pos_right _ (pow_pos hsc 2)
+    nlinarith [sq_abs (Real.tanh (‖v‖ * Real.sqrt c)),
+      abs_nonneg (Real.tanh (‖v‖ * Real.sqrt c)), hlt]
+  calc c * (|Real.tanh (‖v‖ * Real.sqrt c)| / Real.sqrt c) ^ 2
+      < c * (1 / Real.sqrt c) ^ 2 := mul_lt_mul_of_pos_left h1 hc
+    _ = 1 := by rw [div_pow, one_pow, Real.sq_sqrt (le_of_lt hc)]; field_simp [ne_of_gt hc]
+
 /-- The exponential map at the origin.  Total (defined for all v including 0):
     exp_0^c(0) = 0.  (The v ≠ 0 case is the tanh formula; v = 0 maps to the
     origin, which is in the ball.) -/
@@ -66,6 +89,15 @@ theorem expMap0Total_zero {n : ℕ} (c : ℝ) :
     expMap0Total c (0 : EuclideanSpace ℝ (Fin n)) = 0 := by
   unfold expMap0Total
   simp
+
+/-- The v ≠ 0 case of the total map agrees with `expMap0`: when v ≠ 0,
+    expMap0Total c v = expMap0 c v (the proof obligation).  This links the
+    total on-manifold guarantee back to the original v ≠ 0 theorem. -/
+theorem expMap0Total_of_ne_zero {n : ℕ} (c : ℝ) (v : EuclideanSpace ℝ (Fin n))
+    (hv : v ≠ 0) :
+    expMap0Total c v = expMap0 c v hv := by
+  unfold expMap0Total expMap0
+  simp only [hv, if_false, not_false_iff, dif_neg]
 
 /-- BALL PRESERVATION (total, including v = 0): c·‖exp_0^c(v)‖² < 1 for ALL
     tangent vectors v (and = 0 < 1 when v = 0).
@@ -83,34 +115,7 @@ theorem expMap0Total_in_ball {n : ℕ} (c : ℝ) (hc : c > 0)
   · -- v = 0: exp = 0, so c·0 = 0 < 1
     subst h
     simp
-  · -- v ≠ 0: same cancellation as expMap0_norm (the ‖v‖ cancels)
+  · -- v ≠ 0: the else-branch value equals expMap0 c v hne (same tanh formula)
     have hne : v ≠ 0 := h
-    have hsc : Real.sqrt c > 0 := Real.sqrt_pos.mpr hc
-    have hvpos : ‖v‖ > 0 := norm_pos_iff.mpr hne
-    have hden : ‖v‖ * Real.sqrt c > 0 := mul_pos hvpos hsc
-    show c * ‖(Real.tanh (‖v‖ * Real.sqrt c) / (‖v‖ * Real.sqrt c)) • v‖ ^ 2 < 1
-    rw [norm_smul, Real.norm_eq_abs, abs_div, abs_of_pos hden, mul_pow]
-    -- |tanh/(‖v‖√c)|² · ‖v‖² = (|tanh|/√c)²  (the ‖v‖² cancels)
-    have hcancel : |Real.tanh (‖v‖ * Real.sqrt c) / (‖v‖ * Real.sqrt c)| ^ 2 * ‖v‖ ^ 2
-        = (|Real.tanh (‖v‖ * Real.sqrt c)| / Real.sqrt c) ^ 2 := by
-      rw [abs_div, abs_of_pos hden, div_pow, div_pow]
-      field_simp [hsc.ne.symm, hvpos.ne.symm]
-    rw [hcancel]
-    have hlt : |Real.tanh (‖v‖ * Real.sqrt c)| < 1 := abs_tanh_lt_one _
-    calc c * (|Real.tanh (‖v‖ * Real.sqrt c)| / Real.sqrt c) ^ 2
-        < c * (1 / Real.sqrt c) ^ 2 := by
-          apply mul_lt_mul_of_pos_left _ hc
-          rw [div_pow, div_pow, one_pow]
-          apply div_lt_div_of_pos_right _ (pow_pos hsc 2)
-          nlinarith [sq_abs (Real.tanh (‖v‖ * Real.sqrt c)),
-            abs_nonneg (Real.tanh (‖v‖ * Real.sqrt c)), hlt]
-      _ = 1 := by rw [div_pow, one_pow, Real.sq_sqrt (le_of_lt hc)]; field_simp [ne_of_gt hc]
-
-/-- The v ≠ 0 case of the total map agrees with `expMap0`: when v ≠ 0,
-    expMap0Total c v = expMap0 c v (the proof obligation).  This links the
-    total on-manifold guarantee back to the original v ≠ 0 theorem. -/
-theorem expMap0Total_of_ne_zero {n : ℕ} (c : ℝ) (v : EuclideanSpace ℝ (Fin n))
-    (hv : v ≠ 0) :
-    expMap0Total c v = expMap0 c v hv := by
-  unfold expMap0Total expMap0
-  simp only [hv, if_false, not_false_iff]
+    show c * ‖expMap0 c v hne‖ ^ 2 < 1
+    exact expMap0_in_ball c hc v hne

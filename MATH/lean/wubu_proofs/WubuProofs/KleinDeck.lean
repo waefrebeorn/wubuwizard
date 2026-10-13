@@ -99,13 +99,6 @@ theorem deckA_apply_twice (p : ℝ × ℝ) : deckA (deckA p) = (p.1 + 2, p.2) :=
   rw [Prod.ext_iff]
   refine ⟨by ring, rfl⟩
 
-/-- Iterated translation: A applied k times translates the first coordinate
-    by k.  This is the "moving the manifold by integer steps" storage-defrag
-    primitive — A^k corresponds to shifting the fundamental domain k units
-    along the x-axis, and every data point's x-coordinate moves by exactly k
-    while y is untouched.
-
-    Proof by induction on k. -/
 /-- Iterated translation (concrete finite cases): A applied k times translates
     the first coordinate by k.  We state the cases k = 2, 3 explicitly (the
     "moving the manifold by integer steps" storage-defrag primitive) rather
