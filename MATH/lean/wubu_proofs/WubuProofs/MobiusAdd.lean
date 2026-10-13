@@ -91,3 +91,36 @@ theorem mobius_add_preserves_ball (c x y : ℝ) (hc : c > 0) (hx : x ^ 2 < 1 / c
     field_simp [hDpos.ne.symm, hc.ne.symm]
     nlinarith [h_pos]
   exact h
+
+/-- 1D Möbius left-cancellation: (-x) ⊕_c (x ⊕_c y) = y.
+
+    This is the scalar reduction of the gyro-left-cancellation law (Ungar
+    2005; Ganea et al. 2018) — the property that makes Möbius subtraction
+    well-defined from the left. It is load-bearing for the geodesic γ(1)=y
+    endpoint (GeodesicInterp) and for the C bridge [T10].
+
+    Proof: the outer Möbius addition is a rational function; cross-multiply
+    (`div_eq_iff`, using the outer denominator ≠ 0 from ball membership of
+    -x and x⊕y), substitute the inner Möbius addition, clear the inner
+    denominator with `field_simp`, and close the resulting polynomial
+    identity with `ring`. (Plain `field_simp; ring` leaves a residual
+    denominator-inverse that doesn't match — the cross-multiply route
+    avoids that friction.) -/
+theorem mobius_add_1d_left_cancel (c x y : ℝ) (hc : c > 0)
+    (hx : x ^ 2 < 1 / c) (hy : y ^ 2 < 1 / c) :
+    mobius_add_1d c (-x) (mobius_add_1d c x y) = y := by
+  have hden : 1 + 2 * c * x * y + c ^ 2 * x ^ 2 * y ^ 2 ≠ 0 := denom_nonzero c x y hc hx hy
+  have hz_ball : mobius_add_1d c x y ^ 2 < 1 / c := mobius_add_preserves_ball c x y hc hx hy
+  have hden2 : 1 + 2 * c * (-x) * (mobius_add_1d c x y)
+      + c ^ 2 * (-x) ^ 2 * (mobius_add_1d c x y) ^ 2 ≠ 0 :=
+    denom_nonzero c (-x) (mobius_add_1d c x y) hc (by rw [neg_sq]; exact hx) hz_ball
+  show ((1 + 2 * c * (-x) * (mobius_add_1d c x y) + c * (mobius_add_1d c x y) ^ 2) * (-x)
+        + (1 - c * (-x) ^ 2) * (mobius_add_1d c x y))
+       / (1 + 2 * c * (-x) * (mobius_add_1d c x y) + c ^ 2 * (-x) ^ 2 * (mobius_add_1d c x y) ^ 2) = y
+  rw [div_eq_iff hden2]
+  have hzdef : mobius_add_1d c x y
+      = ((1 + 2 * c * x * y + c * y ^ 2) * x + (1 - c * x ^ 2) * y)
+        / (1 + 2 * c * x * y + c ^ 2 * x ^ 2 * y ^ 2) := rfl
+  rw [hzdef]
+  field_simp [hden]
+  ring
