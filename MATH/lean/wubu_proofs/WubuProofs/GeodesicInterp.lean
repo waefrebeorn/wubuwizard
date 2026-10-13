@@ -56,6 +56,44 @@ theorem mobiusScalarMul_zero {n : ℕ} (c : ℝ) (hc : c > 0)
   unfold mobiusScalarMul
   simp
 
+/-- Unit scalar is the identity: 1 ⊗_c w = w.  (The tanh/artanh round-trip
+    `tanh(artanh z) = z` makes the scalar `(1/√c)·tanh(artanh(√c‖w‖))·(1/‖w‖)`
+    equal to 1, so `1 ⊗ w = 1 • w = w`.  Requires w in the ball so
+    `√c‖w‖ < 1` and artanh is defined.)  This is the load-bearing identity
+    for the γ(1) = y geodesic endpoint. -/
+theorem mobiusScalarMul_one {n : ℕ} (c : ℝ) (hc : c > 0)
+    (w : EuclideanSpace ℝ (Fin n)) (hw : w ≠ 0) (hball : ‖w‖ ^ 2 < 1 / c) :
+    mobiusScalarMul c 1 w hw = w := by
+  unfold mobiusScalarMul
+  have hsc : Real.sqrt c > 0 := Real.sqrt_pos.mpr hc
+  have hwpos : ‖w‖ > 0 := norm_pos_iff.mpr hw
+  -- √c‖w‖ < 1  (from c‖w‖² < 1, taking sqrt of both sides)
+  have harg : Real.sqrt c * ‖w‖ < 1 := by
+    have h1 : c * ‖w‖ ^ 2 < 1 := by
+      calc c * ‖w‖ ^ 2 < c * (1 / c) := mul_lt_mul_of_pos_left hball hc
+        _ = 1 := by field_simp
+    have hsq : (Real.sqrt c * ‖w‖) ^ 2 < 1 := by
+      calc (Real.sqrt c * ‖w‖) ^ 2 = Real.sqrt c ^ 2 * ‖w‖ ^ 2 := by ring
+        _ = c * ‖w‖ ^ 2 := by rw [Real.sq_sqrt hc.le]
+        _ < 1 := h1
+    have hnne : 0 ≤ Real.sqrt c * ‖w‖ := mul_nonneg (le_of_lt hsc) (le_of_lt hwpos)
+    calc Real.sqrt c * ‖w‖ = Real.sqrt ((Real.sqrt c * ‖w‖) ^ 2) := (Real.sqrt_sq hnne).symm
+      _ < Real.sqrt 1 := Real.sqrt_lt_sqrt (sq_nonneg _) hsq
+      _ = 1 := Real.sqrt_one
+  -- tanh(artanh(√c‖w‖)) = √c‖w‖
+  have hnne : 0 ≤ Real.sqrt c * ‖w‖ := mul_nonneg (le_of_lt hsc) (le_of_lt hwpos)
+  have hrnd : Real.tanh (Real.artanh (Real.sqrt c * ‖w‖)) = Real.sqrt c * ‖w‖ :=
+    Real.tanh_artanh ⟨by linarith [hnne], harg⟩
+  -- the scalar simplifies to 1
+  have hscalar : ((1 / Real.sqrt c) * Real.tanh (1 * Real.artanh (Real.sqrt c * ‖w‖))) * (1 / ‖w‖) = 1 := by
+    rw [one_mul, hrnd]
+    field_simp [hsc.ne.symm, hwpos.ne.symm]
+  show ((1 / Real.sqrt c) * Real.tanh (1 * Real.artanh (Real.sqrt c * ‖w‖))) • ((1 / ‖w‖) • w) = w
+  have hsmul : ((1 / Real.sqrt c) * Real.tanh (1 * Real.artanh (Real.sqrt c * ‖w‖))) • ((1 / ‖w‖) • w)
+      = (((1 / Real.sqrt c) * Real.tanh (1 * Real.artanh (Real.sqrt c * ‖w‖))) * (1 / ‖w‖)) • w := by
+    rw [smul_smul]
+  rw [hsmul, hscalar, one_smul]
+
 /-- The geodesic direction: ⊖_c x ⊕_c y = x ⊕_c (-x) ⊕_c y is written
     here as the two-step mobius_add_nd composition the standard formula uses.
     We take the direction d = (-x) ⊕_c y (the tangent direction at x
