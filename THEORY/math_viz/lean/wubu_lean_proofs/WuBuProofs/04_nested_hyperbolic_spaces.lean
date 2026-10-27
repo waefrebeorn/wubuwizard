@@ -1,7 +1,5 @@
 /-
-math_viz/lean/04_nested_hyperbolic_spaces.lean
-
-PROOF 4: Nested Hyperbolic Spaces (WuBu Nesting)
+Nested Hyperbolic Spaces (WuBu Nesting)
 
 WuBu Nesting: H^{n1}_{c1,s1} ⊃ H^{n2}_{c2,s2} ⊃ ... ⊃ H^{nk}_{ck,sk}
 
@@ -34,13 +32,13 @@ structure HyperbolicLevel where
 -- Nesting condition: level i+1 is embedded in level i
 structure NestingChain (levels : List HyperbolicLevel) : Prop where
   dim_decreasing : ∀ i : ℕ, i + 1 < levels.length → 
-    (levels.get ⟨i, by omega⟩).dim ≥ (levels.get ⟨i+1, by omega⟩).dim
+    (levels.get? i).map (fun l => l.dim) ≥ (levels.get? (i + 1)).map (fun l => l.dim)
   metric_preserved : ∀ i : ℕ, i + 1 < levels.length → 
-    (levels.get ⟨i, by omega⟩).curvature * (levels.get ⟨i, by omega⟩).scale ^ 2 =
-    (levels.get ⟨i+1, by omega⟩).curvature * (levels.get ⟨i+1, by omega⟩).scale ^ 2
+    (levels.get? i).map (fun l => l.curvature * l.scale ^ 2) = 
+    (levels.get? (i + 1)).map (fun l => l.curvature * l.scale ^ 2)
 
 -- Euclidean ball of radius r (in ℝ^n)
-def euclidean_ball (n : ℕ) (r : ℝ) : Set (ℝ^n) := {x | ∑ i, x i ^ 2 < r ^ 2}
+def euclidean_ball (n : ℕ) (r : ℝ) : Set (EuclideanSpace ℝ (Fin n)) := {x | ‖x‖ < r}
 
 -- The Poincaré ball model of hyperbolic space (curvature -1)
 -- is the open unit ball with metric g = 4⟨·,·⟩/(1 - ||x||²)²
@@ -50,18 +48,11 @@ def euclidean_ball (n : ℕ) (r : ℝ) : Set (ℝ^n) := {x | ∑ i, x i ^ 2 < r 
 theorem nested_balls (r₁ r₂ : ℝ) (hr₁ : 0 ≤ r₁) (hr₂ : 0 ≤ r₂) (h : r₁ < r₂) :
     euclidean_ball 1 r₁ ⊆ euclidean_ball 1 r₂ := by
   intro x hx
-  dsimp [euclidean_ball] at hx ⊢
-  have hx_val : |x 0| < r₁ := by
-    -- In ℝ^1, the sum is just x_0²
-    simpa using hx
-  have hx_abs : |x 0| < r₂ := lt_of_lt_of_le hx_val h
-  -- |x 0|^2 < r₂^2
-  calc
-    (x 0) ^ 2 ≤ |x 0| ^ 2 := by
-      nlinarith [abs_mul_abs_self (x 0)]
-    _ < r₂ ^ 2 := by
-      have : |x 0| ^ 2 < r₂ ^ 2 := pow_lt_pow_left (abs_nonneg _) hx_abs (by norm_num : 0 < 2)
-      exact this
+  simp only [euclidean_ball, Set.mem_setOf_eq] at hx ⊢
+  have h₁ : ‖(x : EuclideanSpace ℝ (Fin 1))‖ < r₁ := hx
+  have h₂ : r₁ < r₂ := h
+  have h₃ : ‖(x : EuclideanSpace ℝ (Fin 1))‖ < r₂ := by linarith
+  exact h₃
 
 -- The φ-progression of curvatures
 noncomputable def φ : ℝ := (1 + Real.sqrt 5) / 2

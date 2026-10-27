@@ -1,16 +1,11 @@
 #include "wubu_model.h"
-#include "wubu_dense_ffn.h"  /* dense SwiGLU FFN (zero-copy blob path) */
 #include "gguf_reader.h"
-#include "wubu_moe.h"   // wubu_moe_router_only for N64 pre-cache fill
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
 #include <immintrin.h>  // _mm_prefetch for expert prefetch
-#include "mtp_q8_cache.h"  // Q8_0 lazy dequant cache for MTP draft head
-
-#include <omp.h>
 
 // Global tensor naming convention (set during model init)
 extern int g_tensor_naming;  // defined in wubu_ssm.c, 0=blk.Qwen 1=model.layers.Gemma 2=pure-GQA
@@ -64,138 +59,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     // Allocate layers
     model->layers = (wubu_layer_t *)calloc(model->n_layers, sizeof(wubu_layer_t));
     if (!model->layers) { gguf_close(ctx); return false; }
-
-    /* Runtime dims from the checkpoint's OWN config KV — every model runs
-     * at its real shape. The SSM side keeps the Qwen3.6 invariants (the
-     * Gated-DeltaNet port is Qwen3.6-specific; other architectures set the
-     * GQA side only and their SSM layers are handled per-arch). */
-    {
-        /* Architecture-prefixed config keys: llama.* (MiniCPM5), qwen35.*
-         * (Qwen3.5), lfm2.* (LFM2.5). Try each prefix; the first with an
-         * embedding_length wins. */
-        const char *pfxs[] = { "llama", "qwen35", "qwen36", "lfm2", NULL };
-        int64_t emb = 0, hc = 0, hckv = 0, kl = 0, rope = 0;
-        int64_t sd = 0, sk = 0, sv = 0, dt = 0;
-        char key[128];
-        for (int pi = 0; pfxs[pi] && emb == 0; pi++) {
-            snprintf(key, sizeof(key), "%s.embedding_length", pfxs[pi]);
-            emb = gguf_read_kv_i64(ctx, key, 0);
-            if (!emb) continue;
-            snprintf(key, sizeof(key), "%s.attention.head_count", pfxs[pi]);
-            hc = gguf_read_kv_i64(ctx, key, 0);
-            snprintf(key, sizeof(key), "%s.attention.head_count_kv", pfxs[pi]);
-            hckv = gguf_read_kv_i64(ctx, key, 0);   /* int arrays → first element */
-            snprintf(key, sizeof(key), "%s.attention.key_length", pfxs[pi]);
-            kl = gguf_read_kv_i64(ctx, key, 0);
-            snprintf(key, sizeof(key), "%s.rope.dimension_count", pfxs[pi]);
-            rope = gguf_read_kv_i64(ctx, key, 0);
-            /* SSM side (qwen35-style Gated-DeltaNet keys) */
-            snprintf(key, sizeof(key), "%s.ssm.state_size", pfxs[pi]);
-            sd = gguf_read_kv_i64(ctx, key, 0);
-            snprintf(key, sizeof(key), "%s.ssm.group_count", pfxs[pi]);
-            sk = gguf_read_kv_i64(ctx, key, 0);
-            snprintf(key, sizeof(key), "%s.ssm.inner_size", pfxs[pi]);
-            sv = gguf_read_kv_i64(ctx, key, 0);
-            snprintf(key, sizeof(key), "%s.ssm.time_step_rank", pfxs[pi]);
-            dt = gguf_read_kv_i64(ctx, key, 0);
-        }
-        if (emb > 0 && hc > 0) {
-            wubu_dims_t dd;
-            memset(&dd, 0, sizeof(dd));
-            dd.d_model      = (int)emb;
-            dd.gqa_q_heads  = (int)hc;
-            dd.gqa_kv_heads = (int)(hckv > 0 ? hckv : 1);
-            /* head dim: key_length KV, else the attn_q_norm tensor (LFM2.5
-             * has q_norm [64] and no key_length), else emb/heads */
-            dd.gqa_head_dim = (int)(kl > 0 ? kl : 0);
-            if (dd.gqa_head_dim <= 0) {
-                gguf_tensor_info *tqn = gguf_find_tensor(ctx, "blk.0.attn_q_norm.weight");
-                if (tqn && tqn->dims[0] > 0) dd.gqa_head_dim = (int)tqn->dims[0];
-            }
-            if (dd.gqa_head_dim <= 0 && hc > 0) dd.gqa_head_dim = (int)(emb / hc);
-            dd.gqa_kv_dim   = dd.gqa_kv_heads * dd.gqa_head_dim;
-            dd.rope_head_dim = (int)(rope > 0 ? rope : 64);
-            /* SSM (Gated-DeltaNet): real values when present, else the
-             * Qwen3.6 defaults (128/16/4096/32) */
-            dd.ssm_d_state  = (int)(sd > 0 ? sd : 128);
-            dd.ssm_k_heads  = (int)(sk > 0 ? sk : 16);
-            dd.value_dim    = (int)(sv > 0 ? sv : dd.ssm_d_state * 32);
-            dd.key_dim      = dd.ssm_d_state * dd.ssm_k_heads;
-            dd.ssm_v_heads  = dd.ssm_d_state > 0 ? dd.value_dim / dd.ssm_d_state : 32;
-            dd.conv_kernel  = 4;
-            dd.dt_rank      = (int)(dt > 0 ? dt : 32);
-            dd.conv_dim     = 2 * dd.key_dim + dd.value_dim;
-            /* ── tensor ground truth ──
-             * The config KV can disagree with the actual tensors:
-             *  - LFM2.5 head_count_kv is a PER-LAYER array with 0s on the
-             *    shortconv layers (first element = 0 → wrong fallback);
-             *    the attn_k tensor says kv_dim=512 (8 heads × 64).
-             *  - Qwen3.5's ssm config describes the full model (conv 6144)
-             *    while the 0.8B's fused attn_qkv is 3×D=3072 → key=value=
-             *    conv/3. */
-            for (int gl = 0; gl < model->n_layers; gl++) {
-                char tn[128];
-                snprintf(tn, sizeof(tn), "blk.%d.attn_q.weight", gl);
-                gguf_tensor_info *tq = gguf_find_tensor(ctx, tn);
-                if (tq && tq->dims[1] > 0) {
-                    int64_t q_dim = tq->dims[1];
-                    snprintf(tn, sizeof(tn), "blk.%d.attn_k.weight", gl);
-                    gguf_tensor_info *tk = gguf_find_tensor(ctx, tn);
-                    int64_t kv_dim = tk ? tk->dims[1] : 0;
-                    if (dd.gqa_head_dim > 0 && q_dim % dd.gqa_head_dim == 0) {
-                        /* attn_q columns are the Q+gate FUSED pair
-                         * (gated-attn family): [q_h0 | gate_h0 | q_h1 |
-                         * gate_h1 | ...] = 2*q_heads*hd. The true q_dim is
-                         * attn_output's INPUT dim (2048 for Qwen3.5-0.8B →
-                         * 8 heads × 256; q_dim/plain_hd would wrongly say
-                         * 16 and the matmul would read past the weight). */
-                        int64_t out_dim = 0;
-                        snprintf(tn, sizeof(tn), "blk.%d.attn_output.weight", gl);
-                        gguf_tensor_info *to_ = gguf_find_tensor(ctx, tn);
-                        if (to_) out_dim = to_->dims[0];
-                        if (out_dim > 0 && out_dim % dd.gqa_head_dim == 0)
-                            dd.gqa_q_heads = (int)(out_dim / dd.gqa_head_dim);
-                        else
-                            dd.gqa_q_heads = (int)(q_dim / dd.gqa_head_dim);
-                        if (kv_dim > 0 && kv_dim % dd.gqa_head_dim == 0) {
-                            dd.gqa_kv_heads = (int)(kv_dim / dd.gqa_head_dim);
-                            dd.gqa_kv_dim   = (int)kv_dim;
-                        }
-                    }
-                    break;
-                }
-            }
-            {
-                gguf_tensor_info *tqkv = gguf_find_tensor(ctx, "blk.0.attn_qkv.weight");
-                if (tqkv && tqkv->dims[1] > 0) {
-                    int64_t conv = tqkv->dims[1];
-                    if (2 * dd.key_dim + dd.value_dim != conv && conv % 3 == 0) {
-                        dd.key_dim    = (int)(conv / 3);
-                        dd.value_dim  = (int)(conv / 3);
-                        dd.ssm_k_heads = dd.ssm_d_state > 0 ? dd.key_dim / dd.ssm_d_state : 0;
-                        dd.ssm_v_heads = dd.ssm_d_state > 0 ? dd.value_dim / dd.ssm_d_state : 0;
-                    }
-                    dd.conv_dim = (int)conv;
-                    fprintf(stderr, "  [dims] attn_qkv ne=%lld dims=%lld,%lld,%lld,%lld conv(d1)=%lld\n",
-                            (long long)tqkv->dims[0] * tqkv->dims[1],
-                            (long long)tqkv->dims[0], (long long)tqkv->dims[1],
-                            (long long)tqkv->dims[2], (long long)tqkv->dims[3],
-                            (long long)conv);
-                } else {
-                    fprintf(stderr, "  [dims] no blk.0 attn_qkv (conv override skipped)\n");
-                }
-            }
-            wubu_dims_set(&dd);
-            printf("  Runtime dims: D=%d GQA=%dx%d hd=%d kv=%d rope=%d SSM(k=%d s=%d v=%d dt=%d)\n",
-                   dd.d_model, dd.gqa_q_heads, dd.gqa_kv_heads,
-                   dd.gqa_head_dim, dd.gqa_kv_dim, dd.rope_head_dim,
-                   dd.ssm_k_heads, dd.ssm_d_state, dd.ssm_v_heads, dd.dt_rank);
-        } else {
-            wubu_dims_default();
-            printf("  Runtime dims: legacy defaults (no config KV)\n");
-        }
-    }
-
+    
     printf("Allocating %d layers...\n", model->n_layers);
 
     // ============================================================
@@ -260,18 +124,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     for (int l = 0; l < model->n_layers; l++) {
         wubu_layer_t *layer = &model->layers[l];
         layer->layer_idx = l;
-        /* Tensor-driven block type (NOT wubu_is_ssm_layer's hardcoded
-         * (l+1)%4 pattern — that only matches Qwen3.5's 18-SSM/6-GQA split.
-         * MiniCPM5 is all-GQA, LFM2.5 is 8 GQA + 22 shortconv). */
-        {
-            char probe[256];
-            snprintf(probe, sizeof(probe), "blk.%d.shortconv.in_proj.weight", l);
-            int has_scv = gguf_find_tensor(ctx, probe) != NULL;
-            snprintf(probe, sizeof(probe), "blk.%d.attn_qkv.weight", l);
-            int has_ssm = gguf_find_tensor(ctx, probe) != NULL;
-            layer->block_type = has_scv ? 2 : (has_ssm ? 0 : 1);
-            layer->is_ssm = (layer->block_type == 0);
-        }
+        layer->is_ssm = wubu_is_ssm_layer(l);
         
         gguf_tensor_info *t;
         
@@ -283,21 +136,15 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                 { fprintf(stderr, "Failed to load attn_norm[%d]\n", l); goto fail; }
         }
         
-        // post_attention_norm.weight (or ffn_norm.weight — LFM2.5 names the
-        // FFN-input norm ffn_norm and has no post_attention_norm)
+        // post_attention_norm.weight
         t = gguf_find_tensor(ctx, tensor_name_post_attn_norm(l));
-        if (!t) {
-            char fn[256];
-            snprintf(fn, sizeof(fn), "blk.%d.ffn_norm.weight", l);
-            t = gguf_find_tensor(ctx, fn);
-        }
         if (t) {
             layer->post_attn_norm_weight = (float *)malloc(model->d_model * sizeof(float));
             if (!gguf_read_tensor_f32(ctx, t, layer->post_attn_norm_weight, model->d_model))
                 { fprintf(stderr, "Failed to load post_attn_norm[%d]\n", l); goto fail; }
         }
         
-        if (layer->block_type == 0) {
+        if (layer->is_ssm) {
             // Load SSM weights — QUANTIZED-ONLY PATH for large weight matrices.
             // attn_qkv, attn_gate, ssm_out use quantized blob pointers (set later).
             // Small tensors (norms, a, dt, conv1d) loaded as F32.
@@ -364,26 +211,6 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             if (!ok) { fprintf(stderr, "Failed to load SSM weights for layer %d\n", l); goto fail; }
             printf("  Layer %d: SSM loaded (quantized attn_qkv/gate/out)\n", l);
             
-        } else if (layer->block_type == 2) {
-            // LFM shortconv block: attn_norm -> shortconv(in_proj -> conv1d
-            // -> out_proj) + residual -> ffn_norm -> dense FFN. The big
-            // projections are blob-bound later (riding ssm.attn_qkv/ssm_out);
-            // only the F32 conv kernel loads here.
-            char name[256];
-            int ok = 1;
-            layer->ssm.attn_qkv_weight = NULL;
-            layer->ssm.ssm_out_weight = NULL;
-            snprintf(name, sizeof(name), "blk.%d.shortconv.conv.weight", l);
-            t = gguf_find_tensor(ctx, name);
-            if (!t) { fprintf(stderr, "Missing %s\n", name); goto fail; }
-            {
-                int64_t n_conv = 1;
-                for (int d = 0; d < t->n_dims; d++) n_conv *= t->dims[d];
-                layer->scv_conv_weight = (float *)malloc((size_t)n_conv * sizeof(float));
-                ok = ok && (gguf_read_tensor_f32(ctx, t, layer->scv_conv_weight, (int)n_conv) > 0);
-            }
-            if (!ok) { fprintf(stderr, "Failed to load shortconv weights for layer %d\n", l); goto fail; }
-            printf("  Layer %d: LFM shortconv loaded (in_proj/conv/out_proj)\n", l);
         } else {
             // Load GQA weights — QUANTIZED-ONLY PATH for large weight matrices.
             // attn_q, attn_k, attn_v, attn_output use quantized blob pointers (set later).
@@ -402,25 +229,61 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             // LARGE: attn_output.weight — quantized-only (blob pointer)
             layer->gqa.attn_output_weight = NULL;
             
-            // Small: attn_q_norm.weight [256] F32 — OPTIONAL (MiniCPM5 has
-            // no q/k norms; the forward uses the hardcoded L2-normalize)
+            // Small: attn_q_norm.weight [head_dim] F32
             snprintf(name, sizeof(name), "blk.%d.attn_q_norm.weight", l);
             t = gguf_find_tensor(ctx, name);
-            if (t) {
-                layer->gqa.attn_q_norm_weight = (float *)malloc(GQA_HEAD_DIM * sizeof(float));
-                ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_q_norm_weight, GQA_HEAD_DIM) > 0);
-            }
+            if (!t) { fprintf(stderr, "Missing %s\n", name); goto fail; }
+            int layer_head_dim = (t->n_dims >= 1) ? (int)t->dims[0] : GQA_HEAD_DIM;
+            layer->gqa.head_dim = layer_head_dim;
+            layer->gqa.attn_q_norm_weight = (float *)malloc(layer_head_dim * sizeof(float));
+            ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_q_norm_weight, layer_head_dim) > 0);
             
-            // Small: attn_k_norm.weight [256] F32 — OPTIONAL
+            // Small: attn_k_norm.weight [head_dim] F32
             snprintf(name, sizeof(name), "blk.%d.attn_k_norm.weight", l);
             t = gguf_find_tensor(ctx, name);
-            if (t) {
-                layer->gqa.attn_k_norm_weight = (float *)malloc(GQA_HEAD_DIM * sizeof(float));
-                ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_k_norm_weight, GQA_HEAD_DIM) > 0);
+            if (!t) { fprintf(stderr, "Missing %s\n", name); goto fail; }
+            layer->gqa.attn_k_norm_weight = (float *)malloc(layer_head_dim * sizeof(float));
+            ok = ok && (gguf_read_tensor_f32(ctx, t, layer->gqa.attn_k_norm_weight, layer_head_dim) > 0);
+
+            // Extract per-layer dimensions from GGUF tensor shapes
+            // K weight: [d_model, kv_heads * head_dim] => kv_heads from dims
+            snprintf(name, sizeof(name), "blk.%d.attn_k.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (t && t->n_dims >= 2) {
+                int kv_dim = (int)t->dims[1];  // kv_heads * head_dim
+                layer->gqa.kv_heads = kv_dim / layer_head_dim;
+            } else {
+                layer->gqa.kv_heads = GQA_KV_HEADS;
             }
-            
-            if (!ok) { fprintf(stderr, "Failed to load GQA weights for layer %d\n", l); goto fail; }
-            printf("  Layer %d: GQA loaded (quantized attn_q/k/v/output)\n", l);
+            // Q weight: [d_model, q_heads * head_dim * 2] (fused Q+gate) => q_heads from dims
+            snprintf(name, sizeof(name), "blk.%d.attn_q.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (t && t->n_dims >= 2) {
+                int q_dim_fused = (int)t->dims[1];  // q_heads * head_dim * 2
+                layer->gqa.q_heads = q_dim_fused / (layer_head_dim * 2);
+            } else {
+                layer->gqa.q_heads = GQA_Q_HEADS;
+            }
+            layer->gqa.kv_dim = layer->gqa.kv_heads * layer_head_dim;
+            layer->gqa.q_dim = layer->gqa.q_heads * layer_head_dim;
+            layer->gqa.is_large = (layer_head_dim == 512) ? 1 : 0;
+
+            // Extract output projection dim from attn_output.weight tensor
+            // For standard models (Qwen): out_dim = q_dim
+            // For DGemma: out_dim = q_dim * 2 (Q+gate fused into output proj)
+            layer->gqa.out_dim = layer->gqa.q_dim;  // default
+            snprintf(name, sizeof(name), "blk.%d.attn_output.weight", l);
+            t = gguf_find_tensor(ctx, name);
+            if (t && t->n_dims >= 2) {
+                int out_rows = (int)t->dims[0];  // first dim = input features to output proj
+                if (out_rows != layer->gqa.q_dim) {
+                    layer->gqa.out_dim = out_rows;  // e.g., q_dim*2 for DGemma
+                }
+            }
+
+            printf("  Layer %d: GQA loaded, head_dim=%d q_heads=%d kv_heads=%d out_dim=%d%s\n",
+                   l, layer_head_dim, layer->gqa.q_heads, layer->gqa.kv_heads,
+                   layer->gqa.out_dim, layer->gqa.is_large ? " LARGE" : "");
         }
         
         // Load MoE (FFN) weights — NOT loaded by default (memory: 3.2 GB/layer)
@@ -435,68 +298,21 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         gguf_read_tensor_f32(ctx, t, model->norm_weight, model->d_model);
         printf("  Final norm loaded\n");
     } else {
-        /* LFM2.5 names the final norm token_embd_norm.weight */
-        t = gguf_find_tensor(ctx, "token_embd_norm.weight");
-        if (t) {
-            model->norm_weight = (float *)malloc(D_MODEL * sizeof(float));
-            gguf_read_tensor_f32(ctx, t, model->norm_weight, D_MODEL);
-            printf("  Final norm loaded (token_embd_norm.weight)\n");
-        } else {
-            printf("  WARNING: output_norm.weight not found\n");
-        }
+        printf("  WARNING: output_norm.weight not found\n");
     }
     
     // Embeddings: auto-extract from GGUF if not available, else load from file
     model->use_embedding_file = true;
-    /* The MODEL's vocab comes from the token_embd tensor — the embedding
-     * FILE is model-specific (Qwen3.5=248320, LFM2.5=128000); matching the
-     * file against a hardcoded 248320 silently loads the WRONG embeddings. */
-    gguf_tensor_info *t_emb0 = gguf_find_tensor(ctx, "token_embd.weight");
-    int model_vocab = t_emb0 && t_emb0->dims[1] > 0 ? (int)t_emb0->dims[1] : 0;
-    char emb_path[256];
-    snprintf(emb_path, sizeof(emb_path), "data/embeddings_%d_%d.bin.raw", model_vocab, D_MODEL);
-    FILE *emb_f = fopen(emb_path, "rb");
-    if (emb_f && model_vocab > 0) {
-        fseek(emb_f, 0, SEEK_END);
-        long emb_size = ftell(emb_f);
-        int file_vocab = (int)(emb_size / (D_MODEL * sizeof(float)));
-        if (file_vocab == model_vocab) {
-            model->vocab_size = file_vocab;
-            printf("  Embeddings: %d tokens from file (%ld MB)\n", model->vocab_size, emb_size / (1024*1024));
-            fclose(emb_f);
-        } else {
-            fclose(emb_f);
-            printf("  Embedding file has wrong size (%d tokens, expected %d), re-extracting...\n", file_vocab, model_vocab);
-            goto extract_embeddings;
-        }
-    } else {
-        extract_embeddings: {
-            printf("  Extracting token_embd.weight from GGUF...\n");
-            gguf_tensor_info *t_emb = gguf_find_tensor(ctx, "token_embd.weight");
-            if (!t_emb) { fprintf(stderr, "  ERROR: token_embd.weight not found\n"); }
-            else {
-                /* vocab from the tensor itself (LFM2.5 = 128000, Qwen3.5 =
-                 * 248320 — never hardcode) */
-                int64_t vocab = t_emb->dims[1] > 0 ? t_emb->dims[1] : 248320;
-                int64_t n_emb = vocab * D_MODEL;
-                float *temp_emb = (float *)malloc(n_emb * sizeof(float));
-                if (temp_emb && gguf_read_tensor_f32(ctx, t_emb, temp_emb, n_emb) > 0) {
-                    FILE *out = fopen(emb_path, "wb");
-                    if (out) {
-                        fwrite(temp_emb, sizeof(float), n_emb, out);
-                        fclose(out);
-                        printf("  Embeddings saved to %s\n", emb_path);
-                    }
-                    // Use the in-memory copy for this run
-                    model->token_embd = temp_emb;
-                    model->vocab_size = (int)vocab;
-                    model->use_embedding_file = false;
-                    printf("  Token embeddings: %lld tokens x %d (%.0f MB in-memory)\n",
-                           (long long)vocab, D_MODEL, n_emb * sizeof(float) / (1024.0 * 1024.0));
-                } else {
-                    if (temp_emb) free(temp_emb);
-                    fprintf(stderr, "  Failed to extract embeddings\n");
-                }
+    model->vocab_size = 0;
+    // Get actual vocab size from GGUF embedding tensor
+    {
+        gguf_tensor_info *t_emb = gguf_find_tensor(ctx, "token_embd.weight");
+        if (t_emb && t_emb->n_dims >= 2) {
+            int64_t n_emb = 1;
+            for (int d = 0; d < t_emb->n_dims; d++) n_emb *= t_emb->dims[d];
+            int64_t vocab_from_emb = n_emb / model->d_model;
+            if (vocab_from_emb > 0 && vocab_from_emb < 1000000) {
+                model->vocab_size = (int)vocab_from_emb;
             }
         }
         if (model->vocab_size == 0) model->vocab_size = 248320; // fallback
@@ -534,12 +350,14 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         printf("  Large vocab (%d tokens): using mmap'd GGUF blob for embedding\n", model->vocab_size);
         model->use_embedding_file = false;
         model->token_embd = NULL;
-        // Get quantized token_embd pointer from blob
+        // Get quantized token_embd pointer from blob (will be set after gguf_buffer_data)
         gguf_tensor_info *t_emb = gguf_find_tensor(ctx, "token_embd.weight");
-        if (t_emb && blob) {
-            model->token_embd_q = blob + t_emb->data_offset;
+        if (t_emb) {
             model->token_embd_type = t_emb->ggml_type;
-            printf("  token_embd: quantized type=%d, %ld elements\n", t_emb->ggml_type, (long)(t_emb->n_elems));
+            // n_elems computed from dims
+            int64_t n_elems = 1;
+            for (int d = 0; d < t_emb->n_dims; d++) n_elems *= t_emb->dims[d];
+            printf("  token_embd: quantized type=%d, %ld elements\n", t_emb->ggml_type, (long)n_elems);
         }
     }
     
@@ -552,17 +370,19 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     model->output_weight = NULL;
     gguf_tensor_info *t_out = gguf_find_tensor(ctx, "output.weight");
     if (!t_out) {
-        t_out = gguf_find_tensor(ctx, "token_embd.weight");  /* tied */
-        if (!t_out) fprintf(stderr, "  ERROR: output.weight not found\n");
+        // Tied output: use token_embd.weight (common for Gemma, LLaMA, etc.)
+        gguf_tensor_info *t_embd = gguf_find_tensor(ctx, "token_embd.weight");
+        if (t_embd) {
+            model->output_weight_q = NULL;  // will get blob pointer after gguf_buffer_data
+            model->output_weight_type = t_embd->ggml_type;
+            model->tied_output = true;
+            fprintf(stderr, "  Output weight: TIED to token_embd.weight\n");
+        } else {
+            fprintf(stderr, "  ERROR: neither output.weight nor token_embd.weight found\n");
+        }
+    } else {
+        model->tied_output = false;
     }
-    
-    // Allocate logit cache (reuses previous token's logits to skip output proj)
-    model->logit_cache = (float *)calloc(model->vocab_size, sizeof(float));
-    model->logit_cache_valid = false;
-    model->logit_cache_steps = 0;
-    model->logit_cache_max_hits = 2;
-    model->logit_cache_argmax_prev = -1;
-    model->logit_subset_valid = false;
     
     // Output weight quantized pointer will be set after gguf_buffer_data() below
     printf("  Output weight: will use quantized path (Q4_K via blob pointer)\n");
@@ -590,7 +410,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             wubu_layer_t *layer = &model->layers[l];
             gguf_tensor_info *t;
             char name[256];
-            if (layer->block_type == 0) {
+            if (layer->is_ssm) {
                 snprintf(name, sizeof(name), "blk.%d.attn_qkv.weight", l);
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) { layer->ssm.attn_qkv_weight_q = blob + t->data_offset; layer->ssm.attn_qkv_weight_type = t->ggml_type; }
@@ -598,14 +418,6 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) { layer->ssm.attn_gate_weight_q = blob + t->data_offset; layer->ssm.attn_gate_weight_type = t->ggml_type; }
                 snprintf(name, sizeof(name), "blk.%d.ssm_out.weight", l);
-                t = gguf_find_tensor(ctx, name);
-                if (t && blob) { layer->ssm.ssm_out_weight_q = blob + t->data_offset; layer->ssm.ssm_out_weight_type = t->ggml_type; }
-            } else if (layer->block_type == 2) {
-                /* LFM shortconv: in_proj/out_proj ride the ssm blob slots */
-                snprintf(name, sizeof(name), "blk.%d.shortconv.in_proj.weight", l);
-                t = gguf_find_tensor(ctx, name);
-                if (t && blob) { layer->ssm.attn_qkv_weight_q = blob + t->data_offset; layer->ssm.attn_qkv_weight_type = t->ggml_type; }
-                snprintf(name, sizeof(name), "blk.%d.shortconv.out_proj.weight", l);
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) { layer->ssm.ssm_out_weight_q = blob + t->data_offset; layer->ssm.ssm_out_weight_type = t->ggml_type; }
             } else {
@@ -630,31 +442,23 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                 if (t && blob) { layer->gqa.attn_output_weight_q = blob + t->data_offset; layer->gqa.attn_output_weight_type = t->ggml_type; }
             }
         }
-        gguf_tensor_info *t_out = gguf_find_tensor(ctx, "output.weight");
-        if (!t_out) {
-            /* tied embeddings (LFM2.5): logits = h @ token_embd^T — same
-             * [vocab][D] layout, same blob pointer works. */
-            t_out = gguf_find_tensor(ctx, "token_embd.weight");
-            if (t_out) fprintf(stderr, "  Tied embeddings: output proj <- token_embd.weight\n");
+        // Set token_embd quantized pointer
+        gguf_tensor_info *t_emb = gguf_find_tensor(ctx, "token_embd.weight");
+        if (t_emb && blob) {
+            model->token_embd_q = blob + t_emb->data_offset;
         }
-        if (t_out && blob) { model->output_weight_q = blob + t_out->data_offset; model->output_weight_type = t_out->ggml_type; }
-
-        // Dense SwiGLU FFN blob pointers (ffn_gate/up/down.weight) — bound
-        // for every block type; the forward wiring is the dense-FFN parity
-        // work (currently the forward pass-throughs when MoE is disabled).
-        for (int l = 0; l < model->n_layers; l++) {
-            wubu_layer_t *layer = &model->layers[l];
-            gguf_tensor_info *t;
-            char name[256];
-            snprintf(name, sizeof(name), "blk.%d.ffn_gate.weight", l);
-            t = gguf_find_tensor(ctx, name);
-            if (t && blob) { layer->ffn_gate_q = blob + t->data_offset; layer->ffn_gate_type = t->ggml_type; }
-            snprintf(name, sizeof(name), "blk.%d.ffn_up.weight", l);
-            t = gguf_find_tensor(ctx, name);
-            if (t && blob) { layer->ffn_up_q = blob + t->data_offset; layer->ffn_up_type = t->ggml_type; layer->ffn_d_ff = (int)t->dims[1]; }
-            snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", l);
-            t = gguf_find_tensor(ctx, name);
-            if (t && blob) { layer->ffn_down_q = blob + t->data_offset; layer->ffn_down_type = t->ggml_type; }
+        gguf_tensor_info *t_out = gguf_find_tensor(ctx, "output.weight");
+        if (t_out && blob) {
+            model->output_weight_q = blob + t_out->data_offset;
+            model->output_weight_type = t_out->ggml_type;
+            model->tied_output = false;
+        } else if (model->tied_output) {
+            // Tied: output_weight_q was set to token_embd tensor info earlier,
+            // but we need the actual blob pointer
+            gguf_tensor_info *t_embd = gguf_find_tensor(ctx, "token_embd.weight");
+            if (t_embd && blob) {
+                model->output_weight_q = blob + t_embd->data_offset;
+            }
         }
 
         // Save MoE quantized pointers for each layer (routed + shared experts)
@@ -677,13 +481,6 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             snprintf(name, sizeof(name), "blk.%d.ffn_gate_exps.weight", l);
             t = gguf_find_tensor(ctx, name);
             if (t && blob) { moe->ffn_gate_exps_q = blob + t->data_offset; moe->ffn_gate_exps_q_type = t->ggml_type; }
-            // Set loaded expert count from tensor dimensions (pruned models have fewer experts)
-            if (t && t->n_dims >= 3) {
-                int n_exp = (int)t->dims[2];
-                moe->n_experts_loaded = (n_exp > 0 && n_exp <= N_EXPERTS) ? n_exp : N_EXPERTS;
-                if (n_exp < N_EXPERTS)
-                    fprintf(stderr, "  Layer %d MoE: %d/%d experts loaded (pruned)\n", l, n_exp, N_EXPERTS);
-            }
 
             snprintf(name, sizeof(name), "blk.%d.ffn_up_exps.weight", l);
             t = gguf_find_tensor(ctx, name);
@@ -713,39 +510,42 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         }
     }
     
-    int n_ssm = 0, n_gqa = 0, n_scv = 0;
+    // Count actual SSM and GQA layers
+    int n_ssm_count = 0, n_gqa_count = 0;
     for (int l = 0; l < model->n_layers; l++) {
-        if (model->layers[l].block_type == 0) n_ssm++;
-        else if (model->layers[l].block_type == 1) n_gqa++;
-        else n_scv++;
+        if (model->layers[l].is_ssm) n_ssm_count++;
+        else n_gqa_count++;
     }
-    printf("Model initialized: %d layers (%d SSM, %d GQA, %d shortconv), %d vocab\n",
-           model->n_layers, n_ssm, n_gqa, n_scv, model->vocab_size);
-    
-    // Allocate GQA KV cache (ACTUAL GQA layer count × runtime context ×
-    // GQA_KV_DIM — the old hardcoded "10" sized 5.4GB on this box
-    // (10 × 524288 × 512 × 2B), OOMing/swapping with the model + embeddings
-    // resident. MiniCPM5 has 3 GQA, LFM2.5 has 8.)
-    // Revolver S6: the active KV context cap is runtime-overridable via
-    // WUBU_MAX_CTX (env), defaulting to GQA_MAX_CTX. The physical buffer
-    // is the banked cylinder; gqa_max_ctx is the active rotation count.
-    int runtime_max_ctx = GQA_MAX_CTX;
-    {
-        const char *mc_env = getenv("WUBU_MAX_CTX");
-        if (mc_env) { int mc = atoi(mc_env); if (mc > GQA_MAX_CTX/64 && mc <= GQA_MAX_CTX) runtime_max_ctx = mc; }
+    model->n_gqa_layers = n_gqa_count;
+    printf("Model initialized: %d layers (%d SSM, %d GQA), %d vocab\n",
+           model->n_layers, n_ssm_count, n_gqa_count, model->vocab_size);
+
+    // Allocate GQA KV cache: sum over all GQA layers of (max_ctx * layer_kv_dim)
+    // Allow MAX_CTX env var to override GQA_MAX_CTX for memory-constrained systems
+    int max_ctx = GQA_MAX_CTX;
+    const char *env_max_ctx = getenv("MAX_CTX");
+    if (env_max_ctx) {
+        int parsed = atoi(env_max_ctx);
+        if (parsed > 0 && parsed <= GQA_MAX_CTX) {
+            max_ctx = parsed;
+        }
     }
-    model->gqa_max_ctx = runtime_max_ctx;
-    int n_gqa_layers = 0;
-    for (int l = 0; l < model->n_layers; l++)
-        if (model->layers[l].block_type == 1) n_gqa_layers++;
-    int64_t cache_elems = (int64_t)(n_gqa_layers > 0 ? n_gqa_layers : 1) * model->gqa_max_ctx * GQA_KV_DIM;
-    fprintf(stderr, "  GQA KV cache: %d layers x %d ctx x %d dims (%.0f MB)\n",
-            n_gqa_layers, model->gqa_max_ctx, GQA_KV_DIM,
-            cache_elems * 2.0 / (1024.0 * 1024.0));
-    model->gqa_k_cache = malloc(kv_cache_alloc_size(cache_elems));
-    model->gqa_v_cache = malloc(kv_cache_alloc_size(cache_elems));
-    memset(model->gqa_k_cache, 0, kv_cache_alloc_size(cache_elems));
-    memset(model->gqa_v_cache, 0, kv_cache_alloc_size(cache_elems));
+    int64_t total_cache_elems = 0;
+    for (int l = 0; l < model->n_layers; l++) {
+        if (!model->layers[l].is_ssm) {
+            int kv_dim = model->layers[l].gqa.kv_dim;
+            total_cache_elems += (int64_t)max_ctx * kv_dim;
+        }
+    }
+    int64_t k_cache_bytes = kv_cache_alloc_size(total_cache_elems);
+    model->gqa_k_cache = malloc(k_cache_bytes);
+    model->gqa_v_cache = malloc(k_cache_bytes);
+    if (!model->gqa_k_cache || !model->gqa_v_cache) {
+        fprintf(stderr, "Failed to allocate GQA KV cache (%ld MB)\n", (long)(k_cache_bytes / (1024*1024)));
+        goto fail;
+    }
+    memset(model->gqa_k_cache, 0, k_cache_bytes);
+    memset(model->gqa_v_cache, 0, k_cache_bytes);
     model->gqa_cache_len = 0;
     
     return true;
@@ -796,13 +596,11 @@ void wubu_model_free(wubu_model_t *model) {
             free(layer->gqa.attn_q_norm_weight);
             free(layer->gqa.attn_k_norm_weight);
         }
-        if (layer->dense_ffn) wubu_dense_ffn_free(layer->dense_ffn);
     }
     free(model->layers);
     free(model->norm_weight);
     free(model->token_embd);
     free(model->output_weight);
-    free(model->logit_cache);
     free(model->ssm_states);
     free(model->ssm_states_saved);  // frees both ssm_states_saved and conv_states_saved (same alloc)
     free(model->gqa_k_cache);
@@ -838,10 +636,11 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
     int *prev_experts = (int *)malloc(N * N_ACTIVE_EXPTS * sizeof(int));
     int have_prev_experts = 0;
     
-    // SSM workspace: pre-allocate all SSM intermediate buffers once,
-    // reuse across all 30 SSM layers (avoids 17 malloc/free per layer).
-    ssm_workspace_t *ssm_ws = wubu_ssm_workspace_alloc(B, T);
-    // If allocation fails, SSM forward will fall back to per-call malloc.
+    // Per-layer GQA debug counter (env var filters which GQA layer to dump)
+    int gqa_debug_layer = -1;
+    const char *gqa_debug_env = getenv("DUMP_GQA_LAYER");
+    if (gqa_debug_env) gqa_debug_layer = atoi(gqa_debug_env);
+    int gqa_layer_idx = 0;  // which GQA layer across the model (0,1,2,...)
     
     // Layer loop
     for (int l = 0; l < model->n_layers; l++) {
@@ -859,81 +658,40 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
         // Pre-attention RMSNorm
         wubu_rms_norm(B, T, model->d_model, x, layer->attn_norm_weight, 1e-6f, normed);
         
-        // ─── N64 RDRAM Pre-Cache Fill ───
-        // Compute router on pre-attention normed to get THIS layer's actual
-        // expert indices. Then prefetch those weight blocks into L3 during
-        // the SSM/GQA forward which follows.  The attn_out correction is
-        // typically 10-20% of the residual, so expert selection on normed
-        // ≈ normed2 — the prefetched weights arrive in L3 by the time the
-        // expert compute runs (on normed2, ~50-100ms later).
-        //
-        // This is exactly the N64 RDRAM pre-cache fill concept: issue loads
-        // for the data you KNOW you'll need, onto a bus that would otherwise
-        // be idle during compute.  The router is tiny (2048×256 F32 matmul),
-        // virtually free compared to the SSM/GQA attention (~50ms).
-        if (layer->moe.loaded && model->enable_moe &&
-            (model->moe_max_layers == 0 || l < model->moe_max_layers) &&
-            layer->moe.ffn_gate_exps_q) {
-
-            // Router on pre-attention normed: [N,2048] @ [2048,256] -> [N,256] scores -> top-8
-            wubu_moe_router_only(normed, B, T, &layer->moe, prev_experts);
-
-#ifdef LARGE_L3
-            // N64 pre-cache fill: prefetch selected expert weights into L3
-            // Router computed 8 expert indices above. Prefetch their quantized
-            // gate/up/down weights during SSM forward (~50ms). On DDR5 systems
-            // or when L3 > 7.4MB, data arrives in L3 before MoE needs it.
-            {
-                const int64_t n_elems_gate = (int64_t)D_MODEL * D_FF;
-                const int64_t n_elems_down = (int64_t)D_FF * D_MODEL;
-                const int64_t gate_stride = gguf_raw_size(layer->moe.ffn_gate_exps_q_type, n_elems_gate);
-                const int64_t up_stride   = gguf_raw_size(layer->moe.ffn_up_exps_q_type,   n_elems_gate);
-                const int64_t down_stride = gguf_raw_size(layer->moe.ffn_down_exps_q_type, n_elems_down);
-                const int ntokens = B * T;
-                // Decode: prefetch all 8 selected experts. Prefill: first token only.
-                const int prefetch_tokens = (ntokens > 1) ? 1 : ntokens;
-
-                for (int t = 0; t < prefetch_tokens; t++) {
-                    for (int k = 0; k < N_ACTIVE_EXPTS; k++) {
-                        int e = prev_experts[t * N_ACTIVE_EXPTS + k];
-                        if (e < 0 || e >= N_EXPERTS) continue;
-
-                        const uint8_t *gate_base = layer->moe.ffn_gate_exps_q + e * gate_stride;
-                        const uint8_t *up_base   = layer->moe.ffn_up_exps_q   + e * up_stride;
-                        const uint8_t *down_base = layer->moe.ffn_down_exps_q + e * down_stride;
-
-                        for (int64_t off = 0; off < gate_stride; off += 256)
-                            _mm_prefetch((const char *)gate_base + off, _MM_HINT_T2);
-                        for (int64_t off = 0; off < up_stride; off += 256)
-                            _mm_prefetch((const char *)up_base + off, _MM_HINT_T2);
-                        for (int64_t off = 0; off < down_stride; off += 256)
-                            _mm_prefetch((const char *)down_base + off, _MM_HINT_T2);
+        // Expert prefetch: if previous layer had MoE, prefetch this layer's expert weights
+        // Uses the previous layer's selected expert indices (experts tend to persist across layers)
+        // Strides through full weight data to L3 cache, not just first 256 bytes to L1
+        if (have_prev_experts && l > 0 && layer->moe.loaded && layer->moe.ffn_gate_exps_q) {
+            wubu_layer_t *prev = &model->layers[l-1];
+            if (prev->moe.loaded) {
+                int64_t gate_bytes = gguf_raw_size(layer->moe.ffn_gate_exps_q_type, (int64_t)model->d_model * D_FF);
+                int64_t up_bytes   = gguf_raw_size(layer->moe.ffn_up_exps_q_type,   (int64_t)model->d_model * D_FF);
+                int64_t down_bytes = gguf_raw_size(layer->moe.ffn_down_exps_q_type, (int64_t)D_FF * model->d_model);
+                const int64_t P_STRIDE = 256;  // 4 cache lines per prefetch
+                for (int k = 0; k < N_ACTIVE_EXPTS; k++) {
+                    int e = prev_experts[k];
+                    if (e < 0 || e >= N_EXPERTS) continue;
+                    const uint8_t *g = layer->moe.ffn_gate_exps_q + (int64_t)e * gate_bytes;
+                    const uint8_t *u = layer->moe.ffn_up_exps_q   + (int64_t)e * up_bytes;
+                    const uint8_t *d = layer->moe.ffn_down_exps_q + (int64_t)e * down_bytes;
+                    // Stride through full weight: ~264KB per gate/up, ~392KB per down
+                    // Total ~920KB per expert, 7.4MB for 8 experts → L3
+                    for (int64_t off = 0; off < gate_bytes; off += P_STRIDE) {
+                        _mm_prefetch((const char *)g + off, _MM_HINT_T2);
+                    }
+                    for (int64_t off = 0; off < up_bytes; off += P_STRIDE) {
+                        _mm_prefetch((const char *)u + off, _MM_HINT_T2);
+                    }
+                    for (int64_t off = 0; off < down_bytes; off += P_STRIDE) {
+                        _mm_prefetch((const char *)d + off, _MM_HINT_T2);
                     }
                 }
-            }
-#endif // LARGE_L3 — routed expert prefetch ends here
-
-            // Shared expert always-active prefetch (all paths)
-            // Only ~2.4MB total — small enough to prefetch even on DDR4 without
-            // significant bus contention. Always needed (shared expert is always on).
-            if (layer->moe.ffn_gate_shexp_q) {
-                const int64_t n_elems_gate = (int64_t)D_MODEL * SHARED_D_FF;
-                const int64_t n_elems_down = (int64_t)SHARED_D_FF * D_MODEL;
-                const int64_t sh_gate_sz = gguf_raw_size(layer->moe.ffn_gate_shexp_q_type, n_elems_gate);
-                const int64_t sh_up_sz   = gguf_raw_size(layer->moe.ffn_up_shexp_q_type,   n_elems_gate);
-                const int64_t sh_down_sz = gguf_raw_size(layer->moe.ffn_down_shexp_q_type, n_elems_down);
-                for (int64_t off = 0; off < sh_gate_sz; off += 256)
-                    _mm_prefetch((const char *)layer->moe.ffn_gate_shexp_q + off, _MM_HINT_T2);
-                for (int64_t off = 0; off < sh_up_sz; off += 256)
-                    _mm_prefetch((const char *)layer->moe.ffn_up_shexp_q + off, _MM_HINT_T2);
-                for (int64_t off = 0; off < sh_down_sz; off += 256)
-                    _mm_prefetch((const char *)layer->moe.ffn_down_shexp_q + off, _MM_HINT_T2);
             }
         }
         
         double t0 = wall_time();
         
-        if (layer->block_type == 0) {
+        if (layer->is_ssm) {
             float *ssm_state = model->ssm_states + l * SSM_V_HEADS * SSM_D_STATE * SSM_D_STATE;
             float *conv_state = model->conv_states + l * (CONV_KERNEL - 1) * CONV_DIM;
 #ifdef GPU_SUPPORT
@@ -953,14 +711,14 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                         // Set GPU recurrence pointers so wubu_ssm_forward uses GPU
                         wubu_gpu_set_ssm_hybrid(model->gpu_ctx, l, &layer->ssm);
                         wubu_ssm_forward(normed, B, T, &layer->ssm,
-                            ssm_state, conv_state, attn_out, gpu_qkv, gpu_z, ssm_ws);
+                            ssm_state, conv_state, attn_out, gpu_qkv, gpu_z);
                         // Clear GPU pointers to avoid stale state
                         layer->ssm.gpu_ssm_state = NULL;
                         layer->ssm.gpu_stream    = NULL;
                     } else {
                         // Allocation failed, fall back to CPU
                         wubu_ssm_forward(normed, B, T, &layer->ssm,
-                            ssm_state, conv_state, attn_out, NULL, NULL, ssm_ws);
+                            ssm_state, conv_state, attn_out, NULL, NULL);
                     }
                     free(gpu_qkv);
                     free(gpu_z);
@@ -980,29 +738,16 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                     ssm_state, conv_state);
                 wubu_gpu_set_ssm_hybrid(model->gpu_ctx, l, &layer->ssm);
                 wubu_ssm_forward(normed, B, T, &layer->ssm,
-                    ssm_state, conv_state, attn_out, NULL, NULL, ssm_ws);
+                    ssm_state, conv_state, attn_out, NULL, NULL);
                 layer->ssm.gpu_ssm_state = NULL;
                 layer->ssm.gpu_stream    = NULL;
             } else
 #endif
             {
                 wubu_ssm_forward(normed, B, T, &layer->ssm,
-                    ssm_state, conv_state, attn_out, NULL, NULL, ssm_ws);
-                }
-                } else if (layer->block_type == 2) {
-                /* LFM shortconv block — LOADED, but the forward math is not yet
-                 * ported (needs the reference implementation for the exact
-                 * in_proj/conv/out_proj semantics). Pass through + warn once so
-                 * the model runs without crashing; this is the LFM2.5 parity
-                 * work, not a silent correctness claim. */
-                static int scv_warned = 0;
-                if (!scv_warned) {
-                    fprintf(stderr, "  NOTE: LFM shortconv forward not ported yet — "
-                            "shortconv layers pass through (parity work queued)\n");
-                    scv_warned = 1;
-                }
-                memcpy(attn_out, normed, (size_t)N * D_MODEL * sizeof(float));
-                } else {
+                    ssm_state, conv_state, attn_out, NULL, NULL);
+            }
+        } else {
 #ifdef GPU_SUPPORT
             if (model->gpu_ctx) {
                 // Use cached GQA layer index to check if GPU attention is beneficial
@@ -1033,9 +778,31 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             int l_gqa = 0;  // GQA layer index among GQA layers
             // Count GQA layers up to current to index into cache
             for (int li = 0; li < l; li++) {
-                if (model->layers[li].block_type == 1) l_gqa++;
+                if (!model->layers[li].is_ssm) l_gqa++;
             }
-            int64_t layer_cache_off = (int64_t)l_gqa * model->gqa_max_ctx * GQA_KV_DIM;
+            // Set DUMP_GQA_PREFIX for targeted layer debugging
+            const char *gqa_debug_layer_str = getenv("DUMP_GQA_LAYER");
+            int gqa_debug_target = gqa_debug_layer_str ? atoi(gqa_debug_layer_str) : -1;
+            char prefix_buf[64];
+            int is_debug_layer = (gqa_debug_target >= 0 && l == gqa_debug_target);
+            if (is_debug_layer) {
+                snprintf(prefix_buf, sizeof(prefix_buf), "L%d_gqa%d", l, l_gqa);
+                setenv("DUMP_GQA_PREFIX", prefix_buf, 1);
+            } else {
+                setenv("DUMP_GQA_PREFIX", "", 1);
+            }
+            // Compute per-layer KV cache offset using actual kv_dim for each GQA layer
+            int64_t layer_cache_elems = 0;
+            int gqa_idx2 = 0;
+            for (int li = 0; li < l; li++) {
+                if (!model->layers[li].is_ssm) {
+                    if (gqa_idx2 == l_gqa) break;
+                    layer_cache_elems += (int64_t)GQA_MAX_CTX * model->layers[li].gqa.kv_dim;
+                    gqa_idx2++;
+                }
+            }
+            int kv_dim = layer->gqa.kv_dim;
+            int64_t layer_cache_off = layer_cache_elems;
             void *k_cache = (uint8_t *)model->gqa_k_cache + kv_cache_alloc_size(layer_cache_off);
             void *v_cache = (uint8_t *)model->gqa_v_cache + kv_cache_alloc_size(layer_cache_off);
             void *k_out = (model->gqa_cache_len > 0) ?
@@ -1060,7 +827,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
         }  // close else block (non-SSM)
         
         double t1 = wall_time();
-        if (getenv("PROFILE")) {
+        if (getenv("PROFILE") && l < 3) {
             fprintf(stderr, "  L%d %s attn: %.3fms\n", l, layer->is_ssm ? "SSM" : "GQA", (t1 - t0) * 1000.0);
         }
         
@@ -1097,37 +864,12 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                 layer->moe.gpu_ctx = (void *)model;
             }
 #endif
-            // Pass pre-computed expert indices (from n64 router_only) to skip
-            // the full 2048×256 router matmul inside wubu_moe_forward.
-            layer->moe.precomputed_indices = have_prev_experts ? prev_experts : NULL;
-            wubu_moe_forward(normed2, B, T, &layer->moe, ffn_out, have_prev_experts ? prev_experts : NULL);
-            layer->moe.precomputed_indices = NULL;  // clear after use
+            wubu_moe_forward(normed2, B, T, &layer->moe, ffn_out, have_prev_experts ? prev_experts : NULL,
+                             model->n_active_experts, model->n_experts, model->d_model, model->d_ff);
             have_prev_experts = 1;
-            // Capture expert selections for demoscene profiling
-            if (model->expert_recorder && l < model->n_layers && prev_experts) {
-                int idx = l * MAX_EXPERT_RECORDER_TOKENS + model->expert_recorder_tokens;
-                memcpy(model->expert_recorder[idx], prev_experts, B * T * N_ACTIVE_EXPTS * sizeof(int));
-            }
 #ifdef GPU_SUPPORT
             layer->moe.gpu_ctx = NULL;  // reset after use
 #endif
-        } else if (layer->ffn_gate_q && layer->ffn_up_q && layer->ffn_down_q && layer->ffn_d_ff > 0) {
-            // Dense SwiGLU FFN (Qwen3.5 / MiniCPM5 / LFM2.5-family GGUFs) —
-            // zero-copy quantized path on the mmap'd blob pointers.
-            if (!layer->dense_ffn) {
-                layer->dense_ffn = wubu_dense_ffn_create(
-                    layer->ffn_gate_q, layer->ffn_gate_type,
-                    layer->ffn_up_q, layer->ffn_up_type,
-                    layer->ffn_down_q, layer->ffn_down_type,
-                    D_MODEL, layer->ffn_d_ff);
-            }
-            if (layer->dense_ffn) {
-                #pragma omp parallel for if(N > 4)
-                for (int s = 0; s < N; s++)
-                    wubu_dense_ffn_forward(layer->dense_ffn, normed2 + s * D_MODEL, ffn_out + s * D_MODEL);
-            } else {
-                memcpy(ffn_out, normed2, N * D_MODEL * sizeof(float));
-            }
         } else if (model->enable_moe && model->gguf_ctx &&
                    (model->moe_max_layers == 0 || l < model->moe_max_layers)) {
             // Fallback: F32 dequant path
@@ -1144,7 +886,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
         }
         
         double t_moe1 = wall_time();
-        if (getenv("PROFILE")) {
+        if (getenv("PROFILE") && l < 3) {
             fprintf(stderr, "  L%d MoE: %.3fms\n", l, (t_moe1 - t_moe0) * 1000.0);
         }
         
@@ -1186,34 +928,6 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
     // Output projection
     // logits[t, v] = sum_k h[t,k] * output_weight[k, v]
     double t_out0 = wall_time();
-    
-    // Dump final hidden state if DUMP_HIDDEN set
-    if (getenv("DUMP_HIDDEN")) {
-        FILE *hf = fopen("/tmp/our_final_hidden.bin", "wb");
-        if (hf) { fwrite(x, sizeof(float), N * D_MODEL, hf); fclose(hf); }
-    }
-    
-    // Full output projection (logit cache disabled - was causing repetitive output)
-    bool _output_proj_done = false;
-
-    // Logit cache N-hop reuse: for single-token decode, directly reuse cached logits
-    // for up to logit_cache_max_hits consecutive steps. Hidden state evolves slowly
-    // between adjacent decode steps — stale logits often produce valid argmax.
-    if (N == 1 && model->logit_cache_valid && !model->skip_output_proj &&
-        model->logit_cache_steps < model->logit_cache_max_hits &&
-        model->output_weight_q && model->output_weight_type != GGML_TYPE_F32)
-    {
-        memcpy(logits, model->logit_cache, (size_t)model->vocab_size * sizeof(float));
-        _output_proj_done = true;
-        model->logit_cache_steps++;
-        if (getenv("PROFILE")) {
-            fprintf(stderr, "  logit cache: HIT %d/%d (argmax=%d)\n",
-                    model->logit_cache_steps, model->logit_cache_max_hits,
-                    model->logit_cache_argmax);
-        }
-    }
-
-    if (!_output_proj_done) {
     if (model->skip_output_proj) {
         // Copy final hidden states to logits buffer (caller does GPU output proj)
         for (int i = 0; i < N; i++) {
@@ -1223,31 +937,17 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
     } else if (model->output_weight_q && model->output_weight_type != GGML_TYPE_F32) {
         // Q4_K quantized matmul path
         // For decode (N=1), quantized_matmul internal parallelizes across 248320 cols.
-        // For prefill (N>1), use outer loop parallel with inner single-threaded matmul
-        // to avoid 4x4=16 thread thrash on 4-core i5 (nested OMP oversubscription).
+        // For prefill (N>1), parallelize across tokens (outer loop).
+        // Nested OMP: outer parallel for uses threads for tokens, inner quantized_matmul
+        // uses 1 thread per token when nested=off (default) — correct behavior.
         #pragma omp parallel for if(N > 1)
         for (int i = 0; i < N; i++) {
-            // IMPORTANT: Save and restore per-thread OMP limit.  omp_set_num_threads(1)
-            // is thread-local — when each thread in the team calls it here, the limit on
-            // that thread persists AFTER the parallel region ends.  If we don't restore
-            // it, threads 1-3 will have omp_set_num_threads(1) for their OWN subsequent
-            // parallel regions (e.g. the next decode token's quantized_matmul which does
-            // #pragma omp parallel for if(n_cols > 8)).  The master thread's parallel
-            // region NUM_THREADS is set by the master's limit when entering the region,
-            // but worker threads' own limits affect their internal nested teams.
-            // Explicit restore prevents gradual thread starvation on long decode runs.
-            int _saved_omp = omp_get_max_threads();
-            omp_set_num_threads(1);
-            quantized_matmul(x + i * D_MODEL,
+            quantized_matmul(x + i * model->d_model,
                              model->output_weight_q,
                              model->output_weight_type,
                              model->d_model, model->vocab_size, 0,
                              logits + i * model->vocab_size);
-            omp_set_num_threads(_saved_omp);
         }
-        // Single-threaded restore for the master thread (outside the parallel
-        // region).  Worker threads already restored via _saved_omp above.
-        omp_set_num_threads(omp_get_max_threads());
         // Compare against F32 SGEMM when output_weight is also loaded
         if (model->output_weight && getenv("VERBOSE_OUTPUT_PROJ")) {
             float *f32_logits = (float *)malloc(N * model->vocab_size * sizeof(float));
@@ -1274,84 +974,21 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                     dot / (sqrt(n1) * sqrt(n2)), max_e);
             free(f32_logits);
         }
-        if (!_output_proj_done) {
-            double t_out1 = wall_time();
-            if (getenv("PROFILE")) {
-                fprintf(stderr, "  Output proj: %.3fms\n", (t_out1 - t_out0) * 1000.0);
-            }
+        double t_out1 = wall_time();
+        if (getenv("PROFILE")) {
+            fprintf(stderr, "  Output proj: %.3fms\n", (t_out1 - t_out0) * 1000.0);
         }
-    }  // close else-if (quantized matmul path)
-        else {
+    } else {
         // Fallback: copy hidden states only (no output weight loaded)
         memcpy(logits, x, N * model->d_model * sizeof(float));
     }
-    }  // close `if (!_output_proj_done)` — save-to-cache runs whether cache hit or miss
-
-    // Save logits to cache (for reuse on next single-token decode)
-    // Only runs on cache MISS (full compute) — cache HIT preserves existing data
-    if (N == 1 && model->logit_cache && !_output_proj_done) {
-        memcpy(model->logit_cache, logits, model->vocab_size * sizeof(float));
-        model->logit_cache_valid = true;
-        model->logit_cache_steps = 0;
-        // Find argmax for quick comparison
-        int am = 0; float av = logits[0];
-        for (int i = 1; i < model->vocab_size; i++)
-            if (logits[i] > av) { av = logits[i]; am = i; }
-        model->logit_cache_argmax = am;
-        
-        // Adaptive cache depth: if argmax stable...
-        int old_am = model->logit_cache_argmax_prev;
-        if (am == old_am)
-            model->logit_cache_max_hits = (model->logit_cache_max_hits < 2) ? 
-                model->logit_cache_max_hits + 1 : 2;
-        else
-            model->logit_cache_max_hits = 2;  // conservative fallback
-        model->logit_cache_argmax_prev = am;
-        
-        // Save top-K subset for fast refresh (when argmax changed from previous)
-        if (!model->logit_subset_valid || am != old_am) {
-            // Find top-K token IDs (full scan of 248k logits)
-            int temp_ids[LOGIT_SUBSET_K];
-            float temp_vals[LOGIT_SUBSET_K];
-            for (int i = 0; i < LOGIT_SUBSET_K; i++) {
-                temp_ids[i] = i;
-                temp_vals[i] = logits[i];
-            }
-            // Bubble sort to find top K (O(K * vocab) = 1000 * 248k = 248M comparisons)
-            // Fast enough: ~30ms on modern CPU
-            for (int v = LOGIT_SUBSET_K; v < model->vocab_size; v++) {
-                float lv = logits[v];
-                if (lv > temp_vals[0]) {
-                    temp_vals[0] = lv;
-                    temp_ids[0] = v;
-                    // Bubble down
-                    int pos = 0;
-                    while (pos + 1 < LOGIT_SUBSET_K && temp_vals[pos] > temp_vals[pos+1]) {
-                        float tv = temp_vals[pos]; temp_vals[pos] = temp_vals[pos+1]; temp_vals[pos+1] = tv;
-                        int ti = temp_ids[pos]; temp_ids[pos] = temp_ids[pos+1]; temp_ids[pos+1] = ti;
-                        pos++;
-                    }
-                }
-            }
-            memcpy(model->logit_subset_ids, temp_ids, LOGIT_SUBSET_K * sizeof(int));
-            // Sort ascending so subset matmul order is stable
-            for (int i = 0; i < LOGIT_SUBSET_K; i++)
-                for (int j = i+1; j < LOGIT_SUBSET_K; j++)
-                    if (model->logit_subset_ids[j] < model->logit_subset_ids[i]) {
-                        int t = model->logit_subset_ids[i];
-                        model->logit_subset_ids[i] = model->logit_subset_ids[j];
-                        model->logit_subset_ids[j] = t;
-                    }
-            model->logit_subset_valid = true;
-        }
-    }
+    
     free(x);
     free(normed);
     free(attn_out);
     free(normed2);
     free(ffn_out);
     free(prev_experts);
-    wubu_ssm_workspace_free(ssm_ws);
 }
 
 // ========== Forward Pass from Token IDs ==========
@@ -1418,11 +1055,12 @@ bool wubu_mtp_load(mtp_head_t *mtp, const char *mtp_gguf_path,
                    gguf_ctx *main_ctx, const uint8_t *main_blob) {
     memset(mtp, 0, sizeof(*mtp));
     
-    // Use the already-open context (can be main or separate MTP GGUF)
+    // Use the already-open main context (same model, same blob)
+    // The MTP model is the same GGUF file as the main model
     gguf_ctx *ctx = main_ctx;
     const uint8_t *blob = (const uint8_t *)ctx->data_blob;
-    if (!ctx) {
-        fprintf(stderr, "MTP: no context available\n");
+    if (!ctx || !blob) {
+        fprintf(stderr, "MTP: no context or blob available\n");
         return false;
     }
     
@@ -1432,21 +1070,6 @@ bool wubu_mtp_load(mtp_head_t *mtp, const char *mtp_gguf_path,
         fprintf(stderr, "MTP: no nextn tensors in model (not an MTP model?)\n");
         return false;
     }
-
-    // Lambda: quantized pointer from blob, or allocate+read from file if blob unavailable
-    // Returns allocated pointer size or 0 on error
-    #define mtp_quant_ptr(tensor, typestr) ({ \
-        gguf_tensor_info *_t = (tensor); \
-        void *_p = NULL; \
-        if (_t) { \
-            int64_t _n = 1; for (int _d = 0; _d < _t->n_dims; _d++) _n *= _t->dims[_d]; \
-            int64_t _sz = gguf_raw_size(_t->ggml_type, _n); \
-            if (blob) { _p = (void *)(blob + _t->data_offset); } \
-            else { _p = malloc((size_t)_sz); if (!gguf_read_raw_tensor(ctx, _t, _p)) { free(_p); _p = NULL; } } \
-        } \
-        _p; \
-    })
-
     mtp->nextn_hnorm = (float *)malloc(D_MODEL * sizeof(float));
     gguf_read_tensor_f32(ctx, t, mtp->nextn_hnorm, D_MODEL);
     
@@ -1475,13 +1098,16 @@ bool wubu_mtp_load(mtp_head_t *mtp, const char *mtp_gguf_path,
     printf("MTP: nextn loaded (hnorm+enorm+eh_proj[%lldx%lld]+shared_head_norm)\n",
            (long long)t->dims[0], (long long)t->dims[1]);
     
-    // Load blk.40 layer
+    // Load blk.40 layer — use the MTP model's GGAUF for tensor offsets
+    // We store pointers into the MTP model's data_blob for MoE and attn weights
     wubu_layer_t *blk40 = &mtp->blk40;
     memset(blk40, 0, sizeof(*blk40));
     blk40->layer_idx = 40;
     blk40->is_ssm = false;  // blk.40 is GQA (every 4th layer)
     
     // Load norms from MTP context (F32)
+    // (blob already set above)
+    
     t = gguf_find_tensor(ctx, "blk.40.attn_norm.weight");
     if (!t) { fprintf(stderr, "MTP: missing attn_norm\n"); goto fail; }
     blk40->attn_norm_weight = (float *)malloc(D_MODEL * sizeof(float));
@@ -1492,25 +1118,26 @@ bool wubu_mtp_load(mtp_head_t *mtp, const char *mtp_gguf_path,
     blk40->post_attn_norm_weight = (float *)malloc(D_MODEL * sizeof(float));
     gguf_read_tensor_f32(ctx, t, blk40->post_attn_norm_weight, D_MODEL);
     
-    // Load GQA weights — quantized pointers (with blob-backed or heap-backed)
+    // Load GQA weights (all Q5_K — type 13)
+    // attn_q.weight [2048, 8192] — Q + gate fused
     t = gguf_find_tensor(ctx, "blk.40.attn_q.weight");
     if (!t) { fprintf(stderr, "MTP: missing attn_q\n"); goto fail; }
-    blk40->gqa.attn_q_weight_q = (const uint8_t *)mtp_quant_ptr(t, "attn_q");
+    blk40->gqa.attn_q_weight_q = blob + t->data_offset;
     blk40->gqa.attn_q_weight_type = t->ggml_type;
     
     t = gguf_find_tensor(ctx, "blk.40.attn_k.weight");
     if (!t) { fprintf(stderr, "MTP: missing attn_k\n"); goto fail; }
-    blk40->gqa.attn_k_weight_q = (const uint8_t *)mtp_quant_ptr(t, "attn_k");
+    blk40->gqa.attn_k_weight_q = blob + t->data_offset;
     blk40->gqa.attn_k_weight_type = t->ggml_type;
     
     t = gguf_find_tensor(ctx, "blk.40.attn_v.weight");
     if (!t) { fprintf(stderr, "MTP: missing attn_v\n"); goto fail; }
-    blk40->gqa.attn_v_weight_q = (const uint8_t *)mtp_quant_ptr(t, "attn_v");
+    blk40->gqa.attn_v_weight_q = blob + t->data_offset;
     blk40->gqa.attn_v_weight_type = t->ggml_type;
     
     t = gguf_find_tensor(ctx, "blk.40.attn_output.weight");
     if (!t) { fprintf(stderr, "MTP: missing attn_output\n"); goto fail; }
-    blk40->gqa.attn_output_weight_q = (const uint8_t *)mtp_quant_ptr(t, "attn_output");
+    blk40->gqa.attn_output_weight_q = blob + t->data_offset;
     blk40->gqa.attn_output_weight_type = t->ggml_type;
     
     // Q/K norms (F32) — size from GGUF tensor shape
@@ -1530,58 +1157,46 @@ bool wubu_mtp_load(mtp_head_t *mtp, const char *mtp_gguf_path,
     blk40->gqa.q_dim = GQA_Q_HEADS * mtp_head_dim;
     blk40->gqa.kv_dim = GQA_KV_HEADS * mtp_head_dim;
     
-    // Load MoE weights (quantized pointers or heap copies)
+    // Load MoE weights (quantized pointers into blob)
     moe_weights_t *moe = &blk40->moe;
     
     t = gguf_find_tensor(ctx, "blk.40.ffn_gate_inp.weight");
-    if (t) {
+    if (t && blob) {
+        // BF16 router — dequant to F32 during init
         int64_t n_router = (int64_t)t->dims[0] * t->dims[1];
         moe->ffn_gate_inp = (float *)malloc(n_router * sizeof(float));
         gguf_read_tensor_f32(ctx, t, moe->ffn_gate_inp, n_router);
     }
     
     t = gguf_find_tensor(ctx, "blk.40.ffn_gate_inp_shexp.weight");
-    if (t) {
+    if (t && blob) {
         moe->ffn_gate_inp_shexp = (float *)malloc(D_MODEL * sizeof(float));
         gguf_read_tensor_f32(ctx, t, moe->ffn_gate_inp_shexp, D_MODEL);
     }
     
-    // Routed experts
+    // Routed experts: Q2_K (gate, up), Q3_K (down)
     t = gguf_find_tensor(ctx, "blk.40.ffn_gate_exps.weight");
-    if (t) { moe->ffn_gate_exps_q = (const uint8_t *)mtp_quant_ptr(t, "gate_exps"); moe->ffn_gate_exps_q_type = t->ggml_type; }
+    if (t && blob) { moe->ffn_gate_exps_q = blob + t->data_offset; moe->ffn_gate_exps_q_type = t->ggml_type; }
     t = gguf_find_tensor(ctx, "blk.40.ffn_up_exps.weight");
-    if (t) { moe->ffn_up_exps_q = (const uint8_t *)mtp_quant_ptr(t, "up_exps"); moe->ffn_up_exps_q_type = t->ggml_type; }
+    if (t && blob) { moe->ffn_up_exps_q = blob + t->data_offset; moe->ffn_up_exps_q_type = t->ggml_type; }
     t = gguf_find_tensor(ctx, "blk.40.ffn_down_exps.weight");
-    if (t) { moe->ffn_down_exps_q = (const uint8_t *)mtp_quant_ptr(t, "down_exps"); moe->ffn_down_exps_q_type = t->ggml_type; }
+    if (t && blob) { moe->ffn_down_exps_q = blob + t->data_offset; moe->ffn_down_exps_q_type = t->ggml_type; }
     
-    // Shared expert
+    // Shared expert: Q5_K (gate, up), Q6_K (down)
     t = gguf_find_tensor(ctx, "blk.40.ffn_gate_shexp.weight");
-    if (t) { moe->ffn_gate_shexp_q = (const uint8_t *)mtp_quant_ptr(t, "gate_shexp"); moe->ffn_gate_shexp_q_type = t->ggml_type; }
+    if (t && blob) { moe->ffn_gate_shexp_q = blob + t->data_offset; moe->ffn_gate_shexp_q_type = t->ggml_type; }
     t = gguf_find_tensor(ctx, "blk.40.ffn_up_shexp.weight");
-    if (t) { moe->ffn_up_shexp_q = (const uint8_t *)mtp_quant_ptr(t, "up_shexp"); moe->ffn_up_shexp_q_type = t->ggml_type; }
+    if (t && blob) { moe->ffn_up_shexp_q = blob + t->data_offset; moe->ffn_up_shexp_q_type = t->ggml_type; }
     t = gguf_find_tensor(ctx, "blk.40.ffn_down_shexp.weight");
-    if (t) { moe->ffn_down_shexp_q = (const uint8_t *)mtp_quant_ptr(t, "down_shexp"); moe->ffn_down_shexp_q_type = t->ggml_type; }
+    if (t && blob) { moe->ffn_down_shexp_q = blob + t->data_offset; moe->ffn_down_shexp_q_type = t->ggml_type; }
     
     // Mark MoE as loaded
     if (moe->ffn_gate_exps_q && moe->ffn_up_exps_q && moe->ffn_down_exps_q) {
         moe->loaded = true;
-        moe->load_from_blob = (blob != NULL);  // false if heap-copied
+        moe->load_from_blob = true;
     }
     
-    // Initialize IQ raw-quant cache for blk.40 MoE (MTP draft head)
-    mtp_iq_cache_t *iq_cache = (mtp_iq_cache_t *)malloc(sizeof(mtp_iq_cache_t));
-    if (iq_cache) {
-        mtp_iq_cache_init(iq_cache);
-        moe->q8_cache = iq_cache;
-        printf("MTP: IQ raw-quant cache initialized (%d slots, ~%zu MB)\n",
-               MTP_IQ_CACHE_SLOTS,
-               sizeof(mtp_iq_cache_t) / 1048576);
-    } else {
-        fprintf(stderr, "MTP: WARNING: failed to allocate IQ cache (OOM)\n");
-        moe->q8_cache = NULL;
-    }
-    
-    printf("MTP: blk.40 loaded (GQA+MoE: Q5_K/IQ2_XXS/IQ3_XXS/Q6_K)\n");
+    printf("MTP: blk.40 loaded (GQA+MoE: Q5_K/Q2_K/Q3_K/Q6_K)\n");
     
     // Allocate KV cache for blk.40 (per-layer kv_dim)
     int mtp_kv_dim = blk40->gqa.kv_heads * blk40->gqa.head_dim;
@@ -1596,8 +1211,6 @@ bool wubu_mtp_load(mtp_head_t *mtp, const char *mtp_gguf_path,
 fail:
     wubu_mtp_free(mtp);
     return false;
-    
-    #undef mtp_quant_ptr
 }
 
 int wubu_mtp_draft_forward(wubu_model_t *model,
@@ -1710,29 +1323,16 @@ void wubu_mtp_free(mtp_head_t *mtp) {
     free(mtp->blk40.post_attn_norm_weight);
     free(mtp->blk40.gqa.attn_q_norm_weight);
     free(mtp->blk40.gqa.attn_k_norm_weight);
-    // blk.40 MoE (always free F32 pointers)
-    free(mtp->blk40.moe.ffn_gate_inp);
-    free(mtp->blk40.moe.ffn_gate_inp_shexp);
-    // blk.40 quantized weights: free heap copies if not blob-backed
+    // blk.40 MoE (blob-backed so only F32 pointers freed)
     if (!mtp->blk40.moe.load_from_blob) {
-        free((void*)mtp->blk40.moe.ffn_gate_exps_q);
-        free((void*)mtp->blk40.moe.ffn_up_exps_q);
-        free((void*)mtp->blk40.moe.ffn_down_exps_q);
-        free((void*)mtp->blk40.moe.ffn_gate_shexp_q);
-        free((void*)mtp->blk40.moe.ffn_up_shexp_q);
-        free((void*)mtp->blk40.moe.ffn_down_shexp_q);
-    }
-    // blk.40 GQA weights: free heap copies if not blob-backed
-    // When load_from_blob is false, all mtp_quant_ptr results were heap-allocated
-    if (!mtp->blk40.moe.load_from_blob) {
-        free((void*)mtp->blk40.gqa.attn_q_weight_q);
-        free((void*)mtp->blk40.gqa.attn_k_weight_q);
-        free((void*)mtp->blk40.gqa.attn_v_weight_q);
-        free((void*)mtp->blk40.gqa.attn_output_weight_q);
+        free(mtp->blk40.moe.ffn_gate_inp);
+        free(mtp->blk40.moe.ffn_gate_inp_shexp);
+    } else {
+        free(mtp->blk40.moe.ffn_gate_inp);
+        free(mtp->blk40.moe.ffn_gate_inp_shexp);
     }
     free(mtp->k_cache);
     free(mtp->v_cache);
-    free(mtp->blk40.moe.q8_cache);
     memset(mtp, 0, sizeof(*mtp));
 }
 
@@ -1991,41 +1591,3 @@ void wubu_model_backward_from_embd(
     free(d_x);
 }
 
-void wubu_model_forward(wubu_model_t *model,
-                        const int *token_ids, int B, int T,
-                        float *logits) {
-    // Load embeddings
-    float *embd = (float *)malloc(B * T * D_MODEL * sizeof(float));
-    
-    if (model->token_embd && !model->use_embedding_file) {
-        // Use GGUF-loaded embeddings (auto-extracted)
-        for (int i = 0; i < B * T; i++) {
-            int id = token_ids[i];
-            if (id < 0 || id >= model->vocab_size) id = 0;
-            memcpy(embd + i * D_MODEL, model->token_embd + id * D_MODEL, D_MODEL * sizeof(float));
-        }
-    } else if (model->use_embedding_file) {
-        FILE *f = fopen("data/qwen36_embeddings_c.bin.raw", "rb");
-        if (f) {
-            for (int i = 0; i < B * T; i++) {
-                int id = token_ids[i];
-                if (id < 0 || id >= model->vocab_size) id = 0;
-                fseek(f, id * D_MODEL * sizeof(float), SEEK_SET);
-                size_t nr = fread(embd + i * D_MODEL, sizeof(float), D_MODEL, f);
-                (void)nr;
-            }
-            fclose(f);
-        } else {
-            memset(embd, 0, B * T * D_MODEL * sizeof(float));
-        }
-    } else {
-        memset(embd, 0, B * T * D_MODEL * sizeof(float));
-    }
-    
-    wubu_model_forward_from_embd(model, embd, B, T, logits);
-    free(embd);
-    
-    // Increment expert recorder for next token
-    if (model->expert_recorder)
-        model->expert_recorder_tokens += B * T;
-}

@@ -395,21 +395,21 @@ void g4_gpu_destroy(g4_gpu_ctx_t *ctx) {
     if (ctx->initialized) {
         cudaStreamSynchronize(ctx->stream);
         if (ctx->d_qweight_row) cudaFree(ctx->d_qweight_row);
-        cudaFreeAsync(ctx->d_scratch, ctx->stream);
-        cudaFreeAsync(ctx->d_q, ctx->stream);
-        cudaFreeAsync(ctx->d_k, ctx->stream);
-        cudaFreeAsync(ctx->d_v, ctx->stream);
-        cudaFreeAsync(ctx->d_attn_out, ctx->stream);
-        cudaFreeAsync(ctx->d_ffn_gate, ctx->stream);
-        cudaFreeAsync(ctx->d_ffn_up, ctx->stream);
-        cudaFreeAsync(ctx->d_hidden, ctx->stream);
-        cudaFreeAsync(ctx->d_normed, ctx->stream);
-        cudaFreeAsync(ctx->d_logits, ctx->stream);
-        cudaFreeAsync(ctx->d_row_buf, ctx->stream);
-        cudaFreeAsync(ctx->d_k_cache, ctx->stream);
-        cudaFreeAsync(ctx->d_v_cache, ctx->stream);
-        cudaFreeAsync(ctx->d_positions, ctx->stream);
-        cudaFreeAsync(ctx->d_kv_sizes, ctx->stream);
+        cudaFree(ctx->d_scratch);
+        cudaFree(ctx->d_q);
+        cudaFree(ctx->d_k);
+        cudaFree(ctx->d_v);
+        cudaFree(ctx->d_attn_out);
+        cudaFree(ctx->d_ffn_gate);
+        cudaFree(ctx->d_ffn_up);
+        cudaFree(ctx->d_hidden);
+        cudaFree(ctx->d_normed);
+        cudaFree(ctx->d_logits);
+        cudaFree(ctx->d_row_buf);
+        cudaFree(ctx->d_k_cache);
+        cudaFree(ctx->d_v_cache);
+        cudaFree(ctx->d_positions);
+        cudaFree(ctx->d_kv_sizes);
         cudaStreamDestroy(ctx->stream);
         cublasDestroy(ctx->cublas);
     }

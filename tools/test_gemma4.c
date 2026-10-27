@@ -136,7 +136,6 @@ int main(int argc, char **argv) {
 #ifdef GPU_SUPPORT
     if (g_gpu_ctx) g4_gpu_destroy(g_gpu_ctx);
 #endif
-
     g4_model_destroy(&model);
     free(tokens);
     free(logits);

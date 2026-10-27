@@ -30,6 +30,7 @@ enum ggml_type {
     GGML_TYPE_IQ2_XS  = 17,
     GGML_TYPE_IQ3_XXS = 18,
     GGML_TYPE_IQ1_S   = 19,
+    GGML_TYPE_IQ4_NL  = 20,
     GGML_TYPE_IQ3_S   = 21,
     GGML_TYPE_IQ2_S   = 22,
     GGML_TYPE_IQ4_XS  = 23,
@@ -115,6 +116,7 @@ void dequantize_q6_K_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq1_s_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq2_xxs_row(const uint8_t *data, float *output, int64_t n_elems);
+void dequantize_iq2_xs_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq2_s_row(const uint8_t *data, float *output, int64_t n_elems);
 
 // IQ2_XXS block-level operations (for on-the-fly dequant dot product)
