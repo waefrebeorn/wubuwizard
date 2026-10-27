@@ -18,6 +18,13 @@ depends only on ⟨x,y⟩, ‖x‖², ‖y‖² — this is why the nD proof red
 
 Since ‖x‖², ‖y‖² < 1/c the RHS is strictly positive, and D > 0, hence
 ‖N‖² < D²/c, i.e. ‖x ⊕_c y‖² < 1/c. ∎
+
+Plus the nD gyrovector left-cancellation law:
+
+  x ⊕_c ((-x) ⊕_c y) = y
+
+(the nD lift of `mobius_add_1d_left_cancel`), load-bearing for the geodesic
+γ(1)=y endpoint (GeodesicInterp, GAP C009).
 -/
 
 /-- Möbius (gyrovector) addition in the n-dimensional Poincaré ball. -/
@@ -149,3 +156,121 @@ theorem mobius_add_nd_preserves_ball {n : ℕ} (c : ℝ) (hc : c > 0)
   rw [hN, hnorm_div]
   rw [div_lt_div_iff₀ (by positivity : 0 < D ^ 2) (by positivity : 0 < c)]
   linarith [hmain, pow_pos hc 2, pow_pos hDpos 2]
+
+/-- The two intermediate polynomials (X1, X2) that carry the nD left-cancellation.
+
+    For the inner sum w = (-x) ⊕_c y = (1/D1) • (q • (-x) + (1-c‖-x‖²) • y) with
+    q := 1 + 2c⟨-x,y⟩ + c‖y‖² and D1 := 1 + 2c⟨-x,y⟩ + c²‖-x‖²‖y‖², the derived
+    scalars p2 := ⟨x, w⟩ and bz := ‖w‖² satisfy, in the reduced variables
+    p := ⟨x,y⟩, a := ‖x‖², b := ‖y‖² (so ⟨-x,y⟩ = -p and ‖-x‖² = a):
+
+      p2 · D1 = -(1-2cp+cb)·a + (1-ca)·p          (X1)
+      bz · D1 = (q'²·a - 2·q'·(1-ca)·p + (1-ca)²·b) / D1   with q' := 1-2cp+cb   (X2/D1)
+
+    These are the substitutions the I1/I2 polynomial identities need. -/
+theorem mobius_add_nd_left_cancel_scalar {n : ℕ} (c : ℝ) (hc : c > 0)
+    (x y : EuclideanSpace ℝ (Fin n)) (hx : ‖x‖ ^ 2 < 1 / c) (hy : ‖y‖ ^ 2 < 1 / c) :
+    let p := inner ℝ x y
+    let a := ‖x‖ ^ 2
+    let b := ‖y‖ ^ 2
+    let p2 := inner ℝ x (mobius_add_nd c (-x) y)
+    let bz := ‖mobius_add_nd c (-x) y‖ ^ 2
+    let D1 := 1 + 2 * c * inner ℝ (-x) y + c ^ 2 * ‖-x‖ ^ 2 * b
+    let q := 1 + 2 * c * inner ℝ (-x) y + c * b
+    p2 * D1 = -q * a + (1 - c * a) * p ∧
+    bz * D1 = (q ^ 2 * a - 2 * q * (1 - c * a) * p + (1 - c * a) ^ 2 * b) / D1 := by
+  intro p a b p2 bz D1 q
+  -- facts about -x
+  have hp1 : inner ℝ (-x) y = -inner ℝ x y := by rw [inner_neg_left]
+  have hxnn : ‖-x‖ ^ 2 = ‖x‖ ^ 2 := by rw [norm_neg]
+  -- D1 > 0 (same Cauchy–Schwarz argument as preserves_ball)
+  -- D1 = 1 + 2c·⟨-x,y⟩ + c²‖-x‖²·b = 1 - 2cp + c²ab (after hp1, hxnn)
+  have hD1pos : D1 > 0 := by
+    unfold D1
+    rw [hp1, hxnn]
+    have hcs : p ^ 2 ≤ a * b := by
+      have h := real_inner_mul_inner_self_le x y
+      rw [real_inner_comm] at h
+      have hh : inner ℝ y y = b := real_inner_self_eq_norm_sq y
+      have hxx : inner ℝ x x = a := real_inner_self_eq_norm_sq x
+      rw [hh, hxx] at h
+      have hpc : inner ℝ y x = p := by rw [real_inner_comm]
+      rw [hpc] at h
+      simpa [pow_two] using h
+    have h1 : 1 + 2 * c * -⟪x, y⟫_ℝ + c ^ 2 * ‖x‖ ^ 2 * b
+        = (1 - c * p) ^ 2 + c ^ 2 * (a * b - p ^ 2) := by
+      have hp : p = ⟪x, y⟫_ℝ := rfl
+      rw [hp]
+      ring
+    rw [h1]
+    have h2 : c ^ 2 * (a * b - p ^ 2) ≥ 0 := by
+      have hab : a * b ≥ p ^ 2 := by
+        have h := hcs
+        simpa [pow_two] using h
+      nlinarith [hab]
+    by_contra hc'
+    push Not at hc'
+    have h4 : (1 - c * p) ^ 2 = 0 := by nlinarith [h2]
+    have h5 : c * p = 1 := by nlinarith [h4]
+    have h6 : p ^ 2 = 1 / c ^ 2 := by
+      have h7 : p = 1 / c := by
+        have h8 : c * p = 1 := h5
+        field_simp at h8 ⊢
+        linarith
+      rw [h7]; ring
+    have hca : c * a < 1 := by
+      have h1 : c * a < c * (1 / c) := mul_lt_mul_of_pos_left hx hc
+      rwa [mul_one_div_cancel hc.ne'] at h1
+    have hcb : c * b < 1 := by
+      have h1 : c * b < c * (1 / c) := mul_lt_mul_of_pos_left hy hc
+      rwa [mul_one_div_cancel hc.ne'] at h1
+    have hn1 : 0 ≤ c * a := by positivity
+    have hn2 : 0 ≤ c * b := by positivity
+    have h9 : a * b < 1 / c ^ 2 := by nlinarith [mul_nonneg hn1 hn2]
+    linarith [h6]
+  have hD1ne : D1 ≠ 0 := hD1pos.ne'
+  -- unfold the inner sum (D1 and q must match the definition's literals)
+  have hw : mobius_add_nd c (-x) y
+      = (1 / D1) • (q • (-x) + (1 - c * a) • y) := by
+    unfold mobius_add_nd
+    show (1 / (1 + 2 * c * inner ℝ (-x) y + c ^ 2 * ‖-x‖ ^ 2 * ‖y‖ ^ 2)) •
+        ((1 + 2 * c * inner ℝ (-x) y + c * ‖y‖ ^ 2) • -x + (1 - c * ‖-x‖ ^ 2) • y)
+      = (1 / D1) • (q • -x + (1 - c * a) • y)
+    rw [hp1, hxnn]
+    -- now both sides are in terms of -⟪x,y⟫_ℝ, ‖x‖², ‖y‖² — use ring to close
+    have hD1def : D1 = 1 + 2 * c * -⟪x, y⟫_ℝ + c ^ 2 * ‖x‖ ^ 2 * ‖y‖ ^ 2 := by
+      unfold D1
+      rw [hp1, hxnn]
+    have hqdef : q = 1 + 2 * c * -⟪x, y⟫_ℝ + c * ‖y‖ ^ 2 := by
+      unfold q
+      rw [hp1]
+    rw [hD1def, hqdef]
+  constructor
+  · -- p2 * D1 = -q * a + (1-c*a)*p
+    -- goal is p2 * D1 = ... but p2 is a let-bound name; unfold it first
+    show inner ℝ x (mobius_add_nd c (-x) y) * D1 = -q * a + (1 - c * a) * p
+    rw [hw]
+    rw [inner_smul_right]
+    rw [inner_add_right]
+    rw [inner_smul_right x (-x) q, inner_smul_right x y (1 - c * a)]
+    have hxx : inner ℝ x x = a := real_inner_self_eq_norm_sq x
+    have hxnn' : inner ℝ x (-x) = -a := by rw [inner_neg_right, hxx]
+    have hxy : inner ℝ x y = p := rfl
+    rw [hxnn', hxy]
+    field_simp [hD1ne]
+  · -- bz * D1 = (q²a - 2q(1-ca)p + (1-ca)²b) / D1
+    show ‖mobius_add_nd c (-x) y‖ ^ 2 * D1
+      = (q ^ 2 * a - 2 * q * (1 - c * a) * p + (1 - c * a) ^ 2 * b) / D1
+    rw [hw]
+    rw [norm_smul, norm_div, norm_one]
+    -- (1/‖D1‖ · ‖...‖)² = (1/‖D1‖)² · ‖...‖²  then expand the inner sum
+    rw [mul_pow, norm_add_sq_real (q • -x) ((1 - c * a) • y)]
+    have hxx : inner ℝ x x = a := real_inner_self_eq_norm_sq x
+    have hxnn' : inner ℝ (-x) (-x) = a := by
+      rw [inner_neg_left, inner_neg_right, hxx]
+    have hxy : inner ℝ (-x) y = -p := by
+      rw [inner_neg_left]
+    have hyy : inner ℝ y y = b := real_inner_self_eq_norm_sq y
+    rw [inner_smul_left, inner_smul_right, hxy]
+    rw [Real.norm_of_nonneg (le_of_lt hD1pos)]
+    ring
