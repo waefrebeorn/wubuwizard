@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "gguf_reader.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -572,29 +573,19 @@ float gguf_f16_to_f32(uint16_t h) {
     uint32_t exp  = (h >> 10) & 0x1F;
     uint32_t mant = h & 0x03FF;
     if (exp == 0) {
-        // Subnormal: value = (-1)^sign * mant/1024 * 2^(-14)
-        uint32_t normal_f32 = (sign << 31) | ((1 + 112) << 23) | (mant << 13);
-        float normal_val;
-        memcpy(&normal_val, &normal_f32, 4);
-        if (sign) {
-            return normal_val + 6.103515625e-5f;  // 2^(-14), adds because normal_val is negative
-        } else {
-            return normal_val - 6.103515625e-5f;  // 2^(-14)
-        }
+        if (mant == 0) return sign ? -0.0f : 0.0f;
+        // Subnormal: shift until mant has bit 10 set
+        const int shift = __builtin_clz(mant) - 21;
+        const uint32_t new_exp = exp + 1 - shift;
+        fp32.u = (sign << 31) | (new_exp << 23) | (mant << (13 + shift));
+        return fp32.f;
     }
     if (exp == 31) {
-        // Inf or NaN: propagate to float32
-        // FP16: exp=31, mant=0 → Inf, mant!=0 → NaN
-        // FP32: exp=255, mant=0 → Inf, mant!=0 → NaN (mant shifted << 13)
-        uint32_t f32 = (sign << 31) | (0xFF << 23) | (mant << 13);
-        float result;
-        memcpy(&result, &f32, 4);
-        return result;
+        fp32.u = (sign << 31) | (0xFF << 23) | (mant << 13);
+        return fp32.f;
     }
-    uint32_t f32 = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
-    float result;
-    memcpy(&result, &f32, 4);
-    return result;
+    fp32.u = (sign << 31) | ((exp + 112) << 23) | (mant << 13);
+    return fp32.f;
 }
 
 gguf_ctx* gguf_open(const char *path) {
@@ -858,7 +849,7 @@ void dequantize_q6_K_row(const uint8_t *data, float *output, int64_t n_elems) {
 // ========== Tensor Reading ==========
 
 // Forward declaration for Q4_K dequant function
-static void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_elems);
+
 static void dequantize_q2_K_row(const uint8_t *data, float *output, int64_t n_elems);
 static void dequantize_q3_K_row(const uint8_t *data, float *output, int64_t n_elems);
 
@@ -989,6 +980,20 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
     }
     else if (tensor->ggml_type == GGML_TYPE_IQ4_XS) {
         dequantize_iq4_xs_row(src, output, n_elems);
+    }
+    else if (tensor->ggml_type == GGML_TYPE_Q4_0) {
+        // Q4_0 dequantization: blocks of 32 elements, fp16 scale + 16 bytes nibbles
+        int64_t q4_blocks = (n_elems + 31) / 32;
+        for (int64_t b = 0; b < q4_blocks; b++) {
+            uint16_t d_bits;
+            memcpy(&d_bits, src + b * 18, 2);
+            float d = f16_to_f32(d_bits);
+            for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
+                uint8_t q = src[b * 18 + 2 + j / 2];
+                int qval = (j & 1) ? (q >> 4) : (q & 0xF);
+                output[b * 32 + j] = d * (float)(qval - 8);
+            }
+        }
     }
     else if (tensor->ggml_type == GGML_TYPE_Q2_K) {
         dequantize_q2_K_row(src, output, n_elems);
@@ -1390,6 +1395,21 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
         case GGML_TYPE_IQ3_XXS: dequantize_iq3_xxs_row(data, output, n_elems); break;
         case GGML_TYPE_IQ4_XS: dequantize_iq4_xs_row(data, output, n_elems); break;
         case GGML_TYPE_Q4_K: dequantize_q4_K_row(data, output, n_elems); break;
+        case GGML_TYPE_Q4_0: {
+            int64_t n_blocks = (n_elems + 31) / 32;
+            for (int64_t b = 0; b < n_blocks; b++) {
+                uint16_t d_bits;
+                memcpy(&d_bits, data + b * 18, 2);
+                float d = f16_to_f32(d_bits);
+                const uint8_t *qs = data + b * 18 + 2;
+                for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
+                    int shift = (j & 1) ? 0 : 4;
+                    int val = (qs[j / 2] >> shift) & 0xF;
+                    output[b * 32 + j] = d * (float)(val - 8);
+                }
+            }
+            break;
+        }
         case GGML_TYPE_BF16: {
             // bfloat16: upper 16 bits of IEEE float32
             for (int64_t i = 0; i < n_elems; i++) {
@@ -1430,6 +1450,7 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_IQ3_XXS: return n_blocks * 98;   // d[2] + qs[96] = 98 bytes (verified vs llama.cpp struct)
         case GGML_TYPE_IQ4_XS: return n_blocks * 136;  // d[2] + scales_h[2] + scales_l[4] + qs[128]
         case GGML_TYPE_Q4_K:  return n_blocks * 144;  // d[2] + dmin[2] + scales[12] + qs[128]
+        case GGML_TYPE_Q4_0:  return ((n_elems + 31) / 32) * 18;  // d[2] + qs[16], block=32
         case GGML_TYPE_Q2_K:  return n_blocks * 84;   // scales[16] + qs[64] + d[2] + dmin[2]
         case GGML_TYPE_Q3_K:  return n_blocks * 110;  // hmask[32] + qs[64] + scales[12] + d[2]
         case 30:              return n_elems * 2;     // BF16 (bfloat16)
@@ -1496,9 +1517,9 @@ int gguf_buffer_data(gguf_ctx *ctx) {
         ctx->data_blob = NULL;
         return 0;
     }
-    
+
     ctx->data_blob_size = blob_size;
-    fprintf(stderr, "  GGUF data blob buffered: %lu MB\n", (unsigned long)(blob_size / (1024*1024)));
+    fprintf(stderr, "  GGUF data blob mmap'd: %lu MB\n", (unsigned long)(blob_size / (1024*1024)));
     return 1;
     }
 }

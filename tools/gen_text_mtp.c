@@ -34,6 +34,7 @@
 #include <math.h>
 #include <time.h>
 #include <signal.h>
+#include "wubu_core_dumps.h"
 
 #define DRAFT_N 2
 
@@ -202,9 +203,6 @@ int main(int argc, char **argv) {
         (void)accepted_drafts;
         if (use_mtp && mdl.mtp.loaded) {
             total_attempted++;
-
-            // Reset MTP KV cache for fresh draft generation
-            mdl.mtp.cache_len = 0;
 
             // Generate draft[0] using prev_cur (token before the one we just predicted)
             wubu_mtp_draft_forward(&mdl, h_39, prev_cur, 1, mtp_logits);

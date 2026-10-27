@@ -45,7 +45,7 @@ bash tools/test-hermes-integration.sh      # 9 tests
 
 ## File Layout
 ```
-src/          — Core: ssm, moe, model, gguf_reader, cuda_kernels, vision
+src/          — SSM, MoE, model, gguf_reader, CUDA kernels, vision
 include/      — Headers
 tools/        — gen_text.c, serve_local.py, test_*, dump_*
 data/         — embeddings, tokenizer

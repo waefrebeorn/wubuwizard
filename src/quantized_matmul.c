@@ -377,6 +377,24 @@ void quantized_matmul_from_q8(const void *q8_x,
                               int64_t n_rows, int64_t n_cols,
                               int64_t col_stride_bytes,
                               float *y) {
+    // Handle F32 (type 0) - direct F32 dot product
+    if (weight_type == GGML_TYPE_F32) {
+        #pragma omp parallel for if(n_cols > 8)
+        for (int64_t j = 0; j < n_cols; j++) {
+            const float *w_col = (const float *)W + j * n_rows;
+            const block_q8_K *q8 = (const block_q8_K *)q8_x;
+            float sum = 0.0f;
+            for (int64_t qb = 0; qb < (n_rows + QK_K - 1) / QK_K; qb++) {
+                float dq = q8[qb].d;
+                for (int l = 0; l < 256 && qb * 256 + l < n_rows; l++) {
+                    sum += dq * (float)q8[qb].qs[l] * w_col[qb * 256 + l];
+                }
+            }
+            y[j] = sum;
+        }
+        return;
+    }
+
     // Handle IQ1_M and other rare types without vec_dot: dequant then SGEMM
     // Q8_0 also goes here: q8_0_vec_dot expects Q8_0-format activations
     // (34-byte blocks), but callers pass a Q8_K buffer (292-byte blocks) —

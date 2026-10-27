@@ -106,8 +106,17 @@ typedef struct gqa_layer_weights {
     float *attn_k_norm_weight;  // [GQA_HEAD_DIM] = [256]
     
     // Pre/post norms
-    float *attn_norm_weight;          // [D_MODEL] = [2048]
-    float *post_attention_norm_weight; // [D_MODEL] = [2048]
+    float *attn_norm_weight;          // [D_MODEL]
+    float *post_attention_norm_weight; // [D_MODEL]
+
+    // Per-layer dynamic dimensions (extracted from GGUF tensor shapes)
+    int q_dim;        // Q projection dim (fused Q+gate)
+    int kv_dim;       // KV projection dim
+    int out_dim;      // Output projection dim
+    int head_dim;     // Per-head dimension
+    int q_heads;      // Number of Q heads (q_dim / head_dim)
+    int kv_heads;     // Number of KV heads (kv_dim / head_dim)
+    int is_large;     // 1 if this is a large/global attention layer
 } gqa_layer_weights;
 
 // Full model state (for SSM recurrent state)
@@ -218,9 +227,11 @@ void wubu_ssm_forward_save(const float *x, int B, int T,
 // k_out/v_out: output buffers for the NEW K_norm and V (caller can cache these)
 void wubu_gqa_forward(const float *x, int B, int T,
                       const gqa_layer_weights *weights,
+                      int d_model,
                       float *output,
                       const void *k_cache, const void *v_cache, int cache_len,
-                      void *k_out, void *v_out);
+                      void *k_out, void *v_out,
+                      int head_dim, int n_q_heads, int n_kv_heads);
 
 // Saved GQA forward intermediates (for backward pass)
 typedef struct {
@@ -237,8 +248,10 @@ typedef struct {
 // Single GQA + save forward (pass save=NULL for standard forward)
 void wubu_gqa_forward_save(const float *x, int B, int T,
                            const gqa_layer_weights *weights,
+                           int d_model,
                            float *output,
-                           gqa_fwd_save_t *save);
+                           gqa_fwd_save_t *save,
+                           int head_dim, int n_q_heads, int n_kv_heads);
 
 // Single Poincaré SSM layer forward pass (hyperbolic recurrence)
 // Same interface as wubu_ssm_forward but uses Möbius operations
@@ -382,6 +395,7 @@ void wubu_gqa_backward_attention(
 // Full GQA layer backward (chains steps 7 through 1)
 void wubu_gqa_backward(
     int B, int T,
+    int d_model,
     const float *x, const float *Q_norm, const float *Q_raw,
     const float *K_norm, const float *K_raw,
     const float *V,

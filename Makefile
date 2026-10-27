@@ -505,6 +505,18 @@ src/gpu_gemma4.o: src/gpu_gemma4.cu include/gpu_gemma4.h include/wubu_gemma4.h
 src/gpu_gemma4_forward.o: src/gpu_gemma4_forward.cu include/gpu_gemma4.h include/wubu_gemma4.h
 	$(NVCC) $(NVCC_FLAGS) -DWUBU_ENABLE_CUDA -c -o $@ $<
 
+src/flash_attn_q4_0_opt.o: src/flash_attn_q4_0_opt.cu include/cuda_kernels.h
+	$(NVCC) $(NVCC_FLAGS) -c -o $@ $<
+
+src/flash_attn_q4_0_prefill_opt.o: src/flash_attn_q4_0_prefill_opt.cu include/cuda_kernels.h
+	$(NVCC) $(NVCC_FLAGS) -c -o $@ $<
+
+src/gpu_gemma4.o: src/gpu_gemma4.cu include/gpu_gemma4.h include/wubu_gemma4.h
+	$(NVCC) $(NVCC_FLAGS) -c -o $@ $<
+
+src/gpu_gemma4_forward.o: src/gpu_gemma4_forward.cu include/gpu_gemma4.h include/wubu_gemma4.h
+	$(NVCC) $(NVCC_FLAGS) -c -o $@ $<
+
 src/rsgd.o: src/rsgd.c include/rsgd.h include/gguf_reader.h
 	$(CC) $(CFLAGS) -DWUBU_ENABLE_CUDA -c -o $@ $<
 

@@ -53,10 +53,10 @@ typedef struct {
     int64_t n_tensors;
     int64_t n_kv;
     uint32_t alignment;
-    
+
     // Tensor info array
     gguf_tensor_info *tensors;
-    
+
     // Data blob location in file
     uint64_t data_blob_offset;
     
@@ -65,7 +65,7 @@ typedef struct {
     
     // File handle
     FILE *file;
-    
+
     // Optional: buffered data blob (mmap or malloc'd copy)
     void *data_blob;
     size_t data_blob_size;
@@ -112,6 +112,7 @@ void gguf_close(gguf_ctx *ctx);
 
 // IQ1_S / Q6_K dequantization (called internally by gguf_read_tensor_f32)
 void dequantize_q6_K_row(const uint8_t *data, float *output, int64_t n_elems);
+void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq1_s_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq2_xxs_row(const uint8_t *data, float *output, int64_t n_elems);
 void dequantize_iq2_s_row(const uint8_t *data, float *output, int64_t n_elems);

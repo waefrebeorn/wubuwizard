@@ -251,8 +251,9 @@ typedef struct mtp_head_t {
     wubu_layer_t blk40;
     
     // KV cache for blk.40's GQA attention
-    float *k_cache;  // [GQA_MAX_CTX * GQA_KV_DIM]
-    float *v_cache;  // [GQA_MAX_CTX * GQA_KV_DIM]
+    float *k_cache;  // [GQA_MAX_CTX * kv_dim]
+    float *v_cache;  // [GQA_MAX_CTX * kv_dim]
+    int kv_dim;      // per-layer KV dim (kv_heads * head_dim)
     int cache_len;
 } mtp_head_t;
 typedef struct wubu_model_t {
@@ -264,6 +265,9 @@ typedef struct wubu_model_t {
     float *output_weight;    // [D_MODEL, vocab_size] or NULL
     const uint8_t *output_weight_q;   // raw Q4_K quantized
     int output_weight_type;
+    bool tied_output;                // true if output_weight_q points to token_embd
+    const uint8_t *token_embd_q;     // raw Q4_K quantized token embeddings (large vocab, mmap'd)
+    int token_embd_type;             // GGML type of token_embd (usually Q4_K)
     
     // Embedding file (from Phase 1)
     bool use_embedding_file;

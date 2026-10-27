@@ -103,6 +103,7 @@ static void forward_with_save(wubu_model_t *model,
 }
 
 int main(int argc, char **argv) {
+    wubu_disable_core_dumps();
     const char *model_path = argc > 1 ? argv[1]
         : "/home/wubu/models/Qwen3.6-35B-A3B-UD-IQ2_M.gguf";
     const char *corpus_path = argc > 2 ? argv[2] : "data/train_data.bin";

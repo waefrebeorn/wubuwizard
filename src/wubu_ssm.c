@@ -3,6 +3,10 @@
 #include "gguf_reader.h"
 #include "thread_pool.h"
 #include "wubu_model.h"  // for kv_cache_read_head / kv_cache_write_head
+
+// Global tensor naming convention (defined here for CORE_OBJ visibility)
+// 0 = Qwen-style "blk.N.*", 1 = Gemma-style "model.layers.N.*", 2 = pure GQA
+int g_tensor_naming = 0;
 #include <omp.h>
 #include <immintrin.h>  // AVX2/FMA intrinsics for GQA attention
 // GQA_MAX_CTX from wubu_model.h — max KV cache positions (also used for attn stack buf)
@@ -1213,12 +1217,30 @@ static const float *gqa_qk_norm_ones(const float *w) {
 
 void wubu_gqa_forward(const float *x, int B, int T,
                       const gqa_layer_weights *w,
+                      int d_model,
                       float *output,
                       const void *k_cache, const void *v_cache, int cache_len,
-                      void *k_out, void *v_out) {
+                      void *k_out, void *v_out,
+                      int head_dim, int n_q_heads, int n_kv_heads) {
     const int N = B * T;
-    const int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;  // 4096
-    const int kv_dim = GQA_KV_HEADS * GQA_HEAD_DIM;  // 512
+    const int q_dim = n_q_heads * head_dim;
+    const int kv_dim = n_kv_heads * head_dim;
+    
+    // DUMP_GQA_DEBUG_DIR: dump function inputs
+    {
+        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
+        if (gqa_dump_dir && gqa_dump_dir[0]) {
+            const char *prefix = getenv("DUMP_GQA_PREFIX");
+            if (!prefix) prefix = "";
+            char fname[1024];
+            if (prefix[0])
+                snprintf(fname, sizeof(fname), "%s/%s_input.bin", gqa_dump_dir, prefix);
+            else
+                snprintf(fname, sizeof(fname), "%s/input.bin", gqa_dump_dir);
+            FILE *fp = fopen(fname, "wb");
+            if (fp) { fwrite(x, sizeof(float), N * d_model, fp); fclose(fp); }
+        }
+    }
     
     // Allocate
     // Q_full: [N, q_dim*2] = [N, 8192] — first q_dim=4096 Q, next 4096 gate
@@ -1266,6 +1288,36 @@ void wubu_gqa_forward(const float *x, int B, int T,
         w->attn_v_weight_q, w->attn_v_weight_type,
         D_MODEL, kv_dim, 0, N, V);
     
+    // DUMP_GQA_DEBUG_DIR: dump Q/K/V projections for 1:1 parity comparison
+    {
+        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
+        if (gqa_dump_dir && gqa_dump_dir[0]) {
+            const char *prefix = getenv("DUMP_GQA_PREFIX");
+            if (!prefix) prefix = "";
+            FILE *fp;
+            char fname[1024];
+            if (prefix[0]) {
+                snprintf(fname, sizeof(fname), "%s/%s_Q_full.bin", gqa_dump_dir, prefix);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_full, sizeof(float), N * q_dim * 2, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/%s_gate.bin", gqa_dump_dir, prefix);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(gate, sizeof(float), N * q_dim, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/%s_K.bin", gqa_dump_dir, prefix);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(K, sizeof(float), N * kv_dim, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/%s_V.bin", gqa_dump_dir, prefix);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(V, sizeof(float), N * kv_dim, fp); fclose(fp); }
+            } else {
+                snprintf(fname, sizeof(fname), "%s/Q_full.bin", gqa_dump_dir);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_full, sizeof(float), N * q_dim * 2, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/gate.bin", gqa_dump_dir);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(gate, sizeof(float), N * q_dim, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/K.bin", gqa_dump_dir);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(K, sizeof(float), N * kv_dim, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/V.bin", gqa_dump_dir);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(V, sizeof(float), N * kv_dim, fp); fclose(fp); }
+            }
+        }
+    }
+    
     // NaN guard: replace any NaN/Inf in Q_full, K, V with 0
     // Only check when debug is enabled; normally matmul produces no NaN
     const char *gqa_dd = getenv("DUMP_GQA_DEBUG");
@@ -1288,9 +1340,9 @@ void wubu_gqa_forward(const float *x, int B, int T,
     if (!Q_only) { free(Q_full); free(gate); free(K); free(V); free(Q_norm); free(K_norm); free(attn_out); return; }
     for (int s = 0; s < N; s++) {
         int q_offset = s * q_dim * 2;
-        for (int h = 0; h < GQA_Q_HEADS; h++) {
-            for (int j = 0; j < GQA_HEAD_DIM; j++) {
-                Q_only[s * q_dim + h * GQA_HEAD_DIM + j] = Q_full[q_offset + h * (2 * GQA_HEAD_DIM) + j];
+        for (int h = 0; h < n_q_heads; h++) {
+            for (int j = 0; j < head_dim; j++) {
+                Q_only[s * q_dim + h * head_dim + j] = Q_full[q_offset + h * (2 * head_dim) + j];
             }
         }
     }
@@ -1338,10 +1390,10 @@ void wubu_gqa_forward(const float *x, int B, int T,
                 float pos = (float)(b * T + t);
                 float pos_scale = pos * scale_factor;
                 
-                // Apply to all 16 Q heads — fully parallel
+                // Apply to all Q heads — fully parallel
                 #pragma omp parallel for
-                for (int h = 0; h < GQA_Q_HEADS; h++) {
-                    float *q_h = Q_norm + ((b * T + t) * GQA_Q_HEADS + h) * GQA_HEAD_DIM;
+                for (int h = 0; h < n_q_heads; h++) {
+                    float *q_h = Q_norm + ((b * T + t) * n_q_heads + h) * head_dim;
                     for (int i = 0; i < q_rot_pairs; i++) {
                         float theta = pos_scale * rope_theta[i];
                         float cos_t = cosf(theta);
@@ -1353,9 +1405,9 @@ void wubu_gqa_forward(const float *x, int B, int T,
                     }
                 }
                 
-                // Apply to all 2 KV heads
-                for (int h = 0; h < GQA_KV_HEADS; h++) {
-                    float *k_h = K_norm + ((b * T + t) * GQA_KV_HEADS + h) * GQA_HEAD_DIM;
+                // Apply to all KV heads
+                for (int h = 0; h < n_kv_heads; h++) {
+                    float *k_h = K_norm + ((b * T + t) * n_kv_heads + h) * head_dim;
                     for (int i = 0; i < q_rot_pairs; i++) {
                         float theta = pos_scale * rope_theta[i];
                         float cos_t = cosf(theta);
@@ -1366,6 +1418,28 @@ void wubu_gqa_forward(const float *x, int B, int T,
                         k_h[2*i+1] = x0 * sin_t + x1 * cos_t;
                     }
                 }
+            }
+        }
+    }
+    
+    // DUMP_GQA_DEBUG_DIR: dump Q_norm/K_norm after RoPE
+    {
+        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
+        if (gqa_dump_dir && gqa_dump_dir[0]) {
+            const char *prefix = getenv("DUMP_GQA_PREFIX");
+            if (!prefix) prefix = "";
+            FILE *fp;
+            char fname[1024];
+            if (prefix[0]) {
+                snprintf(fname, sizeof(fname), "%s/%s_Q_norm.bin", gqa_dump_dir, prefix);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_norm, sizeof(float), N * q_dim, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/%s_K_norm.bin", gqa_dump_dir, prefix);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(K_norm, sizeof(float), N * kv_dim, fp); fclose(fp); }
+            } else {
+                snprintf(fname, sizeof(fname), "%s/Q_norm.bin", gqa_dump_dir);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(Q_norm, sizeof(float), N * q_dim, fp); fclose(fp); }
+                snprintf(fname, sizeof(fname), "%s/K_norm.bin", gqa_dump_dir);
+                fp = fopen(fname, "wb"); if(fp) { fwrite(K_norm, sizeof(float), N * kv_dim, fp); fclose(fp); }
             }
         }
     }
@@ -1398,8 +1472,8 @@ void wubu_gqa_forward(const float *x, int B, int T,
         use_sparse = 0;
     }
     
-    // 16 Q heads, 2 KV heads. Each KV head serves 8 Q heads.
-    float scale = 1.0f / sqrtf(GQA_HEAD_DIM);
+    // n_q_heads Q heads, n_kv_heads KV heads. Each KV head serves n_q_heads/n_kv_heads Q heads.
+    float scale = 1.0f / sqrtf(head_dim);
     
     // AVX2 horizontal sum helper (inlined)
 #ifdef __AVX2__
@@ -1469,26 +1543,26 @@ void wubu_gqa_forward(const float *x, int B, int T,
             #pragma omp parallel for if(attend_len > 64)
             for (int _tk = 0; _tk < sparse_count; _tk++) {
                 int t_k = use_sparse ? sparse_buf[_tk] : _tk;
-                float k_buf0[GQA_HEAD_DIM], k_buf1[GQA_HEAD_DIM];
+                float k_buf0[1024], k_buf1[1024];
                 const float *k0, *k1;
                 
                 // Read K cache for both KV heads (or from new tokens)
                 if (t_k < cache_len) {
-                    int64_t off0 = (int64_t)t_k * GQA_KV_HEADS + 0;
-                    int64_t off1 = (int64_t)t_k * GQA_KV_HEADS + 1;
-                    kv_cache_read_head(k_cache, off0 * GQA_HEAD_DIM, k_buf0, GQA_HEAD_DIM);
-                    kv_cache_read_head(k_cache, off1 * GQA_HEAD_DIM, k_buf1, GQA_HEAD_DIM);
+                    int64_t off0 = (int64_t)t_k * n_kv_heads + 0;
+                    int64_t off1 = (int64_t)t_k * n_kv_heads + 1;
+                    kv_cache_read_head(k_cache, off0 * head_dim, k_buf0, head_dim);
+                    kv_cache_read_head(k_cache, off1 * head_dim, k_buf1, head_dim);
                     k0 = k_buf0; k1 = k_buf1;
                 } else {
                     int new_idx = t_k - cache_len;
-                    k0 = K_norm + (new_idx * GQA_KV_HEADS + 0) * GQA_HEAD_DIM;
-                    k1 = K_norm + (new_idx * GQA_KV_HEADS + 1) * GQA_HEAD_DIM;
+                    k0 = K_norm + (new_idx * n_kv_heads + 0) * head_dim;
+                    k1 = K_norm + (new_idx * n_kv_heads + 1) * head_dim;
                 }
                 
-                // Compute Q·K for all 16 Q heads at this position
-                for (int h_q = 0; h_q < GQA_Q_HEADS; h_q++) {
-                    const float *k_vec = (h_q < 8) ? k0 : k1;
-                    const float *q_vec = Q_norm + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
+                // Compute Q·K for all n_q_heads Q heads at this position
+                for (int h_q = 0; h_q < n_q_heads; h_q++) {
+                    const float *k_vec = (h_q < n_q_heads / 2) ? k0 : k1;
+                    const float *q_vec = Q_norm + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
                     float score;
                     
 #ifdef __AVX2__
@@ -1496,7 +1570,7 @@ void wubu_gqa_forward(const float *x, int B, int T,
                     __m256 acc1 = _mm256_setzero_ps();
                     __m256 acc2 = _mm256_setzero_ps();
                     __m256 acc3 = _mm256_setzero_ps();
-                    for (int i = 0; i < GQA_HEAD_DIM; i += 32) {
+                    for (int i = 0; i < head_dim; i += 32) {
                         acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(q_vec + i),     _mm256_loadu_ps(k_vec + i),     acc0);
                         acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(q_vec + i + 8), _mm256_loadu_ps(k_vec + i + 8), acc1);
                         acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(q_vec + i + 16),_mm256_loadu_ps(k_vec + i + 16),acc2);
@@ -1506,7 +1580,7 @@ void wubu_gqa_forward(const float *x, int B, int T,
                     score = HSUM256(tot) * scale;
 #else
                     score = 0.0f;
-                    for (int i = 0; i < GQA_HEAD_DIM; i++)
+                    for (int i = 0; i < head_dim; i++)
                         score += q_vec[i] * k_vec[i];
                     score *= scale;
 #endif
@@ -1516,10 +1590,10 @@ void wubu_gqa_forward(const float *x, int B, int T,
             
             // Now softmax and V weighted sum per Q head
             #pragma omp parallel for
-            for (int h_q = 0; h_q < GQA_Q_HEADS; h_q++) {
-                int h_kv = h_q / (GQA_Q_HEADS / GQA_KV_HEADS);
-                float *out_vec = attn_out + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
-                memset(out_vec, 0, GQA_HEAD_DIM * sizeof(float));
+            for (int h_q = 0; h_q < n_q_heads; h_q++) {
+                int h_kv = h_q / (n_q_heads / n_kv_heads);
+                float *out_vec = attn_out + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
+                memset(out_vec, 0, head_dim * sizeof(float));
                 
                 // Find max score for this head
                 float max_score = -1e30f;
@@ -1543,27 +1617,27 @@ void wubu_gqa_forward(const float *x, int B, int T,
                 // Weighted sum of V
                 for (int _tk = 0; _tk < sparse_count; _tk++) {
                     int t_k = use_sparse ? sparse_buf[_tk] : _tk;
-                    float v_buf[GQA_HEAD_DIM];
+                    float v_buf[1024];
                     const float *v_vec;
                     if (t_k < cache_len) {
-                        int64_t off = (int64_t)t_k * GQA_KV_HEADS + h_kv;
-                        kv_cache_read_head(v_cache, off * GQA_HEAD_DIM, v_buf, GQA_HEAD_DIM);
+                        int64_t off = (int64_t)t_k * n_kv_heads + h_kv;
+                        kv_cache_read_head(v_cache, off * head_dim, v_buf, head_dim);
                         v_vec = v_buf;
                     } else {
                         int new_idx = t_k - cache_len;
-                        v_vec = V + (new_idx * GQA_KV_HEADS + h_kv) * GQA_HEAD_DIM;
+                        v_vec = V + (new_idx * n_kv_heads + h_kv) * head_dim;
                     }
                     float a = all_attn_w[(size_t)h_q * sparse_count + _tk];
 #ifdef __AVX2__
                     __m256 a_v = _mm256_set1_ps(a);
-                    for (int i = 0; i < GQA_HEAD_DIM; i += 8) {
+                    for (int i = 0; i < head_dim; i += 8) {
                         __m256 v = _mm256_loadu_ps(v_vec + i);
                         __m256 o = _mm256_loadu_ps(out_vec + i);
                         o = _mm256_fmadd_ps(a_v, v, o);
                         _mm256_storeu_ps(out_vec + i, o);
                     }
 #else
-                    for (int i = 0; i < GQA_HEAD_DIM; i++) {
+                    for (int i = 0; i < head_dim; i++) {
                         out_vec[i] += a * v_vec[i];
                     }
 #endif
@@ -1581,19 +1655,61 @@ void wubu_gqa_forward(const float *x, int B, int T,
     all_attn_w = NULL;
     
     // Step 6: Gate (sigmoid)
+    // DUMP_GQA_DEBUG_DIR: dump attn_out before gating (raw attention)
+    {
+        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
+        if (gqa_dump_dir && gqa_dump_dir[0]) {
+            const char *prefix = getenv("DUMP_GQA_PREFIX");
+            if (!prefix) prefix = "";
+            FILE *fp;
+            char fname[1024];
+            if (prefix[0])
+                snprintf(fname, sizeof(fname), "%s/%s_attn_out_pregate.bin", gqa_dump_dir, prefix);
+            else
+                snprintf(fname, sizeof(fname), "%s/attn_out_pregate.bin", gqa_dump_dir);
+            fp = fopen(fname, "wb"); if(fp) { fwrite(attn_out, sizeof(float), N * q_dim, fp); fclose(fp); }
+        }
+    }
     float *gate_sig = (float *)malloc(N * q_dim * sizeof(float));
     if (!gate_sig) { free(gate_sig); free(Q_full); free(gate); free(K); free(V); free(Q_norm); free(K_norm); free(attn_out); return; }
     wubu_sigmoid(N * q_dim, gate, gate_sig);
-    
+
     for (int i = 0; i < N * q_dim; i++) {
         attn_out[i] *= gate_sig[i];
     }
-    
+
     // Step 7: Output projection via quantized or F32 matmul
-    for (int s = 0; s < N; s++) {
-        proj_matmul(attn_out + s * q_dim, q_dim, D_MODEL,
-                    w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
-                    output + s * D_MODEL);
+    // For standard layers (Qwen): out_dim = q_dim, use gated attn_out
+    // For DGemma-style layers: out_dim = q_dim*2, use Q_full directly (gate handled in output proj)
+    {
+        int out_proj_in_dim = q_dim;
+        const float *out_proj_in = attn_out;
+        if (w->out_dim != q_dim && w->out_dim == q_dim * 2) {
+            // DGemma-style: bypass gate, use Q_full as output projection input
+            out_proj_in_dim = q_dim * 2;
+            out_proj_in = Q_full;
+        }
+        for (int s = 0; s < N; s++) {
+            proj_matmul(out_proj_in + s * out_proj_in_dim, out_proj_in_dim, d_model,
+                        w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
+                        output + s * d_model);
+        }
+    }
+    
+    // DUMP_GQA_DEBUG_DIR: dump final output after output projection
+    {
+        const char *gqa_dump_dir = getenv("DUMP_GQA_DEBUG_DIR");
+        if (gqa_dump_dir && gqa_dump_dir[0]) {
+            const char *prefix = getenv("DUMP_GQA_PREFIX");
+            if (!prefix) prefix = "";
+            FILE *fp;
+            char fname[1024];
+            if (prefix[0])
+                snprintf(fname, sizeof(fname), "%s/%s_output.bin", gqa_dump_dir, prefix);
+            else
+                snprintf(fname, sizeof(fname), "%s/output.bin", gqa_dump_dir);
+            fp = fopen(fname, "wb"); if(fp) { fwrite(output, sizeof(float), N * d_model, fp); fclose(fp); }
+        }
     }
     
     // Copy K_norm and V to output buffers for KV cache (stored as F16 if enabled)
@@ -1628,12 +1744,14 @@ gqa_alloc_fail:
 // GQA forward with intermediate saving (for backward)
 void wubu_gqa_forward_save(const float *x, int B, int T,
                            const gqa_layer_weights *w,
+                           int d_model,
                            float *output,
-                           gqa_fwd_save_t *save)
+                           gqa_fwd_save_t *save,
+                           int head_dim, int n_q_heads, int n_kv_heads)
 {
     const int N = B * T;
-    const int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;
-    const int kv_dim = GQA_KV_HEADS * GQA_HEAD_DIM;
+    const int q_dim = n_q_heads * head_dim;
+    const int kv_dim = n_kv_heads * head_dim;
     
     float *Q_full = (float *)malloc(N * q_dim * 2 * sizeof(float));
     float *gate = (float *)malloc(N * q_dim * sizeof(float));
@@ -1681,21 +1799,21 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     // Step 4: (RoPE skipped)
     
     // Step 5: GQA Attention
-    float scale = 1.0f / sqrtf(GQA_HEAD_DIM);
+    float scale = 1.0f / sqrtf(head_dim);
     for (int b = 0; b < B; b++) {
         for (int t_q = 0; t_q < T; t_q++) {
-            for (int h_q = 0; h_q < GQA_Q_HEADS; h_q++) {
-                int h_kv = h_q / (GQA_Q_HEADS / GQA_KV_HEADS);
-                const float *q_vec = Q_norm + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
-                float *out_vec = attn_out + ((b * T + t_q) * GQA_Q_HEADS + h_q) * GQA_HEAD_DIM;
-                memset(out_vec, 0, GQA_HEAD_DIM * sizeof(float));
+            for (int h_q = 0; h_q < n_q_heads; h_q++) {
+                int h_kv = h_q / (n_q_heads / n_kv_heads);
+                const float *q_vec = Q_norm + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
+                float *out_vec = attn_out + ((b * T + t_q) * n_q_heads + h_q) * head_dim;
+                memset(out_vec, 0, head_dim * sizeof(float));
                 
                 float attn_weights[4096];
                 float max_score = -1e30f;
                 for (int t_k = 0; t_k <= t_q; t_k++) {
-                    const float *k_vec = K_norm + ((b * T + t_k) * GQA_KV_HEADS + h_kv) * GQA_HEAD_DIM;
+                    const float *k_vec = K_norm + ((b * T + t_k) * n_kv_heads + h_kv) * head_dim;
                     float score = 0.0f;
-                    for (int i = 0; i < GQA_HEAD_DIM; i++)
+                    for (int i = 0; i < head_dim; i++)
                         score += q_vec[i] * k_vec[i];
                     score *= scale;
                     // TGT: wrap attention score to prevent overflow — REMOVED: breaks softmax (inverts weights)
@@ -1713,9 +1831,9 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
                     attn_weights[t_k] /= sum_exp;
                 
                 for (int t_k = 0; t_k <= t_q; t_k++) {
-                    const float *v_vec = V + ((b * T + t_k) * GQA_KV_HEADS + h_kv) * GQA_HEAD_DIM;
+                    const float *v_vec = V + ((b * T + t_k) * n_kv_heads + h_kv) * head_dim;
                     float a = attn_weights[t_k];
-                    for (int i = 0; i < GQA_HEAD_DIM; i++)
+                    for (int i = 0; i < head_dim; i++)
                         out_vec[i] += a * v_vec[i];
                 }
             }
@@ -1732,12 +1850,20 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     
     for (int i = 0; i < N * q_dim; i++)
         attn_out[i] *= gate_sig[i];
-    
+
     // Step 7: Output projection via quantized or F32 matmul
-    for (int s = 0; s < N; s++) {
-        proj_matmul(attn_out + s * q_dim, q_dim, D_MODEL,
-                    w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
-                    output + s * D_MODEL);
+    {
+        int out_proj_in_dim = q_dim;
+        const float *out_proj_in = attn_out;
+        if (w->out_dim != q_dim && w->out_dim == q_dim * 2) {
+            out_proj_in_dim = q_dim * 2;
+            out_proj_in = Q_full;
+        }
+        for (int s = 0; s < N; s++) {
+            proj_matmul(out_proj_in + s * out_proj_in_dim, out_proj_in_dim, d_model,
+                        w->attn_output_weight, w->attn_output_weight_q, w->attn_output_weight_type,
+                        output + s * d_model);
+        }
     }
     
     // Save intermediates
@@ -2629,7 +2755,8 @@ void wubu_gqa_backward_attention(
 // Full GQA layer backward
 void wubu_gqa_backward(
     int B, int T,
-    const float *x,             // [B, T, D_MODEL] input to forward
+    int d_model,
+    const float *x,             // [B, T, d_model] input to forward
     const float *Q_norm,        // [N, q_dim] post-RMSNorm Q
     const float *Q_raw,         // [N, q_dim] pre-RMSNorm Q (from Q_full first half)
     const float *K_norm,        // [N, kv_dim] post-RMSNorm K
@@ -2638,16 +2765,16 @@ void wubu_gqa_backward(
     const float *gate,          // [N, q_dim] raw gate (pre-sigmoid)
     const float *gate_sig,      // [N, q_dim] sigmoid(gate)
     const float *attn_out,      // [N, q_dim] post-gate attn_out
-    const float *output,        // [B, T, D_MODEL] forward output
-    const float *d_output,      // [B, T, D_MODEL] upstream gradient
+    const float *output,        // [B, T, d_model] forward output
+    const float *d_output,      // [B, T, d_model] upstream gradient
     const gqa_layer_weights *w, // weights
-    float *d_x,                 // [B, T, D_MODEL] gradient to propagate
-    float *d_q_weight,          // [D_MODEL, q_dim*2] fused Q+gate weight grad
-    float *d_k_weight,          // [D_MODEL, kv_dim]
-    float *d_v_weight,          // [D_MODEL, kv_dim]
+    float *d_x,                 // [B, T, d_model] gradient to propagate
+    float *d_q_weight,          // [d_model, q_dim*2] fused Q+gate weight grad
+    float *d_k_weight,          // [d_model, kv_dim]
+    float *d_v_weight,          // [d_model, kv_dim]
     float *d_q_norm_weight,     // [GQA_HEAD_DIM]
     float *d_k_norm_weight,     // [GQA_HEAD_DIM]
-    float *d_out_weight)        // [q_dim, D_MODEL]
+    float *d_out_weight)        // [q_dim, d_model]
 {
     const int N = B * T;
     const int q_dim = GQA_Q_HEADS * GQA_HEAD_DIM;
@@ -2694,7 +2821,7 @@ void wubu_gqa_backward(
     }
     
     // === Step 7: Output projection backward ===
-    // Same dims as SSM output proj: [q_dim=4096, D_MODEL=2048]
+    // Same dims as SSM output proj: [q_dim=4096, d_model=2048]
     // Reuse the SSM function (VALUE_DIM == q_dim)
     wubu_ssm_backward_output_proj(attn_out, d_output, w->attn_output_weight,
                                    w->attn_output_weight_q, w->attn_output_weight_type,

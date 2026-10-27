@@ -121,8 +121,8 @@ int main(void) {
     // ========== Run Euclidean GQA ==========
     printf("\nRunning Euclidean GQA...\n");
     memset(output_euclidean, 0, N * D_MODEL * sizeof(float));
-    wubu_gqa_forward(x, B, T, &w, output_euclidean,
-                      NULL, NULL, 0, NULL, NULL);
+    wubu_gqa_forward(x, B, T, &w, D_MODEL, output_euclidean,
+                      NULL, NULL, 0, NULL, NULL, w.head_dim, w.q_heads, w.kv_heads);
 
     // Check Euclidean output for NaN (informational only)
     int euclidean_nan = 0;
