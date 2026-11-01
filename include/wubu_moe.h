@@ -21,6 +21,20 @@ extern "C" {
 #define DEF_N_ACTIVE_EXPTS  8     // top-k experts per token
 #define DEF_D_FF            512   // expert intermediate dimension
 #define DEF_SHARED_D_FF     512   // shared expert intermediate dimension
+
+/* Short aliases used by the engine sources; the DEF_ names are the canonical ones. */
+#ifndef N_EXPERTS
+#  define N_EXPERTS        DEF_N_EXPERTS
+#endif
+#ifndef N_ACTIVE_EXPTS
+#  define N_ACTIVE_EXPTS   DEF_N_ACTIVE_EXPTS
+#endif
+#ifndef D_FF
+#  define D_FF             DEF_D_FF
+#endif
+#ifndef SHARED_D_FF
+#  define SHARED_D_FF      DEF_SHARED_D_FF
+#endif
 #define DEF_D_MODEL         2048  // hidden dimension
 #endif
 
