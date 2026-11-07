@@ -130,6 +130,14 @@ int wubu_kv_embedding_encode_tokens(wubu_kv_embedding_t *kv,
                                      const uint16_t *tokens, size_t n_tokens) {
     if (!kv || !path || !tokens || n_tokens == 0) return -1;
 
+    /* Re-encoding an existing path REPLACES it (KV-FS write semantics):
+     * find a prior record, drop its namespace mount + record, then remount. */
+    int replace_idx = -1;
+    for (size_t i = 0; i < kv->n_paths; i++)
+        if (strcmp(kv->paths[i].path, path) == 0) { replace_idx = (int)i; break; }
+    if (replace_idx >= 0)
+        wubu_kvfs_unmount(kv->fs, path);
+
     /* Compute blocks needed: each token is 1 float in the KV tensor */
     int64_t n_floats = (int64_t)n_tokens;
     uint32_t n_blocks = (uint32_t)((n_floats + kv->block_size - 1) / kv->block_size);
@@ -155,19 +163,21 @@ int wubu_kv_embedding_encode_tokens(wubu_kv_embedding_t *kv,
     size_t abs_offset = wubu_kvfs_handle_offset(h);
     wubu_kvfs_handle_close(h);
 
-    /* Register the path for coherence lookup */
-    if (kv_emb_ensure_cap(kv) != 0) {
-        wubu_kvfs_unmount(kv->fs, path);
-        kv->next_block -= n_blocks;
-        return -1;
+    /* Register (or refresh) the path for coherence lookup */
+    if (replace_idx < 0) {
+        if (kv_emb_ensure_cap(kv) != 0) {
+            wubu_kvfs_unmount(kv->fs, path);
+            kv->next_block -= n_blocks;
+            return -1;
+        }
+        replace_idx = (int)kv->n_paths;
+        kv->n_paths++;
     }
-
-    kv_path_record_t *rec = &kv->paths[kv->n_paths];
+    kv_path_record_t *rec = &kv->paths[replace_idx];
     strncpy(rec->path, path, sizeof(rec->path) - 1);
     rec->path[sizeof(rec->path) - 1] = '\0';
     rec->n_tokens = (int64_t)n_tokens;
     rec->kv_offset = (int64_t)abs_offset;
-    kv->n_paths++;
 
     /* The caller (executor) writes the actual token floats into the KV
      * tensor at `offset` using wubu_kvfs_open + wubu_kvfs_handle_write.
