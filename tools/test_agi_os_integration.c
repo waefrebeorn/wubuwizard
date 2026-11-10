@@ -42,14 +42,16 @@ int main(void) {
     CHECK(wubu_ctx_tier(0.5f, 100)  == WUBU_CTX_L3, "mid -> L3");
     CHECK(wubu_ctx_tier(0.1f, 5)    == WUBU_CTX_L2, "low ttl -> L2");
 
-    /* AF09 FIFO eviction + working-set residency */
-    wubu_ctxring_t r; long buf[4]; r.tok = buf; r.head = 0; r.size = 0; r.capacity = 4;
+    /* AF09 HIVE-backed eviction + working-set residency */
+    wubu_ctxring_t r;
+    CHECK(wubu_ctxring_init(&r, 4) == 0, "ring init");
     for (long i = 1; i <= 4; i++) wubu_ctx_evict_fifo(&r, i);
     CHECK(r.size == 4, "filled to capacity");
-    int ev = wubu_ctx_evict_fifo(&r, 5); /* evicts 1 (token 1) */
+    int ev = wubu_ctx_evict_fifo(&r, 5); /* evicts 1 (oldest, all equal importance) */
     CHECK(ev == 1 && r.size == 4, "over capacity -> evict 1, stays at cap");
     CHECK(wubu_ctx_resident(&r, 5, 4) == 1, "token 5 resident in WS");
     CHECK(wubu_ctx_resident(&r, 1, 4) == 0, "evicted token 1 not resident");
+    wubu_ctxring_free(&r);
 
     /* AF10 cosine + semantic cache */
     float a[3] = {1,0,0}, b[3] = {1,0,0}, c[3] = {0,1,0};

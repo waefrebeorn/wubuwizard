@@ -77,7 +77,7 @@ int wubu_hive_erase(wubu_hive_t *h, void *ptr);
 
 /* H4: iterate all LIVE slots. The callback receives each live pointer;
  * return nonzero to stop early. Returns the count visited. */
-size_t wubu_hive_foreach(wubu_hive_t *h,
+size_t wubu_hive_foreach(const wubu_hive_t *h,
                          int (*fn)(void *ptr, void *user), void *user);
 
 /* H5: the live count. */

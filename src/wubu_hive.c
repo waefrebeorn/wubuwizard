@@ -141,12 +141,12 @@ int wubu_hive_erase(wubu_hive_t *h, void *ptr)
     return -1;   /* not found */
 }
 
-size_t wubu_hive_foreach(wubu_hive_t *h,
+size_t wubu_hive_foreach(const wubu_hive_t *h,
                          int (*fn)(void *ptr, void *user), void *user)
 {
     if (!h || !fn) return 0;
     size_t visited = 0;
-    for (wubu_hive_block_t *blk = h->head; blk; blk = blk->next) {
+    for (const wubu_hive_block_t *blk = h->head; blk; blk = blk->next) {
         if (blk->live == 0) continue;
         for (size_t s = 0; s < blk->cap; s++) {
             if (blk->skip[s] == 0) {

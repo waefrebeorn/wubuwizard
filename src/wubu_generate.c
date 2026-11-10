@@ -117,10 +117,12 @@ int wubu_generate(wubu_model_t *model, const int *prompt, int n_prompt,
     }
 
     /* AF08/09: context virtual-memory ring (logical residency tracker for the
-     * safety gate; capacity = max_ctx). FIFO demand-paging eviction on overflow. */
+     * safety gate; capacity = max_ctx). HIVE-backed demand-paging eviction. */
     wubu_ctxring_t cring;
-    long *cring_buf = (long *)malloc(sizeof(long) * max_ctx);
-    cring.tok = cring_buf; cring.head = 0; cring.size = 0; cring.capacity = max_ctx;
+    if (wubu_ctxring_init(&cring, (size_t)max_ctx) != 0) {
+        free(seq);
+        return 0;
+    }
 
     /* AF11: honor a kernel stop signal if externally raised (env sentinel).
      * The agent cannot set this -- only the operator/kernel can. */
@@ -303,7 +305,7 @@ int wubu_generate(wubu_model_t *model, const int *prompt, int n_prompt,
     }
 
     free(seq); free(logits);
-    free(cring_buf);
+    wubu_ctxring_free(&cring);
     wubu_decode_policy_destroy(policy);
 
     /* KV CACHE IS A FILE SYSTEM — final namespace writeback + 9P snapshot */
