@@ -13,6 +13,11 @@ Styx/9P namespace).
 
 ---
 
+
+> **~WuBu~ AGI** — one system, many repositories. This is the **Brain**. The Body is [WuBuOS](https://github.com/waefrebeorn/WuBuOS), the Compiler [WuBuNOS](https://github.com/waefrebeorn/WuBuNOS).
+
+
+> **~WuBu~ AGI** — one system, many repositories. This is the **Brain**. The Body is [WuBuOS](https://github.com/waefrebeorn/WuBuOS), the Compiler [WuBuNOS](https://github.com/waefrebeorn/WuBuNOS).
 ## What this repo is
 
 wubuwizard is the **Brain** half of the WuBu project — everything that
