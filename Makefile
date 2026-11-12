@@ -172,6 +172,10 @@ test_nested_moe_router_backward: tools/test_nested_moe_router_backward.c $(CORE_
 test_tokenizer: tools/test_tokenizer.c src/wubu_tokenizer.o src/gguf_reader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+test_magnet: tools/test_magnet.c src/wubu_magnet.c
+	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
+	./$@
+
 test_model: tools/test_model.c $(MODEL_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
