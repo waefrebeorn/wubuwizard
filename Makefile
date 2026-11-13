@@ -196,6 +196,10 @@ test_multiaddr: tools/test_multiaddr.c src/wubu_multiaddr.c
 	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
 	./$@
 
+test_cid: tools/test_cid.c src/wubu_cid.c
+	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
+	./$@
+
 test_model: tools/test_model.c $(MODEL_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 

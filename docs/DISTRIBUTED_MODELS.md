@@ -11,7 +11,8 @@ tested, what is next.
 | swarm | DHT, BEP 5 (node IDs, KRPC, `get_peers`) | **built** — `src/wubu_dht.c`, `make test_dht` |
 | swarm-state | routing table + peer selection | **built** — `src/wubu_dht_table.c`, `make test_dht_table` |
 | p2p-address | libp2p multiaddr | **built** — `src/wubu_multiaddr.c`, `make test_multiaddr` |
-| p2p-transport | bitswap / CID | next |
+| p2p-id | CID v0/v1 | **built** — `src/wubu_cid.c`, `make test_cid` |
+| p2p-transport | bitswap WantList/Block | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
 | inference | OpenAI-compatible API | next |
@@ -139,4 +140,28 @@ IPv4-tail test matched a dot belonging to a LATER group and rejected valid
 addresses (scope the search with `strcspn(p, ":")` first), and `::` followed by
 eight explicit groups was accepted even though RFC 4291 requires `::` to stand
 for at least one zero group.
+
+### Content identifiers
+
+`include/wubu_cid.h` / `src/wubu_cid.c`. A CID names WHAT something is rather
+than where it lives: `<version><codec><multihash>`. The codec names the
+encoding (raw, dag-pb, dag-cbor); the multihash names the hash and carries the
+digest. Splitting them is what lets a peer verify bytes before knowing how to
+interpret them.
+
+- v0 (the 46-character legacy form) parses and builds as base58btc only — it
+  has no other legal shape, and one that is not dag-pb / sha2-256 / 32 bytes
+  does not build at all.
+- v1 in base32 (`b`), base58btc (`z`) or base16 (`f`). The same CID in two
+  bases decodes to identical fields and re-encodes byte-identically.
+- Varints are exposed publicly because bitswap reuses them.
+
+Every accepted literal was decoded and re-encoded independently with Python's
+stdlib, including two CIDs that differ only in their last base58 digit — both
+legal, with different digests. 92 checks.
+
+Two findings worth keeping: an unknown encoding must be validated BEFORE any
+branching, because a builder ending in `else { hex }` happily emits a valid
+string for a nonsense base; and a negative test that assumes a one-digit
+variant should be rejected will pass a broken parser and fail a correct one.
 
