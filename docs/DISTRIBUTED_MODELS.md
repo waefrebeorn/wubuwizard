@@ -8,7 +8,7 @@ tested, what is next.
 |---|---|---|
 | address | BitTorrent magnet (BEP 9) | **built** — `src/wubu_magnet.c`, `make test_magnet` |
 | hash | SHA-1 of the bencoded info dict (the btih) | **built** — `src/wubu_sha1.c` + `src/wubu_torrent.c`, `make test_sha1` / `test_torrent` |
-| swarm | DHT, BEP 5 (node IDs, KRPC, `get_peers`) | next |
+| swarm | DHT, BEP 5 (node IDs, KRPC, `get_peers`) | **built** — `src/wubu_dht.c`, `make test_dht` |
 | p2p | libp2p (multiaddr, bitswap) | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
@@ -51,12 +51,33 @@ splitting the input at *every* byte boundary streams to the same digest.
 
 ## What is next, in order
 
-1. **DHT (BEP 5)**: node IDs and the XOR distance metric, KRPC
-   `get_peers`/`announce_peer`, and a routing table that buckets by prefix
-   distance. Nothing can be announced until there are peers to announce to.
+1. **The DHT routing table**: the identity/distance/KRPC leg exists; the table
+   that buckets by shared-prefix length, answers `find_node`, and picks which
+   peers to ask for an info-hash is next.
 2. **libp2p fallback**: multiaddr parse, bitswap block exchange.
 3. **OpenAI-compatible API**: one endpoint that serves a swarm-resolved model.
 4. **DePIN compute**: attach a job to Akash / io.net / Gensyn / Bittensor.
+
+### The DHT addressing core (BEP 5)
+
+`include/wubu_dht.h` / `src/wubu_dht.c`:
+
+- A node id is **derived** (SHA-1 of the node's seed), never typed in — two
+  nodes cannot claim one id by both choosing it, and an id cannot be placed
+  somewhere convenient.
+- Distance is XOR over the 160-bit id, compared big-endian. Bucketing is by
+  shared prefix length, so the closest buckets are known exactly.
+- The four KRPC messages (`ping`, `find_node`, `get_peers`, `announce_peer`)
+  encode and decode. Requests must carry a transaction id — without one a
+  response cannot be matched — so encoding refuses to omit it.
+- Errors carry their code under `e` as `[code, message]`, not under `r`.
+- Fail-closed on non-bencode bodies, truncated datagrams, trailing bytes, a
+  wrong-shaped id or token, and a request with no id. Every refusal is `-1`
+  and leaves the caller's struct untouched.
+
+48 checks, including the metric properties (symmetric, zero only when equal),
+ordering against a known anchor, and a single differing bit reported at its
+exact position across all 160 bits.
 
 ### Reading a `.torrent`
 

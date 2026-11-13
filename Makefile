@@ -184,6 +184,10 @@ test_torrent: tools/test_torrent.c src/wubu_torrent.c src/wubu_sha1.c
 	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
 	./$@
 
+test_dht: tools/test_dht.c src/wubu_dht.c src/wubu_sha1.c
+	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
+	./$@
+
 test_model: tools/test_model.c $(MODEL_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
