@@ -256,3 +256,23 @@ ping code rather than a byte count.
 51 checks, including consecutive frames walked forward until every byte is
 consumed.
 
+### Standards conformance notes
+
+Checked against the published specs rather than memory:
+
+- **yamux frame types are 0x0 Data, 0x1 Window Update, 0x2 Ping, 0x3 Go Away.**
+  My first enum started at 1 -- an off-by-one that would put a Window Update on
+  the wire where every libp2p peer reads Data. The test now asserts the
+  spec's own numbers explicitly.
+- **Multiformats unsigned varints have a practical maximum of NINE bytes
+  (63 bits)**, and non-minimal encodings must be rejected: `{0x81, 0x00}` is 1
+  with a wasted byte and is refused. Values at or above 2^63 are refused by
+  `wubu_varint_encode` rather than silently growing to ten bytes.
+- **protobuf varints differ in exactly one way**: a negative int32 is
+  sign-extended to 64 bits, so `-1` is ten bytes (`ff` x9, `01`). That is why
+  `wubu_pb_varint` exists separately from `wubu_varint_encode`. Refusing it
+  would emit protobuf a peer cannot read.
+- **multistream-select messages are UTF-8 strings always followed by `\n`**,
+  length-prefixed including the newline; the responder ECHOES the protocol id
+  on agreement or answers `na`. Both peers send `/multistream/1.0.0\n` first.
+

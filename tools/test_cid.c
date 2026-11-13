@@ -111,7 +111,7 @@ int main(void)
     {
         static const uint64_t vals[] = {
             0, 1, 127, 128, 255, 16383, 16384, 2097151, 2097152,
-            (uint64_t)1 << 32, UINT64_MAX
+            (uint64_t)1 << 32, ((uint64_t)1 << 63) - 1
         };
         for (unsigned i = 0; i < sizeof(vals) / sizeof(vals[0]); i++) {
             uint8_t buf[16];
@@ -126,15 +126,35 @@ int main(void)
         }
         {
             uint8_t buf[16];
-            long n = wubu_varint_encode(UINT64_MAX, buf, sizeof(buf));
-            CHECK(n == 10, "the maximum needs ten bytes");
-            uint8_t trunc[10];
-            memcpy(trunc, buf, 10);
-            trunc[9] = 0x80;                 /* continuation with nothing after */
             uint64_t back = 0;
             size_t used = 0;
-            CHECK(wubu_varint_decode(trunc, 10, &back, &used) == -1,
+
+            /* The multiformats practical maximum is NINE bytes (63 bits). */
+            long n = wubu_varint_encode(((uint64_t)1 << 63) - 1,
+                                        buf, sizeof(buf));
+            CHECK(n == 9, "2^63-1 takes the full nine bytes");
+            CHECK(wubu_varint_encode((uint64_t)1 << 63, buf, sizeof(buf)) == -1,
+                  "a value at or above 2^63 is refused, not silently ten bytes");
+
+            uint8_t trunc[10];
+            memcpy(trunc, buf, 9);
+            trunc[8] = 0x80;                 /* continuation, nothing after */
+            CHECK(wubu_varint_decode(trunc, 9, &back, &used) == -1,
                   "a varint that never terminates is refused");
+
+            /* Non-minimal encodings are refused: {0x81, 0x00} is 1 with a
+               wasted byte, and one number must have exactly one spelling. */
+            static const uint8_t padded[] = { 0x81, 0x00 };
+            CHECK(wubu_varint_decode(padded, sizeof(padded), &back, &used) == -1,
+                  "a non-minimal varint is refused");
+            static const uint8_t padded2[] = { 0x80, 0x80, 0x00 };
+            CHECK(wubu_varint_decode(padded2, sizeof(padded2),
+                                     &back, &used) == -1,
+                  "a three-byte zero is refused");
+            /* Zero itself is the one value allowed to end in 0x00. */
+            uint8_t zero[1] = { 0x00 };
+            CHECK(wubu_varint_decode(zero, 1, &back, &used) == 0 && back == 0,
+                  "zero still decodes");
         }
     }
 

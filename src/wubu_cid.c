@@ -11,19 +11,40 @@
 
 /* ---- varint ---------------------------------------------------- */
 
+/* Multiformats unsigned varints have a practical maximum of NINE bytes (63
+ * bits): "Implementations MUST restrict the size of the varint to a max of 9
+ * bytes".  Values at or above 2^63 therefore cannot be represented here and
+ * are refused rather than silently truncated into ten bytes. */
+#define WUBU_VARINT_MAX_BYTES 9
+
 long wubu_varint_encode(uint64_t v, uint8_t *out, size_t n)
 {
+    if (!out || v >= ((uint64_t)1 << 63)) return -1;
+
+    uint8_t tmp[WUBU_VARINT_MAX_BYTES];
     size_t o = 0;
     do {
-        if (o >= n) return -1;
+        if (o >= sizeof(tmp)) return -1;
         uint8_t b = (uint8_t)(v & 0x7F);
         v >>= 7;
         if (v) b |= 0x80;
-        out[o++] = b;
+        tmp[o++] = b;
     } while (v);
+
+    if (o > n) return -1;
+    memcpy(out, tmp, o);
     return (long)o;
 }
 
+/* Decoding tolerates up to TEN bytes because protobuf sign-extends negative
+ * int32/int64 to a 64-bit varint, and bitswap carries negative priorities.
+ * Callers that need the stricter multiformats limit bound the VALUE instead
+ * (a CID or a frame length can never legitimately reach 2^63).
+ *
+ * Non-minimal encodings are refused: {0x81, 0x00} means 1 but wastes a byte,
+ * and accepting it lets one number have two spellings.  The spec requires the
+ * minimal form ("Leading zeros must be trimmed when encoding and must be
+ * rejected when decoding"). */
 int wubu_varint_decode(const uint8_t *in, size_t n, uint64_t *out,
                        size_t *used)
 {
@@ -33,6 +54,7 @@ int wubu_varint_decode(const uint8_t *in, size_t n, uint64_t *out,
     for (size_t i = 0; i < n; i++) {
         uint8_t b = in[i];
         if (shift >= 64) return -1;          /* would overflow */
+        if (i > 0 && b == 0x00) return -1;   /* not minimally encoded */
         v |= ((uint64_t)(b & 0x7F)) << shift;
         if (!(b & 0x80)) {
             *out = v;

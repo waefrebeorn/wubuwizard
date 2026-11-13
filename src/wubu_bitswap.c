@@ -12,9 +12,26 @@
 
 /* ---- protobuf primitives --------------------------------------- */
 
+/* protobuf varints differ from multiformats ones in exactly one way that
+ * matters here: a negative int32 is sign-extended to a 64-bit value, so -1 is
+ * written as ten bytes (ff x9, 01).  The multiformats 9-byte limit would
+ * refuse that, and refusing it would emit a protobuf peer cannot read.
+ * Minimality is still enforced -- no wasted bytes either way. */
 long wubu_pb_varint(uint8_t *out, size_t n, uint64_t v)
 {
-    return wubu_varint_encode(v, out, n);
+    if (!out) return -1;
+    uint8_t tmp[10];
+    size_t o = 0;
+    do {
+        if (o >= sizeof(tmp)) return -1;
+        uint8_t b = (uint8_t)(v & 0x7F);
+        v >>= 7;
+        if (v) b |= 0x80;
+        tmp[o++] = b;
+    } while (v);
+    if (o > n) return -1;
+    memcpy(out, tmp, o);
+    return (long)o;
 }
 
 long wubu_pb_tag(uint8_t *out, size_t n, unsigned field, int wire)

@@ -14,19 +14,29 @@ static int failures, checks;
 /* Hand-checked: version 0, type DATA(1), flags SYN, stream 1, length 5,
  * payload "hello". */
 static const uint8_t kDataHello[] = {
-    0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
     0x00, 0x00, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o'
 };
 
 /* PING with SYN and a 7-byte opaque code, no payload. */
 static const uint8_t kPing[] = {
-    0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x07
 };
 
 int main(void)
 {
     printf("=== test_yamux ===\n");
+
+    /* ---- the spec's own type numbers ---- */
+    {
+        CHECK(WUBU_YAMUX_DATA == 0x0 && WUBU_YAMUX_WINDOW_UPDATE == 0x1 &&
+              WUBU_YAMUX_PING == 0x2 && WUBU_YAMUX_GOAWAY == 0x3,
+              "frame type numbers match the libp2p yamux specification");
+        CHECK(WUBU_YAMUX_SYN == 0x1 && WUBU_YAMUX_ACK == 0x2 &&
+              WUBU_YAMUX_FIN == 0x4 && WUBU_YAMUX_RST == 0x8,
+              "flag bits match the specification");
+    }
 
     /* ---- golden vectors ---- */
     {

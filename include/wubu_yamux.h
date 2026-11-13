@@ -30,11 +30,15 @@
 #define WUBU_YAMUX_HEADER    12
 #define WUBU_YAMUX_MAX_LEN   (1 << 20)
 
+/* Type numbers are the ones from the libp2p yamux specification:
+ *   0x0 Data, 0x1 Window Update, 0x2 Ping, 0x3 Go Away.
+ * They are written explicitly rather than left implicit -- an enum that starts
+ * at 1 would put a Window Update on the wire where a peer reads Data. */
 typedef enum {
-    WUBU_YAMUX_DATA = 1,
-    WUBU_YAMUX_WINDOW_UPDATE = 2,
-    WUBU_YAMUX_PING = 3,
-    WUBU_YAMUX_GOAWAY = 4
+    WUBU_YAMUX_DATA = 0,
+    WUBU_YAMUX_WINDOW_UPDATE = 1,
+    WUBU_YAMUX_PING = 2,
+    WUBU_YAMUX_GOAWAY = 3
 } wubu_yamux_type_t;
 
 enum {
