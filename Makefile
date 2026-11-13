@@ -208,6 +208,10 @@ test_multistream: tools/test_multistream.c src/wubu_multistream.c src/wubu_cid.c
 	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
 	./$@
 
+test_yamux: tools/test_yamux.c src/wubu_yamux.c
+	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
+	./$@
+
 test_model: tools/test_model.c $(MODEL_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 

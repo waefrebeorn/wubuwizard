@@ -14,6 +14,7 @@ tested, what is next.
 | p2p-id | CID v0/v1 | **built** — `src/wubu_cid.c`, `make test_cid` |
 | block-exch | bitswap Message | **built** — `src/wubu_bitswap.c`, `make test_bitswap` |
 | mux-address | multistream-select | **built** — `src/wubu_multistream.c`, `make test_multistream` |
+| stream-mux | yamux framing | **built** — `src/wubu_yamux.c`, `make test_yamux` |
 | crypto | noise handshake | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
@@ -225,4 +226,33 @@ Three findings worth keeping:
   with "no previous character", or every legal protocol fails as `//`.
 - **A newline-free body is DATA, not corruption.** Refusing it would make a
   negotiated binary protocol indistinguishable from a broken frame.
+
+### Stream multiplexing
+
+`include/wubu_yamux.h` / `src/wubu_yamux.c`. One connection carries many logical
+streams; each frame is a fixed 12-byte header plus an optional payload:
+
+```
+version    1 byte    always 0
+type       1 byte    DATA / WINDOW_UPDATE / PING / GOAWAY
+flags      2 bytes   BE: SYN, ACK, FIN, RST
+streamID   4 bytes   BE: odd = client-initiated, even = server
+length     4 bytes   BE: payload length, or the window delta
+```
+
+This module frames and parses headers. It does not open sockets, track windows,
+or reassemble streams -- framing is its whole job.
+
+The two golden vectors (a DATA/SYN frame carrying "hello" and a PING/SYN with a
+7-byte code) are asserted byte-for-byte against hand-checked layouts.
+
+One API decision worth recording: **a DATA frame's wire length is DERIVED from
+the payload.** The first version trusted a caller-supplied `h->length`, which
+meant a caller could claim a length that did not match the bytes actually handed
+over -- the exact class of bug this whole stack exists to prevent. Control
+frames keep their own length field, because there it means a window delta or a
+ping code rather than a byte count.
+
+51 checks, including consecutive frames walked forward until every byte is
+consumed.
 
