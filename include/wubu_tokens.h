@@ -88,3 +88,54 @@ static inline unsigned int wubu_token_color(const char *name) {
 }
 
 #endif /* WUBU_TOKENS_H */
+
+/* ---- Layout tokens --------------------------------------------------
+ *
+ * There was no layout scale here at all when the audit ran: every surface
+ * invented its own margins (2, 4, 6, 7, 8, 10, 12, 20 appear independently
+ * across the shell), which is why windows, menus and the taskbar disagree by a
+ * pixel or two everywhere.  A spacing system only works if it has ONE owner,
+ * so these are the numbers and nothing else may hardcode geometry.
+ *
+ * The grid is 4px.  Anything not on it needs a reason written down.
+ */
+
+#define WUBU_SPACE_2XS    2
+#define WUBU_SPACE_XS     4
+#define WUBU_SPACE_SM     8
+#define WUBU_SPACE_MD     12
+#define WUBU_SPACE_LG     16
+#define WUBU_SPACE_XL     24
+#define WUBU_SPACE_2XL    32
+
+/* Corner radii.  Win11 uses 8 at 100% scale for windows and menus. */
+#define WUBU_RADIUS_NONE  0
+#define WUBU_RADIUS_SM    4
+#define WUBU_RADIUS_MD    8
+#define WUBU_RADIUS_LG    12
+
+/* Borders. */
+#define WUBU_BORDER_HAIRLINE  1
+#define WUBU_BORDER_THIN      2
+
+/* ---- Control metrics (Windows 11 at 100% scale) ---- */
+
+#define WUBU_CONTROL_H     32   /* a standard button / list row */
+#define WUBU_ICON_SM       16   /* title-bar and menu icon */
+#define WUBU_ICON_MD       24   /* desktop icon glyph */
+#define WUBU_ICON_LG       32
+
+#define WUBU_TITLE_BAR_H   32   /* Win11 caption height */
+#define WUBU_TITLE_BTN_W   46   /* caption button width */
+#define WUBU_TITLE_BTN_H   32   /* flush with the caption bar */
+#define WUBU_TITLE_PAD     WUBU_SPACE_SM   /* icon and title inset */
+
+#define WUBU_TASKBAR_H     48   /* Win11 taskbar height */
+#define WUBU_MENU_PAD      WUBU_SPACE_MD   /* menu content inset */
+#define WUBU_MENU_ROW_H    26
+
+/* Type sizes (the VBE draws at a fixed 8px cell; these are cap heights used
+ * for vertical centring, not point sizes). */
+#define WUBU_FONT_CAP_H    8
+#define WUBU_FONT_BODY_H   8
+
