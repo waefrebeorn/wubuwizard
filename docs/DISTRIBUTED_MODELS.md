@@ -12,7 +12,8 @@ tested, what is next.
 | swarm-state | routing table + peer selection | **built** — `src/wubu_dht_table.c`, `make test_dht_table` |
 | p2p-address | libp2p multiaddr | **built** — `src/wubu_multiaddr.c`, `make test_multiaddr` |
 | p2p-id | CID v0/v1 | **built** — `src/wubu_cid.c`, `make test_cid` |
-| p2p-transport | bitswap WantList/Block | next |
+| block-exch | bitswap Message | **built** — `src/wubu_bitswap.c`, `make test_bitswap` |
+| p2p-transport | stream mux / crypto | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
 | inference | OpenAI-compatible API | next |
@@ -164,4 +165,33 @@ Two findings worth keeping: an unknown encoding must be validated BEFORE any
 branching, because a builder ending in `else { hex }` happily emits a valid
 string for a nonsense base; and a negative test that assumes a one-digit
 variant should be rejected will pass a broken parser and fail a correct one.
+
+### Block exchange
+
+`include/wubu_bitswap.h` / `src/wubu_bitswap.c`. A peer that knows WHAT it
+wants still needs a way to ask for it:
+
+- **Wantlist** — a list of CIDs plus, per entry, a priority, whether it is a
+  cancellation, whether the peer wants a block or just confirmation of
+  possession, and whether a "don't have" answer is acceptable. `full` marks
+  whether this is the entire list rather than an incremental update.
+- **Block** — a multihash prefix plus the bytes.
+- **BlockPresence** — a CID plus HAVE or DONT_HAVE.
+
+The protobuf primitives (`tag`, `varint`, length-delimited fields) are public
+because the other legs reuse them. A negative int32 priority is written
+sign-extended to 64 bits, which is what protobuf requires — the golden vector
+in the test carries nine `0xff` bytes plus `0x01` for `-1`.
+
+The deprecated `Message.block` repeated-bytes form is refused rather than
+half-read: it carries raw blocks with no structure to validate. The module
+encodes and decodes; it does not carry — producing bytes and validating
+structure is its whole job.
+
+45 checks, including a byte-for-byte golden message checked against the
+go-bitswap schema by hand.
+
+One finding worth keeping: an empty buffer is a valid, empty protobuf message,
+and refusing it makes an absent payload indistinguishable from a corrupt one.
+But a NULL buffer WITH a non-zero length is still a lie and is refused.
 
