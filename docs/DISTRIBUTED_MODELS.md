@@ -10,7 +10,8 @@ tested, what is next.
 | hash | SHA-1 of the bencoded info dict (the btih) | **built** — `src/wubu_sha1.c` + `src/wubu_torrent.c`, `make test_sha1` / `test_torrent` |
 | swarm | DHT, BEP 5 (node IDs, KRPC, `get_peers`) | **built** — `src/wubu_dht.c`, `make test_dht` |
 | swarm-state | routing table + peer selection | **built** — `src/wubu_dht_table.c`, `make test_dht_table` |
-| p2p | libp2p (multiaddr, bitswap) | next |
+| p2p-address | libp2p multiaddr | **built** — `src/wubu_multiaddr.c`, `make test_multiaddr` |
+| p2p-transport | bitswap / CID | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
 | inference | OpenAI-compatible API | next |
@@ -113,3 +114,29 @@ Tested against two independently constructed torrents whose spans and digests
 were computed with Python's `hashlib`: a minimal single-file torrent, and a
 multi-file one with keys before `info` and a nested `files` list — so the span
 is proved to be exactly the info dict and not a fixed offset.
+
+### libp2p multiaddr
+
+`include/wubu_multiaddr.h` / `src/wubu_multiaddr.c`. A multiaddr is a
+self-describing path to a peer — `/ip4/1.2.3.4/tcp/6881/p2p/<peer-id>` — so a
+peer can be named without knowing yet how to reach it. Same property as the
+magnet: an address that survives the host.
+
+- ipv4, ipv6 (including `::` compression and the IPv4-mapped tail), tcp, udp,
+  dns/dns4/dns6, p2p, and the flag protocols (`quic`, `tls`, `ws`, ...).
+- Fail-closed: unknown protocol, trailing or doubled slash, leading-zero octet
+  or port, out-of-range values, malformed IPv6. Every refusal is `-1` and the
+  caller's struct is untouched.
+- The IPv6 vectors were checked against Python's `ipaddress`: 16 literals where
+  the parser and the reference implementation agree on accept/reject AND on the
+  resulting bytes — including `::ffff:1.2.3.4`, which builds back as the
+  equivalent hex groups `::ffff:102:304`.
+
+80 checks.
+
+Two bugs my own tests caught, both worth remembering: `strchr(p, '.')` for the
+IPv4-tail test matched a dot belonging to a LATER group and rejected valid
+addresses (scope the search with `strcspn(p, ":")` first), and `::` followed by
+eight explicit groups was accepted even though RFC 4291 requires `::` to stand
+for at least one zero group.
+

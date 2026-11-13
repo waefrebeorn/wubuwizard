@@ -192,6 +192,10 @@ test_dht_table: tools/test_dht_table.c src/wubu_dht_table.c src/wubu_dht.c src/w
 	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
 	./$@
 
+test_multiaddr: tools/test_multiaddr.c src/wubu_multiaddr.c
+	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
+	./$@
+
 test_model: tools/test_model.c $(MODEL_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
