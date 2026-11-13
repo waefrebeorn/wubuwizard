@@ -176,6 +176,10 @@ test_magnet: tools/test_magnet.c src/wubu_magnet.c
 	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
 	./$@
 
+test_sha1: tools/test_sha1.c src/wubu_sha1.c
+	$(CC) $(CFLAGS) -Iinclude -o $@ $^ $(LDFLAGS)
+	./$@
+
 test_model: tools/test_model.c $(MODEL_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
