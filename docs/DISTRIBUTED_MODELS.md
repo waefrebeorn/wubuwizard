@@ -13,7 +13,8 @@ tested, what is next.
 | p2p-address | libp2p multiaddr | **built** — `src/wubu_multiaddr.c`, `make test_multiaddr` |
 | p2p-id | CID v0/v1 | **built** — `src/wubu_cid.c`, `make test_cid` |
 | block-exch | bitswap Message | **built** — `src/wubu_bitswap.c`, `make test_bitswap` |
-| p2p-transport | stream mux / crypto | next |
+| mux-address | multistream-select | **built** — `src/wubu_multistream.c`, `make test_multistream` |
+| crypto | noise handshake | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
 | inference | OpenAI-compatible API | next |
@@ -194,4 +195,34 @@ go-bitswap schema by hand.
 One finding worth keeping: an empty buffer is a valid, empty protobuf message,
 and refusing it makes an absent payload indistinguishable from a corrupt one.
 But a NULL buffer WITH a non-zero length is still a lie and is refused.
+
+### Protocol negotiation
+
+`include/wubu_multistream.h` / `src/wubu_multistream.c`. Before any bitswap
+message travels, both peers must agree on which protocol the connection speaks:
+
+- `<varint length><bytes>` frames, where the length counts the bytes on the
+  wire -- including the trailing newline for strings.
+- `/multistream/1.0.0\n` is the header every side sends first. It is 19 bytes,
+  not 20 or 22: counting it wrong puts two bytes of the following frame inside
+  the header and the read fails.
+- A proposal such as `/ipfs/bitswap/1.2.0\n`; `na\n` when it is unknown.
+- Anything printable ending in a newline is a string message; anything else is
+  an opaque DATA frame, which this layer reports without interpreting.
+
+`wubu_ms_select` compares bare protocol names against the wire form, so the
+wanted table reads `/ipfs/id/1.0.0` rather than carrying its own newline.
+
+48 checks, including the header asserted byte-for-byte against the known wire
+form.
+
+Three findings worth keeping:
+
+- **The trailing newline is required but is not printable (0x0A).** A scan that
+  treats the whole body as printable rejects the header itself; the final byte
+  sits outside that scan.
+- **A leading slash is not a repeated slash.** Segment validation must start
+  with "no previous character", or every legal protocol fails as `//`.
+- **A newline-free body is DATA, not corruption.** Refusing it would make a
+  negotiated binary protocol indistinguishable from a broken frame.
 
