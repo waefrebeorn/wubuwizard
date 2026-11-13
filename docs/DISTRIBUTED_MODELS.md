@@ -9,6 +9,7 @@ tested, what is next.
 | address | BitTorrent magnet (BEP 9) | **built** — `src/wubu_magnet.c`, `make test_magnet` |
 | hash | SHA-1 of the bencoded info dict (the btih) | **built** — `src/wubu_sha1.c` + `src/wubu_torrent.c`, `make test_sha1` / `test_torrent` |
 | swarm | DHT, BEP 5 (node IDs, KRPC, `get_peers`) | **built** — `src/wubu_dht.c`, `make test_dht` |
+| swarm-state | routing table + peer selection | **built** — `src/wubu_dht_table.c`, `make test_dht_table` |
 | p2p | libp2p (multiaddr, bitswap) | next |
 | permanence | Pirate Face / swarm retention | next |
 | compute | DePIN: Akash, io.net, Gensyn, Bittensor | next |
@@ -51,10 +52,7 @@ splitting the input at *every* byte boundary streams to the same digest.
 
 ## What is next, in order
 
-1. **The DHT routing table**: the identity/distance/KRPC leg exists; the table
-   that buckets by shared-prefix length, answers `find_node`, and picks which
-   peers to ask for an info-hash is next.
-2. **libp2p fallback**: multiaddr parse, bitswap block exchange.
+1. **libp2p fallback**: multiaddr parse, bitswap block exchange.
 3. **OpenAI-compatible API**: one endpoint that serves a swarm-resolved model.
 4. **DePIN compute**: attach a job to Akash / io.net / Gensyn / Bittensor.
 
@@ -78,6 +76,26 @@ splitting the input at *every* byte boundary streams to the same digest.
 48 checks, including the metric properties (symmetric, zero only when equal),
 ordering against a known anchor, and a single differing bit reported at its
 exact position across all 160 bits.
+
+### The routing table
+
+`include/wubu_dht_table.h` / `src/wubu_dht_table.c` is the state half: buckets
+keyed by shared-prefix length against **our own** id, so a bucket holds peers
+at roughly one distance and the closest neighbourhood is known exactly.
+
+- A full bucket (8) evicts its **stalest** member — a live peer beats a
+  remembered one, and a dead slot otherwise stays occupied forever.
+- Our own id and the zero id are refused: asking ourselves is a loop, and a
+  zero id is what an uninitialised peer looks like, which poisons every
+  distance calculation downstream.
+- `closest()` orders by distance to a target using a bounded insertion into a
+  fixed output (no heap, no allocation). `find_node()` caps at k=8.
+- `reap()` drops entries silent past a window, the same discipline as the SDR
+  session layer: a slot becomes reusable only after its peer is reaped.
+
+41 checks, including eviction of the stalest rather than the freshest, exact
+ordering by distance, the k cap, and reap keeping the recent while dropping
+the silent.
 
 ### Reading a `.torrent`
 

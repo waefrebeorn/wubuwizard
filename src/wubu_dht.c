@@ -244,29 +244,6 @@ static int rd_skip_value(rd_t *r)
     return rd_bstr_span(r, &s, &l);
 }
 
-/* Read one dictionary entry: the KEY IS CONSUMED, then either its value is
- * copied (key matched `want`) or the value is skipped whole.
- * Returns 1 on a match, 0 on a non-match, -1 on anything malformed.
- *
- * `exact_len` > 0 requires the value to be exactly that many bytes; 0 accepts
- * any length up to `cap`. */
-static int rd_entry(rd_t *r, const char *want, size_t want_len,
-                    uint8_t *dst, size_t cap, size_t exact_len, size_t *got)
-{
-    size_t ks, kl;
-    if (rd_bstr_span(r, &ks, &kl) != 0) return -1;
-    if (kl == want_len && memcmp(r->b + ks, want, want_len) == 0) {
-        size_t vs, vl;
-        if (rd_bstr_span(r, &vs, &vl) != 0) return -1;
-        if (vl > cap) return -1;
-        if (exact_len && vl != exact_len) return -1;
-        if (dst) memcpy(dst, r->b + vs, vl);
-        if (got) *got = vl;
-        return 1;
-    }
-    return rd_skip_value(r) == 0 ? 0 : -1;
-}
-
 /* The `r` dictionary of a response: id, then optionally token / nodes.
  * An error body is NOT an r-dict -- BEP 5 puts it under `e` -- so this only
  * ever sees real responses. */
