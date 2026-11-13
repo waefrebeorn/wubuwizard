@@ -7,7 +7,7 @@ tested, what is next.
 | leg | protocol | status |
 |---|---|---|
 | address | BitTorrent magnet (BEP 9) | **built** — `src/wubu_magnet.c`, `make test_magnet` |
-| hash | SHA-1 of the bencoded info dict (the btih) | **built** — `src/wubu_sha1.c`, `make test_sha1` (FIPS 180-4 vectors) |
+| hash | SHA-1 of the bencoded info dict (the btih) | **built** — `src/wubu_sha1.c` + `src/wubu_torrent.c`, `make test_sha1` / `test_torrent` |
 | swarm | DHT, BEP 5 (node IDs, KRPC, `get_peers`) | next |
 | p2p | libp2p (multiaddr, bitswap) | next |
 | permanence | Pirate Face / swarm retention | next |
@@ -51,13 +51,26 @@ splitting the input at *every* byte boundary streams to the same digest.
 
 ## What is next, in order
 
-1. **bencode** (`wubu_bencode.c`): read a `.torrent`'s `info` dict and re-emit
-   it canonically, so `sha1(canonical_info)` is a real btih. Then read the
-   `index.json` manifests in `manifests/` so a model already tracked here can
-   be addressed by magnet.
-2. **DHT (BEP 5)**: node IDs and the XOR distance metric, KRPC
+1. **DHT (BEP 5)**: node IDs and the XOR distance metric, KRPC
    `get_peers`/`announce_peer`, and a routing table that buckets by prefix
-   distance.
-3. **libp2p fallback**: multiaddr parse, bitswap block exchange.
-4. **OpenAI-compatible API**: one endpoint that serves a swarm-resolved model.
-5. **DePIN compute**: attach a job to Akash / io.net / Gensyn / Bittensor.
+   distance. Nothing can be announced until there are peers to announce to.
+2. **libp2p fallback**: multiaddr parse, bitswap block exchange.
+3. **OpenAI-compatible API**: one endpoint that serves a swarm-resolved model.
+4. **DePIN compute**: attach a job to Akash / io.net / Gensyn / Bittensor.
+
+### Reading a `.torrent`
+
+`include/wubu_torrent.h` / `src/wubu_torrent.c` locate the `info` value's byte
+span and SHA-1 it. It does **not** re-encode the dictionary: hashing a
+re-encoded copy gives a different hash unless the original was already
+canonical, so a hash of anything other than the file's own bytes is a lie.
+
+Fail-closed on a truncated file, a non-dictionary top level, a bad string
+length, a leading-zero length prefix, trailing bytes, a missing `info`, or an
+empty one (an empty info dict addresses nothing usable). Every refusal is the
+same `-1`.
+
+Tested against two independently constructed torrents whose spans and digests
+were computed with Python's `hashlib`: a minimal single-file torrent, and a
+multi-file one with keys before `info` and a nested `files` list — so the span
+is proved to be exactly the info dict and not a fixed offset.
