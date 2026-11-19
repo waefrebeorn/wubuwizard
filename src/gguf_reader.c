@@ -828,7 +828,7 @@ void dequantize_iq4_nl_row(const uint8_t *data, float *output, int64_t n_elems) 
 // IQ2_XXS block sizes (used in gguf_read_tensor_f32) — verified from GGUF data offsets
 // block_iq2_xxs: 66 bytes per 256 elements = 2.0625 bpw
 #define IQ2_XXS_BLOCK_SIZE 66
-#define IQ2_XS_BLOCK_SIZE 108  // d(2) + qs[64] + qh[32] + scales[10] = 108 bytes (2.125 bpw)
+#define IQ2_XS_BLOCK_SIZE 74   // d(2) + qs[32]*u16(64) + scales[8] = 74 bytes (2.3125 bpw, canonical)
 #define IQ2_S_BLOCK_SIZE 82
 #define IQ3_XXS_BLOCK_SIZE 98  // d(fp16,2) + qs[96] = 98 bytes
 #define IQ3_S_BLOCK_SIZE 110   // d(2) + qs[64] + qh[8] + signs[32] + scales[4] = 110
@@ -1682,6 +1682,10 @@ static const uint64_t iq2xxs_grid[256] = {
 
 // Helper tables for IQ2_XXS sign decoding from llama.cpp
 static const uint8_t kmask_iq2xs[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+/* iq2xs_grid: 512 uint64, each packing 8 int8 magnitudes (ggml-common.h) */
+static const uint64_t iq2xs_grid[512] = {
+#include "iq2xs_grid.inc"
+};
 static const uint8_t ksigns_iq2xs[128] = {
       0, 129, 130,   3, 132,   5,   6, 135, 136,   9,  10, 139,  12, 141, 142,  15,
     144,  17,  18, 147,  20, 149, 150,  23,  24, 153, 154,  27, 156,  29,  30, 159,
@@ -1751,51 +1755,34 @@ void dequantize_iq2_xxs_row(const uint8_t *data, float *output, int64_t n_elems)
 // Reference: llama.cpp ggml-quants.c dequantize_row_iq2_xs()
 // Layout: 2 bytes d + 64 bytes qs (4-bit grid indices per element) + 32 bytes qh (high 2 bits) + 10 bytes scales (8-bit per group of 32 elements, 8 groups = 64 bytes? Actually 256/32=8 groups, 8 bytes + 2 extra)
 void dequantize_iq2_xs_row(const uint8_t *data, float *output, int64_t n_elems) {
-    // Reference: llama.cpp ggml-quants.c
-    // block_iq2_xs: d(fp16,2) + qs[64] + qh[32] + scales[10] = 108 bytes
-    // qs: 4-bit grid indices (0-15) packed 2 per byte for 256 elements = 128 bytes? No...
-    // Wait, IQ2_XS uses 2 bits per element for grid index + 2 bits high = 4 bits total
-    // So 256 elements * 4 bits = 128 bytes = 64 bytes qs + 32 bytes qh + 2 bytes d + 10 bytes scales = 108
-    
-    static const uint8_t iq2_xs_grid[32] = {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
-    };
-    
+    /* Canonical ggml block_iq2_xs: d(fp16,2) + qs[32]*uint16(64) + scales[8]
+     * = 74 bytes per 256 elements. Each uint16 qs word: low 9 bits = grid
+     * index into iq2xs_grid[512] (8 int8 magnitudes per uint64), top 7 bits
+     * = sign-pattern index into ksigns_iq2xs[128]. Per ib32 group the scale
+     * byte gives two 4-bit sub-scales: db = d * (0.5 + ls) * 0.25.
+     * Replaces the old placeholder (wrong 108B layout, linear idx mapping). */
     int64_t n_blocks = (n_elems + QK_K - 1) / QK_K;
     for (int64_t b = 0; b < n_blocks; b++) {
         const uint8_t *block = data + b * IQ2_XS_BLOCK_SIZE;
-        
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
         float d = gguf_f16_to_f32(d_bits);
-        
-        const uint8_t *qs = block + 2;           // 64 bytes: 4-bit grid indices (2 per byte)
-        const uint8_t *qh = block + 2 + 64;      // 32 bytes: high 2 bits per element
-        const int8_t *scales = (const int8_t *)(block + 2 + 64 + 32); // 10 bytes scales
-        
-        for (int i = 0; i < QK_K && b * QK_K + i < n_elems; i++) {
-            // Extract 4-bit grid index from qs (2 elements per byte)
-            int q_idx = i / 2;
-            int shift = (i & 1) ? 4 : 0;
-            int grid_idx = (qs[q_idx] >> shift) & 0xF;
-            
-            // Extract 2 high bits from qh (4 elements per byte)
-            int qh_idx = i / 4;
-            int qh_shift = (i % 4) * 2;
-            int high_bits = (qh[qh_idx] >> qh_shift) & 0x3;
-            
-            // Combine into 10-bit index (8-bit grid + 2 high bits)
-            int full_idx = (grid_idx << 2) | high_bits;
-            
-            // Scale index (group of 32 elements)
-            int scale_idx = i / 32;
-            int scale = scales[scale_idx];
-            
-            // IQ2_XS uses a 10-bit grid. The grid values need to be looked up.
-            // For now, use a simple linear mapping - the actual grid is 1024 entries like IQ2_S
-            // This is a placeholder - real implementation needs the full 1024-entry grid
-            output[b * QK_K + i] = d * (float)scale * (float)full_idx * 0.01f;
+        const uint16_t *qs = (const uint16_t *)(block + 2);
+        const uint8_t *scales = block + 2 + 64;
+        float *y = output + b * QK_K;
+        for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+            float db[2];
+            db[0] = d * (0.5f + (scales[ib32] & 0xf)) * 0.25f;
+            db[1] = d * (0.5f + (scales[ib32] >> 4)) * 0.25f;
+            for (int l = 0; l < 4; l++) {
+                uint16_t q = qs[4 * ib32 + l];
+                const uint8_t *grid = (const uint8_t *)(&iq2xs_grid[q & 511]);
+                uint8_t signs = ksigns_iq2xs[q >> 9];
+                for (int j = 0; j < 8; j++) {
+                    y[j] = db[l / 2] * grid[j] * ((signs & kmask_iq2xs[j]) ? -1.0f : 1.0f);
+                }
+                y += 8;
+            }
         }
     }
 }
