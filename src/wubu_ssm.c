@@ -1,4 +1,5 @@
 #include "wubu_ssm.h"
+#include "wubu_alloc.h"
 #include "wubu_mobius.h"
 #include "gguf_reader.h"
 #include "thread_pool.h"
@@ -65,15 +66,15 @@ ssm_workspace_t *wubu_ssm_workspace_alloc(int B, int T) {
 
 void wubu_ssm_workspace_free(ssm_workspace_t *ws) {
     if (!ws) return;
-    free(ws->qkv_all);        free(ws->z_all);
-    free(ws->beta_raw);       free(ws->alpha_raw);
-    free(ws->conv_input);     free(ws->conv_output);
-    free(ws->q_conv);         free(ws->k_conv);
-    free(ws->v_conv);         free(ws->q_norm);
-    free(ws->k_norm);         free(ws->delta_out);
-    free(ws->z_silu);         free(ws->beta_flat);
-    free(ws->gate_flat);      free(ws->alpha_biased);
-    free(ws->alpha_softplus);
+    wubu_aligned_free(ws->qkv_all);   wubu_aligned_free(ws->z_all);
+    wubu_aligned_free(ws->beta_raw);  wubu_aligned_free(ws->alpha_raw);
+    wubu_aligned_free(ws->conv_input); wubu_aligned_free(ws->conv_output);
+    wubu_aligned_free(ws->q_conv);    wubu_aligned_free(ws->k_conv);
+    wubu_aligned_free(ws->v_conv);    wubu_aligned_free(ws->q_norm);
+    wubu_aligned_free(ws->k_norm);    wubu_aligned_free(ws->delta_out);
+    wubu_aligned_free(ws->z_silu);    wubu_aligned_free(ws->beta_flat);
+    wubu_aligned_free(ws->gate_flat); wubu_aligned_free(ws->alpha_biased);
+    wubu_aligned_free(ws->alpha_softplus);
     free(ws);
 }
 
@@ -1209,9 +1210,9 @@ cleanup_p:
  * L2-normalize: the RMSNorm with a ones-weight is the identity-weight case.
  * (The load marks the weights optional; the forward must not deref NULL.) */
 static const float *gqa_qk_norm_ones(const float *w) {
-    static float ones[256];  /* max supported head dim (runtime GQA_HEAD_DIM ≤ 256) */
+    static float ones[1024];  /* covers LARGE head_dim=512 layers too */
     static int inited = 0;
-    if (!inited) { for (int i = 0; i < 256; i++) ones[i] = 1.0f; inited = 1; }
+    if (!inited) { for (int i = 0; i < 1024; i++) ones[i] = 1.0f; inited = 1; }
     return w ? w : ones;
 }
 

@@ -114,6 +114,10 @@ h3_norm_test: tools/test_h3_norm.c src/wubu_h3_norm.o src/wubu_dequant_nf4.o src
 	$(CC) $(CFLAGS) -o $@ tools/test_h3_norm.c src/wubu_h3_norm.o src/wubu_dequant_nf4.o src/wubu_win.o src/wubu_dequant_fp4.o $(LDLIBS)
 	@echo "h3_norm_test built"
 
+gen_text_gemma4: tools/gen_text_gemma4.c $(CORE_OBJ) src/wubu_gemma4_model.o
+	$(CC) $(CFLAGS) -o $@ tools/gen_text_gemma4.c $(CORE_OBJ) src/wubu_gemma4_model.o $(LDLIBS)
+	@echo "gen_text_gemma4 built (dedicated Gemma4 engine: sliding-window + GELU FFN)"
+
 patch_embed_test: tools/test_patch_embed.c src/wubu_patch_embed.o src/wubu_win.o
 	$(CC) $(CFLAGS) -o $@ tools/test_patch_embed.c src/wubu_patch_embed.o src/wubu_win.o $(LDLIBS)
 	@echo "patch_embed_test built"

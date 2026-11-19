@@ -18,6 +18,7 @@
  */
 
 #include "wubu_kv_cacheline.h"
+#include "wubu_alloc.h"
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -59,8 +60,8 @@ wubu_kv_cacheline_t *wubu_kv_cacheline_create(int block_size, int head_dim,
     store->V_data = (float *)aligned_alloc64(store->total_bytes);
 
     if (!store->K_data || !store->V_data) {
-        free(store->K_data);
-        free(store->V_data);
+        wubu_aligned_free(store->K_data);
+        wubu_aligned_free(store->V_data);
         free(store);
         return NULL;
     }
@@ -78,8 +79,8 @@ wubu_kv_cacheline_t *wubu_kv_cacheline_create(int block_size, int head_dim,
 
 void wubu_kv_cacheline_free(wubu_kv_cacheline_t *store) {
     if (!store) return;
-    free(store->K_data);
-    free(store->V_data);
+    wubu_aligned_free(store->K_data);
+    wubu_aligned_free(store->V_data);
     free(store);
 }
 

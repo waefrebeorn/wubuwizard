@@ -17,8 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
 #include <sys/resource.h>
 #include <sys/prctl.h>
+#endif
 
 #ifdef GPU_SUPPORT
 #include "gpu_gemma4.h"
@@ -79,12 +81,14 @@ static int sample_topk(const float *logits, int n_vocab, int top_k, float temper
 }
 
 int main(int argc, char **argv) {
-    /* Disable core dumps */
+    /* Disable core dumps (POSIX only) */
+#ifndef _WIN32
     {
         struct rlimit rl = {0, 0};
         setrlimit(RLIMIT_CORE, &rl);
         prctl(PR_SET_DUMPABLE, 0);
     }
+#endif
 
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <model.gguf> [prompt] [n_tokens] [top_k]\n", argv[0]);

@@ -13,6 +13,7 @@
  *   int4 pack ........... 1 (but slab padded to parent align)
  */
 #include "wubu_arena.h"
+#include "wubu_alloc.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -94,7 +95,7 @@ void wubu_arena_reset(wubu_arena_t *a)
 int wubu_arena_free(wubu_arena_t *a)
 {
     if (!a) return 0;
-    free(a->base);
+    wubu_aligned_free(a->base);
     free(a->slabs);
     free(a);
     return 0;

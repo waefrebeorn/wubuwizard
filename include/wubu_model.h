@@ -406,6 +406,10 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path);
 // Free model resources
 void wubu_model_free(wubu_model_t *model);
 
+/* One-token embedding lookup (eager f32 or quantized-lazy GGUF path).
+ * Returns 1 on success; 0 = no source, caller should zero the row. */
+int wubu_model_embed_token(const wubu_model_t *model, int token_id, float *out);
+
 // Forward pass through all layers
 // Input: token_ids [B, T], Output: logits [B, T, vocab_size]
 void wubu_model_forward(wubu_model_t *model,

@@ -1,4 +1,5 @@
 #include "wubu_model.h"
+#include "wubu_alloc.h"
 #include "gguf_reader.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -561,8 +562,12 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         }
     }
     int64_t k_cache_bytes = kv_cache_alloc_size(total_cache_elems);
-    model->gqa_k_cache = malloc(k_cache_bytes);
-    model->gqa_v_cache = malloc(k_cache_bytes);
+    /* posix_memalign: the bridge path uses it too, and wubu_model_free
+     * releases with wubu_aligned_free -- one allocator, one paired free. */
+    if (posix_memalign(&model->gqa_k_cache, 64, k_cache_bytes ? (size_t)k_cache_bytes : 16) != 0)
+        model->gqa_k_cache = NULL;
+    if (posix_memalign(&model->gqa_v_cache, 64, k_cache_bytes ? (size_t)k_cache_bytes : 16) != 0)
+        model->gqa_v_cache = NULL;
     if (!model->gqa_k_cache || !model->gqa_v_cache) {
         fprintf(stderr, "Failed to allocate GQA KV cache (%ld MB)\n", (long)(k_cache_bytes / (1024*1024)));
         goto fail;
@@ -626,8 +631,8 @@ void wubu_model_free(wubu_model_t *model) {
     free(model->output_weight);
     free(model->ssm_states);
     free(model->ssm_states_saved);  // frees both ssm_states_saved and conv_states_saved (same alloc)
-    free(model->gqa_k_cache);
-    free(model->gqa_v_cache);
+    wubu_aligned_free(model->gqa_k_cache);
+    wubu_aligned_free(model->gqa_v_cache);
     wubu_mtp_free(&model->mtp);
     if (model->gguf_ctx) {
         gguf_close(model->gguf_ctx);
@@ -643,6 +648,30 @@ static double wall_time(void) {
 }
 
 // ========== Forward Pass ==========
+
+/* One-token embedding lookup for tools that drive forward_from_embd
+ * themselves (gen_text). Handles the eager-f32 and quantized-lazy paths;
+ * the raw embedding-file path stays with the caller (it owns the FILE*).
+ * Returns 1 on success, 0 if no embedding source is available. */
+int wubu_model_embed_token(const wubu_model_t *model, int token_id, float *out)
+{
+    const int D = model->d_model;
+    if (token_id < 0 || token_id >= model->vocab_size) token_id = 0;
+    if (model->token_embd) {
+        memcpy(out, model->token_embd + (int64_t)token_id * D, (size_t)D * sizeof(float));
+        return 1;
+    }
+    if (model->token_embd_q && model->gguf_ctx) {
+        gguf_tensor_info *t = gguf_find_tensor(model->gguf_ctx, "token_embd.weight");
+        if (t) {
+            int64_t stride = gguf_raw_size(t->ggml_type, D);
+            gguf_dequantize(model->token_embd_q + (size_t)token_id * stride,
+                            model->token_embd_type, D, out);
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void wubu_model_forward_from_embd(wubu_model_t *model,
                                   const float *embeddings, int B, int T,
@@ -809,7 +838,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             char prefix_buf[64];
             int is_debug_layer = (gqa_debug_target >= 0 && l == gqa_debug_target);
             if (is_debug_layer) {
-                snprintf(prefix_buf, sizeof(prefix_buf), "L%d_gqa%d", l, l_gqa);
+                snprintf(prefix_buf, sizeof(prefix_buf), "L%d_gqa%d_N%d", l, l_gqa, T);
                 setenv("DUMP_GQA_PREFIX", prefix_buf, 1);
             } else {
                 setenv("DUMP_GQA_PREFIX", "", 1);
@@ -1048,14 +1077,14 @@ void wubu_model_forward(wubu_model_t *model,
             memset(embd, 0, N * model->d_model * sizeof(float));
         }
     } else if (model->token_embd_q) {
-        // Large vocab: dequantize per-token from mmap'd GGUF blob
+        // Large vocab: dequantize per-token from mmap'd GGUF blob.
+        // Row stride = quantized bytes of ONE d_model row (gguf_raw_size);
+        // the old raw/n_elems*dims[1] integer-divided to 0 (raw < n_elems
+        // for sub-byte quants), so every token read row 0.
         gguf_tensor_info *t_emb = gguf_find_tensor(model->gguf_ctx, "token_embd.weight");
         int bytes_per_token = (int)(model->d_model * sizeof(float));  // default: F32
         if (t_emb) {
-            int64_t n_elems = 1;
-            for (int d = 0; d < t_emb->n_dims; d++) n_elems *= t_emb->dims[d];
-            int64_t raw = gguf_raw_size(t_emb->ggml_type, n_elems);
-            bytes_per_token = (int)(raw / n_elems * t_emb->dims[1]);
+            bytes_per_token = (int)gguf_raw_size(t_emb->ggml_type, model->d_model);
         }
         for (int i = 0; i < N; i++) {
             int tok = token_ids[i];

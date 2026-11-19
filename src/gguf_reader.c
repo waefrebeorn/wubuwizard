@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "gguf_reader.h"
+#include "wubu_alloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -575,10 +576,16 @@ float gguf_f16_to_f32(uint16_t h) {
     uint32_t mant = h & 0x03FF;
     if (exp == 0) {
         if (mant == 0) return sign ? -0.0f : 0.0f;
-        // Subnormal: shift until mant has bit 10 set
+        /* Subnormal fp16 = mant * 2^-24. Normalize: shift left until bit 10
+         * is set (shift = clz(mant)-21, 1..10), drop the implicit leading 1,
+         * f32 exponent = 113 - shift (103..112, always positive). The old
+         * new_exp = 1-shift went NEGATIVE for mant < 512 and bled the shifted
+         * mantissa into the exponent field -> inf/NaN scales -> NaN weights
+         * on every quiet quantized row (IQ2_S/IQ3_S/... d is often subnormal). */
         const int shift = __builtin_clz(mant) - 21;
-        const uint32_t new_exp = exp + 1 - shift;
-        fp32.u = (sign << 31) | (new_exp << 23) | (mant << (13 + shift));
+        const uint32_t m = ((uint32_t)mant << shift) & 0x3FFu;
+        const uint32_t new_exp = 113u - (uint32_t)shift;
+        fp32.u = (sign << 31) | (new_exp << 23) | (m << 13);
         return fp32.f;
     }
     if (exp == 31) {
@@ -1116,7 +1123,7 @@ void gguf_close(gguf_ctx *ctx) {
             if (ctx->data_blob_is_mmap)
                 munmap(ctx->data_blob_mmap_base, ctx->data_blob_mmap_len);
             else
-                free(ctx->data_blob);
+                wubu_aligned_free(ctx->data_blob);
         }
         free(ctx->tensors);
         free(ctx);
@@ -1459,9 +1466,9 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_IQ1_S: return n_blocks * 42;   // d[2] + qs[32] + qh[8]
         case GGML_TYPE_IQ1_M: return n_blocks * 56;   // d[2] + qs[32] + qh[16] + scales[6]
         case GGML_TYPE_IQ2_XXS: return n_blocks * 66; // d[2] + qs[64] = 66 (NOT 72 — verified empirically)
-        case GGML_TYPE_IQ2_XS: return n_blocks * 108; // d[2] + qs[64] + qh[32] + scales[10]
-        case GGML_TYPE_IQ2_S: return n_blocks * 88;    // d[2] + qs[64] + qh[16] + scales[6]
-        case GGML_TYPE_IQ3_S: return n_blocks * 116;   // d[2] + qs[96] + qh[12] + scales[6]
+        case GGML_TYPE_IQ2_XS: return n_blocks * 74;  // d[2] + qs[32]*u16 + scales[8] (canonical; NOTE: dequantize_iq2_xs_row still assumes the old 108B layout -- needs rewrite)
+        case GGML_TYPE_IQ2_S: return n_blocks * 82;    // d[2] + qs[64] + qh[8] + scales[8]
+        case GGML_TYPE_IQ3_S: return n_blocks * 110;   // d[2] + qs[64] + qh[8] + signs[32] + scales[4]
         case GGML_TYPE_IQ3_XXS: return n_blocks * 98;   // d[2] + qs[96] = 98 bytes (verified vs llama.cpp struct)
         case GGML_TYPE_IQ4_NL: return ((n_elems + 31) / 32) * 18;  // d[2] + qs[16], block=32 (same as Q4_0)
         case GGML_TYPE_IQ4_XS: return n_blocks * 136;  // d[2] + scales_h[2] + scales_l[4] + qs[128]
@@ -1536,7 +1543,7 @@ int gguf_buffer_data(gguf_ctx *ctx) {
     size_t n_read = fread(ctx->data_blob, 1, blob_size, ctx->file);
     if (n_read != blob_size) {
         fprintf(stderr, "gguf_buffer_data: read %zu/%lu bytes\n", n_read, (unsigned long)blob_size);
-        free(ctx->data_blob);
+        wubu_aligned_free(ctx->data_blob);
         ctx->data_blob = NULL;
         return 0;
     }

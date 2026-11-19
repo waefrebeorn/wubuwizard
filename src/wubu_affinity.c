@@ -8,6 +8,7 @@
  */
 #define _GNU_SOURCE            /* must precede any system header for CPU_SET macros */
 #include "wubu_affinity.h"
+#include "wubu_alloc.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -67,9 +68,9 @@ void *wubu_numa_alloc(size_t bytes, int node) {
 }
 void wubu_numa_free(void *p) {
 #if defined(__linux__)
-    if (p) free(p); /* posix_memalign memory is freed with free() */
+    if (p) wubu_aligned_free(p); /* _aligned_free on Windows, free on POSIX */
 #else
-    free(p);
+    wubu_aligned_free(p);
 #endif
 }
 

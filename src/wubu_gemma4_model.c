@@ -113,8 +113,17 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
                     uint32_t exp  = (d_bits >> 10) & 0x1F;
                     uint32_t mant = d_bits & 0x03FF;
                     uint32_t f32_bits;
-                    if (exp == 0)
-                        f32_bits = (sign << 31) | ((uint32_t)(127 - 15 + 1) << 23) | (mant << 13);
+                    if (exp == 0) {
+                        /* subnormal fp16: normalize (mant<<shift until bit 10),
+                         * drop implicit 1, exponent 113-shift. The old code
+                         * assumed bit 10 set -> wrong scale for mant < 512. */
+                        if (mant == 0) f32_bits = sign << 31;
+                        else {
+                            int shift = __builtin_clz(mant) - 21;
+                            uint32_t m = ((uint32_t)mant << shift) & 0x3FFu;
+                            f32_bits = (sign << 31) | ((113u - (uint32_t)shift) << 23) | (m << 13);
+                        }
+                    }
                     else if (exp == 31)
                         f32_bits = (sign << 31) | (0xFF << 23) | (mant << 13);
                     else
@@ -124,8 +133,9 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
                     const uint8_t *qs = col_data + b * 18 + 2;
                     int64_t base = b * 32;
                     for (int j = 0; j < 32 && base + j < K; j++) {
-                        int shift = (j & 1) ? 0 : 4;
-                        int val = (qs[j / 2] >> shift) & 0xF;
+                        /* ggml Q4_0 layout: elems 0-15 = LOW nibbles of
+                         * qs[0..15], elems 16-31 = HIGH nibbles. */
+                        int val = (j < 16) ? (qs[j] & 0x0F) : (qs[j - 16] >> 4);
                         sum += x[(size_t)m * K + base + j] * d * (float)(val - 8);
                     }
                 }

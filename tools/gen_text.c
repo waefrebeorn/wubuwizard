@@ -63,11 +63,11 @@ static int read_embedding(const wubu_model_t *mdl, int token_id, float *out, FIL
             return nread == (size_t)D ? 1 : 0;
         }
         return 0;
-    } else if (mdl->token_embd && token_id >= 0 && token_id < mdl->vocab_size) {
-        memcpy(out, mdl->token_embd + (long long)token_id * D, D * sizeof(float));
-        return 1;
     }
-    return 0;
+    /* eager f32 OR quantized-lazy GGUF (large vocab): the model API owns
+     * both. The old code only handled token_embd != NULL, so quantized
+     * large-vocab models silently produced ZERO embeddings. */
+    return wubu_model_embed_token(mdl, token_id, out);
 }
 
 // Build ChatML prompt tokens for a user message. On first turn (cache_len==0),

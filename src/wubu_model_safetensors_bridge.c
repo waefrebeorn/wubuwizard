@@ -9,6 +9,7 @@
  * No third-party deps. C11, self-contained.
  */
 #include "wubu_model_safetensors_bridge.h"
+#include "wubu_alloc.h"
 #include "wubu_dims.h"
 #include "wubu_safetensors_shard.h"
 #include "safetensors_reader.h"
