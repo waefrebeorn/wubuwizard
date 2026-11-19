@@ -64,6 +64,17 @@ typedef struct ssm_layer_weights {
     int attn_gate_weight_type;
     const uint8_t *ssm_out_weight_q;    // raw Q6_K
     int ssm_out_weight_type;
+    /* BF16/F16 lazy path (AN22 bridge): raw shard bytes + dtype; the _f32
+     * pointers cache the dequantized result on first use. f32_mode forces
+     * the dequantized path even when quantized pointers are present. */
+    const uint8_t *attn_qkv_weight_raw;
+    const uint8_t *attn_gate_weight_raw;
+    const uint8_t *ssm_out_weight_raw;
+    float *attn_qkv_weight_f32;
+    float *attn_gate_weight_f32;
+    float *ssm_out_weight_f32;
+    int lazy_dtype;
+    int f32_mode;
     
     // Pre-attention and post-attention norms
     float *attn_norm_weight;          // [D_MODEL] = [2048]
@@ -98,6 +109,13 @@ typedef struct gqa_layer_weights {
     int attn_k_weight_type;
     const uint8_t *attn_v_weight_q;        // raw Q5_K
     int attn_v_weight_type;
+    /* BF16/F16 lazy path (AN22 bridge): raw shard bytes + dtype, dequantized
+     * on first use; NULL weight means the lazy path owns the tensor. */
+    const uint8_t *attn_q_weight_raw;
+    const uint8_t *attn_k_weight_raw;
+    const uint8_t *attn_v_weight_raw;
+    const uint8_t *attn_output_weight_raw;
+    int lazy_dtype;
     const uint8_t *attn_output_weight_q;   // raw Q5_K
     int attn_output_weight_type;
     

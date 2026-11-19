@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
             // Forward
             double t0 = now_sec();
             wubu_ssm_forward(cpu_in, B, T, &w,
-                             ssm_states_cpu[layer], conv_states_cpu[layer], cpu_out, NULL, NULL);
+                             ssm_states_cpu[layer], conv_states_cpu[layer], cpu_out, NULL, NULL, NULL);
             t_cpu_total += now_sec() - t0;
             
             // DEBUG: check output

@@ -161,11 +161,16 @@ void wubu_moe_router_only(const float *x, int B, int T,
 // d_normed2: [B*T, D_MODEL] — output gradient w.r.t. MoE input
 // weight_grad_bufs: pre-allocated zero-initialized gradient buffers (or NULL to skip)
 void wubu_moe_backward(const float *d_output, int B, int T,
-                       const float *x,
+                       const float *normed2,
                        const moe_weights_t *w,
-                       float *d_x,
-                       int *selected_experts,
-                       int n_active_experts, int n_experts, int d_model, int d_ff);
+                       float *d_normed2,
+                       float *d_gate_inp,
+                       float *d_gate_exps,
+                       float *d_up_exps,
+                       float *d_down_exps,
+                       float *d_gate_shexp,
+                       float *d_up_shexp,
+                       float *d_down_shexp);
 
 #ifdef __cplusplus
 }

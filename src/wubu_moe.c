@@ -34,7 +34,7 @@ int wubu_moe_load_layer(gguf_ctx *ctx, int layer, moe_weights_t *moe, int d_mode
 
     // Use global naming convention
     extern int g_tensor_naming;
-    const char *prefix = (g_tensor_naming == 1) ? "model.layers." : "blk.";
+    const char *prefix = (g_tensor_naming == 1) ? "model.layers" : "blk";
     // Note: we don't have access to g_adapter here, so we use the resolved names from wubu_model.c
 
     // Router: ffn_gate_inp.weight [D_MODEL, N_EXPERTS]
@@ -245,7 +245,7 @@ int wubu_moe_load_layer_quant(gguf_ctx *ctx, int layer,
                               int d_model, int d_ff) {
     char name[256];
     extern int g_tensor_naming;
-    const char *prefix = (g_tensor_naming == 1) ? "model.layers." : "blk.";
+    const char *prefix = (g_tensor_naming == 1) ? "model.layers" : "blk";
 
     // Expert gate — quantized [D_MODEL, D_FF, N_EXPERTS]
     snprintf(name, sizeof(name), "%s.%d.ffn_gate_exps.weight", prefix, layer);
@@ -393,7 +393,7 @@ void wubu_moe_forward(const float *x, int B, int T,
     } else {
         // Full router path: all 256 scores, softmax, top-k selection
         // Step 1: Compute router scores
-        wubu_moe_router(x, B, T, w->ffn_gate_inp, scores);
+        wubu_moe_router(x, B, T, w->ffn_gate_inp, scores, N_EXPERTS, D_MODEL);
 
         // Step 2: Softmax and top-k for each token
         // (Using softmax — the model was trained with softmax routing.
@@ -522,15 +522,15 @@ void wubu_moe_forward(const float *x, int B, int T,
                     out_s[j] = sum;
                 }
             }
-            gate_shared[j] = fmaxf(0.0f, sum_g);  // SiLU(x) = x * sigmoid(x) ≈ max(0, x) for rough approx
-            up_shared[j] = sum_u;
-        }
-
-        // Shared expert output contribution
-        for (int k = 0; k < d_model; k++) {
-            float sum = 0.0f;
-            for (int j = 0; j < d_ff; j++) {
-                sum += gate_shared[j] * up_shared[j] * w->ffn_down_shexp[k + j * d_model];  // [D_MODEL, D_FF] transposed
+            
+            // Apply shared expert output gate: sigmoid(x_s @ ffn_gate_inp_shexp)
+            if (w->ffn_gate_inp_shexp) {
+                float gate_val = 0.0f;
+                for (int k = 0; k < D_MODEL; k++)
+                    gate_val += x_s[k] * w->ffn_gate_inp_shexp[k];
+                float gate_sig = 1.0f / (1.0f + expf(-gate_val));
+                for (int j = 0; j < D_MODEL; j++)
+                    out_s[j] *= gate_sig;
             }
             
             // ---- Routed expert contributions via OpenMP tasks ----
@@ -650,29 +650,22 @@ void wubu_moe_forward(const float *x, int B, int T,
                         }
                     }
                 }
-                gate_shared[j] = fmaxf(0.0f, sum);  // SiLU
-                // Expert up projection
-                sum = 0.0f;
-                for (int k = 0; k < d_model; k++) {
-                    sum += x_s[k] * w->ffn_up_exps[k + j * d_model + e * d_model * d_ff];
-                }
-                up_shared[j] = sum;
             }
-
-            // Expert down projection
-            for (int k = 0; k < d_model; k++) {
-                float sum = 0.0f;
-                for (int j = 0; j < d_ff; j++) {
-                    sum += gate_shared[j] * up_shared[j] * w->ffn_down_exps[k + j * d_model + e * d_model * d_ff];
-                }
-                out_s[k] += weight * sum;
+            }
+            }
+            // Accumulate expert contributions (sequential, no atomics needed)
+            for (int k = 0; k < N_ACTIVE_EXPTS; k++) {
+                for (int j = 0; j < D_MODEL; j++)
+                    out_s[j] += expert_contribs[k][j];
             }
         }
     }
-
-    memcpy(output, expert_out, (size_t)N * d_model * sizeof(float));
-    free(expert_out);
+    
+    free(scores);
     free(topk_indices);
     free(topk_weights);
-    free(scores);
+    free(shared_gate_all);
+    free(shared_up_all);
+    free(shared_act_all);
+    free(expert_temp_all);
 }

@@ -12,13 +12,32 @@ extern "C" {
 #endif
 
 // Layer configuration
-typedef struct {
+struct wubu_ssd_moe;
+struct wubu_shard_ctx;
+
+typedef struct wubu_layer_t {
     int layer_idx;
     bool is_ssm;  // false = GQA
+    int block_type;  /* 0=Gated-DeltaNet SSM, 1=GQA, 2=LFM shortconv
+                      * (tensor-driven at load — NOT the hardcoded (l+1)%4
+                      * pattern, which only matches Qwen3.5's 18/6 split) */
     
     // Weights (loaded from GGUF)
     ssm_layer_weights ssm;      // valid if is_ssm
     gqa_layer_weights gqa;      // valid if !is_ssm
+    
+    // LFM shortconv block (block_type 2): in_proj/out_proj ride the ssm
+    // struct's attn_qkv/ssm_out blob pointers (same shapes); the 1D conv
+    // kernel is F32.
+    float *scv_conv_weight;     // [3*D] F32 (shortconv.conv.weight)
+    
+    // Dense SwiGLU FFN (blob pointers — ffn_gate/up/down.weight). Bound for
+    // every block type; the forward wiring is the dense-FFN parity work.
+    const void *ffn_gate_q; int ffn_gate_type;
+    const void *ffn_up_q;   int ffn_up_type;
+    const void *ffn_down_q; int ffn_down_type;
+    int ffn_d_ff;                       /* FFN intermediate width (from ffn_up dims) */
+    struct wubu_dense_ffn *dense_ffn;   /* zero-copy dense SwiGLU (lazy) */
     
     // Layer norm (pre-attention for all layers)
     float *attn_norm_weight;    // [D_MODEL], RMSNorm
@@ -31,13 +50,16 @@ typedef struct {
 } wubu_layer_t;
 
 // Complete model
-#define GQA_MAX_CTX 262144  // max cached positions for KV cache (256k context)
-#define GQA_KV_DIM (GQA_KV_HEADS * GQA_HEAD_DIM)  // 512
+#define GQA_MAX_CTX 524288  // max cached positions for KV cache (512k context)
+#define GQA_KV_DIM (GQA_KV_HEADS * GQA_HEAD_DIM)  // 512 (wubu_dims.h owns the runtime alias)
 
 // KV cache format: 0=F32, 1=F16 (halves memory at cost of conversion)
 #ifndef KV_CACHE_F16
 #define KV_CACHE_F16 1  // default to F16 for memory efficiency
 #endif
+
+// Expert recorder: max tokens to capture per profiling run
+#define MAX_EXPERT_RECORDER_TOKENS 256
 
 // F16 <-> F32 conversion helpers (used by KV cache)
 static inline float fp16_to_fp32(uint16_t v) {
@@ -216,7 +238,7 @@ static inline int64_t kv_cache_alloc_size(int64_t n_elems) {
 
 // MTP (Multi-Token Prediction) head for speculative decode
 // Architecture: h_39 → hnorm → concat(hnorm, enorm(embd)) → eh_proj → blk.40 → shared_head_norm → output
-typedef struct {
+typedef struct mtp_head_t {
     bool loaded;
     
     // Nextn norms (F32, all [D_MODEL])
@@ -237,7 +259,7 @@ typedef struct {
     int kv_dim;      // per-layer KV dim (kv_heads * head_dim)
     int cache_len;
 } mtp_head_t;
-typedef struct {
+typedef struct wubu_model_t {
     int n_layers;
     wubu_layer_t *layers;
     
@@ -261,10 +283,11 @@ typedef struct {
     float *ssm_states;    // [max_layers, SSM_V_HEADS, SSM_D_STATE, SSM_D_STATE]
     float *conv_states;   // [max_layers, B, CONV_KERNEL-1, CONV_DIM]
     
-    // GQA KV cache (10 GQA layers, max 256k context)
+    // GQA KV cache (10 GQA layers, max GQA_MAX_CTX context)
     void *gqa_k_cache;  // [10 * GQA_MAX_CTX * GQA_KV_DIM] F32 or F16
     void *gqa_v_cache;  // [10 * GQA_MAX_CTX * GQA_KV_DIM]
     int gqa_cache_len;   // how many tokens cached per layer (all 10 layers same len)
+    int gqa_max_ctx;     // active KV context cap — runtime-overridable (Revolver: banked, not flat-static)
     
     // GGUF context (for per-layer MoE lazy loading)
     // Model state save/restore (for speculative decode rollback)
@@ -281,7 +304,13 @@ typedef struct {
     
     // Skip output projection in forward (for GPU offload)
     bool skip_output_proj;
-    
+
+    // Expert selection recorder (for demoscene profiling, P3 prefetch matrix)
+    // Set to a [n_layers * MAX_EXPERT_RECORDER_TOKENS][N_ACTIVE_EXPTS] buffer before forward.
+    // Captured from wubu_moe_forward's selected_experts output parameter.
+    int (*expert_recorder)[N_ACTIVE_EXPTS];
+    int expert_recorder_tokens;  // number of tokens recorded so far
+
     // MoE test: only load MoE for first N layers (0 = all)
     int moe_max_layers;
     
@@ -295,8 +324,38 @@ typedef struct {
     // When non-NULL, GQA layers run on GPU via chunked attention.
     void *gpu_ctx;
 
-    // Number of GQA layers (for KV cache sizing)
-    int n_gqa_layers;
+    // Active backend vtable (wubu_backend.h). NULL = CPU-only.
+    // Set at model load time by wubu_backend_cpu_get() / wubu_backend_cuda_get().
+    struct wubu_backend_t *backend;
+
+    // Expert prefetch history (P3: prompt-aware prefetch matrix)
+    // Records which 8 experts each layer selected on the last forward pass.
+    // Expert prefetch history (P3: prompt-aware prefetch matrix)
+    // Records which 8 experts each layer selected on the last forward pass.
+    int expert_history[40][N_ACTIVE_EXPTS];
+    uint64_t last_prompt_hash;
+    bool expert_history_valid;
+
+    // Fast decode: cache previous token's per-layer hidden states
+    float *prev_hidden;    // [n_layers][D_MODEL] — hidden state at each layer for prev token
+    float *prev_ssm_out;   // [n_layers][D_MODEL] — SSM output at each layer for prev token
+    bool fast_decode;      // enable layer skipping
+    int fast_skip_count;   // how many layers were skipped (for stats)
+
+    // Logit cache: stores previous token's full logits + argmax
+    float *logit_cache;       // [vocab_size] — full logits from previous forward
+    int logit_cache_argmax;   // argmax from cache
+    bool logit_cache_valid;
+    int logit_cache_steps;    // count of consecutive cache uses
+    int logit_cache_max_hits; // adaptive max consecutive cache hits (default 2)
+    int logit_cache_argmax_prev; // previous forward's argmax (for stability detection)
+    
+    // Logit subset cache: top-K token IDs from last full output proj
+    // Used for fast refresh: compute only these K tokens instead of all 248k
+#define LOGIT_SUBSET_K 1000
+    int logit_subset_ids[LOGIT_SUBSET_K];  // token IDs
+    float logit_subset_vals[LOGIT_SUBSET_K]; // cached logit values
+    bool logit_subset_valid;
 
     // Dynamic model dimensions (extracted from GGUF, model-adapter aware)
     int d_model;          // hidden dimension (2048 for Qwen, 2816 for DiffusionGemma)
@@ -318,6 +377,27 @@ typedef struct {
     int gqa_kv_heads;     // GQA_KV_HEADS
     int gqa_head_dim;     // GQA_HEAD_DIM
     int rotary_dim;       // ROTARY_DIM (RoPE rotation dim)
+    int n_gqa_layers;     // number of GQA (non-SSM) layers in the hybrid stack
+
+    // Lazy embedding / lm-head (AN22 bridge): raw BF16/F16 shard bytes,
+    // dequantized per row on demand; NULL raw = eager f32 path owns them.
+    const uint8_t *lazy_embd_raw;
+    int lazy_embd_dtype;
+    int64_t lazy_embd_row;
+    const uint8_t *lazy_lmhead_raw;
+    int lazy_lmhead_dtype;
+    int64_t lazy_lmhead_row;
+
+    // Pow2 Hadamard size armed for lm_head (doc 013): 0 = no rotation.
+    int rotate_P;
+    // Open checkpoint shard context backing the lazy paths above (bridge
+    // owns the lifetime; NULL for GGUF-loaded models).
+    struct wubu_shard_ctx *shard_ctx;
+
+    // SSD-paged MoE slot bank (AN21/AN22: experts streamed from checkpoint
+    // shards on demand). NULL = experts fully in RAM or no MoE.
+    struct wubu_ssd_moe *ssd_moe;
+    int shared_expert_ff; // shared-expert intermediate width (0 = none)
 } wubu_model_t;
 
 // Create model, load from GGUF
@@ -401,7 +481,7 @@ void wubu_gpu_sync_ssm_state_to_cpu(void *gpu_ctx, int layer_idx,
 void wubu_model_gpu_moe_experts(const moe_weights_t *w,
     const float *x_s,
     const int *indices_s, const float *weights_s,
-    float expert_contribs[8][D_MODEL],
+    float *expert_contribs,
     void *model_ptr);
 
 // Free all GPU resources and reset gpu_ctx to NULL.
@@ -453,17 +533,3 @@ void wubu_model_rollback(wubu_model_t *model);
 #endif
 
 #endif // WUBU_MODEL_H
-
-/* ---- Windows/merge compat: constant aliases the merged .c files expect ---- */
-#ifndef N_EXPERTS
-#  define N_EXPERTS         DEF_N_EXPERTS
-#endif
-#ifndef N_ACTIVE_EXPTS
-#  define N_ACTIVE_EXPTS    DEF_N_ACTIVE_EXPTS
-#endif
-#ifndef D_FF
-#  define D_FF              DEF_D_FF
-#endif
-#ifndef SHARED_D_FF
-#  define SHARED_D_FF       DEF_SHARED_D_FF
-#endif

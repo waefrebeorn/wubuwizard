@@ -251,7 +251,8 @@ void wubu_moe_backward(const float *d_output, int B, int T,
     // Recompute router if gate_inp available
     if (has_router) {
         moe_router_backward_prep(x, B, T, w->ffn_gate_inp,
-                                 softmax_vals, topk_indices, topk_weights);
+                                 softmax_vals, topk_indices, topk_weights,
+                                 n_experts, n_active_experts, d_model);
     }
 
     memset(d_x, 0, N * d_model * sizeof(float));

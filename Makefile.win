@@ -72,6 +72,8 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_active.o src/wubu_bandit.o src/wubu_reinforce.o src/wubu_policy.o \
   src/wubu_actor_critic.o src/wubu_ppo.o src/wubu_dqn.o src/wubu_value.o src/wubu_specdec.o \
   src/wubu_pagedkv.o src/wubu_moeroute.o src/wubu_contbatch.o src/wubu_medusa.o src/wubu_quantkv.o \
+  src/wubu_ops.o src/wubu_hive.o src/wubu_gguf_tokenizer.o src/wubu_linear_attn.o \
+  src/wubu_backend.o src/wubu_agentic_os.o \
   src/wubu_win.o
 
 .PHONY: all cpu-build clean

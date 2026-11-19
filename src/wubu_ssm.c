@@ -4,9 +4,9 @@
 #include "thread_pool.h"
 #include "wubu_model.h"  // for kv_cache_read_head / kv_cache_write_head
 
-// Global tensor naming convention (defined here for CORE_OBJ visibility)
+// Global tensor naming convention (owned by wubu_ops.c)
 // 0 = Qwen-style "blk.N.*", 1 = Gemma-style "model.layers.N.*", 2 = pure GQA
-int g_tensor_naming = 0;
+extern int g_tensor_naming;  /* defined in wubu_ops.c */
 #include <omp.h>
 #include <immintrin.h>  // AVX2/FMA intrinsics for GQA attention
 // GQA_MAX_CTX from wubu_model.h — max KV cache positions (also used for attn stack buf)
@@ -1263,16 +1263,16 @@ void wubu_gqa_forward(const float *x, int B, int T,
     // Weight read ONCE from RAM via quantized_matmul_batched
     quantized_matmul_batched(x,
         w->attn_q_weight_q, w->attn_q_weight_type,
-        D_MODEL, q_dim * 2, 0, N, Q_full);
+        d_model, q_dim * 2, 0, N, Q_full);
     
     // Extract gate from Q_full — INTERLEAVED per-head layout:
     // Q_full layout: [Q_h0(256) | gate_h0(256) | Q_h1(256) | gate_h1(256) | ...]
     for (int s = 0; s < N; s++) {
         int q_offset = s * q_dim * 2;
-        for (int h = 0; h < GQA_Q_HEADS; h++) {
-            for (int j = 0; j < GQA_HEAD_DIM; j++) {
-                int qf_idx = q_offset + h * (2 * GQA_HEAD_DIM) + GQA_HEAD_DIM + j;
-                int g_idx  = s * q_dim + h * GQA_HEAD_DIM + j;
+        for (int h = 0; h < n_q_heads; h++) {
+            for (int j = 0; j < head_dim; j++) {
+                int qf_idx = q_offset + h * (2 * head_dim) + head_dim + j;
+                int g_idx  = s * q_dim + h * head_dim + j;
                 gate[g_idx] = Q_full[qf_idx];
             }
         }
@@ -1281,12 +1281,12 @@ void wubu_gqa_forward(const float *x, int B, int T,
     // K projection — batched
     quantized_matmul_batched(x,
         w->attn_k_weight_q, w->attn_k_weight_type,
-        D_MODEL, kv_dim, 0, N, K);
+        d_model, kv_dim, 0, N, K);
     
     // V projection — batched
     quantized_matmul_batched(x,
         w->attn_v_weight_q, w->attn_v_weight_type,
-        D_MODEL, kv_dim, 0, N, V);
+        d_model, kv_dim, 0, N, V);
     
     // DUMP_GQA_DEBUG_DIR: dump Q/K/V projections for 1:1 parity comparison
     {
@@ -1346,13 +1346,13 @@ void wubu_gqa_forward(const float *x, int B, int T,
             }
         }
     }
-    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, gqa_qk_norm_ones(w->attn_q_norm_weight), 1e-6f, Q_norm);
+    wubu_rms_norm(B, T * n_q_heads, head_dim, Q_only, gqa_qk_norm_ones(w->attn_q_norm_weight), 1e-6f, Q_norm);
     free(Q_only);
 
     // K RMSNorm — K has [N, kv_dim] = [N, KV_HEADS * HEAD_DIM]
     // Data layout: K[(b*T+t)*kv_dim + h*HEAD_DIM + i]
     // RMSNorm sees [B, T*KV_HEADS, HEAD_DIM] same layout
-    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, gqa_qk_norm_ones(w->attn_k_norm_weight), 1e-6f, K_norm);
+    wubu_rms_norm(B, T * n_kv_heads, head_dim, K, gqa_qk_norm_ones(w->attn_k_norm_weight), 1e-6f, K_norm);
     
     // Step 4: IMRoPE (Interleaved MultiRoPE) with pre-computed theta table
     // Qwen3.6: rope.dimension_sections=[11,11,10,0], rope.dimension_count=64, rope.freq_base=10000000.0
@@ -1498,9 +1498,9 @@ void wubu_gqa_forward(const float *x, int B, int T,
     int max_attend = use_sparse ? max_sparse : (total_kv < sparse_min_len ? total_kv : max_sparse);
     float *all_attn_w = NULL;
     if (max_attend > 0) {
-        all_attn_w = (float *)malloc((size_t)GQA_Q_HEADS * max_attend * sizeof(float));
+        all_attn_w = (float *)malloc((size_t)n_q_heads * max_attend * sizeof(float));
         if (!all_attn_w) {
-            fprintf(stderr, "GQA: attn_w pre-alloc failed (%zu)\n", (size_t)GQA_Q_HEADS * max_attend * 4);
+            fprintf(stderr, "GQA: attn_w pre-alloc failed (%zu)\n", (size_t)n_q_heads * max_attend * 4);
             goto gqa_alloc_fail;
         }
     }
@@ -1771,7 +1771,7 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     // Step 1: Q + gate fused projection — batched
     quantized_matmul_batched(x,
         w->attn_q_weight_q, w->attn_q_weight_type,
-        D_MODEL, q_dim * 2, 0, N, Q_full);
+        d_model, q_dim * 2, 0, N, Q_full);
     
     // Extract gate from Q_full
     for (int s = 0; s < N; s++) {
@@ -1783,18 +1783,18 @@ void wubu_gqa_forward_save(const float *x, int B, int T,
     // Steps 2-3: K and V projections — batched
     quantized_matmul_batched(x,
         w->attn_k_weight_q, w->attn_k_weight_type,
-        D_MODEL, kv_dim, 0, N, K);
+        d_model, kv_dim, 0, N, K);
     quantized_matmul_batched(x,
         w->attn_v_weight_q, w->attn_v_weight_type,
-        D_MODEL, kv_dim, 0, N, V);
+        d_model, kv_dim, 0, N, V);
     
     // Step 3: Q/K RMSNorm
     float *Q_only = (float *)malloc(N * q_dim * sizeof(float));
     for (int s = 0; s < N; s++)
         memcpy(Q_only + s * q_dim, Q_full + s * q_dim * 2, q_dim * sizeof(float));
-    wubu_rms_norm(B, T * GQA_Q_HEADS, GQA_HEAD_DIM, Q_only, gqa_qk_norm_ones(w->attn_q_norm_weight), 1e-6f, Q_norm);
+    wubu_rms_norm(B, T * n_q_heads, head_dim, Q_only, gqa_qk_norm_ones(w->attn_q_norm_weight), 1e-6f, Q_norm);
     free(Q_only);
-    wubu_rms_norm(B, T * GQA_KV_HEADS, GQA_HEAD_DIM, K, gqa_qk_norm_ones(w->attn_k_norm_weight), 1e-6f, K_norm);
+    wubu_rms_norm(B, T * n_kv_heads, head_dim, K, gqa_qk_norm_ones(w->attn_k_norm_weight), 1e-6f, K_norm);
     
     // Step 4: (RoPE skipped)
     

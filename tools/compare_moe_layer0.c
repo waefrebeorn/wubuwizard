@@ -66,7 +66,7 @@ int main(int argc, char **argv) {
     memset(attn, 0, D_MODEL * sizeof(float));
     float *ssm_state = mdl.ssm_states;
     float *conv_state = mdl.conv_states;
-    wubu_ssm_forward(normed, 1, 1, &mdl.layers[0].ssm, ssm_state, conv_state, attn, NULL, NULL);
+    wubu_ssm_forward(normed, 1, 1, &mdl.layers[0].ssm, ssm_state, conv_state, attn, NULL, NULL, NULL);
     for (int i = 0; i < D_MODEL; i++) residual[i] += attn[i];
     
     // Post-attention RMSNorm (this is the MoE input)

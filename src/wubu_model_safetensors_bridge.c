@@ -15,6 +15,9 @@
 #include "wubu_lora.h"
 #include "wubu_rotate.h"   // doc 013: wubu_pow2_floor / wubu_rotate_fuse_right
 #include "wubu_backend.h"  // wubu_backend_cpu_get() — backend install at bridge create
+#include "wubu_ssd_moe.h"  // wubu_ssd_moe_open_from_shards() — AN22 paged experts
+#include "wubu_kv_select.h"   // wubu_kv_autoselect() — KV scheme pick at load
+#include "wubu_kv_runtime.h"  // wubu_kv_scheme_name(), g_use_q8_cache
 #include <stdlib.h>
 #include "wubu_affinity.h"
 #include <string.h>

@@ -35,7 +35,7 @@ int main(void) {
     // SSM forward
     float *ssm_state = mdl.ssm_states + 0 * SSM_V_HEADS * SSM_D_STATE * SSM_D_STATE;
     float *conv_state = mdl.conv_states + 0 * (CONV_KERNEL - 1) * CONV_DIM;
-    wubu_ssm_forward(normed, 1, 1, &layer->ssm, ssm_state, conv_state, attn_out, NULL, NULL);
+    wubu_ssm_forward(normed, 1, 1, &layer->ssm, ssm_state, conv_state, attn_out, NULL, NULL, NULL);
     
     // Residual
     for (int i = 0; i < D; i++) x[i] += attn_out[i];

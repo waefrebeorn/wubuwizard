@@ -100,6 +100,28 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         if (qn && qn->n_dims >= 1) gqa_head_dim = (int)qn->dims[0];
     }
 
+    /* Publish runtime dims for the GGUF path: WUBU_DIMS starts zeroed and
+     * only the safetensors bridge used to seed it, so every D_MODEL/GQA_*
+     * alias read 0 here -> zero-size buffers -> heap corruption in the
+     * forward. Seed defaults, then override with GGUF-extracted geometry
+     * (layer-0 heads; per-layer loading still derives its own dims). */
+    {
+        wubu_dims_default();
+        wubu_dims_t wd = WUBU_DIMS;
+        wd.d_model = d_model;
+        wd.gqa_head_dim = gqa_head_dim;
+        const char *qname = (model->tensor_naming == 1) ? "model.layers.0.attn_q.weight" : "blk.0.attn_q.weight";
+        const char *kname = (model->tensor_naming == 1) ? "model.layers.0.attn_k.weight" : "blk.0.attn_k.weight";
+        gguf_tensor_info *qt = gguf_find_tensor(ctx, qname);
+        gguf_tensor_info *kt = gguf_find_tensor(ctx, kname);
+        /* attn_q is the FUSED Q+gate projection: dims[1] = 2 * q_dim */
+        if (qt && qt->n_dims >= 2 && gqa_head_dim > 0)
+            wd.gqa_q_heads = (int)(qt->dims[1] / (2 * gqa_head_dim));
+        if (kt && kt->n_dims >= 2 && gqa_head_dim > 0)
+            wd.gqa_kv_heads = (int)(kt->dims[1] / gqa_head_dim);
+        wubu_dims_set(&wd);
+    }
+
     // Set all dynamic dimensions (use GGUF-extracted or fallback to macros)
     model->d_inner = SSM_D_STATE * SSM_V_HEADS;  // VALUE_DIM
     model->key_dim = SSM_D_STATE * SSM_K_HEADS;
@@ -530,6 +552,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             max_ctx = parsed;
         }
     }
+    model->gqa_max_ctx = max_ctx;  /* generate/bounds paths read this back */
     int64_t total_cache_elems = 0;
     for (int l = 0; l < model->n_layers; l++) {
         if (!model->layers[l].is_ssm) {
@@ -711,14 +734,14 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                         // Set GPU recurrence pointers so wubu_ssm_forward uses GPU
                         wubu_gpu_set_ssm_hybrid(model->gpu_ctx, l, &layer->ssm);
                         wubu_ssm_forward(normed, B, T, &layer->ssm,
-                            ssm_state, conv_state, attn_out, gpu_qkv, gpu_z);
+                            ssm_state, conv_state, attn_out, gpu_qkv, gpu_z, NULL);
                         // Clear GPU pointers to avoid stale state
                         layer->ssm.gpu_ssm_state = NULL;
                         layer->ssm.gpu_stream    = NULL;
                     } else {
                         // Allocation failed, fall back to CPU
                         wubu_ssm_forward(normed, B, T, &layer->ssm,
-                            ssm_state, conv_state, attn_out, NULL, NULL);
+                            ssm_state, conv_state, attn_out, NULL, NULL, NULL);
                     }
                     free(gpu_qkv);
                     free(gpu_z);
@@ -738,14 +761,14 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                     ssm_state, conv_state);
                 wubu_gpu_set_ssm_hybrid(model->gpu_ctx, l, &layer->ssm);
                 wubu_ssm_forward(normed, B, T, &layer->ssm,
-                    ssm_state, conv_state, attn_out, NULL, NULL);
+                    ssm_state, conv_state, attn_out, NULL, NULL, NULL);
                 layer->ssm.gpu_ssm_state = NULL;
                 layer->ssm.gpu_stream    = NULL;
             } else
 #endif
             {
                 wubu_ssm_forward(normed, B, T, &layer->ssm,
-                    ssm_state, conv_state, attn_out, NULL, NULL);
+                    ssm_state, conv_state, attn_out, NULL, NULL, NULL);
             }
         } else {
 #ifdef GPU_SUPPORT
@@ -797,7 +820,7 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             for (int li = 0; li < l; li++) {
                 if (!model->layers[li].is_ssm) {
                     if (gqa_idx2 == l_gqa) break;
-                    layer_cache_elems += (int64_t)GQA_MAX_CTX * model->layers[li].gqa.kv_dim;
+                    layer_cache_elems += (int64_t)model->gqa_max_ctx * model->layers[li].gqa.kv_dim;
                     gqa_idx2++;
                 }
             }

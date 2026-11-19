@@ -569,6 +569,7 @@ static void read_str(FILE *f, char *buf, int max_len) {
 
 // Float16 → Float32 (exported: wubu_weight.c and dequant paths use it)
 float gguf_f16_to_f32(uint16_t h) {
+    union { uint32_t u; float f; } fp32;
     uint32_t sign = (h >> 15) & 1;
     uint32_t exp  = (h >> 10) & 0x1F;
     uint32_t mant = h & 0x03FF;
@@ -805,7 +806,7 @@ void dequantize_iq4_nl_row(const uint8_t *data, float *output, int64_t n_elems) 
         const uint8_t *block = data + b * 18;
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         const uint8_t *qs = block + 2;
         for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
             int shift = (j & 1) ? 0 : 4;
@@ -1013,7 +1014,7 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
         for (int64_t b = 0; b < q4_blocks; b++) {
             uint16_t d_bits;
             memcpy(&d_bits, src + b * 18, 2);
-            float d = f16_to_f32(d_bits);
+            float d = gguf_f16_to_f32(d_bits);
             for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
                 uint8_t q = src[b * 18 + 2 + j / 2];
                 int qval = (j & 1) ? (q >> 4) : (q & 0xF);
@@ -1423,21 +1424,6 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
         case GGML_TYPE_IQ4_NL: dequantize_iq4_nl_row(data, output, n_elems); break;
         case GGML_TYPE_IQ4_XS: dequantize_iq4_xs_row(data, output, n_elems); break;
         case GGML_TYPE_Q4_K: dequantize_q4_K_row(data, output, n_elems); break;
-        case GGML_TYPE_Q4_0: {
-            int64_t n_blocks = (n_elems + 31) / 32;
-            for (int64_t b = 0; b < n_blocks; b++) {
-                uint16_t d_bits;
-                memcpy(&d_bits, data + b * 18, 2);
-                float d = f16_to_f32(d_bits);
-                const uint8_t *qs = data + b * 18 + 2;
-                for (int j = 0; j < 32 && b * 32 + j < n_elems; j++) {
-                    int shift = (j & 1) ? 0 : 4;
-                    int val = (qs[j / 2] >> shift) & 0xF;
-                    output[b * 32 + j] = d * (float)(val - 8);
-                }
-            }
-            break;
-        }
         case GGML_TYPE_BF16: {
             // bfloat16: upper 16 bits of IEEE float32
             for (int64_t i = 0; i < n_elems; i++) {
@@ -1480,7 +1466,6 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_IQ4_NL: return ((n_elems + 31) / 32) * 18;  // d[2] + qs[16], block=32 (same as Q4_0)
         case GGML_TYPE_IQ4_XS: return n_blocks * 136;  // d[2] + scales_h[2] + scales_l[4] + qs[128]
         case GGML_TYPE_Q4_K:  return n_blocks * 144;  // d[2] + dmin[2] + scales[12] + qs[128]
-        case GGML_TYPE_Q4_0:  return ((n_elems + 31) / 32) * 18;  // d[2] + qs[16], block=32
         case GGML_TYPE_Q2_K:  return n_blocks * 84;   // scales[16] + qs[64] + d[2] + dmin[2]
         case GGML_TYPE_Q3_K:  return n_blocks * 110;  // hmask[32] + qs[64] + scales[12] + d[2]
         case 30:              return n_elems * 2;     // BF16 (bfloat16)
@@ -1494,15 +1479,23 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
 int gguf_buffer_data(gguf_ctx *ctx) {
     if (ctx->data_blob) return 1;  // already buffered
 
-    // Get file size
+    // Get file size (Windows long is 32-bit: ftell overflows past 2GB,
+    // which produced a bogus blob_size and a failed 4GB allocation)
+#if defined(_WIN32)
+    _fseeki64(ctx->file, 0, SEEK_END);
+    int64_t file_size = _ftelli64(ctx->file);
+#else
     fseek(ctx->file, 0, SEEK_END);
     long file_size = ftell(ctx->file);
+#endif
     uint64_t blob_size = file_size - ctx->data_blob_offset;
     if (blob_size == 0) return 0;
 
-#if defined(_POSIX_MAPPED_FILES)
+#if defined(_POSIX_MAPPED_FILES) || defined(_WIN32)
     /* mmap requires a page-aligned offset — GGUF's blob offset is only
-     * 32-aligned, so map from the aligned base and shift the pointer. */
+     * 32-aligned, so map from the aligned base and shift the pointer.
+     * On Windows the wubu_win.h shim maps via CreateFileMapping; sysconf
+     * returns the 64KB allocation granularity so the offset is legal. */
     {
         const long pg = sysconf(_SC_PAGESIZE);
         const off_t aligned_off = ((off_t)ctx->data_blob_offset / pg) * pg;
@@ -1567,7 +1560,7 @@ static inline void get_scale_min_k4(int j, const uint8_t *q, uint8_t *d, uint8_t
     }
 }
 
-static void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_elems) {
+void dequantize_q4_K_row(const uint8_t *data, float *output, int64_t n_elems) {
     // Reference: llama.cpp ggml-quants.c dequantize_row_q4_K()
     // block_q4_K: d(fp16,2) + dmin(fp16,2) + scales[12] + qs[128] = 144 bytes
     // Modern Q4_K has NO qh field — scales use 6-bit encoding via get_scale_min_k4
@@ -1768,7 +1761,7 @@ void dequantize_iq2_xs_row(const uint8_t *data, float *output, int64_t n_elems) 
         
         uint16_t d_bits;
         memcpy(&d_bits, block, 2);
-        float d = f16_to_f32(d_bits);
+        float d = gguf_f16_to_f32(d_bits);
         
         const uint8_t *qs = block + 2;           // 64 bytes: 4-bit grid indices (2 per byte)
         const uint8_t *qh = block + 2 + 64;      // 32 bytes: high 2 bits per element
