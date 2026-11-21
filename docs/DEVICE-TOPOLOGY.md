@@ -10,8 +10,9 @@ a resolution, an SDK call, or a GPIO map between them.
 |---|---|---|
 | Address | 192.168.1.251 (offline) | 192.168.1.70 (`distiller-bb8c`, online) |
 | SoC | CM4 / Cortex-A72, no dotprod | CM5 Rev 1.0, ARMv8.2 with ASIMDDP |
-| Panel | **240x416**, UC8253, portrait | **128x250** (W x H), landscape |
-| Panel truth | `docs.pamir.ai/hardware_overview`: 240(H) x 416(V), 130 DPI | upstream `distiller-eink-cli`: "standard e-ink is **128x250**, not 250x128"; 1-bit, 4000 raw bytes |
+| Panel | **240x416** (W x H), portrait, UC8253 | **128x250** (W x H), portrait, EPD128x250 |
+| Panel truth | `docs.pamir.ai`: 240(H) x 416(V), 130 DPI | upstream `distiller-cm5-sdk`: "Resolution: 128 x 250", 4000 raw bytes; `distiller-eink-cli`: "128x250, not 250x128" |
+| Orientation | portrait, ~0.58 aspect | portrait, ~0.51 aspect — **both panels are portrait**, only aspect differs |
 | SDK on device | old `DistillerSDK` Python `EinkDSP` is the working path | `/opt/distiller-sdk`, `eink.conf` firmware `EPD128x250`, platform `cm5` |
 | Upstream SDK | `Pamir-AI/DistillerSDK-distiller-one-` (archived) | `Pamir-AI/distiller-cm5-sdk` (installed at `/opt/distiller-cm5-sdk` upstream; **absent here**) |
 | Pins | dc=6, rst=13, busy=9 | dc=7, rst=13, busy=9 |
@@ -24,8 +25,9 @@ is present; `eink.conf` says `EPD128x250`; `distiller_cm5_sdk` is **not installe
 
 ## Assumptions that made the display unusable
 
-1. **Resolution order.** 250x128 was assumed; upstream says 128x250 (width x height).
-   Every composition and byte count follows from this.
+1. **Resolution order and orientation.** 250x128 landscape was assumed; upstream says
+   128x250 width x height, which is **portrait**. Both panels are portrait — only the aspect
+   ratio differs. Every composition and byte count follows from this.
 2. **One SDK for both.** The CM4 works through the old Python `EinkDSP`; the CM5 needs
    `distiller_cm5_sdk`, which is not present on this unit.
 3. **Compiled SDK default applied to CM4.** `libdistiller_display_sdk_shared.so` defaults to
