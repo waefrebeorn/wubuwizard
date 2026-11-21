@@ -33,8 +33,8 @@ Sizes are published file sizes; verify locally after acquisition.
 
 | Model | Path | Status |
 |-------|------|--------|
-| Inkling 2 Mini UD-IQ2_XXS | `models/inkling-2-mini/` | Acquiring (T1) |
-| Inkling 2 Mini UD-Q4_K_XL | `models/inkling-2-mini/` | Acquiring (T2) |
+| Inkling 2 Mini UD-IQ2_XXS | `models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf` | Acquired, verified GGUF v3, 8,486,236,352 B (T1) |
+| Inkling 2 Mini UD-Q4_K_XL | `models/inkling-2-mini/Inkling-2-Mini-UD-Q4_K_XL.gguf` | Acquired, verified GGUF v3, 17,629,759,456 B (T2) |
 | Gemma 4 12B UD-IQ2_M | `models/gemma-12b/` | Present |
 
 ## Tier gates
