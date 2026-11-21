@@ -18,6 +18,23 @@ a template. No vendored ggml, no copied kernel bodies, no parity-as-goal. We rei
 from primary research in C11 and own every line. Reference outputs are for verification
 only — never for design.
 
+## ADAPTABILITY IS THE POINT
+
+- **Model agnostic.** No model is hard-coded into the core. Architecture probes read GGUF
+  metadata; family differences are compiled rows with byte-identical kernel bodies (LP-10).
+  Gemma, Qwen, Inkling and whatever comes next are configurations, not forks.
+- **CUDA/AMD agnostic, eventually.** CUDA is one backend, not the engine. Keep a backend
+  abstraction with CPU always working; add HIP/ROCm behind the same dispatch table. Never
+  let a CUDA-only intrinsic leak into a model kernel.
+- **Different tiers.** The engine runs across hardware tiers, and each tier has a model
+  quant and a gate. See `docs/TIERS.md`. Tier 1 is 6 GB VRAM / 16 GB RAM / SSD; higher
+  tiers add VRAM and RAM, never a different codebase.
+- **Acquire and learn all inference engines.** Study upstream implementations and primary
+  papers, then reimplement the useful parts in our own C11. Acquisition includes weights
+  and knowledge; the goal is understanding, not copying.
+- **Organize all code.** Every module has one owner, one header seam, one gate. See
+  `docs/CODE-ORGANIZATION.md`. AGI adapts because the structure adapts.
+
 ## WHAT WE ARE
 
 wubuwizard is the **brain and math engine**. It aggregates the best inference techniques
