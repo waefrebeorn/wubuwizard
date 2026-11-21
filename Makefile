@@ -15,8 +15,11 @@ all: test_nested_ssm test_nested_ssm_backward load_model test_model test_cpu_tim
 api_server: tools/api_server.c
 	$(CC) -O2 -g -Wall -I include -o $@ $< -lssl -lcrypto -lm
 
+test_sse: tools/api_server.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
 # Object files
-CORE_OBJ = src/wubu_ssm.o src/wubu_ssm_chunked.o src/wubu_mobius.o src/wubu_nested_ssm.o src/wubu_nested_ssm_backward.o src/wubu_moe.o src/wubu_moe_backward.o src/wubu_moe_hyperbolic.o src/wubu_poincare_ssm_backward.o src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o src/quantized_matmul.o src/quantized_dot_generic.o
+CORE_OBJ = src/wubu_ssm.o src/wubu_ssm_chunked.o src/wubu_mobius.o src/wubu_nested_ssm.o src/wubu_nested_ssm_backward.o src/wubu_moe.o src/wubu_moe_backward.o src/wubu_moe_hyperbolic.o src/wubu_poincare_ssm_backward.o src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_goal.o src/wubu_goal_steer.o src/wubu_goal_resample.o src/wubu_harness_bandit.o src/wubu_ttc_budget.o src/wubu_kv_exact.o src/wubu_swa_reclaim.o src/wubu_spec_budget.o src/wubu_spec_seed.o src/wubu_spec_constrained.o src/wubu_kernel_spec.o src/wubu_kv_qfmt.o src/wubu_kv_fetch.o src/wubu_simd_quant.o src/wubu_diff_sampler.o src/wubu_state_version.o
 MODEL_OBJ = src/wubu_model.o $(CORE_OBJ)
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
@@ -467,6 +470,54 @@ check_ssm_a: tools/check_ssm_a.c $(MODEL_OBJ)
 # Gemma 4 12B test binaries
 test_gemma4: tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o
 	$(CC) $(CFLAGS) -o $@ tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o $(LDFLAGS)
+
+test_goal: tools/test_goal.c src/wubu_goal.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_goal_steer: tools/test_goal_steer.c src/wubu_goal_steer.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_harness_bandit: tools/test_harness_bandit.c src/wubu_harness_bandit.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_ttc_budget: tools/test_ttc_budget.c src/wubu_ttc_budget.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_kv_alloc_exact: tools/test_kv_alloc_exact.c src/wubu_kv_exact.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_swa_reclaim: tools/test_swa_reclaim.c src/wubu_swa_reclaim.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_spec_budget: tools/test_spec_budget.c src/wubu_spec_budget.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_spec_seed: tools/test_spec_seed.c src/wubu_spec_seed.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_spec_constrained: tools/test_spec_constrained.c src/wubu_spec_constrained.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_kernel_identity: tools/test_kernel_identity.c src/wubu_kernel_spec.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_kv_qfmt: tools/test_kv_qfmt.c src/wubu_kv_qfmt.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_kv_fetch: tools/test_kv_fetch.c src/wubu_kv_fetch.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_simd_quant: tools/test_simd_quant.c src/wubu_simd_quant.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_diffusion_sampler: tools/test_diffusion_sampler.c src/wubu_diff_sampler.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_state_version: tools/test_state_version.c src/wubu_state_version.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_gemma4_gpu: tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/cuda_kernels.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ tools/test_gemma4.c $(MODEL_OBJ) src/wubu_gemma4_model.o src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/cuda_kernels.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o $(LDFLAGS) -L/usr/local/cuda-13.3/targets/x86_64-linux/lib -lcublas -lcudart -lstdc++

@@ -16,13 +16,17 @@
  *   }
  */
 
+#ifndef _WIN32
 #include <sys/resource.h>
 #include <sys/prctl.h>
+#endif
 
 static inline void wubu_disable_core_dumps(void) {
+#ifndef _WIN32
     struct rlimit rl = {0, 0};
     setrlimit(RLIMIT_CORE, &rl);
     prctl(PR_SET_DUMPABLE, 0);
+#endif
 }
 
 #endif // WUBU_CORE_DUMPS_H

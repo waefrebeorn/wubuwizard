@@ -881,6 +881,24 @@ void dequantize_q6_K_row(const uint8_t *data, float *output, int64_t n_elems) {
 static void dequantize_q2_K_row(const uint8_t *data, float *output, int64_t n_elems);
 static void dequantize_q3_K_row(const uint8_t *data, float *output, int64_t n_elems);
 
+static int gguf_fseek64(FILE *f, uint64_t off)
+{
+#ifdef _WIN32
+    return _fseeki64(f, (__int64)off, SEEK_SET);
+#else
+    return fseeko(f, (off_t)off, SEEK_SET);
+#endif
+}
+
+static int gguf_fskip64(FILE *f, uint64_t off)
+{
+#ifdef _WIN32
+    return _fseeki64(f, (__int64)off, SEEK_CUR);
+#else
+    return fseeko(f, (off_t)off, SEEK_CUR);
+#endif
+}
+
 int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output, int64_t max_elems) {
     // Calculate total elements
     int64_t n_elems = 1;
@@ -904,7 +922,7 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
         if (src) {
             memcpy(output, src, n_elems * sizeof(float));
         } else {
-            fseek(ctx->file, tensor_pos, SEEK_SET);
+            if (gguf_fseek64(ctx->file, tensor_pos) != 0) return 0;
             size_t n_read = fread(output, 4, n_elems, ctx->file);
             if (n_read != (size_t)n_elems) return 0;
         }
@@ -919,7 +937,7 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
                 output[i] = gguf_f16_to_f32(h);
             }
         } else {
-            fseek(ctx->file, tensor_pos, SEEK_SET);
+            if (gguf_fseek64(ctx->file, tensor_pos) != 0) return 0;
             for (int64_t i = 0; i < n_elems; i++) {
                 uint16_t h;
                 if (fread(&h, 2, 1, ctx->file) != 1) return (int)i;
@@ -939,7 +957,7 @@ int gguf_read_tensor_f32(gguf_ctx *ctx, gguf_tensor_info *tensor, float *output,
         }
         raw_heap = (uint8_t *)malloc(raw_size);
         if (!raw_heap) return 0;
-        fseek(ctx->file, tensor_pos, SEEK_SET);
+        if (gguf_fseek64(ctx->file, tensor_pos) != 0) return 0;
         size_t n_read = fread(raw_heap, 1, raw_size, ctx->file);
         if (n_read != (size_t)raw_size) {
             free(raw_heap);
@@ -1249,6 +1267,94 @@ int64_t gguf_read_kv_i64(gguf_ctx *ctx, const char *want, int64_t def) {
     return def;
 }
 
+int gguf_kv_get_str(gguf_ctx *ctx, const char *key, char *out, size_t out_cap)
+{
+    if (!ctx || !ctx->file || !out || out_cap == 0) return 0;
+    out[0] = 0;
+    gguf_fseek64(ctx->file, 16);
+    int64_t n_kv = 0;
+    if (fread(&n_kv, 8, 1, ctx->file) != 1) return 0;
+    for (int64_t ki = 0; ki < n_kv; ki++) {
+        uint64_t klen = 0;
+        if (fread(&klen, 8, 1, ctx->file) != 1) return 0;
+        char cur[256];
+        if (klen >= sizeof(cur)) {
+            if (gguf_fskip64(ctx->file, klen) != 0) return 0;
+            int32_t vt = 0;
+            if (fread(&vt, 4, 1, ctx->file) != 1) return 0;
+            if (vt == 8) { uint64_t sl = 0; if (fread(&sl, 8, 1, ctx->file) != 1) return 0;
+                           if (gguf_fskip64(ctx->file, sl) != 0) return 0; }
+            else if (vt == 9) { /* array */
+                int32_t at = 0; uint64_t al = 0;
+                if (fread(&at, 4, 1, ctx->file) != 1) return 0;
+                if (fread(&al, 8, 1, ctx->file) != 1) return 0;
+                if (at == 8) {
+                    for (uint64_t j = 0; j < al; j++) {
+                        uint64_t sl = 0;
+                        if (fread(&sl, 8, 1, ctx->file) != 1) return 0;
+                        if (gguf_fskip64(ctx->file, sl) != 0) return 0;
+                    }
+                } else {
+                    int esz = 4;
+                    if (at == 0 || at == 1 || at == 7) esz = 1;
+                    else if (at == 2 || at == 3) esz = 2;
+                    else if (at == 10 || at == 11 || at == 12) esz = 8;
+                    if (gguf_fskip64(ctx->file, al * (uint64_t)esz) != 0) return 0;
+                }
+            } else {
+                uint64_t esz = 4;
+                if (vt == 0 || vt == 1 || vt == 7) esz = 1;
+                else if (vt == 2 || vt == 3) esz = 2;
+                else if (vt == 10 || vt == 11 || vt == 12) esz = 8;
+                if (gguf_fskip64(ctx->file, esz) != 0) return 0;
+            }
+            continue;
+        }
+        if (fread(cur, 1, (size_t)klen, ctx->file) != klen) return 0;
+        cur[klen] = 0;
+        int32_t vtype = 0;
+        if (fread(&vtype, 4, 1, ctx->file) != 1) return 0;
+        if (vtype == 8) { /* string */
+            uint64_t slen = 0;
+            if (fread(&slen, 8, 1, ctx->file) != 1) return 0;
+            if (strcmp(cur, key) == 0) {
+                size_t n = slen < out_cap - 1 ? (size_t)slen : out_cap - 1;
+                if (fread(out, 1, n, ctx->file) != n) return 0;
+                out[n] = 0;
+                if (gguf_fskip64(ctx->file, slen - n) != 0) return 0;
+                return 1;
+            }
+            if (gguf_fskip64(ctx->file, slen) != 0) return 0;
+            continue;
+        }
+        if (vtype == 9) { /* array */
+            int32_t at = 0; uint64_t al = 0;
+            if (fread(&at, 4, 1, ctx->file) != 1) return 0;
+            if (fread(&al, 8, 1, ctx->file) != 1) return 0;
+            if (at == 8) {
+                for (uint64_t j = 0; j < al; j++) {
+                    uint64_t sl = 0;
+                    if (fread(&sl, 8, 1, ctx->file) != 1) return 0;
+                    if (gguf_fskip64(ctx->file, sl) != 0) return 0;
+                }
+            } else {
+                int esz = 4;
+                if (at == 0 || at == 1 || at == 7) esz = 1;
+                else if (at == 2 || at == 3) esz = 2;
+                else if (at == 10 || at == 11 || at == 12) esz = 8;
+                if (gguf_fskip64(ctx->file, al * (uint64_t)esz) != 0) return 0;
+            }
+            continue;
+        }
+        uint64_t esz = 4;
+        if (vtype == 0 || vtype == 1 || vtype == 7) esz = 1;
+        else if (vtype == 2 || vtype == 3) esz = 2;
+        else if (vtype == 10 || vtype == 11 || vtype == 12) esz = 8;
+        if (gguf_fskip64(ctx->file, esz) != 0) return 0;
+    }
+    return 0;
+}
+
 int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out) {
     int64_t v = gguf_read_kv_i64(ctx, key, INT64_MIN);
     if (v == INT64_MIN) return 0;
@@ -1256,10 +1362,48 @@ int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out) {
     return 1;
 }
 int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out) {
-    int64_t v = gguf_read_kv_i64(ctx, key, INT64_MIN);
-    if (v == INT64_MIN) return 0;
-    if (out) *out = (float)v;
-    return 1;
+    if (!ctx || !ctx->file || !out) return 0;
+    gguf_fseek64(ctx->file, 16);
+    int64_t n_kv = 0;
+    if (fread(&n_kv, 8, 1, ctx->file) != 1) return 0;
+    for (int64_t ki = 0; ki < n_kv; ki++) {
+        uint64_t klen = 0;
+        if (fread(&klen, 8, 1, ctx->file) != 1) return 0;
+        char cur[256];
+        if (klen >= sizeof(cur)) { if (gguf_fskip64(ctx->file, klen) != 0) return 0;
+                                   int32_t vt = 0; if (fread(&vt, 4, 1, ctx->file) != 1) return 0;
+                                   continue; }
+        if (fread(cur, 1, (size_t)klen, ctx->file) != klen) return 0;
+        cur[klen] = 0;
+        int32_t vtype = 0;
+        if (fread(&vtype, 4, 1, ctx->file) != 1) return 0;
+        if (strcmp(cur, key) == 0) {
+            if (vtype == 6) { float x; if (fread(&x, 4, 1, ctx->file) == 1) { *out = x; return 1; } }
+            else if (vtype == 10) { double x; if (fread(&x, 8, 1, ctx->file) == 1) { *out = (float)x; return 1; } }
+            else if (vtype == 11 || vtype == 12) { int64_t x; if (fread(&x, 8, 1, ctx->file) == 1) { *out = (float)x; return 1; } }
+            else if (vtype == 4 || vtype == 5) { int32_t x; if (fread(&x, 4, 1, ctx->file) == 1) { *out = (float)x; return 1; } }
+            return 0;
+        }
+        if (vtype == 8) { uint64_t sl = 0; if (fread(&sl, 8, 1, ctx->file) != 1) return 0;
+                          if (gguf_fskip64(ctx->file, sl) != 0) return 0; }
+        else if (vtype == 9) { int32_t at = 0; uint64_t al = 0;
+            if (fread(&at, 4, 1, ctx->file) != 1) return 0;
+            if (fread(&al, 8, 1, ctx->file) != 1) return 0;
+            if (at == 8) { for (uint64_t j = 0; j < al; j++) { uint64_t sl = 0;
+                if (fread(&sl, 8, 1, ctx->file) != 1) return 0;
+                if (gguf_fskip64(ctx->file, sl) != 0) return 0; } }
+            else { int esz = 4;
+                if (at == 0 || at == 1 || at == 7) esz = 1;
+                else if (at == 2 || at == 3) esz = 2;
+                else if (at == 10 || at == 11 || at == 12) esz = 8;
+                if (gguf_fskip64(ctx->file, al * (uint64_t)esz) != 0) return 0; } }
+        else { uint64_t esz = 4;
+            if (vtype == 0 || vtype == 1 || vtype == 7) esz = 1;
+            else if (vtype == 2 || vtype == 3) esz = 2;
+            else if (vtype == 10 || vtype == 11 || vtype == 12) esz = 8;
+            if (gguf_fskip64(ctx->file, esz) != 0) return 0; }
+    }
+    return 0;
 }
 int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max) {
     /* the walker returns the FIRST element of an int array; the LFM2.5
@@ -1371,7 +1515,6 @@ static void dequantize_q3_K_row(const uint8_t *data, float *output, int64_t n_el
                 m <<= 1;
             }
             q += 32;
-            hm += 32;
         }
     }
 }
@@ -2147,10 +2290,14 @@ int gguf_read_raw_tensor(gguf_ctx *ctx, gguf_tensor_info *tensor, void *output) 
         return (int)raw_size;
     }
 
-    // File-based read
+    // File-based read (tensor offsets can exceed 2 GB — use 64-bit seek)
     uint64_t tensor_pos = ctx->data_blob_offset + tensor->data_offset;
-    fseek(ctx->file, tensor_pos, SEEK_SET);
-    size_t n_read = fread(output, 1, raw_size, ctx->file);
+#ifdef _WIN32
+    if (_fseeki64(ctx->file, (__int64)tensor_pos, SEEK_SET) != 0) return 0;
+#else
+    if (fseeko(ctx->file, (off_t)tensor_pos, SEEK_SET) != 0) return 0;
+#endif
+    size_t n_read = fread(output, 1, (size_t)raw_size, ctx->file);
     if (n_read != (size_t)raw_size) return 0;
     return (int)raw_size;
 }

@@ -43,13 +43,13 @@ extern "C" {
 #define G4_FULL_Q_DIM       8192   /* 16 * 512 */
 #define G4_FULL_KV_DIM      512    /*  1 * 512 */
 #define G4_FULL_KV_HEADS    1
-#define G4_FULL_N_ROT       128    /* 25% of HEAD_DIM */
+#define G4_FULL_N_ROT       512    /* GGUF rope.dimension_count = full head dim; 25% active via factors */
 #define G4_FULL_ROPE_BASE   1000000.0f
 
 /* KV sharing zone: layers 40-47 reuse KV from layers 38 (SWA) / 39 (full) */
 #define G4_KV_SHARE_START   40
 #define G4_KV_SHARE_SWA_SRC 38
-#define G4_KV_SHARE_FULL_SRC 39
+#define G4_KV_SHARE_FULL_SRC 35  /* last full-attn layer before share block; 39 is SWA */
 
 /* ---- Helpers ---- */
 /* Returns true if layer i is a full-attention layer */
@@ -59,7 +59,11 @@ static inline int g4_layer_is_full(int i) {
 
 /* Returns true if layer i shares KV (no own K,V weights) */
 static inline int g4_layer_shares_kv(int i) {
-    return i >= G4_KV_SHARE_START;
+    /* This GGUF reports gemma4.attention.shared_kv_layers = 0: every layer
+     * has its own attn_k/attn_v tensors. The old i>=40 rule skipped loading
+     * those weights and fed the last 8 layers garbage K/V. */
+    (void)i;
+    return 0;
 }
 
 /* Returns the KV source layer index for a sharing layer */
@@ -105,6 +109,11 @@ typedef struct {
     int ggml_type;
     int64_t raw_bytes;
     int data_owned;  /* 1 if data was malloc'd and needs free */
+    void *stream_ctx;  /* gguf_ctx* when weight is read on demand from file */
+    void *stream_info; /* gguf_tensor_info* for that weight */
+    uint8_t *raw_cache; /* quantized bytes held in the RAM tier (LRU) */
+    uint64_t last_use; /* LRU stamp */
+    void *cache_prev, *cache_next;
 } g4_qweight_t;
 
 /* ---- KV cache entry (per-layer) ---- */
@@ -170,10 +179,16 @@ typedef struct {
     g4_qweight_t output;       /* [3840, 262144] — tied to token_embd if no separate tensor */
     bool tied_output;
     float *output_norm_weight; /* [3840] F32 */
+    /* Opt-in LM-head cache: dequantize the tied embedding once so decode is a
+     * plain matvec instead of re-dequantizing ~4 GB per token. */
+    float *lm_head_f32;        /* [3840 * 262144] F32, or NULL */
     
     /* GGUF data blob */
     void *data_blob;
     size_t data_blob_size;
+    int data_blob_is_mmap;
+    void *data_blob_mmap_base;
+    size_t data_blob_mmap_len;
     
     /* KV cache (per-layer) */
     g4_kv_cache_t *kv_cache;
@@ -198,12 +213,14 @@ typedef struct {
     int buf_size;
 
     /* GGUF file handle for streaming weight upload to GPU.
-     * Kept open so we can read weights directly from file during inference,
-     * bypassing the mmap'd data blob which causes issues on WSL2. */
+     * In G4_STREAM_WEIGHTS mode stream_ctx owns this ctx (and the file). */
+    void *stream_ctx;
     FILE *gguf_file;           /* File handle, kept open for weight streaming */
     uint64_t gguf_data_offset; /* Offset in file where data blob starts */
     int gguf_n_tensors;        /* Number of tensors */
     void *gguf_tensor_info;    /* Array of gguf_tensor_info for all tensors */
+    char gguf_path[1024];      /* For opening a second file handle for prefetch */
+    void *prefetch;            /* g4_prefetch_t* (opaque, Windows only) */
 } g4_model_t;
 
 /* ---- API ---- */

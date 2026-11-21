@@ -44,6 +44,22 @@ of `make all` via EXTRA_OBJ — verified by `make module-registry`:
 | wubu_traj_sft | trajectory -> masked-observation SFT converter |
 | wubu_user_sim | tau-bench style user simulator |
 | wubu_uuid | UUID generation |
+| wubu_goal | persistent goals + evidence-first judge (LP-01) |
+| wubu_goal_steer | LP-02 fast/slow goal drift |
+| wubu_goal_resample | LP-03 bounded verifier-guided resampling |
+| wubu_harness_bandit | LP-04 failure-pattern harness bandit |
+| wubu_ttc_budget | LP-14 measured-cost test-time compute |
+| wubu_kv_exact | LP-05 all-or-nothing paged KV claim |
+| wubu_swa_reclaim | LP-06 shared-cell SWA reclamation |
+| wubu_spec_budget | LP-07 confidence-budgeted speculation |
+| wubu_spec_seed | LP-08 deterministic seeded speculation |
+| wubu_spec_constrained | LP-09 constrained decode with speculation |
+| wubu_kernel_spec | LP-10 compile-time family specialization |
+| wubu_kv_qfmt | LP-11 KV reconstruct in compute format |
+| wubu_kv_fetch | LP-12 tolerance-parameterised 9P KV fetch |
+| wubu_simd_quant | LP-15 per-shape SIMD quant decode |
+| wubu_diff_sampler | LP-13 fused diffusion logits/sampler |
+| wubu_state_version | LP-16 state/ABI semver boundary |
 | wubu_vision_moondream | MoonDream vision tool-calling |
 | wubu_width | width growth |
 | wubu_win | Windows mmap helpers |

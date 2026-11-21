@@ -1,42 +1,32 @@
-# bytropix Goal Mantra — Jun 2, 2026
+# wubuwizard Mind Palace Goal Mantra — Inkling 2 Mini (Nov 21, 2026)
 
 ## THE GOAL
-**All gaps closed. Hardware ceiling reached.** Current state:
-- Context growth penalty: ✅ ELIMINATED (persistent KV, 7.9×)
-- Cos-sim vs llama: 0.976 (IQ2_M floor, improved from 0.974)
-- Compilation flags: ✅ `-fno-fast-math` (IEEE 754)
-- Cos-sim regression: ✅ ALL PASS at 0.975 threshold
-- Between-builds (fast/no-fast): cos-sim 0.99975580, top-5 identical
+
+Local, open-weights inference for looped MoE transformers. Target: **Inkling 2 Mini**
+(26.4B / 3.4B active, 3× middle-layer loop, NVFP4 + MXFP8 tail, ~20 GB, agentic coding).
+Verify looped decode against a reference on local hardware.
+
+**Authoritative goal doc:** `../inkling-2-mini-goal.md`
 
 ## STATE
+
 | Metric | Value | Status |
 |--------|-------|--------|
-| Cos-sim vs llama.cpp | 0.976 (IQ2_M floor) | ✅ Improved from 0.974 |
-| Output projection | Fixed (GCC -O3 + if(0) + AVX2 zeros) | ✅ |
-| Local inference | serve_local.py (real CPU, not proxy) | ✅ |
-| Test suite | 6/6 tests pass (512K, Hermes, integration) | ✅ |
-| Multi-turn conversation | 94.6s total (7.9× faster), constant ~31s/turn | ✅ |
-| Context growth penalty | ELIMINATED | ✅ |
-| Compilation flags | `-fno-fast-math` (IEEE 754) | ✅ |
-| Cos-sim regression | 3/3 pass at 0.975 | ✅ |
+| SOTA LP-01..LP-16 | 16/16 gated (`docs/WORKLIST.md`) | Shipped |
+| Inkling P0 reorient | Goal doc + both boot mantras + archive | Done |
+| Inkling P1..P7 | Probe / loop / format / MoE / context / monitor / agents | Open |
 
 ## THE LOOP
-read docs → pick lowest undone → execute → update docs → push → loop
-no questions. no choices. no stopping. zero delegation.
-every output feeds back into input documents.
+
+read goal → pick lowest undone phase → implement one gate → run gate →
+update `state.md` + `WORKLIST.md` → update palace → push → loop
+
+Exit gate: Claim → Verify → Risk → Mitigate. No ceremony in responses.
+`bytropix` is a coding reference and past proof run, not the target.
 
 ## FILES
-- `.hermes/mind-palace/goal-mantra.md` — this file
-- `.hermes/mind-palace/goal-paste-agent.md` — session start paste
-- `.hermes/mind-palace/walkway.md` — step-by-step path
-- `.hermes/mind-palace/bytropix-300-gap-battleship.md` — full gap taxonomy
-- `.hermes/mind-palace/state.md` — current state
-- `.hermes/mind-palace/plan.md` — plan
-- `.hermes/mind-palace/workflow-parity.md` — parity debug workflow
-- `vault/context-growth-penalty.md` — penalty analysis + compilation flags fix
-- **work-fork:** `/home/wubu/bytropix-work-fork` (branch `work-fork`, commit `816aea8`)
 
-## VAULT & MEMORY DIRECTION
-discover → write vault/[topic].md + memory target:memory content:"vault vault/[topic].md — one-line what it covers"
-palace insight → memory target:memory content:"mind palace mind-palace/[path] — one-line update"
-preference → memory target:user content:"wubu prefers [preference]"
+- `../inkling-2-mini-goal.md` — authoritative goal
+- `../vault/bytropix-goal-archive.md` — previous goal, preserved
+- `state.md`, `plan.md`, `testing.md`, `index.md` — walkway
+- `docs/WORKLIST.md`, `docs/SOTA-2026-11-ROADMAP.md` — pad status and prior roadmap

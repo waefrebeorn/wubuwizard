@@ -453,9 +453,12 @@ static int stream_weights_to_vram(g4_gpu_ctx_t *ctx, int buf_idx,
     g4_layer_vram_t *vw = &ctx->layer_vram[il];
     cudaStream_t upload_stream = ctx->stream[1];  /* UPLOAD stream */
 
-    /* Helper: read from file into staging, then async cudaMemcpy to VRAM */
-    auto upload_one = [&](const uint8_t *data_ptr, int nbytes, uint8_t **d_out) -> int {
-        if (!data_ptr || nbytes <= 0) { *d_out = NULL; return 1; }
+    /* Helper: read a weight from its GGUF file offset into staging, then async H2D.
+     * Works in both blob mode and G4_STREAM_WEIGHTS mode (data == NULL). */
+    auto upload_one = [&](const g4_qweight_t *w, uint8_t **d_out) -> int {
+        if (!w || w->raw_bytes <= 0) { *d_out = NULL; return 1; }
+        int nbytes = (int)w->raw_bytes;
+        if (!d_out) return 0;
 
         /* Sub-allocate from weight pool instead of cudaMalloc */
         *d_out = g4_gpu_weight_alloc(ctx, (size_t)nbytes);
@@ -464,13 +467,18 @@ static int stream_weights_to_vram(g4_gpu_ctx_t *ctx, int buf_idx,
             return 0;
         }
 
-        /* Read from file into staging buffer */
-        uint64_t offset_in_blob = (uint64_t)(data_ptr - (const uint8_t*)model->data_blob);
-        uint64_t file_offset = model->gguf_data_offset + offset_in_blob;
+        /* Resolve absolute file offset without relying on data_blob (it is
+         * NULL in G4_STREAM_WEIGHTS mode). Tensor offsets are relative to the
+         * GGUF data blob start and can exceed 2 GB. */
+        uint64_t tensor_off = w->stream_info
+            ? ((gguf_tensor_info *)w->stream_info)->data_offset
+            : (model->data_blob && w->data
+                ? (uint64_t)(w->data - (const uint8_t *)model->data_blob) : 0);
+        uint64_t file_offset = model->gguf_data_offset + tensor_off;
 
         if (nbytes <= (int)G4_GPU_RAW_BUF_SIZE) {
             /* Fits in single staging buffer */
-            if (fseek(model->gguf_file, (long)file_offset, SEEK_SET) != 0) {
+            if (_fseeki64(model->gguf_file, (__int64)file_offset, SEEK_SET) != 0) {
                 fprintf(stderr, "[G4_GPU] fseek failed offset %lu\n", (unsigned long)file_offset);
                 return 0;
             }
@@ -484,7 +492,7 @@ static int stream_weights_to_vram(g4_gpu_ctx_t *ctx, int buf_idx,
             /* Large tensor (e.g. token_embd 540MB): chunk it */
             uint8_t *chunk = (uint8_t*)malloc((size_t)nbytes);
             if (!chunk) { fprintf(stderr, "[G4_GPU] malloc failed %d\n", nbytes); return 0; }
-            if (fseek(model->gguf_file, (long)file_offset, SEEK_SET) != 0) {
+            if (_fseeki64(model->gguf_file, (__int64)file_offset, SEEK_SET) != 0) {
                 free(chunk); return 0;
             }
             size_t n_read = fread(chunk, 1, (size_t)nbytes, model->gguf_file);
@@ -499,23 +507,23 @@ static int stream_weights_to_vram(g4_gpu_ctx_t *ctx, int buf_idx,
     };
 
     int ok = 1;
-    ok = ok && upload_one(l->attn_q.data, l->attn_q.raw_bytes, &vw->d_q);
+    ok = ok && upload_one(&l->attn_q, &vw->d_q);
     vw->q_bytes = l->attn_q.raw_bytes;
     if (!l->share_kv) {
-        ok = ok && upload_one(l->attn_k.data, l->attn_k.raw_bytes, &vw->d_k);
+        ok = ok && upload_one(&l->attn_k, &vw->d_k);
         vw->k_bytes = l->attn_k.raw_bytes;
         if (!l->kv_eq) {
-            ok = ok && upload_one(l->attn_v.data, l->attn_v.raw_bytes, &vw->d_v);
+            ok = ok && upload_one(&l->attn_v, &vw->d_v);
             vw->v_bytes = l->attn_v.raw_bytes;
         }
     }
-    ok = ok && upload_one(l->attn_out.data, l->attn_out.raw_bytes, &vw->d_o);
+    ok = ok && upload_one(&l->attn_out, &vw->d_o);
     vw->o_bytes = l->attn_out.raw_bytes;
-    ok = ok && upload_one(l->ffn_gate.data, l->ffn_gate.raw_bytes, &vw->d_g);
+    ok = ok && upload_one(&l->ffn_gate, &vw->d_g);
     vw->g_bytes = l->ffn_gate.raw_bytes;
-    ok = ok && upload_one(l->ffn_up.data, l->ffn_up.raw_bytes, &vw->d_u);
+    ok = ok && upload_one(&l->ffn_up, &vw->d_u);
     vw->u_bytes = l->ffn_up.raw_bytes;
-    ok = ok && upload_one(l->ffn_down.data, l->ffn_down.raw_bytes, &vw->d_d);
+    ok = ok && upload_one(&l->ffn_down, &vw->d_d);
     vw->d_bytes = l->ffn_down.raw_bytes;
 
     /* Record upload completion event */
@@ -709,15 +717,17 @@ static int ensure_weights_uploaded(g4_gpu_ctx_t *ctx, g4_model_t *model) {
     cudaStreamSynchronize(s);
 
     /* Upload token_embd via weight pool (sub-allocated) */
-    if (model->token_embd.data) {
+    if (model->token_embd.data || model->token_embd.stream_ctx) {
         ctx->d_token_embd = g4_gpu_weight_alloc(ctx, model->token_embd.raw_bytes);
         if (!ctx->d_token_embd) {
             return 0;
         }
-        /* Read from file in chunks */
-        uint64_t offset_in_blob = (uint64_t)(model->token_embd.data - (const uint8_t*)model->data_blob);
-        uint64_t file_offset = model->gguf_data_offset + offset_in_blob;
-        if (fseek(model->gguf_file, (long)file_offset, SEEK_SET) != 0) return 0;
+        /* Read from file in chunks (64-bit offset; works with streamed weights) */
+        uint64_t tensor_off = model->token_embd.stream_info
+            ? ((gguf_tensor_info *)model->token_embd.stream_info)->data_offset
+            : (uint64_t)(model->token_embd.data - (const uint8_t *)model->data_blob);
+        uint64_t file_offset = model->gguf_data_offset + tensor_off;
+        if (_fseeki64(model->gguf_file, (__int64)file_offset, SEEK_SET) != 0) return 0;
 
         const size_t CHUNK = 4 * 1024 * 1024;
         uint8_t *h_buf = (uint8_t*)malloc(CHUNK);
@@ -735,12 +745,14 @@ static int ensure_weights_uploaded(g4_gpu_ctx_t *ctx, g4_model_t *model) {
         if (remaining > 0) return 0;
     }
 
-    if (!model->tied_output && model->output.data) {
+    if (!model->tied_output && (model->output.data || model->output.stream_ctx)) {
         ctx->d_output_w = g4_gpu_weight_alloc(ctx, model->output.raw_bytes);
         if (!ctx->d_output_w) return 0;
-        uint64_t offset_in_blob = (uint64_t)(model->output.data - (const uint8_t*)model->data_blob);
-        uint64_t file_offset = model->gguf_data_offset + offset_in_blob;
-        if (fseek(model->gguf_file, (long)file_offset, SEEK_SET) != 0) return 0;
+        uint64_t tensor_off = model->output.stream_info
+            ? ((gguf_tensor_info *)model->output.stream_info)->data_offset
+            : (uint64_t)(model->output.data - (const uint8_t *)model->data_blob);
+        uint64_t file_offset = model->gguf_data_offset + tensor_off;
+        if (_fseeki64(model->gguf_file, (__int64)file_offset, SEEK_SET) != 0) return 0;
         const size_t CHUNK2 = 4 * 1024 * 1024;
         uint8_t *h_buf2 = (uint8_t*)malloc(CHUNK2);
         size_t remaining = model->output.raw_bytes;

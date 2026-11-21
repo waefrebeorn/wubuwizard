@@ -208,7 +208,7 @@ void quantized_matmul(const float *x,
     }
     
     // Handle IQ2_S: dequant via gguf_dequantize helper, then SGEMM
-    if (weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ2_XS || 
+    if (weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ2_XS ||
         weight_type == GGML_TYPE_IQ1_S || weight_type == GGML_TYPE_IQ1_M ||
         weight_type == GGML_TYPE_IQ3_S ||
         weight_type == GGML_TYPE_Q2_K || weight_type == GGML_TYPE_Q3_K) {
@@ -501,6 +501,43 @@ void quantized_matmul_batched(const float *x,
                 y[i * n_cols + j] = sum;
             }
         return;
+    }
+
+    /* IQ2_S / IQ3_S have no Q8 vec_dot yet: quantized_matmul dequantizes the
+     * WHOLE weight per call. For a batch, dequantize ONCE and run a dense
+     * GEMM over all N tokens (prefill was re-dequantizing up to 236 MB per
+     * token per matmul). */
+    if (weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ3_S) {
+        int64_t total = n_rows * n_cols;
+        float *wf = (float *)malloc((size_t)total * sizeof(float));
+        if (wf) {
+            gguf_dequantize((const uint8_t *)W, weight_type, total, wf);
+            #pragma omp parallel for collapse(2) if(N * n_cols > 64)
+            for (int i = 0; i < N; i++) {
+                for (int64_t j = 0; j < n_cols; j++) {
+                    const float *xm = x + (size_t)i * n_rows;
+                    const float *wn = wf + (size_t)j * n_rows;
+                    float sum = 0.0f;
+                    int64_t k = 0;
+#if defined(__AVX2__) && defined(__FMA__)
+                    __m256 acc = _mm256_setzero_ps();
+                    for (; k + 8 <= n_rows; k += 8)
+                        acc = _mm256_fmadd_ps(_mm256_loadu_ps(xm + k),
+                                              _mm256_loadu_ps(wn + k), acc);
+                    __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc),
+                                          _mm256_extractf128_ps(acc, 1));
+                    s = _mm_hadd_ps(s, s);
+                    s = _mm_hadd_ps(s, s);
+                    sum = _mm_cvtss_f32(s);
+#endif
+                    for (; k < n_rows; k++) sum += xm[k] * wn[k];
+                    y[(size_t)i * n_cols + j] = sum;
+                }
+            }
+            free(wf);
+            return;
+        }
+        /* OOM: fall through to the per-token path below */
     }
 
     if (weight_type == GGML_TYPE_F16 || weight_type == GGML_TYPE_BF16 || weight_type == 30 ||

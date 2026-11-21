@@ -1,6 +1,8 @@
 #include "wubu_model.h"
 #include "wubu_alloc.h"
 #include "gguf_reader.h"
+#include "wubu_model_arch.h"
+#include "wubu_dense_ffn.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,53 +37,39 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     gguf_ctx *ctx = gguf_open(gguf_path);
     if (!ctx) { fprintf(stderr, "Failed to open %s\n", gguf_path); return false; }
     
-    // Count layers from tensor names
-    // Find max layer index from any blk.N. tensor
+    /* Architecture registry first (WuBuOS manifest pattern): the GGUF's
+     * general.architecture key selects the kernel family and tensor layout.
+     * Tensor-name probing remains only a fallback for sparse metadata. */
+    wubu_arch_spec_t arch;
+    wubu_arch_probe(ctx, &arch);
+    fprintf(stderr, "[wubu] model: %s family=%s layout=%s supported=%s\n",
+            arch.arch_name, wubu_family_name(arch.family),
+            wubu_layout_name(arch.layout), arch.supported ? "yes" : "generic");
+
     int max_layer = 0;
-    int has_nextn = 0;
     for (int i = 0; i < (int)ctx->n_tensors; i++) {
         const char *name = ctx->tensors[i].name;
         if (strncmp(name, "blk.", 4) == 0) {
             int layer = atoi(name + 4);
             if (layer > max_layer) max_layer = layer;
-            // Check if this is an MTP model (has nextn.* tensors)
-            if (strstr(name, ".nextn.")) has_nextn = 1;
         }
     }
-    // For MTP models, the last layer (blk.40) is the MTP prediction head
-    // Only count regular layers (skip MTP head)
-    if (has_nextn) {
-        model->n_layers = max_layer;  // 40 layers (0..39) for MTP model
-        printf("MTP model detected: %d regular layers + 1 MTP head\n", max_layer);
-    } else {
-        model->n_layers = max_layer + 1;  // 41 layers for MTP, 40 for regular
-    }
-    
-    // Allocate layers
+    if (arch.n_layers > 0) model->n_layers = arch.n_layers;
+    else if (max_layer > 0) model->n_layers = max_layer + 1;
+    else model->n_layers = 1;
+
+    /* tensor_naming: 0 = blk.N hybrid SSM, 1 = model.layers.N,
+     * 2 = blk.N pure transformer/GQA. */
+    int has_ssm = gguf_find_tensor(ctx, "blk.0.ssm_beta.weight") ||
+                  gguf_find_tensor(ctx, "model.layers.0.ssm_beta.weight");
+    if (arch.layout == WUBU_LAYOUT_MODEL_LAYERS) model->tensor_naming = 1;
+    else if (arch.family == WUBU_FAMILY_HYBRID_SSM || has_ssm) model->tensor_naming = 0;
+    else model->tensor_naming = 2;
+    g_tensor_naming = model->tensor_naming;
+
     model->layers = (wubu_layer_t *)calloc(model->n_layers, sizeof(wubu_layer_t));
     if (!model->layers) { gguf_close(ctx); return false; }
-    
     printf("Allocating %d layers...\n", model->n_layers);
-
-    // ============================================================
-    // Multi-model dimension extraction from GGUF
-    // ============================================================
-    // Detect tensor naming convention and architecture
-    model->tensor_naming = 0; // default: Qwen (blk.N.*)
-    for (int i = 0; i < (int)ctx->n_tensors; i++) {
-        if (strncmp(ctx->tensors[i].name, "model.layers.", 12) == 0) {
-            model->tensor_naming = 1; // Gemma-style
-            break;
-        }
-    }
-    // Detect pure GQA (no SSM layers) by checking for ssm_beta tensor
-    {
-        const char *ssm_check = (model->tensor_naming == 1) ? "model.layers.0.ssm_beta.weight" : "blk.0.ssm_beta.weight";
-        if (!gguf_find_tensor(ctx, ssm_check)) {
-            model->tensor_naming = 2; // pure GQA (DiffusionGemma/Gemma4)
-        }
-    }
-    g_tensor_naming = model->tensor_naming; // set global for wubu_is_ssm_layer()
 
     // Extract dynamic dimensions from GGUF tensor shapes
     int d_model = 0;
@@ -90,11 +78,11 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
         gguf_tensor_info *nt = gguf_find_tensor(ctx, norm_name);
         if (nt && nt->n_dims >= 1) d_model = (int)nt->dims[0];
     }
-    if (d_model == 0) d_model = D_MODEL; // fallback
+    if (d_model == 0) d_model = arch.d_model > 0 ? arch.d_model : D_MODEL;
     model->d_model = d_model;
 
-    // Extract GQA dimensions from tensor shapes
-    int gqa_head_dim = GQA_HEAD_DIM;
+    // Extract GQA dimensions from GGUF tensor shapes
+    int gqa_head_dim = arch.head_dim > 0 ? arch.head_dim : GQA_HEAD_DIM;
     {
         const char *q_norm_name = (model->tensor_naming == 1) ? "model.layers.0.attn_q_norm.weight" : "blk.0.attn_q_norm.weight";
         gguf_tensor_info *qn = gguf_find_tensor(ctx, q_norm_name);
@@ -120,6 +108,8 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             wd.gqa_q_heads = (int)(qt->dims[1] / (2 * gqa_head_dim));
         if (kt && kt->n_dims >= 2 && gqa_head_dim > 0)
             wd.gqa_kv_heads = (int)(kt->dims[1] / gqa_head_dim);
+        if (arch.n_heads > 0) wd.gqa_q_heads = arch.n_heads;
+        if (arch.n_kv_heads > 0) wd.gqa_kv_heads = arch.n_kv_heads;
         wubu_dims_set(&wd);
     }
 
@@ -132,15 +122,18 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     model->ssm_k_heads = SSM_K_HEADS;
     model->ssm_v_heads = SSM_V_HEADS;
     model->ssm_d_state = SSM_D_STATE;
-    model->gqa_q_heads = GQA_Q_HEADS;
-    model->gqa_kv_heads = GQA_KV_HEADS;
+    model->gqa_q_heads = arch.n_heads > 0 ? arch.n_heads : GQA_Q_HEADS;
+    model->gqa_kv_heads = arch.n_kv_heads > 0 ? arch.n_kv_heads : GQA_KV_HEADS;
     model->gqa_head_dim = gqa_head_dim;
-    model->rotary_dim = (int)(gqa_head_dim * PARTIAL_ROTARY_FACTOR);
-    model->d_ff = D_FF;
+    model->rotary_dim = arch.rotary_dim > 0 ? arch.rotary_dim
+                        : (int)(gqa_head_dim * PARTIAL_ROTARY_FACTOR);
+    model->d_ff = arch.d_ff > 0 ? arch.d_ff : D_FF;
     model->n_experts = N_EXPERTS;
     model->n_active_experts = N_ACTIVE_EXPTS;
 
     printf("  Model dims: d_model=%d, head_dim=%d\n", d_model, gqa_head_dim);
+    printf("  Architecture: %s (%s, %s)\n", arch.arch_name,
+           wubu_arch_id_name(arch.id), wubu_family_name(arch.family));
     printf("  Naming: %s\n", model->tensor_naming == 1 ? "Gemma (model.layers.N.*)" : (model->tensor_naming == 2 ? "Pure-GQA (blk.N.*)" : "Qwen (blk.N.*)"));
 
     // Load layer norms and attention weights
@@ -446,15 +439,16 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
             } else {
                 snprintf(name, sizeof(name), "blk.%d.attn_q.weight", l);
                 t = gguf_find_tensor(ctx, name);
-                if (t && blob) { layer->gqa.attn_q_weight_q = blob + t->data_offset; layer->gqa.attn_q_weight_type = t->ggml_type; }
+                if (t && blob) { layer->gqa.attn_q_weight_q = blob + t->data_offset; layer->gqa.attn_q_weight_type = t->ggml_type; if (t->ggml_type == GGML_TYPE_F32) layer->gqa.attn_q_weight = (float *)(blob + t->data_offset); }
                 snprintf(name, sizeof(name), "blk.%d.attn_k.weight", l);
                 t = gguf_find_tensor(ctx, name);
-                if (t && blob) { layer->gqa.attn_k_weight_q = blob + t->data_offset; layer->gqa.attn_k_weight_type = t->ggml_type; }
+                if (t && blob) { layer->gqa.attn_k_weight_q = blob + t->data_offset; layer->gqa.attn_k_weight_type = t->ggml_type; if (t->ggml_type == GGML_TYPE_F32) layer->gqa.attn_k_weight = (float *)(blob + t->data_offset); }
                 snprintf(name, sizeof(name), "blk.%d.attn_v.weight", l);
                 t = gguf_find_tensor(ctx, name);
                 if (t && blob) {
                     layer->gqa.attn_v_weight_q = blob + t->data_offset;
                     layer->gqa.attn_v_weight_type = t->ggml_type;
+                    if (t->ggml_type == GGML_TYPE_F32) layer->gqa.attn_v_weight = (float *)(blob + t->data_offset);
                 } else {
                     /* LARGE layers: V weight not present, share K weight (V=K) */
                     layer->gqa.attn_v_weight_q = layer->gqa.attn_k_weight_q;
@@ -462,7 +456,27 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
                 }
                 snprintf(name, sizeof(name), "blk.%d.attn_output.weight", l);
                 t = gguf_find_tensor(ctx, name);
-                if (t && blob) { layer->gqa.attn_output_weight_q = blob + t->data_offset; layer->gqa.attn_output_weight_type = t->ggml_type; }
+                if (t && blob) { layer->gqa.attn_output_weight_q = blob + t->data_offset; layer->gqa.attn_output_weight_type = t->ggml_type; if (t->ggml_type == GGML_TYPE_F32) layer->gqa.attn_output_weight = (float *)(blob + t->data_offset); }
+            }
+
+            /* Dense SwiGLU FFN (llama/qwen/mistral/phi): optional, zero-copy
+             * from the GGUF blob. Only create when all three tensors exist. */
+            gguf_tensor_info *gate = NULL, *up = NULL, *down = NULL;
+            snprintf(name, sizeof(name), "blk.%d.ffn_gate.weight", l); gate = gguf_find_tensor(ctx, name);
+            snprintf(name, sizeof(name), "blk.%d.ffn_up.weight", l);   up = gguf_find_tensor(ctx, name);
+            snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", l); down = gguf_find_tensor(ctx, name);
+            if (gate && blob) { layer->ffn_gate_q = blob + gate->data_offset; layer->ffn_gate_type = gate->ggml_type; }
+            if (up && blob) {
+                layer->ffn_up_q = blob + up->data_offset; layer->ffn_up_type = up->ggml_type;
+                layer->ffn_d_ff = up->n_dims >= 2 ? (int)up->dims[1] : model->d_ff;
+            }
+            if (down && blob) { layer->ffn_down_q = blob + down->data_offset; layer->ffn_down_type = down->ggml_type; }
+            if (layer->ffn_gate_q && layer->ffn_up_q && layer->ffn_down_q) {
+                layer->dense_ffn = wubu_dense_ffn_create(
+                    (const uint8_t *)layer->ffn_gate_q, layer->ffn_gate_type,
+                    (const uint8_t *)layer->ffn_up_q, layer->ffn_up_type,
+                    (const uint8_t *)layer->ffn_down_q, layer->ffn_down_type,
+                    model->d_model, layer->ffn_d_ff > 0 ? layer->ffn_d_ff : model->d_ff);
             }
         }
         // Set token_embd quantized pointer
@@ -579,8 +593,7 @@ bool wubu_model_init(wubu_model_t *model, const char *gguf_path) {
     return true;
     
 fail:
-    gguf_close(ctx);
-    model->gguf_ctx = NULL;
+    /* wubu_model_free() owns the gguf_ctx (and its data blob) cleanup. */
     wubu_model_free(model);
     return false;
 }
@@ -591,10 +604,16 @@ void wubu_model_free(wubu_model_t *model) {
 #ifdef GPU_SUPPORT
     wubu_model_gpu_free(model);
 #endif
+    const uint8_t *blob = model->gguf_ctx ? (const uint8_t *)model->gguf_ctx->data_blob : NULL;
+    const uint8_t *blob_end = blob && model->gguf_ctx
+        ? blob + model->gguf_ctx->data_blob_size : NULL;
+#define WUBU_BLOB_OWNED(p) ((p) && blob && (const uint8_t *)(p) >= blob && \
+                            (const uint8_t *)(p) < blob_end)
     for (int l = 0; l < model->n_layers; l++) {
         wubu_layer_t *layer = &model->layers[l];
         free(layer->attn_norm_weight);
         free(layer->post_attn_norm_weight);
+        wubu_dense_ffn_free(layer->dense_ffn);
         // Free MoE weights (skip if blob-backed)
         if (!layer->moe.load_from_blob) {
             free(layer->moe.ffn_gate_inp);
@@ -617,10 +636,11 @@ void wubu_model_free(wubu_model_t *model) {
             free(layer->ssm.ssm_norm_weight);
             free(layer->ssm.ssm_out_weight);
         } else {
-            free(layer->gqa.attn_q_weight);
-            free(layer->gqa.attn_k_weight);
-            free(layer->gqa.attn_v_weight);
-            free(layer->gqa.attn_output_weight);
+            /* F32 weights may point directly into the GGUF blob (zero-copy). */
+            if (!WUBU_BLOB_OWNED(layer->gqa.attn_q_weight)) free(layer->gqa.attn_q_weight);
+            if (!WUBU_BLOB_OWNED(layer->gqa.attn_k_weight)) free(layer->gqa.attn_k_weight);
+            if (!WUBU_BLOB_OWNED(layer->gqa.attn_v_weight)) free(layer->gqa.attn_v_weight);
+            if (!WUBU_BLOB_OWNED(layer->gqa.attn_output_weight)) free(layer->gqa.attn_output_weight);
             free(layer->gqa.attn_q_norm_weight);
             free(layer->gqa.attn_k_norm_weight);
         }
@@ -932,8 +952,15 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
             } else {
                 memcpy(ffn_out, normed2, N * model->d_model * sizeof(float));
             }
+        } else if (layer->dense_ffn && wubu_dense_ffn_ready(layer->dense_ffn)) {
+            /* Dense SwiGLU FFN for llama/qwen/mistral/phi blocks. */
+            for (int i = 0; i < N; i++) {
+                wubu_dense_ffn_forward(layer->dense_ffn,
+                    normed2 + (size_t)i * model->d_model,
+                    ffn_out + (size_t)i * model->d_model);
+            }
         } else {
-            // Pass-through when MoE disabled
+            // Pass-through when neither MoE nor dense FFN is available
             memcpy(ffn_out, normed2, N * model->d_model * sizeof(float));
         }
         

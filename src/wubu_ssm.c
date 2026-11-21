@@ -1368,7 +1368,9 @@ void wubu_gqa_forward(const float *x, int B, int T,
     //
     // Optimization: pre-compute theta_i table (static, once) to eliminate powf() calls
     {
-        const int n_rot = WUBU_DIMS.rope_head_dim > 0 ? WUBU_DIMS.rope_head_dim : 64;  /* rope.dimension_count (runtime) */
+        int n_rot = WUBU_DIMS.rope_head_dim > 0 ? WUBU_DIMS.rope_head_dim : 64;  /* rope.dimension_count (runtime) */
+        /* Partial rotary must never exceed the actual head width. */
+        if (n_rot > head_dim) n_rot = head_dim;
         const float freq_base = 10000000.0f;
         const int q_rot_pairs = n_rot / 2;  /* 32 for Qwen3.6, 64 for MiniCPM5 */
         const char *rope_scale_env = getenv("ROPE_SCALE_FACTOR");

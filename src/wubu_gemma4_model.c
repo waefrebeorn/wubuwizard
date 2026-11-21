@@ -19,6 +19,9 @@
 #include <math.h>
 #include <float.h>
 #include <omp.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /* ============ Tensor name helper ============ */
 static char tn_buf[256];
@@ -51,10 +54,18 @@ static void qw_load(g4_qweight_t *w, gguf_ctx *ctx, const char *name) {
     for (int d = 0; d < t->n_dims; d++) w->n_elems *= t->dims[d];
     w->raw_bytes = gguf_raw_size(t->ggml_type, w->n_elems);
     uint64_t offset = t->data_offset;
-    w->data = (const uint8_t *)ctx->data_blob + offset;
+    if (ctx->data_blob) {
+        w->data = (const uint8_t *)ctx->data_blob + offset;
+        w->stream_ctx = NULL;
+        w->stream_info = NULL;
+    } else {
+        w->data = NULL;
+        w->stream_ctx = ctx;
+        w->stream_info = t;
+    }
     w->data_owned = 0;
-    if (w->data < (const uint8_t *)ctx->data_blob ||
-        w->data + w->raw_bytes > (const uint8_t *)ctx->data_blob + ctx->data_blob_size) {
+    if (w->data && (w->data < (const uint8_t *)ctx->data_blob ||
+        w->data + w->raw_bytes > (const uint8_t *)ctx->data_blob + ctx->data_blob_size)) {
         fprintf(stderr, "[G4] ERROR: tensor %s out of bounds\n", name);
     }
 }
@@ -62,6 +73,10 @@ static void qw_load(g4_qweight_t *w, gguf_ctx *ctx, const char *name) {
 static void qw_load_aliased(g4_qweight_t *w, g4_qweight_t *src) {
     memcpy(w, src, sizeof(*w));
     w->data_owned = 0;  /* alias doesn't own the data */
+    /* An alias must not inherit another tensor's LRU/raw-cache state. */
+    w->raw_cache = NULL;
+    w->last_use = 0;
+    w->cache_prev = w->cache_next = NULL;
 }
 
 static float *g4_load_norm_f32(gguf_ctx *ctx, const char *name, int expected) {
@@ -89,8 +104,372 @@ static float *g4_load_norm_f32(gguf_ctx *ctx, const char *name, int expected) {
  * For Q4_0 (token_embd / output head): uses dequant-to-F32 then SGEMM
  * (not critical path — LM head called once per forward)
  */
+static int g4_fseek_i64(FILE *f, uint64_t off)
+{
+#ifdef _WIN32
+    return _fseeki64(f, (__int64)off, SEEK_SET);
+#else
+    return fseeko(f, (off_t)off, SEEK_SET);
+#endif
+}
+
+/* ---- Bounded RAM tier for streamed weights (SSD -> RAM -> compute) ----
+ * G4_WEIGHT_CACHE_MB caps the QUANTIZED bytes resident in RAM. Caching raw
+ * bytes (not dequantized F32) keeps the tier ~4x smaller and avoids thrash. */
+static g4_qweight_t *g_cache_head, *g_cache_tail;
+static size_t g_cache_bytes, g_cache_cap;
+static uint64_t g_cache_clock, g_cache_hits, g_cache_misses;
+
+static void g4_cache_unlink(g4_qweight_t *w)
+{
+    if (w->cache_prev) ((g4_qweight_t *)w->cache_prev)->cache_next = w->cache_next;
+    else if (g_cache_head == w) g_cache_head = (g4_qweight_t *)w->cache_next;
+    if (w->cache_next) ((g4_qweight_t *)w->cache_next)->cache_prev = w->cache_prev;
+    else if (g_cache_tail == w) g_cache_tail = (g4_qweight_t *)w->cache_prev;
+    w->cache_prev = w->cache_next = NULL;
+}
+
+static void g4_cache_touch(g4_qweight_t *w)
+{
+    if (w->cache_prev || w->cache_next) g4_cache_unlink(w);
+    w->cache_prev = NULL;
+    w->cache_next = g_cache_head;
+    if (g_cache_head) g_cache_head->cache_prev = w;
+    g_cache_head = w;
+    if (!g_cache_tail) g_cache_tail = w;
+    w->last_use = ++g_cache_clock;
+}
+
+static void g4_cache_insert(g4_qweight_t *w, uint8_t *raw, size_t bytes)
+{
+    g4_cache_touch(w);
+    w->raw_cache = raw;
+    g_cache_bytes += bytes;
+    while (g_cache_bytes > g_cache_cap && g_cache_tail) {
+        g4_qweight_t *old = g_cache_tail;
+        uint8_t *victim = old->raw_cache;
+        size_t vb = (size_t)old->raw_bytes;
+        g4_cache_unlink(old);
+        old->raw_cache = NULL;
+        g_cache_bytes -= vb;
+        free(victim);
+    }
+}
+
+static void g4_cache_clear(void)
+{
+    g4_qweight_t *w = g_cache_head;
+    while (w) {
+        g4_qweight_t *next = (g4_qweight_t *)w->cache_next;
+        free(w->raw_cache);
+        w->raw_cache = NULL;
+        w->cache_prev = w->cache_next = NULL;
+        w = next;
+    }
+    g_cache_head = g_cache_tail = NULL;
+    g_cache_bytes = 0;
+    if (g_cache_cap)
+        fprintf(stderr, "[G4] RAM cache: %llu hits, %llu misses\n",
+                (unsigned long long)g_cache_hits, (unsigned long long)g_cache_misses);
+    g_cache_hits = g_cache_misses = 0;
+}
+
+/* ---- One-layer-lookahead weight prefetch (Windows) ----
+ * A worker with its own FILE* reads layer N+1 while the main thread computes
+ * layer N. It never touches LRU state: ready buffers are adopted by the main
+ * thread at the layer boundary, so the cache lists stay single-threaded. */
+#ifdef _WIN32
+#define G4_PF_MAX_W 7
+#define G4_PF_SLOTS 32
+
+typedef struct {
+    volatile LONG state; /* 0 idle, 1 requested, 2 ready */
+    int layer;
+    int n;
+    g4_qweight_t *w[G4_PF_MAX_W];
+    uint8_t *raw[G4_PF_MAX_W];
+    int64_t bytes[G4_PF_MAX_W];
+} g4_pf_slot_t;
+
+typedef struct {
+    FILE *file;
+    uint64_t blob_off;
+    HANDLE thread, req_evt, stop_evt;
+    volatile LONG stop;
+    g4_pf_slot_t slot[G4_PF_SLOTS];
+    uint64_t requests, ready, stale;
+} g4_prefetch_t;
+
+static void g4_pf_layer_weights(g4_model_t *m, int il,
+                                g4_qweight_t **out, int *n)
+{
+    g4_layer_t *l = &m->layers[il];
+    g4_qweight_t *cand[G4_PF_MAX_W] = {
+        &l->attn_q, &l->attn_k, &l->attn_v, &l->attn_out,
+        &l->ffn_gate, &l->ffn_up, &l->ffn_down
+    };
+    int k = 0;
+    for (int i = 0; i < G4_PF_MAX_W; i++) {
+        g4_qweight_t *w = cand[i];
+        if (!w || !w->stream_ctx || w->raw_bytes <= 0 || w->raw_cache) continue;
+        int dup = 0;
+        for (int j = 0; j < k; j++) if (out[j] == w) dup = 1;
+        if (!dup) out[k++] = w;
+    }
+    *n = k;
+}
+
+static DWORD WINAPI g4_pf_thread(LPVOID arg)
+{
+    g4_prefetch_t *pf = (g4_prefetch_t *)arg;
+    HANDLE evts[2] = { pf->req_evt, pf->stop_evt };
+    for (;;) {
+        DWORD r = WaitForMultipleObjects(2, evts, FALSE, INFINITE);
+        if (r == WAIT_OBJECT_0 + 1 || pf->stop) break;
+        if (r != WAIT_OBJECT_0) continue;
+        for (int s = 0; s < G4_PF_SLOTS; s++) {
+            g4_pf_slot_t *sl = &pf->slot[s];
+            if (InterlockedCompareExchange(&sl->state, 1, 1) != 1) continue;
+            for (int i = 0; i < sl->n; i++) {
+                g4_qweight_t *w = sl->w[i];
+                sl->raw[i] = NULL;
+                if (!w || !w->stream_info || w->raw_bytes <= 0 || w->raw_cache) continue;
+                uint8_t *buf = (uint8_t *)malloc((size_t)w->raw_bytes);
+                if (!buf) continue;
+                gguf_tensor_info *t = (gguf_tensor_info *)w->stream_info;
+                uint64_t off = pf->blob_off + t->data_offset;
+                if (_fseeki64(pf->file, (__int64)off, SEEK_SET) != 0 ||
+                    fread(buf, 1, (size_t)w->raw_bytes, pf->file) != (size_t)w->raw_bytes) {
+                    free(buf);
+                    continue;
+                }
+                sl->raw[i] = buf;
+            }
+            InterlockedExchange(&sl->state, 2);
+            pf->ready++;
+        }
+    }
+    return 0;
+}
+
+static void g4_prefetch_request(g4_model_t *m, int il);
+static void g4_prefetch_init(g4_model_t *m, const char *path)
+{
+    const char *s = getenv("G4_PREFETCH");
+    if (!getenv("G4_STREAM_WEIGHTS") || !g_cache_cap || (s && !strcmp(s, "0"))) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    g4_prefetch_t *pf = (g4_prefetch_t *)calloc(1, sizeof(*pf));
+    if (!pf) { fclose(f); return; }
+    pf->file = f;
+    pf->blob_off = m->gguf_data_offset;
+    pf->req_evt = CreateEvent(NULL, FALSE, FALSE, NULL); /* auto-reset */
+    pf->stop_evt = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!pf->req_evt || !pf->stop_evt) {
+        if (pf->req_evt) CloseHandle(pf->req_evt);
+        if (pf->stop_evt) CloseHandle(pf->stop_evt);
+        fclose(f); free(pf); return;
+    }
+    pf->thread = CreateThread(NULL, 0, g4_pf_thread, pf, 0, NULL);
+    if (!pf->thread) {
+        CloseHandle(pf->req_evt); CloseHandle(pf->stop_evt);
+        fclose(f); free(pf); return;
+    }
+    m->prefetch = pf;
+    fprintf(stderr, "[G4] one-layer weight prefetch enabled\n");
+    /* Layer weights are static: stage the first G4_PF_SLOTS layers at load
+     * time so the worker has a real head start before the first forward. */
+    for (int il = 0; il < G4_PF_SLOTS && il < m->n_layers; il++)
+        g4_prefetch_request(m, il);
+}
+
+static void g4_prefetch_request(g4_model_t *m, int il)
+{
+    g4_prefetch_t *pf = (g4_prefetch_t *)m->prefetch;
+    if (!pf || il < 0 || il >= m->n_layers) return;
+    g4_pf_slot_t *sl = NULL;
+    for (int s = 0; s < G4_PF_SLOTS; s++) {
+        LONG st = InterlockedCompareExchange(&pf->slot[s].state, 0, 0);
+        if (st == 0) { sl = &pf->slot[s]; break; }
+        if (st == 2) { /* stale ready slot: release before reuse */
+            g4_pf_slot_t *old = &pf->slot[s];
+            for (int i = 0; i < old->n; i++) { free(old->raw[i]); old->raw[i] = NULL; }
+            old->n = 0;
+            InterlockedExchange(&old->state, 0);
+            sl = old;
+            break;
+        }
+    }
+    if (!sl) return; /* both slots busy; compute path will fall back */
+    sl->layer = il;
+    g4_pf_layer_weights(m, il, sl->w, &sl->n);
+    if (sl->n == 0) return;
+    for (int i = 0; i < sl->n; i++) sl->bytes[i] = sl->w[i]->raw_bytes;
+    InterlockedExchange(&sl->state, 1);
+    pf->requests++;
+    SetEvent(pf->req_evt);
+}
+
+static void g4_prefetch_adopt(g4_model_t *m, int il)
+{
+    g4_prefetch_t *pf = (g4_prefetch_t *)m->prefetch;
+    if (!pf) return;
+    for (int s = 0; s < G4_PF_SLOTS; s++) {
+        g4_pf_slot_t *sl = &pf->slot[s];
+        if (InterlockedCompareExchange(&sl->state, 2, 2) != 2 || sl->layer != il) continue;
+        for (int i = 0; i < sl->n; i++) {
+            uint8_t *raw = sl->raw[i];
+            sl->raw[i] = NULL;
+            if (!raw) continue;
+            g4_qweight_t *w = sl->w[i];
+            if (w && !w->raw_cache) g4_cache_insert(w, raw, (size_t)sl->bytes[i]);
+            else free(raw);
+        }
+        InterlockedExchange(&sl->state, 0);
+    }
+}
+
+static void g4_prefetch_shutdown(g4_model_t *m)
+{
+    g4_prefetch_t *pf = (g4_prefetch_t *)m->prefetch;
+    if (!pf) return;
+    InterlockedExchange(&pf->stop, 1);
+    SetEvent(pf->stop_evt);
+    if (pf->thread) {
+        WaitForSingleObject(pf->thread, 10000);
+        CloseHandle(pf->thread);
+    }
+    for (int s = 0; s < G4_PF_SLOTS; s++) {
+        for (int i = 0; i < pf->slot[s].n; i++) free(pf->slot[s].raw[i]);
+    }
+    CloseHandle(pf->req_evt);
+    CloseHandle(pf->stop_evt);
+    if (pf->file) fclose(pf->file);
+    if (pf->requests)
+        fprintf(stderr, "[G4] prefetch: %llu requests, %llu ready\n",
+                (unsigned long long)pf->requests, (unsigned long long)pf->ready);
+    free(pf);
+    m->prefetch = NULL;
+}
+#else
+static void g4_prefetch_init(g4_model_t *m, const char *path) { (void)m; (void)path; }
+static void g4_prefetch_request(g4_model_t *m, int il) { (void)m; (void)il; }
+static void g4_prefetch_adopt(g4_model_t *m, int il) { (void)m; (void)il; }
+static void g4_prefetch_shutdown(g4_model_t *m) { (void)m; }
+#endif
+
+/* Read one weight from disk and dequantize it to a temporary F32 buffer.
+ * Resident cost is one weight (~236 MB for FFN) instead of the whole 4 GB blob. */
+static float *g4_qweight_stream_buffer(const g4_qweight_t *w, int *owned)
+{
+    *owned = 0;
+    if (!w || !w->stream_ctx || !w->stream_info || w->raw_bytes <= 0) return NULL;
+    const uint8_t *src = NULL;
+    int src_owned = 0;
+    if (w->raw_cache) {
+        g4_cache_touch((g4_qweight_t *)w);
+        g_cache_hits++;
+        src = w->raw_cache;
+    } else {
+        g_cache_misses++;
+        uint8_t *raw = malloc((size_t)w->raw_bytes);
+        if (!raw) return NULL;
+        if (!gguf_read_raw_tensor((gguf_ctx *)w->stream_ctx,
+                                  (gguf_tensor_info *)w->stream_info, raw)) {
+            free(raw); return NULL;
+        }
+        if (g_cache_cap && w->raw_bytes <= (int64_t)g_cache_cap) {
+            g4_cache_insert((g4_qweight_t *)w, raw, (size_t)w->raw_bytes);
+            src = raw;
+        } else {
+            src = raw;
+            src_owned = 1;
+        }
+    }
+    float *f = (float *)malloc((size_t)w->n_elems * sizeof(float));
+    if (!f) { if (src_owned) free((void *)src); return NULL; }
+    gguf_dequantize(src, w->ggml_type, w->n_elems, f);
+    if (src_owned) free((void *)src);
+    *owned = 1; /* caller owns the F32 scratch buffer */
+    return f;
+}
+
+static const uint8_t *g4_qweight_stream_raw(const g4_qweight_t *w, int *owned)
+{
+    *owned = 0;
+    if (!w || !w->stream_ctx || !w->stream_info || w->raw_bytes <= 0) return NULL;
+    if (w->raw_cache) {
+        g4_cache_touch((g4_qweight_t *)w);
+        g_cache_hits++;
+        return w->raw_cache;
+    }
+    g_cache_misses++;
+    uint8_t *raw = (uint8_t *)malloc((size_t)w->raw_bytes);
+    if (!raw) return NULL;
+    if (!gguf_read_raw_tensor((gguf_ctx *)w->stream_ctx,
+                              (gguf_tensor_info *)w->stream_info, raw)) {
+        free(raw); return NULL;
+    }
+    if (g_cache_cap && w->raw_bytes <= (int64_t)g_cache_cap) {
+        g4_cache_insert((g4_qweight_t *)w, raw, (size_t)w->raw_bytes);
+        return raw;
+    }
+    *owned = 1;
+    return raw;
+}
+
+static int g4_type_native_supported(int t)
+{
+    switch (t) {
+    case GGML_TYPE_IQ2_S: case GGML_TYPE_IQ3_S:
+    case GGML_TYPE_IQ2_XXS: case GGML_TYPE_IQ3_XXS:
+    case GGML_TYPE_IQ4_XS:
+    case GGML_TYPE_Q4_K: case GGML_TYPE_Q5_K:
+    case GGML_TYPE_Q6_K: case GGML_TYPE_Q8_0:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int g4_qweight_stream_f32(const g4_qweight_t *w, float **out)
+{
+    int owned = 0;
+    float *f = g4_qweight_stream_buffer(w, &owned);
+    if (!f) return 0;
+    *out = f;
+    return 1;
+}
+
 void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
                                int M, int N, int K, float *c) {
+    if (!w) return;
+    if (!w->data && w->stream_ctx) {
+        if (g4_type_native_supported(w->ggml_type) && N > 0) {
+            /* Feed quantized bytes straight to the SIMD matmul: no 4x F32
+             * scratch buffer and no separate dequantization pass. */
+            int owned = 0;
+            const uint8_t *raw = g4_qweight_stream_raw(w, &owned);
+            if (!raw) {
+                memset(c, 0, (size_t)M * N * sizeof(float));
+                return;
+            }
+            quantized_matmul_batched(x, raw, w->ggml_type, (int64_t)K, (int64_t)N,
+                                     w->raw_bytes / N, M, c);
+            if (owned) free((void *)raw);
+            return;
+        }
+        int owned = 0;
+        float *wf = g4_qweight_stream_buffer(w, &owned);
+        if (!wf) {
+            memset(c, 0, (size_t)M * N * sizeof(float));
+            return;
+        }
+        quantized_matmul_batched(x, wf, GGML_TYPE_F32, (int64_t)K, (int64_t)N,
+                                 (int64_t)K * 4, M, c);
+        if (owned) free(wf);
+        return;
+    }
     if (!w->data || w->raw_bytes <= 0) {
         memset(c, 0, (size_t)M * N * sizeof(float));
         return;
@@ -145,13 +524,12 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
         return;
     }
 
-    /* K-quant types: use quantized_matmul which has SIMD vec_dot + OpenMP over columns */
+    /* Everything else: batched API shares the weight read/dequant across
+     * all M tokens (IQ2_S/IQ3_S dequantize once per batch, K-quants share
+     * the weight stream; was a per-token quantized_matmul loop). */
     int64_t col_stride = w->raw_bytes / N;
-    for (int m = 0; m < M; m++) {
-        quantized_matmul(x + (size_t)m * K, w->data, w->ggml_type,
-                        (int64_t)K, (int64_t)N, (int64_t)col_stride,
-                        c + (size_t)m * N);
-    }
+    quantized_matmul_batched(x, w->data, w->ggml_type,
+                             (int64_t)K, (int64_t)N, col_stride, M, c);
 }
 
 /* ============ Math ============ */
@@ -165,9 +543,8 @@ void g4_rms_norm(const float *x, const float *weight, int n, float eps, float *o
 }
 
 float g4_gelu_tanh(float x) {
-    float x3 = x * x * x;
-    float inner = 0.7978845608f * (x + 0.044715f * x3);
-    return 0.5f * x * (1.0f + tanhf(inner));
+    /* llama.cpp LLM_FFN_GELU uses ggml_gelu (erf form), not tanh approx. */
+    return 0.5f * x * (1.0f + erff(x * 0.7071067811865476f));
 }
 
 void g4_softcap(float *logits, int n, float cap) {
@@ -180,31 +557,49 @@ void g4_softcap(float *logits, int n, float cap) {
 
 /* ============ RoPE (dual-mode) ============ */
 
+/* Gemma 4 uses NEOX RoPE: each head is rotated as two halves
+ * (j, j + n_rot/2), NOT adjacent pairs. For full-attention layers the
+ * precomputed rope_freqs.weight acts as a divisor ('factors' in llama.cpp):
+ *   theta_j = pos * rope_base^(-2j/n_rot) / freq_factors[j]
+ * with factors 1.0 for the active 25% rotary dims and 1e30 for the rest
+ * (division by 1e30 => identity rotation). SWA layers have no factors. */
 static void g4_rope_apply(float *q, float *k, int n_tokens, int d_head,
                           int q_stride, int k_stride,
                           const int *positions, int n_rot, float rope_base,
                           const float *freqs, int is_full) {
+    (void)is_full;
+    int half = n_rot / 2;
+    float theta_scale = powf(rope_base, -2.0f / (float)n_rot);
     for (int t = 0; t < n_tokens; t++) {
-        int pos = positions[t];
+        float pos = (float)positions[t];
+        /* Q has n_head heads, K has n_head_kv heads. Rotating K with the Q
+         * head offset wrote past each K row into the next token's K and
+         * re-rotated shared K heads multiple times. Keep the loops separate. */
         for (int h = 0; h < q_stride; h += d_head) {
-            for (int i = 0; i < n_rot; i += 2) {
-                float freq_val = (is_full && freqs && i / 2 < d_head / 8)
-                    ? freqs[i / 2] : 1.0f;
-                float theta = (float)pos / powf(rope_base * freq_val,
-                                                (float)i / (float)d_head);
+            float *qv = q + (size_t)t * q_stride + h;
+            for (int j = 0; j < half; j++) {
+                float ff = freqs ? freqs[j] : 1.0f;
+                if (ff > 1e20f) continue;              /* inactive rotary pair */
+                float theta = pos * powf(theta_scale, (float)j) / ff;
                 float cos_t = cosf(theta);
                 float sin_t = sinf(theta);
-                int base = t * q_stride + h;
-                float q0 = q[base + i];
-                float q1 = q[base + i + 1];
-                q[base + i]     = q0 * cos_t - q1 * sin_t;
-                q[base + i + 1] = q0 * sin_t + q1 * cos_t;
-                if (k) {
-                    int kbase = t * k_stride + h;
-                    float k0 = k[kbase + i];
-                    float k1 = k[kbase + i + 1];
-                    k[kbase + i]     = k0 * cos_t - k1 * sin_t;
-                    k[kbase + i + 1] = k0 * sin_t + k1 * cos_t;
+                float q0 = qv[j], q1 = qv[j + half];
+                qv[j]       = q0 * cos_t - q1 * sin_t;
+                qv[j+half]  = q0 * sin_t + q1 * cos_t;
+            }
+        }
+        if (k) {
+            for (int h = 0; h < k_stride; h += d_head) {
+                float *kv = k + (size_t)t * k_stride + h;
+                for (int j = 0; j < half; j++) {
+                    float ff = freqs ? freqs[j] : 1.0f;
+                    if (ff > 1e20f) continue;
+                    float theta = pos * powf(theta_scale, (float)j) / ff;
+                    float cos_t = cosf(theta);
+                    float sin_t = sinf(theta);
+                    float k0 = kv[j], k1 = kv[j + half];
+                    kv[j]      = k0 * cos_t - k1 * sin_t;
+                    kv[j+half] = k0 * sin_t + k1 * cos_t;
                 }
             }
         }
@@ -257,7 +652,13 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
 
     gguf_ctx *ctx = gguf_open(gguf_path);
     if (!ctx) return false;
-    if (!gguf_buffer_data(ctx)) { gguf_close(ctx); return false; }
+    if (getenv("G4_STREAM_WEIGHTS")) {
+        fprintf(stderr, "[G4] weight streaming: no blob buffer; reading tensors on demand\n");
+        const char *cap = getenv("G4_WEIGHT_CACHE_MB");
+        g_cache_cap = cap ? (size_t)atoll(cap) * 1048576 : 0;
+        if (g_cache_cap)
+            fprintf(stderr, "[G4] RAM weight cache cap: %zu MiB\n", g_cache_cap / 1048576);
+    } else if (!gguf_buffer_data(ctx)) { gguf_close(ctx); return false; }
 
     printf("[G4] Loading model (%lld tensors, %zu MB data blob)\n",
            (long long)ctx->n_tensors, ctx->data_blob_size / 1048576);
@@ -306,6 +707,15 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
 
         l->attn_k_norm_weight = g4_load_norm_f32(ctx, TN("blk.%d.attn_k_norm.weight", i), hd);
         if (!l->attn_k_norm_weight) l->attn_k_norm_weight = l->attn_q_norm_weight;
+        if (i == 0 && getenv("G4_DUMP_TYPES")) {
+            fprintf(stderr, "[NORM q]");
+            for (int z = 0; z < 8; z++) fprintf(stderr, " %.5f", l->attn_q_norm_weight[z]);
+            fprintf(stderr, "\n[NORM k]");
+            for (int z = 0; z < 8; z++) fprintf(stderr, " %.5f", l->attn_k_norm_weight[z]);
+            fprintf(stderr, "\n[NORM out]");
+            for (int z = 0; z < 8; z++) fprintf(stderr, " %.5f", model->output_norm_weight[z]);
+            fprintf(stderr, "\n");
+        }
 
         l->post_attn_norm_weight = g4_load_norm_f32(ctx, TN("blk.%d.post_attention_norm.weight", i), G4_HIDDEN);
         if (!l->post_attn_norm_weight) { fprintf(stderr,"[G4] post_attn_norm[%d] missing\n", i); goto fail; }
@@ -343,6 +753,7 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
 
         if (l->is_full) {
             t = gguf_find_tensor(ctx, TN("blk.%d.rope_freqs.weight", i));
+            if (!t) t = gguf_find_tensor(ctx, "rope_freqs.weight"); /* GGUF stores one global tensor */
             if (t) {
                 l->rope_freqs = (float *)malloc((size_t)(hd / 2) * sizeof(float));
                 gguf_read_tensor_f32(ctx, t, l->rope_freqs, hd / 2);
@@ -353,6 +764,9 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
 
     model->data_blob = ctx->data_blob;
     model->data_blob_size = ctx->data_blob_size;
+    model->data_blob_is_mmap = ctx->data_blob_is_mmap;
+    model->data_blob_mmap_base = ctx->data_blob_mmap_base;
+    model->data_blob_mmap_len = ctx->data_blob_mmap_len;
     ctx->data_blob = NULL;
 
     /* Save GGUF file handle and tensor info for GPU weight streaming.
@@ -363,12 +777,57 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
     model->gguf_data_offset = ctx->data_blob_offset;
     model->gguf_n_tensors = (int)ctx->n_tensors;
     model->gguf_tensor_info = ctx->tensors;
+    strncpy(model->gguf_path, gguf_path, sizeof(model->gguf_path) - 1);
+    g4_prefetch_init(model, model->gguf_path);
+    if (getenv("G4_CACHE_LM_HEAD")) {
+        int64_t head_elems = (int64_t)G4_VOCAB * G4_HIDDEN;
+        model->lm_head_f32 = (float *)malloc((size_t)head_elems * sizeof(float));
+        if (model->lm_head_f32) {
+            if (model->output.data) {
+                gguf_dequantize(model->output.data, model->output.ggml_type,
+                                head_elems, model->lm_head_f32);
+            } else {
+                free(model->lm_head_f32);
+                model->lm_head_f32 = NULL;
+                if (g4_qweight_stream_f32(&model->output, &model->lm_head_f32)) {
+                    fprintf(stderr, "[G4] LM head streamed from file\n");
+                }
+            }
+        }
+        if (model->lm_head_f32) {
+            fprintf(stderr, "[G4] LM head cached: %.1f MiB F32\n",
+                    (double)(head_elems * sizeof(float)) / 1048576.0);
+        } else {
+            fprintf(stderr, "[G4] LM head cache unavailable; using streaming path\n");
+        }
+    }
+
+    if (getenv("G4_DUMP_TYPES")) {
+        int hist[64] = {0};
+        for (int64_t ti = 0; ti < ctx->n_tensors; ti++)
+            hist[ctx->tensors[ti].ggml_type]++;
+        for (int ty = 0; ty < 64; ty++)
+            if (hist[ty]) fprintf(stderr, "[TYPE] %d = %d tensors\n", ty, hist[ty]);
+        for (int64_t ti = 0; ti < ctx->n_tensors; ti++) {
+            const char *nm = ctx->tensors[ti].name;
+            if (strstr(nm, "blk.") != NULL) continue;
+            fprintf(stderr, "[TENSOR] %s type=%d dim0=%lld dim1=%lld off=%llu\n",
+                    nm, ctx->tensors[ti].ggml_type,
+                    (long long)ctx->tensors[ti].dims[0],
+                    ctx->tensors[ti].n_dims > 1 ? (long long)ctx->tensors[ti].dims[1] : -1,
+                    (unsigned long long)ctx->tensors[ti].data_offset);
+        }
+    }
+    if (getenv("G4_STREAM_WEIGHTS")) {
+        model->stream_ctx = ctx; /* qweights hold pointers into this ctx */
+    } else {
     ctx->file = NULL;       /* model now owns the file handle */
     ctx->tensors = NULL;    /* model now owns the tensor info */
     ctx->data_blob = NULL;  /* already transferred above */
 
     /* Close the gguf context but NOT the file (model owns it now) */
     free(ctx);
+    }
 
     printf("[G4] %d layers loaded (~%d MB quantized + %.1f MB norms)\n",
            model->n_layers, (int)(model->data_blob_size / 1048576),
@@ -391,7 +850,9 @@ fail:
 /* ============ KV-cache helpers ============ */
 
 static g4_kv_cache_t *g4_kv_get(g4_model_t *model, g4_layer_t *layer) {
-    return &model->kv_cache[layer->kv_src_idx];
+    /* Only true KV-sharing layers read a different layer's cache. This GGUF
+     * reports shared_kv_layers = 0, so last-8 layers must read their own. */
+    return &model->kv_cache[layer->share_kv ? layer->kv_src_idx : layer->layer_idx];
 }
 
 /* ============ Sliding window attention (OpenMP-parallel) ============ */
@@ -414,14 +875,14 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
     #pragma omp parallel for if(N > 1)
     for (int t = 0; t < N; t++) {
         int pos = positions[t];
-        int kv_start = (pos > window) ? (pos - window) : 0;
+        int kv_start = (pos >= window) ? (pos - window + 1) : 0; /* exactly `window` keys incl. current */
         int kv_len = pos - kv_start + 1;
         if (kv_len > cache->size) kv_len = cache->size;
         if (kv_len <= 0) continue;
         int kv_end = kv_start + kv_len - 1;
 
         for (int hq = 0; hq < n_heads; hq++) {
-            int kv_h = hq % kv_heads;
+            int kv_h = hq / (n_heads / kv_heads); /* GQA: consecutive Q heads share a KV head */
             const float *q_vec = q + (size_t)t * qd + (size_t)hq * hd;
 
             /* Scores in thread-local part of scores_buf */
@@ -433,7 +894,8 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
                 float score = 0.0f;
                 for (int d = 0; d < hd; d++)
                     score += q_vec[d] * kv[d];
-                score *= 1.0f / sqrtf((float)hd);
+                /* Gemma 4 uses kq_scale = 1.0 (no 1/sqrt(head_dim)); llama.cpp
+                 * gemma4.cpp sets f_attention_scale = 1.0f. */
                 s[kp - kv_start] = score;
                 if (score > max_s) max_s = score;
             }
@@ -466,12 +928,17 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
                              float *scores_buf, float *row_buf) {
     (void)row_buf;
     (void)model;
+    (void)scores_buf;
     int hd = layer->head_dim;
     int qd = layer->q_dim;
     int kvd = cache->kv_heads * cache->head_dim;
     int n_heads = G4_HEADS;
     int kv_heads = cache->kv_heads;
     int kv_size = cache->size;
+    /* Caller's scores buffer is sized for SWA windows; full attention needs
+     * one score per cached position. Allocate locally to avoid heap overflow. */
+    float *scores_local = (float *)malloc((size_t)N * n_heads * (kv_size > 0 ? kv_size : 1) * sizeof(float));
+    if (!scores_local) return;
 
     memset(attn_out, 0, (size_t)N * qd * sizeof(float));
 
@@ -484,9 +951,9 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
         if (kv_len <= 0) continue;
 
         for (int hq = 0; hq < n_heads; hq++) {
-            int kv_h = hq % kv_heads;
+            int kv_h = hq / (n_heads / kv_heads); /* GQA: consecutive Q heads share a KV head */
             const float *q_vec = q + (size_t)t * qd + (size_t)hq * hd;
-            float *s = scores_buf + (size_t)(t * n_heads + hq) * kv_size;
+            float *s = scores_local + (size_t)(t * n_heads + hq) * kv_size;
 
             float max_s = -FLT_MAX;
             for (int kp = 0; kp <= kv_end; kp++) {
@@ -494,7 +961,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
                 float score = 0.0f;
                 for (int d = 0; d < hd; d++)
                     score += q_vec[d] * kv[d];
-                score *= 1.0f / sqrtf((float)hd);
+                /* Gemma 4: kq_scale = 1.0f (see sliding-attention above). */
                 s[kp] = score;
                 if (score > max_s) max_s = score;
             }
@@ -517,6 +984,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
             }
         }
     }
+    free(scores_local);
 }
 
 /* ============ Single layer forward (CPU, fused matmuls in one parallel region) ============ */
@@ -560,6 +1028,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                         layer->attn_q_norm_weight, hd, G4_RMS_EPS,
                         q + (size_t)t * qd + (size_t)h * hd);
         if (!layer->share_kv) {
+            /* Gemma 4 RMS-normalizes V with NO learned weight (llama.cpp
+             * gemma4.cpp: Vcur = ggml_rms_norm(ctx0, Vcur, eps)). Gemma 3
+             * does not. Do not remove this for the Gemma 4 engine. */
             for (int h = 0; h < kvh; h++) {
                 g4_rms_norm(k + (size_t)t * kvd + (size_t)h * hd,
                             layer->attn_k_norm_weight, hd, G4_RMS_EPS,
@@ -700,6 +1171,11 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
     for (int i = 0; i < N; i++) positions[i] = model->current_pos + i;
 
     for (int il = 0; il < model->n_layers; il++) {
+        /* Queue more work G4_PF_SLOTS layers ahead; the worker started at
+         * model load, so most first-pass weights are already staged. */
+        if (il + G4_PF_SLOTS < model->n_layers)
+            g4_prefetch_request(model, il + G4_PF_SLOTS);
+        g4_prefetch_adopt(model, il);
         g4_layer_forward_cpu(model, il, x, normed, attn_out, q, k, v,
                             ffn_gate, ffn_up, ffn_down_out, scores, row, N, positions);
     }
@@ -710,8 +1186,21 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
         g4_rms_norm(x + (size_t)t * G4_HIDDEN, model->output_norm_weight,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
 
-    /* ===== LM head (Q4_0) ===== */
-    g4_batched_qmatmul(normed, &model->output, N, G4_VOCAB, G4_HIDDEN, logits);
+    /* ===== LM head (Q3_K tied embedding, or cached F32 matvec) ===== */
+    if (model->lm_head_f32) {
+        #pragma omp parallel for collapse(2) if(N * G4_VOCAB > 65536)
+        for (int t = 0; t < N; t++) {
+            for (int j = 0; j < G4_VOCAB; j++) {
+                const float *xm = normed + (size_t)t * G4_HIDDEN;
+                const float *w = model->lm_head_f32 + (size_t)j * G4_HIDDEN;
+                float sum = 0.0f;
+                for (int k = 0; k < G4_HIDDEN; k++) sum += xm[k] * w[k];
+                logits[(size_t)t * G4_VOCAB + j] = sum;
+            }
+        }
+    } else {
+        g4_batched_qmatmul(normed, &model->output, N, G4_VOCAB, G4_HIDDEN, logits);
+    }
 
     /* ===== Softcap ===== */
     g4_softcap(logits, N * G4_VOCAB, G4_SOFTCAP);
@@ -730,13 +1219,44 @@ void g4_model_forward_from_tokens(g4_model_t *model, const int *tokens, int B, i
     for (int i = 0; i < N; i++) {
         int tok = tokens[i];
         if (tok < 0 || tok >= G4_VOCAB) tok = 0;
-        gguf_dequantize(model->token_embd.data + (size_t)tok * row_bytes,
-                       model->token_embd.ggml_type, G4_HIDDEN,
-                       embd + (size_t)i * G4_HIDDEN);
+        const uint8_t *row = NULL;
+        uint8_t *tmp = NULL;
+        if (model->token_embd.data) {
+            row = model->token_embd.data + (size_t)tok * row_bytes;
+        } else if (model->gguf_file && row_bytes > 0) {
+            tmp = (uint8_t *)malloc((size_t)row_bytes);
+            uint64_t tensor_off = model->token_embd.stream_info
+                ? ((gguf_tensor_info *)model->token_embd.stream_info)->data_offset : 0;
+            if (tmp && g4_fseek_i64(model->gguf_file,
+                    model->gguf_data_offset + tensor_off +
+                    (uint64_t)tok * (uint64_t)row_bytes) == 0 &&
+                fread(tmp, 1, (size_t)row_bytes, model->gguf_file) == (size_t)row_bytes) {
+                row = tmp;
+            }
+        }
+        if (row) {
+            gguf_dequantize(row, model->token_embd.ggml_type, G4_HIDDEN,
+                            embd + (size_t)i * G4_HIDDEN);
+        } else {
+            memset(embd + (size_t)i * G4_HIDDEN, 0, (size_t)G4_HIDDEN * sizeof(float));
+        }
+        free(tmp);
     }
 
     float scale = sqrtf((float)G4_HIDDEN);
     for (int i = 0; i < N * G4_HIDDEN; i++) embd[i] *= scale;
+    if (getenv("G4_DEBUG_EMBD")) {
+        for (int i = 0; i < N; i++) {
+            int bad = 0; double l2 = 0;
+            const float *r = embd + (size_t)i * G4_HIDDEN;
+            for (int d = 0; d < G4_HIDDEN; d++) {
+                if (!isfinite(r[d])) bad++;
+                else l2 += (double)r[d] * r[d];
+            }
+            fprintf(stderr, "[EMBDROW %d] tok=%d bad=%d l2=%.3f\n",
+                    i, tokens[i], bad, sqrt(l2));
+        }
+    }
 
     g4_model_forward(model, embd, B, T, logits);
     free(embd);
@@ -759,6 +1279,8 @@ void g4_model_reset(g4_model_t *model) {
 /* ============ Destroy ============ */
 
 void g4_model_destroy(g4_model_t *model) {
+    g4_prefetch_shutdown(model); /* join worker before stream_ctx/file closes */
+    g4_cache_clear();
     for (int i = 0; i < model->n_layers; i++) {
         g4_layer_t *l = &model->layers[i];
         free(l->attn_norm_weight);
@@ -772,7 +1294,22 @@ void g4_model_destroy(g4_model_t *model) {
     }
     free(model->layers);
     free(model->output_norm_weight);
-    free(model->data_blob);
+    free(model->lm_head_f32);
+    if (model->data_blob) {
+        if (model->data_blob_is_mmap) {
+            void *base = model->data_blob_mmap_base
+                         ? model->data_blob_mmap_base : model->data_blob;
+            size_t len = model->data_blob_mmap_len
+                         ? model->data_blob_mmap_len : model->data_blob_size;
+#ifdef _WIN32
+            wubu_munmap(base, len);
+#else
+            munmap(base, len);
+#endif
+        } else {
+            free(model->data_blob); /* posix_memalign'd blob */
+        }
+    }
 
     if (model->kv_cache) {
         for (int i = 0; i < model->n_layers; i++) {
@@ -795,8 +1332,13 @@ void g4_model_destroy(g4_model_t *model) {
     free(model->buf_row);
 
     /* Close GGUF file and free tensor info */
-    if (model->gguf_file) {
-        fclose(model->gguf_file);
+    if (model->stream_ctx) {
+        /* gguf_close owns the file, tensors and ctx in streaming mode */
+        gguf_close((gguf_ctx *)model->stream_ctx);
+        model->gguf_file = NULL;
+        model->gguf_tensor_info = NULL;
+    } else {
+        if (model->gguf_file) fclose(model->gguf_file);
+        free(model->gguf_tensor_info);
     }
-    free(model->gguf_tensor_info);
 }

@@ -48,18 +48,51 @@
 #include <signal.h>
 #include <time.h>
 #include <math.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <io.h>
+typedef int socklen_t;
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/wait.h>
+#endif
 #include "wubu_banner.h"   /* UX: consistent banner + stats formatting */
 #include <fcntl.h>
 #include <ctype.h>
 #include "wubu_core_dumps.h"
 
 /* OpenSSL for TLS support */
+#if defined(__has_include)
+#  if __has_include(<openssl/ssl.h>)
+#    define WUBU_WITH_TLS 1
+#  endif
+#endif
+#ifdef WUBU_WITH_TLS
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#else
+/* TLS unavailable: keep the same call sites compiling as no-ops. */
+typedef void SSL;
+typedef void SSL_CTX;
+#define SSL_write(...) 0
+#define SSL_read(...) 0
+#define SSL_shutdown(...) 0
+#define SSL_free(...) ((void)0)
+#define SSL_new(...) NULL
+#define SSL_set_fd(...) 0
+#define SSL_CTX_new(...) NULL
+#define SSL_CTX_free(...) ((void)0)
+#define SSL_CTX_use_certificate_file(...) 0
+#define SSL_CTX_use_PrivateKey_file(...) 0
+#define SSL_load_error_strings() ((void)0)
+#define OPENSSL_init_ssl(...) 0
+#define TLS_server_method() NULL
+#define SSL_FILETYPE_PEM 0
+#endif
 
 /* ================================================================
  *  Constants
@@ -343,6 +376,16 @@ static char *run_inference(const char *prompt, int max_tokens,
     return strdup(result);
 }
 
+#ifdef _WIN32
+#define sock_read(fd, buf, n)  recv((SOCKET)(fd), (char *)(buf), (int)(n), 0)
+#define sock_write(fd, buf, n) send((SOCKET)(fd), (const char *)(buf), (int)(n), 0)
+#define sock_close(fd)         closesocket((SOCKET)(fd))
+#else
+#define sock_read(fd, buf, n)  read((fd), (buf), (n))
+#define sock_write(fd, buf, n) write((fd), (buf), (n))
+#define sock_close(fd)         close(fd)
+#endif
+
 /* ================================================================
  *  HTTP response helpers
  * ================================================================ */
@@ -376,8 +419,8 @@ static void send_response(int fd, int status, const char *content_type,
         SSL_write(ssl, header, len);
         if (body) SSL_write(ssl, body, strlen(body));
     } else {
-        write(fd, header, len);
-        if (body) write(fd, body, strlen(body));
+        sock_write(fd, header, len);
+        if (body) sock_write(fd, body, strlen(body));
     }
 }
 
@@ -391,6 +434,242 @@ static void send_error(int fd, int status, const char *msg, SSL *ssl) {
         "{\"error\":{\"message\":%s,\"type\":\"error\",\"code\":%d}}",
         json_escape(msg), status);
     send_json(fd, status, err_body, ssl);
+}
+
+/* ================================================================
+ * SSE token streaming (OpenAI-compatible chat.completion.chunk)
+ * ================================================================ */
+
+static void sse_write(int fd, SSL *ssl, const char *s)
+{
+    if (ssl) SSL_write(ssl, s, (int)strlen(s));
+    else (void)!sock_write(fd, s, strlen(s));
+}
+
+/* Longest prefix of n bytes that ends on a complete UTF-8 codepoint.
+ * llama.cpp buffers partial sequences the same way (server-common.cpp). */
+static size_t utf8_complete_prefix(const char *s, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = (unsigned char)s[i];
+        int need = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 :
+                   (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+        if (i + (size_t)need > n) break;
+        int valid = 1;
+        for (int k = 1; k < need; k++)
+            if (((unsigned char)s[i + k] & 0xC0) != 0x80) { valid = 0; break; }
+        if (!valid) { need = 1; }
+        i += (size_t)need;
+    }
+    return i;
+}
+
+static void sse_chunk(int fd, SSL *ssl, long id, time_t now,
+                      const char *content, const char *finish_reason)
+{
+    char *escaped = content && content[0] ? json_escape(content) : strdup("\"\"");
+    char buf[16384];
+    int n = snprintf(buf, sizeof(buf),
+        "data: {\"id\":\"chatcmpl-%ld\",\"object\":\"chat.completion.chunk\","
+        "\"created\":%ld,\"model\":\"wubuwizard-stream\","
+        "\"choices\":[{\"index\":0,\"delta\":{%s%s},\"finish_reason\":%s}]}\n\n",
+        id, (long)now,
+        content && content[0] ? "\"content\":" : "",
+        escaped ? escaped : "\"\"",
+        finish_reason ? finish_reason : "null");
+    if (n > 0) sse_write(fd, ssl, buf);
+    free(escaped);
+}
+
+static void send_sse_stream(int fd, const char *prompt, int max_tokens,
+                            double temperature, int top_k, double top_p, SSL *ssl)
+{
+    static const char *hdr =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream; charset=utf-8\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: close\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "X-Accel-Buffering: no\r\n"
+        "\r\n";
+    sse_write(fd, ssl, hdr);
+    long id = (long)getpid();
+    time_t now = time(NULL);
+
+    if (g_sandbox) {
+        const char *words[] = { "This ", "is ", "a ", "streamed ", "sandbox ", "reply.\n" };
+        for (size_t i = 0; i < sizeof(words)/sizeof(words[0]); i++) {
+            sse_chunk(fd, ssl, id, now, words[i], NULL);
+            usleep(20000);
+        }
+    } else {
+        char cmd[32768];
+        /* popen uses cmd.exe on Windows: VAR=value prefix is invalid there.
+         * Set the engine env in this process so the child inherits it. */
+        {
+            char v[64];
+#ifdef _WIN32
+            _putenv("G4_STREAM_LINE=1");
+            snprintf(v, sizeof(v), "TEM=%.4f", temperature); _putenv(v);
+            snprintf(v, sizeof(v), "TOP_K=%d", top_k); _putenv(v);
+            snprintf(v, sizeof(v), "TOP_P=%.4f", top_p); _putenv(v);
+            _putenv("MOE=1");
+#else
+            setenv("G4_STREAM_LINE", "1", 1);
+            snprintf(v, sizeof(v), "%.4f", temperature); setenv("TEM", v, 1);
+            snprintf(v, sizeof(v), "%d", top_k); setenv("TOP_K", v, 1);
+            snprintf(v, sizeof(v), "%.4f", top_p); setenv("TOP_P", v, 1);
+            setenv("MOE", "1", 1);
+#endif
+        }
+#ifdef _WIN32
+        /* cmd.exe (used by MinGW popen) rejects a quoted exe path followed by
+         * quoted args. Use a short (8.3) path so the exe token needs no quotes. */
+        {
+            char exe_short[MAX_PATH], model_short[MAX_PATH];
+            DWORD ne = GetShortPathNameA(g_infer_bin, exe_short, MAX_PATH);
+            DWORD nm = GetShortPathNameA(g_model_path, model_short, MAX_PATH);
+            const char *exe = ne > 0 && ne < MAX_PATH ? exe_short : g_infer_bin;
+            const char *model = nm > 0 && nm < MAX_PATH ? model_short : g_model_path;
+            if (strchr(exe, ' ') || strchr(model, ' ')) {
+                snprintf(cmd, sizeof(cmd), "call \"%s\" \"%s\" \"%s\" %d",
+                         exe, model, prompt, max_tokens);
+            } else {
+                snprintf(cmd, sizeof(cmd), "%s \"%s\" \"%s\" %d",
+                         exe, model, prompt, max_tokens);
+            }
+        }
+#else
+        snprintf(cmd, sizeof(cmd), "timeout %d %s %s %s %d",
+                 max_tokens > 100 ? max_tokens + 30 : 120,
+                 g_infer_bin, g_model_path, prompt, max_tokens);
+#endif
+        if (getenv("SSE_DEBUG")) fprintf(stderr, "[SSE] cmd: %s\n", cmd);
+        FILE *fp = popen(cmd, "r");
+        if (!fp) { sse_chunk(fd, ssl, id, now, "inference failed", "error"); goto done; }
+        setvbuf(fp, NULL, _IONBF, 0); /* critical: emit each token line as it arrives */
+        char line[4096];
+        char pending[16];
+        size_t npending = 0;
+        int in_generation = 0;
+        for (;;) {
+#ifdef _WIN32
+            /* llama.cpp sends ": ping" every 30 s of silence to keep proxies
+             * from closing an idle SSE connection. */
+            HANDLE ph = (HANDLE)_get_osfhandle(_fileno(fp));
+            DWORD wr = WaitForSingleObject(ph, 30000);
+            if (wr == WAIT_TIMEOUT) {
+                sse_write(fd, ssl, ":\n\n");
+                continue;
+            }
+            if (wr != WAIT_OBJECT_0) break;
+#endif
+            if (!fgets(line, sizeof(line), fp)) break;
+            if (strstr(line, "<<<STREAM_START>>>")) { in_generation = 1; continue; }
+            if (!in_generation) continue;
+            if (line[0] == '\n' || line[0] == '\0') continue;
+            if (strstr(line, "--- Stats") || strstr(line, "Total:") ||
+                strstr(line, "Prefill:") || strstr(line, "Decode:")) break;
+            char text[4096];
+            snprintf(text, sizeof(text), "%s", line);
+            size_t ntext = strlen(text);
+            while (ntext && (text[ntext - 1] == '\n' || text[ntext - 1] == '\r'))
+                text[--ntext] = '\0';
+            if (!ntext) continue;
+            char combined[4200], emit[4200];
+            size_t total = npending + ntext;
+            if (total >= sizeof(combined)) total = sizeof(combined) - 1;
+            memcpy(combined, pending, npending);
+            size_t copy = ntext;
+            if (npending + copy > total) copy = total - npending;
+            memcpy(combined + npending, text, copy);
+            size_t complete = utf8_complete_prefix(combined, total);
+            if (complete) {
+                memcpy(emit, combined, complete);
+                emit[complete] = '\0';
+                sse_chunk(fd, ssl, id, now, emit, NULL);
+            }
+            npending = total - complete;
+            memmove(pending, combined + complete, npending);
+        }
+        if (npending) {
+            char emit[16];
+            memcpy(emit, pending, npending);
+            emit[npending] = '\0';
+            sse_chunk(fd, ssl, id, now, emit, NULL);
+        }
+        (void)pclose(fp);
+    }
+done:
+    sse_chunk(fd, ssl, id, now, NULL, "\"stop\"");
+    sse_write(fd, ssl, "data: [DONE]\n\n");
+}
+
+/* In-process loopback test: exercises the real SSE writer over sockets. */
+static int sse_selftest(void)
+{
+    const char *bin_env = getenv("INFER_BIN");
+    const char *model_env = getenv("MODEL_PATH");
+    if (getenv("SSE_REAL")) {
+        if (bin_env) snprintf(g_infer_bin, sizeof(g_infer_bin), "%s", bin_env);
+        if (model_env) snprintf(g_model_path, sizeof(g_model_path), "%s", model_env);
+        g_sandbox = 0;
+    } else {
+        g_sandbox = 1;
+    }
+    int server, client;
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    server = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (server < 0 || bind(server, (struct sockaddr *)&a, sizeof(a)) < 0 ||
+        listen(server, 1) < 0) return 1;
+    int alen = sizeof(a);
+    getsockname(server, (struct sockaddr *)&a, &alen);
+    client = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (client < 0 || connect(client, (struct sockaddr *)&a, alen) < 0) return 1;
+    server = (int)accept(server, NULL, NULL);
+    if (server < 0) return 1;
+#else
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return 1;
+    server = sv[0]; client = sv[1];
+#endif
+    send_sse_stream(server, "hi", 8, 1.0, 20, 0.95, NULL);
+    sock_close(server);
+
+    char buf[65536];
+    size_t len = 0;
+    ssize_t n;
+    while (len + 1 < sizeof(buf) &&
+           (n = sock_read(client, buf + len, sizeof(buf) - len - 1)) > 0) len += (size_t)n;
+    buf[len] = '\0';
+    sock_close(client);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    if (getenv("SSE_DUMP")) fwrite(buf, 1, len, stderr);
+    int chunks = 0;
+    for (const char *p = buf; (p = strstr(p, "data:")); p += 5) chunks++;
+    int min_chunks = getenv("SSE_REAL") ? 3 : 6;
+    int ok = strstr(buf, "text/event-stream") &&
+             strstr(buf, "chat.completion.chunk") &&
+             strstr(buf, "\"finish_reason\":\"stop\"") &&
+             strstr(buf, "[DONE]") &&
+             !strstr(buf, "inference failed") &&
+             chunks >= min_chunks;
+    if (!ok) {
+        fprintf(stderr, "sse_selftest: FAIL chunks=%d len=%zu\n%.400s\n", chunks, len, buf);
+        return 1;
+    }
+    printf("test_sse: PASS (%d stream events)\n", chunks);
+    return 0;
 }
 
 /* ================================================================
@@ -418,7 +697,7 @@ static int parse_request(int fd, http_request_t *req, SSL *ssl) {
         if (ssl)
             n = SSL_read(ssl, buf + total, (int)(sizeof(buf) - total - 1));
         else
-            n = (int)read(fd, buf + total, sizeof(buf) - total - 1);
+            n = (int)sock_read(fd, buf + total, sizeof(buf) - total - 1);
 
         if (n <= 0) break;
         total += (size_t)n;
@@ -608,6 +887,14 @@ static void handle_request(int fd, http_request_t *req, SSL *ssl) {
             snprintf(prompt, sizeof(prompt), "hello");
         }
 
+        /* stream:true -> SSE token chunks instead of one buffered JSON response */
+        char *stream_ptr = strstr(body, "\"stream\"");
+        int stream = stream_ptr && strstr(stream_ptr, "true") != NULL;
+        if (stream) {
+            send_sse_stream(fd, prompt, max_tokens, temperature, top_k, top_p, ssl);
+            return;
+        }
+
         /* Run inference */
         char *result = run_inference(prompt, max_tokens, temperature, top_k, top_p);
         if (!result) {
@@ -637,7 +924,7 @@ static void handle_client(int fd, SSL *ssl) {
         SSL_shutdown(ssl);
         SSL_free(ssl);
     }
-    close(fd);
+    sock_close(fd);
 }
 
 /* ================================================================
@@ -671,6 +958,15 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--sse-selftest") == 0)
+        return sse_selftest();
+#ifdef _WIN32
+    WSADATA wsa_data;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        fprintf(stderr, "WSAStartup failed\n");
+        return 1;
+    }
+#endif
     wubu_disable_core_dumps();
     /* Parse args */
     for (int i = 1; i < argc; i++) {
@@ -708,7 +1004,9 @@ int main(int argc, char **argv) {
     /* Signal handlers */
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+#ifndef _WIN32
     signal(SIGCHLD, SIG_IGN); /* reap child processes */
+#endif
 
     /* Initialize OpenSSL for TLS */
     SSL_CTX *ssl_ctx = NULL;
@@ -735,7 +1033,7 @@ int main(int argc, char **argv) {
     if (server_fd < 0) { perror("socket"); return 1; }
 
     int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -745,13 +1043,13 @@ int main(int argc, char **argv) {
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
-        close(server_fd);
+        sock_close(server_fd);
         return 1;
     }
 
     if (listen(server_fd, 5) < 0) {
         perror("listen");
-        close(server_fd);
+        sock_close(server_fd);
         return 1;
     }
 
@@ -768,11 +1066,12 @@ int main(int argc, char **argv) {
             continue;
         }
 
+#ifndef _WIN32
         /* Fork to handle client (simple concurrency — each request gets own process) */
         pid_t pid = fork();
         if (pid == 0) {
             /* Child process */
-            close(server_fd);
+            sock_close(server_fd);
             SSL *ssl = NULL;
             if (g_use_tls) {
                 ssl = SSL_new(ssl_ctx);
@@ -781,15 +1080,31 @@ int main(int argc, char **argv) {
             handle_client(client_fd, ssl);
             _exit(0);
         } else if (pid > 0) {
-            close(client_fd);
+            sock_close(client_fd);
         } else {
             perror("fork");
-            close(client_fd);
+            sock_close(client_fd);
         }
+#else
+        /* Windows has no fork: handle sequentially. SSE still streams per
+         * connection because sse_write flushes each generated line. */
+        {
+            SSL *ssl = NULL;
+            if (g_use_tls) {
+                ssl = SSL_new(ssl_ctx);
+                if (ssl) SSL_set_fd(ssl, client_fd);
+            }
+            handle_client(client_fd, ssl);
+            sock_close(client_fd);
+        }
+#endif
     }
 
-    close(server_fd);
+    sock_close(server_fd);
     if (ssl_ctx) SSL_CTX_free(ssl_ctx);
+#ifdef _WIN32
+    WSACleanup();
+#endif
     printf("[server] Shutdown complete.\n");
     return 0;
 }

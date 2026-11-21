@@ -94,6 +94,8 @@ int64_t gguf_read_kv_i64(gguf_ctx *ctx, const char *want, int64_t def);
 int gguf_kv_get_i32(gguf_ctx *ctx, const char *key, int *out);
 int gguf_kv_get_f32(gguf_ctx *ctx, const char *key, float *out);
 int gguf_kv_get_i32_arr(gguf_ctx *ctx, const char *key, int *out, int max);
+/* String KV by key. Copies at most out_cap-1 bytes; returns 1 on found. */
+int gguf_kv_get_str(gguf_ctx *ctx, const char *key, char *out, size_t out_cap);
 
 // Calculate raw (quantized) byte size for a tensor type/element count
 int64_t gguf_raw_size(int ggml_type, int64_t n_elems);

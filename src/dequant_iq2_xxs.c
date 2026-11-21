@@ -32,7 +32,7 @@ static float f16_to_f32_local(uint16_t h) {
            off by ~6x on tiny scales). */
         if (mant == 0) { f32 = sign << 31; }
         else {
-            uint32_t e = 112, m = mant;
+            uint32_t e = 113, m = mant;
             while ((m & 0x400) == 0) { m <<= 1; e--; }
             f32 = (sign << 31) | (e << 23) | ((m & 0x3FF) << 13);
         }

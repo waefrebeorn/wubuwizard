@@ -381,6 +381,42 @@ bool wubu_tokenizer_init_from_gguf(wubu_tokenizer_t *tok, const char *gguf_path)
 
 // ========== Init from text files ==========
 static void build_byte_token_ids(wubu_tokenizer_t *tok) {
+    /* Gemma/SentencePiece uses U+2581 (▁) as the word-space marker and
+     * <0xXX> as byte-fallback tokens. The generic GPT-2 byte map (U+0100+b)
+     * picks "Ġ" for space, which breaks every "▁ word" BPE merge and feeds
+     * the model a token sequence it never saw in training. */
+    const char *gemma_space = "\xE2\x96\x81"; /* U+2581 */
+    int gemma = find_token_by_string(tok, (const uint8_t *)gemma_space, 3) >= 0 &&
+                find_token_by_string(tok, (const uint8_t *)"<0x00>", 6) >= 0;
+    if (gemma) {
+        for (int i = 0; i < 256; i++) {
+            int tid = -1;
+            if (i == 0x20) {
+                tid = find_token_by_string(tok, (const uint8_t *)gemma_space, 3);
+            } else if (i < 0x80) {
+                uint8_t c = (uint8_t)i;
+                tid = find_token_by_string(tok, &c, 1);
+            } else {
+                char bt[8];
+                snprintf(bt, sizeof(bt), "<0x%02X>", i);
+                tid = find_token_by_string(tok, (const uint8_t *)bt, (int)strlen(bt));
+            }
+            tok->byte_token_ids[i] = tid;
+        }
+        tok->is_byte_token = (bool *)calloc((size_t)tok->vocab_size, sizeof(bool));
+        for (int i = 0; i < 256; i++) {
+            int tid = tok->byte_token_ids[i];
+            if (tid >= 0 && tid < tok->vocab_size) {
+                tok->is_byte_token[tid] = true;
+                int blen = tok->vocab[tid].byte_len;
+                if (blen > 0 && blen <= (int)sizeof(tok->byte_text_bytes[0])) {
+                    memcpy(tok->byte_text_bytes[i], tok->vocab[tid].bytes, (size_t)blen);
+                    tok->byte_text_len[i] = blen;
+                }
+            }
+        }
+        return;
+    }
     // Look up each byte's character in the vocab (matches merge table encoding).
     // Convention 1: the byte AS the codepoint (Latin-1) — matches Llama/Qwen-style
     //   tokenizers whose merges use the literal space and ASCII characters.

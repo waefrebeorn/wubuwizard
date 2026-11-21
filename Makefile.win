@@ -31,6 +31,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o \
   src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o \
   src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o \
+  src/wubu_model_arch.o src/wubu_dense_ffn.o \
   src/quantized_matmul.o src/quantized_dot_generic.o src/safetensors_reader.o \
   src/wubu_repetition.o src/wubu_lora.o src/wubu_model_adapter.o \
   src/wubu_model_safetensors_bridge.o src/wubu_safetensors_shard.o \
@@ -56,7 +57,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_patch_embed.o \
   src/wubu_mmrope.o \
   src/wubu_hashrouter.o src/wubu_dsa.o src/wubu_kvfs.o \
-  src/wubu_enc_h3.o src/wubu_mxfp4.o \
+  src/wubu_enc_h3.o src/wubu_mxfp4.o src/wubu_goal.o src/wubu_goal_steer.o src/wubu_goal_resample.o src/wubu_harness_bandit.o src/wubu_ttc_budget.o src/wubu_kv_exact.o src/wubu_swa_reclaim.o src/wubu_spec_budget.o src/wubu_spec_seed.o src/wubu_spec_constrained.o src/wubu_kernel_spec.o src/wubu_kv_qfmt.o src/wubu_kv_fetch.o src/wubu_simd_quant.o src/wubu_diff_sampler.o src/wubu_state_version.o \
   src/wubu_dsv4.o src/wubu_megakernel.o src/wubu_lfm.o src/wubu_dsv4_layer.o src/wubu_colonel.o src/wubu_gaad.o src/wubu_bear_mlp.o src/wubu_uuid.o \
   src/wubu_equiv_check.o src/wubu_integrate.o src/wubu_capzero.o src/wubu_latency.o \
   src/wubu_ctxvm.o src/wubu_safekern.o src/wubu_loopguard.o src/wubu_planediv.o \
@@ -114,8 +115,8 @@ h3_norm_test: tools/test_h3_norm.c src/wubu_h3_norm.o src/wubu_dequant_nf4.o src
 	$(CC) $(CFLAGS) -o $@ tools/test_h3_norm.c src/wubu_h3_norm.o src/wubu_dequant_nf4.o src/wubu_win.o src/wubu_dequant_fp4.o $(LDLIBS)
 	@echo "h3_norm_test built"
 
-gen_text_gemma4: tools/gen_text_gemma4.c $(CORE_OBJ) src/wubu_gemma4_model.o
-	$(CC) $(CFLAGS) -o $@ tools/gen_text_gemma4.c $(CORE_OBJ) src/wubu_gemma4_model.o $(LDLIBS)
+gen_text_gemma4: tools/gen_text_gemma4.c $(CORE_OBJ) src/wubu_gemma4_model.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o
+	$(CC) $(CFLAGS) -o $@ tools/gen_text_gemma4.c $(CORE_OBJ) src/wubu_gemma4_model.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(LDLIBS)
 	@echo "gen_text_gemma4 built (dedicated Gemma4 engine: sliding-window + GELU FFN)"
 
 patch_embed_test: tools/test_patch_embed.c src/wubu_patch_embed.o src/wubu_win.o
@@ -127,6 +128,72 @@ mmrope_test: tools/test_mmrope.c src/wubu_mmrope.o src/wubu_win.o
 	@echo "mmrope_test built"
 
 # Overnight agent's new module tests
+test_sse: tools/api_server.c
+	$(CC) $(CFLAGS) -o $@ tools/api_server.c -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+model_arch_probe: tools/model_arch_probe.c src/wubu_model_arch.o src/gguf_reader.o
+	$(CC) $(CFLAGS) -o $@ tools/model_arch_probe.c src/wubu_model_arch.o src/gguf_reader.o $(LDLIBS)
+	@echo "model_arch_probe built"
+
+infer_any: tools/infer_any.c $(CORE_OBJ) src/wubu_gemma4_model.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o
+	$(CC) $(CFLAGS) -o $@ tools/infer_any.c $(CORE_OBJ) src/wubu_gemma4_model.o src/wubu_tokenizer.o src/wubu_tokenizer_hf.o $(LDLIBS)
+	@echo "infer_any built (architecture-driven dispatch)"
+
+test_arch: model_arch_probe
+	python tools/make_arch_fixtures.py tests/fixtures
+	./model_arch_probe.exe tests/fixtures/llama.gguf | grep -q 'runner=generic-transformer.*supported=yes'
+	./model_arch_probe.exe tests/fixtures/qwen3moe.gguf | grep -q 'runner=moe.*supported=yes'
+	./model_arch_probe.exe tests/fixtures/futurex.gguf | grep -q 'runner=unknown.*supported=generic'
+	@echo "test_arch: PASS"
+
+test_goal: tools/test_goal.c src/wubu_goal.o
+	$(CC) $(CFLAGS) -o $@ tools/test_goal.c src/wubu_goal.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_goal_steer: tools/test_goal_steer.c src/wubu_goal_steer.o
+	$(CC) $(CFLAGS) -o $@ tools/test_goal_steer.c src/wubu_goal_steer.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
+	$(CC) $(CFLAGS) -o $@ tools/test_goal_resample.c src/wubu_goal_resample.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_harness_bandit: tools/test_harness_bandit.c src/wubu_harness_bandit.o
+	$(CC) $(CFLAGS) -o $@ tools/test_harness_bandit.c src/wubu_harness_bandit.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_ttc_budget: tools/test_ttc_budget.c src/wubu_ttc_budget.o
+	$(CC) $(CFLAGS) -o $@ tools/test_ttc_budget.c src/wubu_ttc_budget.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_kv_alloc_exact: tools/test_kv_alloc_exact.c src/wubu_kv_exact.o
+	$(CC) $(CFLAGS) -o $@ tools/test_kv_alloc_exact.c src/wubu_kv_exact.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_swa_reclaim: tools/test_swa_reclaim.c src/wubu_swa_reclaim.o
+	$(CC) $(CFLAGS) -o $@ tools/test_swa_reclaim.c src/wubu_swa_reclaim.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_spec_budget: tools/test_spec_budget.c src/wubu_spec_budget.o
+	$(CC) $(CFLAGS) -o $@ tools/test_spec_budget.c src/wubu_spec_budget.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_spec_seed: tools/test_spec_seed.c src/wubu_spec_seed.o
+	$(CC) $(CFLAGS) -o $@ tools/test_spec_seed.c src/wubu_spec_seed.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_spec_constrained: tools/test_spec_constrained.c src/wubu_spec_constrained.o
+	$(CC) $(CFLAGS) -o $@ tools/test_spec_constrained.c src/wubu_spec_constrained.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_kernel_identity: tools/test_kernel_identity.c src/wubu_kernel_spec.o
+	$(CC) $(CFLAGS) -o $@ tools/test_kernel_identity.c src/wubu_kernel_spec.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_kv_qfmt: tools/test_kv_qfmt.c src/wubu_kv_qfmt.o
+	$(CC) $(CFLAGS) -o $@ tools/test_kv_qfmt.c src/wubu_kv_qfmt.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_kv_fetch: tools/test_kv_fetch.c src/wubu_kv_fetch.o
+	$(CC) $(CFLAGS) -o $@ tools/test_kv_fetch.c src/wubu_kv_fetch.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_simd_quant: tools/test_simd_quant.c src/wubu_simd_quant.o
+	$(CC) $(CFLAGS) -o $@ tools/test_simd_quant.c src/wubu_simd_quant.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_diffusion_sampler: tools/test_diffusion_sampler.c src/wubu_diff_sampler.o
+	$(CC) $(CFLAGS) -o $@ tools/test_diffusion_sampler.c src/wubu_diff_sampler.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_state_version: tools/test_state_version.c src/wubu_state_version.o
+	$(CC) $(CFLAGS) -o $@ tools/test_state_version.c src/wubu_state_version.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
 test_dsa: tools/test_dsa.c src/wubu_dsa.o src/wubu_hashrouter.o src/wubu_win.o
 	$(CC) $(CFLAGS) -o $@ tools/test_dsa.c src/wubu_dsa.o src/wubu_hashrouter.o src/wubu_win.o -lm $(LDLIBS)
 	@echo "test_dsa built"

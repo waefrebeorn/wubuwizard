@@ -1,32 +1,33 @@
-# bytropix Goal Mantra — May 27, 2026 (CPU Parity Phase)
+# wubuwizard Goal Mantra — Inkling 2 Mini (Nov 21, 2026)
 
 ## THE GOAL
-CPU inference parity for Qwen3.6-35B-A3B IQ2_M on i5-8365U.
-Local inference pipeline (not proxy). Verified cos-sim vs llama.cpp.
+
+Make wubuwizard a local, open-weights inference engine for looped MoE transformers.
+First target: **Inkling 2 Mini** — 26.4B total / 3.4B active, 3× middle-layer loop,
+native NVFP4 with MXFP8 tail layers, ~20 GB footprint. Verify looped decode against a
+reference implementation on local hardware.
+
+**Full goal, source, gap map and phase gates:** `.hermes/inkling-2-mini-goal.md`
 
 ## STATE
+
 | Metric | Value | Status |
 |--------|-------|--------|
-| Cos-sim vs llama.cpp | 0.974 (IQ2_M floor) | ✅ Reached |
-| Output projection | Fixed (GCC -O3 + if(0) + AVX2 zeros) | ✅ |
-| Local inference | serve_local.py (all 4 test scripts patched) | ✅ |
-| KV cache 512K | Alloc + decode confirmed | ✅ |
-| Test suite | test-512k-suite.sh, test-hermes-*.sh all patched | ✅ |
-| NES emulator | Pre-built benchmark (not my project) | ✅ Docs fixed |
-
-## NEXT (Phase 3: Gainz when ready)
-- SSM buffer pre-allocation (cell 241)
-- MoE shared expert quantize-once (cell 242)
-- Attention sparsity wire (cell 245)
-- MoE expert prefetch benchmark (cell 246)
+| SOTA LP-01..LP-16 pads | 16/16 gated (see `docs/WORKLIST.md`) | Shipped |
+| Inkling phase P0 (reorient) | This file + full goal doc + archived old goal | Done |
+| Inkling phases P1..P7 | Architecture probe → loop → NVFP4 → MoE → context → monitor → agents | Open |
 
 ## THE LOOP
-read docs → pick lowest undone → execute → update docs → push → loop
+
+read goal → pick lowest undone phase → implement one gate → run gate →
+update `state.md` + `WORKLIST.md` → update palace → push → loop
+
+Exit gate on every decision: Claim → Verify → Risk → Mitigate.
+A handoff is a claim, not evidence.
 
 ## FILES
-- .hermes/goal-mantra.md — this file
-- .hermes/mind-palace/goal-paste-agent.md — session start paste
-- .hermes/mind-palace/bytropix-300-gap-battleship.md — full gap taxonomy
-- .hermes/mind-palace/state.md — current state
-- .hermes/mind-palace/plan.md — plan
-- .hermes/mind-palace/workflow-parity.md — parity debug workflow
+
+- `.hermes/inkling-2-mini-goal.md` — authoritative goal
+- `.hermes/vault/bytropix-goal-archive.md` — previous goal, preserved
+- `docs/WORKLIST.md` — shipped pad status
+- `docs/SOTA-2026-11-ROADMAP.md` — prior lilypad set
