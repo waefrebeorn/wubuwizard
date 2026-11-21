@@ -99,7 +99,7 @@ static inline float wubu_fold_cos(float x)
  * Computes 8 sin/cos pairs per iteration with FMA + branchless
  * quadrant blending. Falls back to the scalar fold on non-AVX2. */
 #if defined(__AVX2__) && defined(__FMA__)
-#include <immintrin.h>
+#include "wubu_portable_simd.h"
 static inline void wubu_fold_sincos8(const float *x, float *s, float *c, int n)
 {
     const __m256 k2opi  = _mm256_set1_ps(FMTWO_OVER_PI);

@@ -20,7 +20,7 @@
 #include <math.h>
 
 #if defined(__x86_64__) || defined(__i386__)
-#include <immintrin.h>
+#include "wubu_portable_simd.h"
 #include <cpuid.h>
 static int have_avx512bf16(void) {
     unsigned eax, ebx, ecx, edx;

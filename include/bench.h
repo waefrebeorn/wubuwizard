@@ -2,7 +2,6 @@
 #define WUBU_BENCH_H
 
 #include "wubu_ssm.h"
-#include "cuda_kernels.h"
 #include "gguf_reader.h"
 #include "cpu_timing.h"   // cycle-accurate timing: rdtsc, clflush, cache probe
 #include <stdio.h>
@@ -10,12 +9,24 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <cuda_runtime.h>
-#include <cublas_v2.h>
+
+/* CUDA is optional: x86/CUDA hosts keep the GPU helpers, ARM/CPU hosts do not. */
+#if defined(__has_include)
+#  if __has_include(<cuda_runtime.h>) && __has_include(<cublas_v2.h>)
+#    define WUBU_HAVE_CUDA 1
+#  endif
+#endif
+#ifdef WUBU_HAVE_CUDA
+#  include "cuda_kernels.h"
+#  include <cuda_runtime.h>
+#  include <cublas_v2.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#ifdef WUBU_HAVE_CUDA
 
 // ================================================================
 // Timing helper
@@ -351,6 +362,10 @@ void gpu_gqa_prefill(cublasHandle_t cublas_h, cudaStream_t stream,
     float *h_output,
     float *h_K_out,   // [B*T, GQA_KV_DIM] host output for KV cache
     float *h_V_out);  // [B*T, GQA_KV_DIM] host output for KV cache
+
+#ifdef __cplusplus
+}
+#endif /* WUBU_HAVE_CUDA */
 
 #ifdef __cplusplus
 }

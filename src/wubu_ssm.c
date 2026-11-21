@@ -9,7 +9,7 @@
 // 0 = Qwen-style "blk.N.*", 1 = Gemma-style "model.layers.N.*", 2 = pure GQA
 extern int g_tensor_naming;  /* defined in wubu_ops.c */
 #include <omp.h>
-#include <immintrin.h>  // AVX2/FMA intrinsics for GQA attention
+#include "wubu_portable_simd.h"  // AVX2/FMA intrinsics for GQA attention
 // GQA_MAX_CTX from wubu_model.h — max KV cache positions (also used for attn stack buf)
 #ifndef GQA_MAX_CTX
 #define GQA_MAX_CTX 4096
@@ -101,6 +101,7 @@ void wubu_gpu_ssm_recurrence(
 // AVX2-optimized SSM selective scan helpers
 // ============================================================
 
+#ifdef __AVX2__
 // State decay: h[i][j] *= gg for all i,j in [0,SSM_D_STATE)
 // h: [SSM_D_STATE, SSM_D_STATE] row-major = 16384 floats
 // gg: scalar multiplier (exp(gate))
@@ -168,6 +169,8 @@ static inline void avx2_hq(const float *h, const float *q, float *out) {
         out[i] = _mm_cvtss_f32(lo);
     }
 }
+
+#endif /* __AVX2__ */
 
 // ============================================================
 // Utility: Activation Functions

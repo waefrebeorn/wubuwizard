@@ -3,7 +3,7 @@
  * Strict C11 + GCC intrinsics, self-contained, opaque context.
  * See include/wubu_simd_quant.h.
  */
-#include <immintrin.h>
+#include "wubu_portable_simd.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +100,7 @@ static void decode_scalar(const uint64_t *in, float *out, int n, float scale)
     for (int i = 0; i < n; i++) decode_one(in[i], scale, out + i);
 }
 
+#if defined(__SSE4_1__)
 /* Decode two 64-bit tokens held in one 128-bit register. The low 32-bit
  * halves are compacted to lanes 0,1 (tag halves would otherwise decode as
  * extra codes and overwrite neighbours); the integer blend restores raw
@@ -131,6 +132,9 @@ static void decode_sse(const uint64_t *in, float *out, int n, float scale)
     for (; i < n; i++) decode_one(in[i], scale, out + i);
 }
 
+#endif /* __SSE4_1__ */
+
+#if defined(__AVX2__)
 /* 8-wide AVX2 kernel: two 256-bit loads per block, each split into its two
  * 128-bit halves (a 256-bit shuffle cannot cross the 128-bit boundary). */
 static void decode_avx2(const uint64_t *in, float *out, int n, float scale)
@@ -146,6 +150,8 @@ static void decode_avx2(const uint64_t *in, float *out, int n, float scale)
     for (; i < n; i++) decode_one(in[i], scale, out + i);
 }
 
+#endif /* __AVX2__ */
+
 int wubu_simd_quant_decode_path(wubu_simd_quant_t *s, wubu_simd_q_path_t path,
                                 const uint64_t *in, float *out, int n)
 {
@@ -153,8 +159,18 @@ int wubu_simd_quant_decode_path(wubu_simd_quant_t *s, wubu_simd_q_path_t path,
     if (path == WUBU_SIMD_Q_AVX2_8 && !wubu_simd_quant_has_avx2()) return -1;
     switch (path) {
         case WUBU_SIMD_Q_SCALAR: decode_scalar(in, out, n, s->scale); break;
-        case WUBU_SIMD_Q_SSE_2:  decode_sse(in, out, n, s->scale); break;
-        case WUBU_SIMD_Q_AVX2_8: decode_avx2(in, out, n, s->scale); break;
+        case WUBU_SIMD_Q_SSE_2:
+#if defined(__SSE4_1__)
+            decode_sse(in, out, n, s->scale); break;
+#else
+            decode_scalar(in, out, n, s->scale); break;
+#endif
+        case WUBU_SIMD_Q_AVX2_8:
+#if defined(__AVX2__)
+            decode_avx2(in, out, n, s->scale); break;
+#else
+            decode_scalar(in, out, n, s->scale); break;
+#endif
         default: return -1;
     }
     s->last_path = path;

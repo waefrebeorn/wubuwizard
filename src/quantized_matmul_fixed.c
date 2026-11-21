@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "gguf_reader.h"
-#include <immintrin.h>
+#include "wubu_portable_simd.h"
 #ifndef QK_K
 #define QK_K 256
 #endif
@@ -89,7 +89,7 @@ void quantized_matmul_from_q8(const void *q8_x,
     for (int64_t j = 0; j < n_cols; j++) {
         const void *w_col = (const uint8_t *)W + j * col_stride;
         if (j + 1 < n_cols) {
-            _mm_prefetch((const char *)W + (j + 1) * col_stride, _MM_HINT_T0);
+            WUBU_PREFETCH(W + (j + 1) * col_stride, 1);
         }
         dot_fn((int)n_rows, &y[j], 0, w_col, 0, q8_x, 0, 1);
     }

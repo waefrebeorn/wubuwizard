@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <immintrin.h>  // AVX2/FMA intrinsics (l2_norm, rms_norm, conv1d)
+#include "wubu_portable_simd.h"  // AVX2/FMA intrinsics (l2_norm, rms_norm, conv1d)
 
 /* ---- Global shared with wubu_ssm.c ---- */
 float g_ssm_l2_eps = 1e-6f;

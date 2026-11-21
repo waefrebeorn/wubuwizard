@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(__AVX2__) && defined(__FMA__)
-#include <immintrin.h>
+#include "wubu_portable_simd.h"
 #endif
 #include <math.h>
 #include <omp.h>

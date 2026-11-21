@@ -8,7 +8,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <immintrin.h>  // _mm_prefetch for expert prefetch
+#include "wubu_portable_simd.h"  // _mm_prefetch for expert prefetch
 
 // Global tensor naming convention (set during model init)
 extern int g_tensor_naming;  // defined in wubu_ssm.c, 0=blk.Qwen 1=model.layers.Gemma 2=pure-GQA
@@ -749,13 +749,13 @@ void wubu_model_forward_from_embd(wubu_model_t *model,
                     // Stride through full weight: ~264KB per gate/up, ~392KB per down
                     // Total ~920KB per expert, 7.4MB for 8 experts → L3
                     for (int64_t off = 0; off < gate_bytes; off += P_STRIDE) {
-                        _mm_prefetch((const char *)g + off, _MM_HINT_T2);
+                        WUBU_PREFETCH(g + off, 1);
                     }
                     for (int64_t off = 0; off < up_bytes; off += P_STRIDE) {
-                        _mm_prefetch((const char *)u + off, _MM_HINT_T2);
+                        WUBU_PREFETCH(u + off, 3);
                     }
                     for (int64_t off = 0; off < down_bytes; off += P_STRIDE) {
-                        _mm_prefetch((const char *)d + off, _MM_HINT_T2);
+                        WUBU_PREFETCH(d + off, 3);
                     }
                 }
             }

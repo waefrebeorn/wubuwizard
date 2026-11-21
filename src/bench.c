@@ -1,3 +1,4 @@
+#ifdef WUBU_HAVE_CUDA
 #include "bench.h"
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -1092,3 +1093,5 @@ void gpu_gqa_prefill(cublasHandle_t cublas_h, cudaStream_t stream,
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
 }
+
+#endif /* WUBU_HAVE_CUDA */

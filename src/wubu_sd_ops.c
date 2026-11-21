@@ -10,7 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #if defined(__AVX2__) || defined(__FMA__)
-#include <immintrin.h>
+#include "wubu_portable_simd.h"
 #endif
 
 /* y[M,N] = x[M,K] @ W^T[K,N]  (nn.Linear convention, W row-major [N,K]).
