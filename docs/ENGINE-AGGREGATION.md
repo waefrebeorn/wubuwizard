@@ -74,9 +74,9 @@ reported, not independently benchmarked.
 
 ## Navigation for the next session
 
-- `docs/ENGINE-GAP-REGISTER.md` — ordered TODO: 34 gaps, gate names, dependencies, next action
+- `docs/ENGINE-GAP-REGISTER.md` — ordered TODO: 46 gaps, gate names, dependencies, next action
 - `docs/ENGINE-SOURCE-INDEX.md` — engine catalog with exact upstream file/symbol pointers
-- `docs/research/engine-sweeps/` — full cited reports from the serving, edge and offload sweeps
+- `docs/research/engine-sweeps/` — full cited reports from the serving, edge, offload and time-bounded recent-gains sweeps
 
 Rule: a technique is absorbed only when it has a named gate and a measured run. Research
 notes and "port complete" claims do not count.

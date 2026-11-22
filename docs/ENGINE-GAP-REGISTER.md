@@ -77,6 +77,27 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 | EG-33 | Disaggregated connector protocol | In-tree file-backed handoff exists; network protocol only if a multi-node use case appears | `test_eg33_connector` | L |
 | EG-34 | Watermarking / typical-p logits processors | LOW fit for the target; no use case yet | `test_eg34_logits` | S |
 
+## Wave 5 — recent gains (2026-10-31 → 2026-11-22, time-bounded sweep)
+
+Grounded in primary releases and papers; full report with rendered Sources block is
+`docs/research/engine-sweeps/front-d-recent-2026-11.md`. A reported speedup is a reason
+to write a gate, never evidence that wubuwizard has the feature.
+
+| ID | Technique | Local evidence / gap relation | Reference | Gate | Size | Next action |
+|---|---|---|---|---|---|---|
+| EG-35 | Extensible KV sized after warmup, UMA page-cache-corrected free memory | refines EG-03; `wubu_mem_budget.c` estimates before load | vLLM v0.34.0, PR #65413 | `test_eg35_extkv` | M | Measure free memory after graph capture; gate 6 GB refusal + UMA accounting |
+| EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv` | M | FP8 KV round-trip + expert LRFU hit-rate gate |
+| EG-37 | Unified arena, one entry per token, compaction, whole-request admission | new; EG-18 is tiers, not one allocator | SGLang unified memory (11 Nov 2026) | `test_eg37_arena` | L | Highest T1 fit in this sweep; gate mixed KV/state capacity under 6 GB |
+| EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | T1: decode-side prefix reuse; defer multi-rank sharding |
+| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | Preserve state across turns; gate no re-prefill on resume |
+| EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | Gate lossless commit + preemption threshold |
+| EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | Search over draft config; gate parity + measured speedup per tier |
+| EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | Validate acceptance-probability identity; gate calibration |
+| EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | Gate draft memory saved vs acceptance drop |
+| EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | Needs an accuracy gate before any speed claim |
+| EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | One family per gate; start with low-rank keys |
+| EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists |
+
 ## What not to break
 
 - Engine stays ignorant of domain concepts. Grammar and tool schemas arrive as request

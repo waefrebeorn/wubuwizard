@@ -96,6 +96,30 @@ it is not a work order.
 | MindGPT-4ov | arxiv.org/html/2512.02895v2 | Modality-split chunked prefill, session-keyed vision-embedding cache | §5.2 | CONDITIONAL | multimodal only |
 | DirectKV / compute-in-flash | dl.acm.org/doi/10.5555/3843968.3843971; arxiv 2609.16161 | Hardware-specialized KV / in-flash compute | papers | LOW | record as hardware non-fit, not a port target |
 
+## Recent gains sweep (2026-10-31 → 2026-11-22)
+
+Time-bounded search of November 2026 releases and papers, grounded on primary sources.
+Full report: `docs/research/engine-sweeps/front-d-recent-2026-11.md`.
+
+| Date | Engine / paper | Concrete gain | Local gap |
+|---|---|---|---|
+| 16 Nov 2026 | vLLM v0.34.0 | Extensible KV cache sized after warmup + CUDA graph capture; block size 64 default | EG-35 |
+| — | vLLM PR #65413 | UMA page-cache correction; raw `cudaMemGetInfo` undersized KV cache by up to 84% | EG-35 |
+| 13 Nov 2026 | llama.cpp v1.0.0 | OCP FP8 KV (`f8_e4m3`), MoE expert cache LRFU/ClassLRU with no CPU wait, external PLE shards | EG-36 |
+| 11 Nov 2026 | SGLang unified memory | One arena for all state types; one entry per token; compaction; whole-request admission | EG-37 |
+| 2 Nov 2026 | SGLang HiCache distributed | Logical radix tree with page ownership; draft-state restore; decode-side prefix reuse | EG-38 |
+| 7 Nov 2026 | Hibana | Model surgery + persistent per-agent state + adaptive speculation for unified-memory devices | EG-39 |
+| 13 Nov 2026 | Callo | Invalidated KV as speculative drafts, verified after prefill; agent context-edit miss penalty | EG-40 |
+| 17 Nov 2026 | SpecSearch | Hardware/workload/memory-aware speculative configuration search | EG-41 |
+| 31 Oct 2026 | TVP | Drafter trained with total-variation objective matched to lossless acceptance | EG-42 |
+| 16 Nov 2026 | Quantized draft KV | K4V4 per-channel keys / per-token values; draft cache −66.20%, acceptance −1.36% rel. | EG-43 |
+| 17 Nov 2026 | NVIDIA sparse attention | Trained indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) vs drop-in pruning | EG-44 |
+| Oct–Nov 2026 | LowRAM / MeltKV / MoE-CORE | Low-rank+amortised values; variable-bit packed VQ; coordinated expert layer staging | EG-45 |
+| MICRO 2026 | SiFAR | Sync-free all-reduce (tier-gated T4) | EG-46 |
+
+Claims found only on AI-news aggregators (SGLang v1.0 consortium, "DeepSeek 3× GPU")
+were not used: no primary source was retrieved for them.
+
 ## Code to gather and compare next
 
 Highest-yield exact reads, in order. Each has a matching row in the gap register.
