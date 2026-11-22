@@ -52,6 +52,7 @@ the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
 | Offload placement solver + zigzag schedule | FlexGen ICML 2023 §4 | `make test_eg06_plan` | greedy 0.070s vs exhaustive optimum 0.070s (ratio 1.000), all-SSD 3.500s, 24-entry alternating schedule; exit 0 |
 | SSD sliding-window row reuse | LLM in a Flash §2–3 | `make test_eg07_row_reuse` | 8 reads / 61440 B vs naive 64 reads / 262144 B over 8 windows, 7 incremental deltas, 32 KiB coalescing; exit 0 |
 | RadixAttention prefix tree | SGLang | `make test_eg08_radix` | sibling prefix sharing 7 nodes vs 9 flat, 4-token full / 3-token partial match, LRU eviction 7→6; exit 0 |
+| Overlapping scheduler + deferred results | SGLang `event_loop_overlap` | `make test_eg09_overlap` | 27 tokens in 10 steps vs 27 serial (2.70×), 1-step deferred drain, max_wait=3 bounded, drain cap=1 loses no tokens; exit 0 |
 | Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
 | Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
 

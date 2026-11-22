@@ -92,11 +92,18 @@ prefix, producing `nodes=7` versus 9 for a flat cache, a 4-token full match,
 a 3-token partial match, a miss, LRU eviction `nodes=6`, and deterministic hit
 and eviction counters; `PASS`, exit 0.
 
+**EG-09 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg09_overlap`
+builds; `./test_eg09_overlap.exe` prints `steps=10 produced=27 drained=27
+max_wait=3` for six requests with a batch limit of four — 2.70× fewer steps
+than the 27-step serial baseline, no token lost or duplicated, step-0 drain
+is zero (deferred by exactly one step), and a drain cap of 1 still delivers
+all 12 tokens. `PASS`, exit 0.
+
 ## Wave 1 — scheduling and control
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
-| EG-09 | Overlapping scheduler with deferred result queue | `src/wubu_scheduler.c` steps CPU and decode in the same loop; no step pipelining | SGLang `event_loop_overlap`, mini-sglang `overlap_loop` | `test_eg09_overlap` | M | Defer result drain one step; gate on no starvation + identical tokens |
+| EG-09 | Overlapping scheduler with deferred result queue | `src/wubu_scheduler.c` drains and decodes in one step; no deferred result queue or round-robin admission | SGLang `event_loop_overlap`, mini-sglang `overlap_loop` | `test_eg09_overlap` | M | **DONE** — `src/wubu_overlap_sched.c/.h` defers results one step and admits round-robin; Evidence below. |
 | EG-10 | Single shared admission validator + token budget | admission scattered across request paths; no queue timeout | TGI shared validator; TensorRT capacity admission | `test_eg10_admit` | S | One validator, one budget; gate rejection of over-budget requests |
 | EG-11 | Structured decoding: grammar → automaton → batched bitmask + jump-forward | `src/wubu_spec_constrained.c` is a hardcoded single-shape tool-call mask; no grammar engine | SGLang xgrammar backend; vLLM `StructuredOutputManager`; llama.cpp `llama-grammar.cpp` | `test_eg11_grammar` | L | GBNF stack machine + bitmask, then jump-forward; gate invalid-token rejection |
 | EG-12 | Composable sampler chain (min-p, top-n-sigma, XTC, DRY, mirostat, dynatemp, typical-p, adaptive-p) | `src/wubu_token.c` has temperature/top-k/top-p/repetition only | MLX sampler chain; llama.cpp samplers | `test_eg12_sampler` | M | Ordered chain with per-stage RNG; gate distribution invariants |
