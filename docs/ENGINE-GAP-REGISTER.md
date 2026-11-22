@@ -26,7 +26,7 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 | EG-02 | GGUF tokenizer metadata completeness | `src/wubu_gguf_tokenizer.c` read tokens/merges/bos/eos/pad; `tokenizer.ggml.pre`, `token_type`, `add_bos`, `chat_template` were skipped | llama.cpp `llama-vocab.cpp`, GGUF spec | `test_eg02_tok_meta` | S | **DONE** — four fields exposed on the extractor struct; metadata-only fixture + gate. Evidence below. |
 | EG-03 | Metadata-first VRAM planner (80% rule, OOM ctx shrink, recovery wait) | `src/wubu_mem_budget.c` budgets host RAM; `src/wubu_resource.c` used a coarse VRAM×quant_factor heuristic | Ollama `PredictServerVRAM` + vLLM PR #65413 UMA sizing | `test_eg03_vram_plan` | M | **DONE** — `src/wubu_vram_plan.c/.h` plans from measured bytes; Evidence below. |
 | EG-04 | StreamingLLM attention sinks | `src/wubu_swa_reclaim.c` had no pinning: every masked cell was reusable | StreamingLLM / attention-sink literature | `test_eg04_attention_sink` | S | **DONE** — sink positions pinned in `wubu_swa_reclaim`; Evidence below. |
-| EG-05 | Neuron-cluster abstraction + activation-sparsity predictor | 0 hits for `activation.predictor\|hot.neuron\|neuron.cluster` in inference path | PowerInfer SOSP 2024; PowerInfer-2 §1/§3 | `test_eg05_neuron` | L | C11 cluster descriptors, runtime sizing, hot/cold split; gate on cluster I/O count |
+| EG-05 | Neuron-cluster abstraction + activation-sparsity predictor | `src/wubu_*.c` had no activation predictor, hot/cold split or cluster I/O accounting | PowerInfer SOSP 2024; PowerInfer-2 §1/§3 | `test_eg05_neuron` | L | **DONE** — `src/wubu_neuron_cluster.c/.h` with runtime sizing and cluster-read gate; Evidence below. |
 | EG-06 | Offload-placement solver + zigzag block schedule | `docs/ssd_moe.md` is a per-layer LRU slot bank; no policy solver | FlexGen ICML 2023 §4 Algorithm 1 | `test_eg06_plan` | L | Solve placement from bandwidth/capacity; gate within 2× of cost model |
 | EG-07 | SSD sliding-window row reuse + ≥32 KiB coalesced reads | weight streaming reads per tensor on demand; no incremental `s_agg(k+1)-s_agg(k)` reuse | LLM in a Flash §2–3 | `test_eg07_row_reuse` | M | Bundle rows into coalesced reads; gate on read syscall/byte count |
 | EG-08 | RadixAttention tree | 0 hits for `radix\|prefix_tree` in src/include (only unrelated audio/codec/kvfs hits); prefix cache is hash-based | SGLang compressed FSM + RadixAttention | `test_eg08_radix` | M | Tree with LRU eviction and incremental branch match; gate sibling-prefix sharing |
@@ -63,6 +63,14 @@ cells survive a reuse attempt that is correctly refused, non-sink cell 2 is reus
 the sink count, then `PASS`, exit 0. The existing LP-06 `test_swa_reclaim` gate
 still passes. This gate covers retention policy; a long-context perplexity gate
 is a later refinement.
+
+**EG-05 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg05_neuron`
+builds; `./test_eg05_neuron.exe` prints `observations=616`, `hot_percent=10
+hot_neurons=8` (four per layer), runtime cluster size 16 then 4 from byte
+targets, and `predicted_reads: hot=140 no_hot=160 (10 tokens)` — the hot
+partition removes one active cluster per layer from the fetch path. `PASS`,
+exit 0. The module is a deterministic policy surface; wiring it into the
+matmul path is a separate integration gate.
 
 ## Wave 1 — scheduling and control
 
