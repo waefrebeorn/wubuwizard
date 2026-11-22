@@ -2,6 +2,8 @@
 
 > Execution view of `docs/SOTA-2026-11-ROADMAP.md`. Pads are dependency-ordered.
 > Status reflects a **real gated test**, not intent: SHIPPED / PARTIAL / TODO.
+> Engine-absorption TODO lives in `docs/ENGINE-GAP-REGISTER.md`; upstream reading
+> pointers live in `docs/ENGINE-SOURCE-INDEX.md`.
 
 | Pad | Size | Depends on | Best source | Gate | Status |
 |---|---|---|---|---|---|

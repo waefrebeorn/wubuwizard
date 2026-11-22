@@ -71,3 +71,12 @@ All 16 have a named `make test_*` gate. See `docs/WORKLIST.md`.
 `.hermes/GOAL.md` for direction. `docs/WORKLIST.md` for shipped status.
 Vendor model claims are preserved in `.hermes/vault/inkling-2-mini-target.md` and are
 reported, not independently benchmarked.
+
+## Navigation for the next session
+
+- `docs/ENGINE-GAP-REGISTER.md` — ordered TODO: 34 gaps, gate names, dependencies, next action
+- `docs/ENGINE-SOURCE-INDEX.md` — engine catalog with exact upstream file/symbol pointers
+- `docs/research/engine-sweeps/` — full cited reports from the serving, edge and offload sweeps
+
+Rule: a technique is absorbed only when it has a named gate and a measured run. Research
+notes and "port complete" claims do not count.
