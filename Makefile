@@ -27,7 +27,7 @@ test_sse: tools/api_server.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 # Object files
-CORE_OBJ = src/wubu_ssm.o src/wubu_ssm_chunked.o src/wubu_mobius.o src/wubu_nested_ssm.o src/wubu_nested_ssm_backward.o src/wubu_moe.o src/wubu_moe_backward.o src/wubu_moe_hyperbolic.o src/wubu_poincare_ssm_backward.o src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_model_arch.o src/wubu_rotate.o src/wubu_ops.o src/wubu_dense_ffn.o src/gguf_reader.o src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_goal.o src/wubu_goal_steer.o src/wubu_goal_resample.o src/wubu_harness_bandit.o src/wubu_ttc_budget.o src/wubu_kv_exact.o src/wubu_swa_reclaim.o src/wubu_spec_budget.o src/wubu_spec_seed.o src/wubu_spec_constrained.o src/wubu_kernel_spec.o src/wubu_kv_qfmt.o src/wubu_kv_fetch.o src/wubu_simd_quant.o src/wubu_diff_sampler.o src/wubu_state_version.o
+CORE_OBJ = src/wubu_ssm.o src/wubu_ssm_chunked.o src/wubu_mobius.o src/wubu_nested_ssm.o src/wubu_nested_ssm_backward.o src/wubu_moe.o src/wubu_moe_backward.o src/wubu_moe_hyperbolic.o src/wubu_poincare_ssm_backward.o src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_model_arch.o src/wubu_rotate.o src/wubu_ops.o src/wubu_dense_ffn.o src/gguf_reader.o src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_goal.o src/wubu_goal_steer.o src/wubu_goal_resample.o src/wubu_harness_bandit.o src/wubu_ttc_budget.o src/wubu_kv_exact.o src/wubu_swa_reclaim.o src/wubu_spec_budget.o src/wubu_spec_seed.o src/wubu_spec_constrained.o src/wubu_kernel_spec.o src/wubu_kv_qfmt.o src/wubu_kv_fetch.o src/wubu_simd_quant.o src/wubu_diff_sampler.o src/wubu_state_version.o
 MODEL_OBJ = src/wubu_model.o $(CORE_OBJ)
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
@@ -37,6 +37,9 @@ src/qlearner.o: src/qlearner.c include/qlearner.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm.o: src/wubu_ssm.c include/wubu_ssm.h include/wubu_mobius.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_vecdot_dispatch.o: src/wubu_vecdot_dispatch.c include/wubu_vecdot_dispatch.h include/gguf_reader.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -486,6 +489,10 @@ test_goal_steer: tools/test_goal_steer.c src/wubu_goal_steer.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-01: runtime per-type vec_dot table + multi-row GEMV.
+test_eg01_vecdot: tools/test_eg01_vecdot.c src/wubu_vecdot_dispatch.c src/quantized_dot_generic.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # Engine aggregation gates: vLLM-style iteration-level batching and

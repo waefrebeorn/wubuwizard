@@ -32,7 +32,8 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o \
   src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o \
   src/wubu_model_arch.o src/wubu_dense_ffn.o \
-  src/quantized_matmul.o src/quantized_dot_generic.o src/safetensors_reader.o \
+  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o \
+  src/safetensors_reader.o \
   src/wubu_repetition.o src/wubu_lora.o src/wubu_model_adapter.o \
   src/wubu_model_safetensors_bridge.o src/wubu_safetensors_shard.o \
   src/wubu_ssd_moe.o src/wubu_gemm.o src/wubu_kvcache_quant.o src/wubu_ssm_scan.o \
@@ -154,6 +155,10 @@ test_goal_steer: tools/test_goal_steer.c src/wubu_goal_steer.o
 
 test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
 	$(CC) $(CFLAGS) -o $@ tools/test_goal_resample.c src/wubu_goal_resample.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-01: runtime per-type vec_dot table + multi-row GEMV.
+test_eg01_vecdot: tools/test_eg01_vecdot.c src/wubu_vecdot_dispatch.c src/quantized_dot_generic.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # Engine aggregation gates (Windows): same two gates as the Linux Makefile.
 test_contbatch: tools/test_continuous_batching.c src/wubu_scheduler.c src/wubu_continuous_batching.c src/wubu_contbatch.c src/wubu_paged_kv.c src/wubu_prefix_cache.c

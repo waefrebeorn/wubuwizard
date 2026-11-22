@@ -44,6 +44,7 @@ the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
 
 | Technique | Source family | Gate | Measured evidence |
 |-----------|---------------|------|-------------------|
+| Runtime per-type `vec_dot` dispatch + multi-row GEMV | llama.cpp `ggml-cpu.c` type traits | `make test_eg01_vecdot` | 7-type table, unknown type refused, 4 rows `err=0.000` vs scalar reference, `rows=4 lookups=1`; gate exposed and fixed a 4× AVX2 Q8_0 reduction bug |
 | Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
 | Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
 

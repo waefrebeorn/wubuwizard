@@ -22,7 +22,7 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
-| EG-01 | Runtime per-type `vec_dot` dispatch table + multi-row GEMV | `src/quantized_dot_generic.c` selects kernels with compile-time `#if __AVX2__`, one output column at a time | llama.cpp `ggml-cpu.c` `type_traits_cpu[].vec_dot/nrows/ncols` | `test_eg01_vecdot` | M | Add dispatch table + `num_rows_per_vec_dot>1`; gate on identical dequant output across types |
+| EG-01 | Runtime per-type `vec_dot` dispatch table + multi-row GEMV | `src/quantized_dot_generic.c` selected kernels with compile-time `#if __AVX2__`, one output column at a time | llama.cpp `ggml-cpu.c` `type_traits_cpu[].vec_dot/nrows/ncols` | `test_eg01_vecdot` | M | **DONE** — `src/wubu_vecdot_dispatch.c/.h` + 7-type table, one dispatch reused across 4 rows; fixed a 4× AVX2 Q8_0 reduction bug. Evidence below. |
 | EG-02 | GGUF tokenizer metadata completeness | `src/wubu_gguf_tokenizer.c` reads tokens/merges/bos/eos/pad; `tokenizer.ggml.pre`, `token_type`, `add_bos`, `chat_template` unused | llama.cpp `llama-vocab.cpp`, GGUF spec | `test_eg02_tok_meta` | S | Read and expose the four fields; gate asserts values from a fixture GGUF |
 | EG-03 | Metadata-first VRAM planner (80% rule, OOM ctx shrink, recovery wait) | `src/wubu_mem_budget.c` budgets host RAM; `src/wubu_resource.c` uses a coarse VRAM×quant_factor heuristic | Ollama `PredictServerVRAM` + `reduceAutoNumCtxForLoadOOM` | `test_eg03_vram_plan` | M | Plan from GGUF metadata before load; gate on refusing an 8.49 GB quant on 6 GB |
 | EG-04 | StreamingLLM attention sinks | 0 hits for `attention_sink\|attn_sink\|sink_token\|streaming_llm` in src/include/tools | StreamingLLM / attention-sink literature | `test_eg04_sink` | S | Keep first-position KV as persistent sinks; gate long-context perplexity vs sliding window |
@@ -30,6 +30,15 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 | EG-06 | Offload-placement solver + zigzag block schedule | `docs/ssd_moe.md` is a per-layer LRU slot bank; no policy solver | FlexGen ICML 2023 §4 Algorithm 1 | `test_eg06_plan` | L | Solve placement from bandwidth/capacity; gate within 2× of cost model |
 | EG-07 | SSD sliding-window row reuse + ≥32 KiB coalesced reads | weight streaming reads per tensor on demand; no incremental `s_agg(k+1)-s_agg(k)` reuse | LLM in a Flash §2–3 | `test_eg07_row_reuse` | M | Bundle rows into coalesced reads; gate on read syscall/byte count |
 | EG-08 | RadixAttention tree | 0 hits for `radix\|prefix_tree` in src/include (only unrelated audio/codec/kvfs hits); prefix cache is hash-based | SGLang compressed FSM + RadixAttention | `test_eg08_radix` | M | Tree with LRU eviction and incremental branch match; gate sibling-prefix sharing |
+
+**EG-01 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg01_vecdot`
+builds; `./test_eg01_vecdot.exe` prints `table entries: 7`, all seven types routed to
+kernels, unknown type 9999 refused, four Q8_0 rows with `err=0.000` against an
+independent scalar reference, `multi-row: rows=4 lookups=1`, `PASS`, exit 0. Scalar
+and AVX2 builds agree. The gate exposed a pre-existing defect: the AVX2 Q8_0
+horizontal reduction duplicated lanes and returned exactly 4× the correct dot;
+the reduction now sums the eight int32 lanes once per block before applying scales.
+The new module is in `CORE_OBJ` on both platforms.
 
 ## Wave 1 — scheduling and control
 

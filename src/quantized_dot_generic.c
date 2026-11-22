@@ -667,7 +667,11 @@ void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
     const uint8_t *w = (const uint8_t *)vx;   /* Q8_0 weights */
     const uint8_t *x = (const uint8_t *)vy;   /* Q8_0 activations */
 #ifdef __AVX2__
-    __m256 acc = _mm256_setzero_ps();
+    /* Reduce the eight int32 lanes ONCE per block, then apply that block's
+     * scales. The previous double-hadd sequence duplicated lanes and
+     * returned 4x the true dot (caught by test_eg01_vecdot against the
+     * scalar path and an independent reference). */
+    float accf = 0.0f;
     for (int i = 0; i < nb; i++) {
         float d0 = fp16_to_fp32(*(const uint16_t *)(w + i * 34));
         float d1 = fp16_to_fp32(*(const uint16_t *)(x + i * 34));
@@ -677,14 +681,13 @@ void q8_0_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const v
         __m256i ys = _mm256_sign_epi8(y_i, x_i);          /* y·sign(x) (s8) */
         __m256i p16 = _mm256_maddubs_epi16(xs, ys);       /* x·y pairs → s16 */
         __m256i p32 = _mm256_madd_epi16(p16, _mm256_set1_epi16(1));
-        __m256i s32 = _mm256_hadd_epi32(p32, p32);
-        s32 = _mm256_hadd_epi32(s32, s32);
-        acc = _mm256_fmadd_ps(_mm256_set1_ps(d0 * d1), _mm256_cvtepi32_ps(s32), acc);
+        __m128i sum = _mm_add_epi32(_mm256_castsi256_si128(p32),
+                                    _mm256_extracti128_si256(p32, 1));
+        sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, _MM_SHUFFLE(1, 0, 3, 2)));
+        sum = _mm_add_epi32(sum, _mm_shuffle_epi32(sum, _MM_SHUFFLE(2, 3, 0, 1)));
+        accf += d0 * d1 * (float)_mm_cvtsi128_si32(sum);
     }
-    __m128 acc0 = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
-    acc0 = _mm_add_ps(acc0, _mm_movehl_ps(acc0, acc0));
-    acc0 = _mm_add_ss(acc0, _mm_shuffle_ps(acc0, acc0, 1));
-    *s += _mm_cvtss_f32(acc0);
+    *s += accf;
 #elif defined(__aarch64__)
     float32x4_t acc = vdupq_n_f32(0.0f);
     for (int i = 0; i < nb; i++) {
