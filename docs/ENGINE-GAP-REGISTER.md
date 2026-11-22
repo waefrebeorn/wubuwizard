@@ -28,7 +28,7 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 | EG-04 | StreamingLLM attention sinks | `src/wubu_swa_reclaim.c` had no pinning: every masked cell was reusable | StreamingLLM / attention-sink literature | `test_eg04_attention_sink` | S | **DONE** — sink positions pinned in `wubu_swa_reclaim`; Evidence below. |
 | EG-05 | Neuron-cluster abstraction + activation-sparsity predictor | `src/wubu_*.c` had no activation predictor, hot/cold split or cluster I/O accounting | PowerInfer SOSP 2024; PowerInfer-2 §1/§3 | `test_eg05_neuron` | L | **DONE** — `src/wubu_neuron_cluster.c/.h` with runtime sizing and cluster-read gate; Evidence below. |
 | EG-06 | Offload-placement solver + zigzag block schedule | `docs/ssd_moe.md` is a per-layer LRU slot bank; no policy solver | FlexGen ICML 2023 §4 Algorithm 1 | `test_eg06_plan` | L | **DONE** — `src/wubu_offload_plan.c/.h` solves placement and emits the zigzag order; Evidence below. |
-| EG-07 | SSD sliding-window row reuse + ≥32 KiB coalesced reads | weight streaming reads per tensor on demand; no incremental `s_agg(k+1)-s_agg(k)` reuse | LLM in a Flash §2–3 | `test_eg07_row_reuse` | M | Bundle rows into coalesced reads; gate on read syscall/byte count |
+| EG-07 | SSD sliding-window weight-row reuse + ≥32 KiB coalesced reads | weight streaming reread the full window per step; no incremental `s_agg(k+1)-s_agg(k)` | LLM in a Flash §2–3 | `test_eg07_row_reuse` | M | **DONE** — `src/wubu_ssd_row_reuse.c/.h` reuses rows and coalesces refills; Evidence below. |
 | EG-08 | RadixAttention tree | 0 hits for `radix\|prefix_tree` in src/include (only unrelated audio/codec/kvfs hits); prefix cache is hash-based | SGLang compressed FSM + RadixAttention | `test_eg08_radix` | M | Tree with LRU eviction and incremental branch match; gate sibling-prefix sharing |
 
 **EG-01 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg01_vecdot`
@@ -78,6 +78,13 @@ cost `0.070000s` against an exhaustive 3^6 optimum of `0.070000s` (ratio 1.000),
 all-SSD baseline `3.500000s`, and a 24-entry zigzag schedule across four
 alternating forward/reverse passes; `PASS`, exit 0. Capacity is checked per tier
 and zero-capacity inputs are refused.
+
+**EG-07 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg07_row_reuse`
+builds; `./test_eg07_row_reuse.exe` prints first window `reads=1 bytes=32768`,
+after seven slides `reads=8 bytes=61440 deltas=7` against a naive `64` reads /
+`262144` bytes — 8× fewer reads and ~4.3× fewer bytes — with every window
+byte-identical to the source. A 16-row refill is two 32 KiB reads; bounds and
+bad construction fail closed. `PASS`, exit 0.
 
 ## Wave 1 — scheduling and control
 
