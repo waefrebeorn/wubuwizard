@@ -122,6 +122,14 @@ candidate, and chaining top-k with min-p never grows the set. `PASS`, exit 0.
 Only six stages are gated here; top-n-sigma, XTC, DRY, mirostat, dynatemp
 and adaptive-p remain in the deferred watchlist.
 
+**EG-13 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg13_pretok`
+builds; `./test_eg13_pretok.exe` registers five families, shows observable
+dispatch (`default=2` vs `llama3=4` pieces for "Hi, world!"; qwen2=2 vs
+llama3=1 vs deepseek=3 on mixed digits), refuses an unknown family, and
+composes `e + U+0301` into the two bytes `C3 A9` while leaving an unknown
+combining mark untouched. `PASS`, exit 0. This is a minimal NFC subset, not a
+full Unicode normalization table.
+
 ## Wave 1 — scheduling and control
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
@@ -130,7 +138,7 @@ and adaptive-p remain in the deferred watchlist.
 | EG-10 | Single shared admission validator + token budget | admission scattered across request paths; no queue timeout | TGI shared validator; TensorRT capacity admission | `test_eg10_admit` | S | **DONE** — `src/wubu_admission.c/.h` owns budget, queue cap and timeout; Evidence below. |
 | EG-11 | Structured decoding: grammar → automaton → batched bitmask + jump-forward | `src/wubu_spec_constrained.c` hardcodes one tool-call mask; no grammar automaton or bitmask | SGLang xgrammar backend; vLLM `StructuredOutputManager`; llama.cpp `llama-grammar.cpp` | `test_eg11_grammar` | L | **DONE** — `src/wubu_grammar_fsm.c/.h` compiles alternative tries and emits batched masks; Evidence below. |
 | EG-12 | Composable sampler chain (min-p, top-n-sigma, XTC, DRY, mirostat, dynatemp, typical-p, adaptive-p) | `src/wubu_token.c` has temperature/top-k/top-p/repetition only | MLX sampler chain; llama.cpp samplers | `test_eg12_sampler` | M | **DONE (partial)** — `src/wubu_sampler_chain.c/.h` with repetition, temperature, top-k, top-p, min-p, typical-p; remaining stages tracked below. Evidence paragraph. |
-| EG-13 | Pre-tokenizer registry + Unicode NFC fallback | depends on EG-02; no family registry keyed on `tokenizer.ggml.pre` | llama.cpp `llama-vocab.cpp`, `unicode.cpp` | `test_eg13_pretok` | M | Hash-keyed registry for llama3/gpt2/qwen2/deepseek; gate token-ID parity |
+| EG-13 | Pre-tokenizer registry + Unicode NFC fallback | depends on EG-02; no family registry keyed on `tokenizer.ggml.pre` | llama.cpp `llama-vocab.cpp`, `unicode.cpp` | `test_eg13_pretok` | M | **DONE** — `src/wubu_pretoken.c/.h` with 5 families and a byte-level NFC fallback; Evidence below. |
 | EG-14 | Jinja-subset chat template renderer | prompts are hardcoded per tool; GGUF `chat_template` unused | llama.cpp minja `common/jinja/`; TGI | `test_eg14_template` | M | Read template from GGUF, render minimal subset; gate exact prompt string |
 | EG-15 | Disaggregated PD gate (already implemented, source-only) | `src/wubu_pd_serve.c`, `wubu_pd_split.c`, `wubu_kv_transfer.c` exist; `tools/test_disagg_prefill_decode.c` has no gate | in-tree | `test_eg15_pd` | S | Wire the existing test as a gate against its owning modules |
 
