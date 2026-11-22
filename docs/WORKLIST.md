@@ -46,6 +46,7 @@ the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
 |-----------|---------------|------|-------------------|
 | Runtime per-type `vec_dot` dispatch + multi-row GEMV | llama.cpp `ggml-cpu.c` type traits | `make test_eg01_vecdot` | 7-type table, unknown type refused, 4 rows `err=0.000` vs scalar reference, `rows=4 lookups=1`; gate exposed and fixed a 4× AVX2 Q8_0 reduction bug |
 | GGUF tokenizer metadata completeness | llama.cpp pre-tokenizer registry lineage | `make test_eg02_tok_meta` | `pre=llama3`, `token_type_n=3`, `add_bos=1`, full `chat_template`; generated 9-KV fixture, exit 0 |
+| Metadata-first VRAM planner (80% rule) | Ollama VRAM prediction + vLLM UMA sizing | `make test_eg03_vram_plan` | 8.49 GB on 6 GB → REFUSE (STREAM when allowed), UMA-corrected 5 GB → FIT vs raw 3 GB → REFUSE, large KV → SHRINK to 2867, wait=100ms; exit 0 |
 | Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
 | Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
 
