@@ -156,6 +156,14 @@ Full reports: `front-e-second-degree.md`, `front-f-new-engines.md`, `front-g-q3-
 | DiffusionGemma / I-DLM / DLM drafters | front-f §§12–14 | Bidirectional canvas, entropy-bound denoising, dLLM block proposals | CONDITIONAL | watch |
 | NanoFlow / Magnitude / FreeToken | front-f §5/§20, front-g G8 | Nano-batching, per-device kernel tuning, bandwidth-adaptive stack | MED | watch |
 
+## Local reference code (do not vendor)
+
+Shallow clones of 26 engines live at `~/WuBu/research/engine-sources/` outside the
+wubuwizard tree. They are **study material only**: never link, copy verbatim, or add
+them to `CORE_OBJ`. Read a file, extract the mechanism, reimplement it in C11 with a
+gate. See `docs/research/engine-sweeps/q3q4-2026-repos.md` for the Q3/Q4 2026
+catalog and `gh`-derived creation dates.
+
 ## Code to gather and compare next
 
 Highest-yield exact reads, in order. Each has a matching row in the gap register.
