@@ -34,6 +34,22 @@ spine fork and can be worked in parallel; LP-06..LP-09 stand on it.
 - KV/spec fork: LP-05 → {LP-06, LP-07 → LP-08 → LP-09}, and LP-05 → LP-11 → LP-12 → LP-15.
 - Independent: LP-10, LP-13, LP-16.
 
+## Engine absorption gates (evidence-first)
+
+These techniques were already implemented in the tree but had source-only tests with no
+`make` gate. They are now real gates in both `Makefile` and `Makefile.win`, verified on
+the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
+
+| Technique | Source family | Gate | Measured evidence |
+|-----------|---------------|------|-------------------|
+| Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
+| Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
+
+Both gates are linked against the owning modules directly, so they cannot pass on a
+stubbed or unlinked build. `test_contbatch` depends on `wubu_scheduler`,
+`wubu_continuous_batching`, `wubu_contbatch`, `wubu_paged_kv` and `wubu_prefix_cache`;
+`test_prefix_reuse` depends on `wubu_prefix_cache`.
+
 ## Definition of SHIPPED
 
 The named gate exists in the Makefile, compiles with the project's C11 flags, runs

@@ -488,6 +488,15 @@ test_goal_steer: tools/test_goal_steer.c src/wubu_goal_steer.o
 test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# Engine aggregation gates: vLLM-style iteration-level batching and
+# SGLang-style cross-request prefix KV reuse. Sources are listed directly so
+# the gate does not depend on an implicit object rule.
+test_contbatch: tools/test_continuous_batching.c src/wubu_scheduler.c src/wubu_continuous_batching.c src/wubu_contbatch.c src/wubu_paged_kv.c src/wubu_prefix_cache.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test_prefix_reuse: tools/test_prefix_reuse.c src/wubu_prefix_cache.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 test_harness_bandit: tools/test_harness_bandit.c src/wubu_harness_bandit.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 

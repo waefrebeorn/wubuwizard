@@ -155,6 +155,13 @@ test_goal_steer: tools/test_goal_steer.c src/wubu_goal_steer.o
 test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
 	$(CC) $(CFLAGS) -o $@ tools/test_goal_resample.c src/wubu_goal_resample.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
+# Engine aggregation gates (Windows): same two gates as the Linux Makefile.
+test_contbatch: tools/test_continuous_batching.c src/wubu_scheduler.c src/wubu_continuous_batching.c src/wubu_contbatch.c src/wubu_paged_kv.c src/wubu_prefix_cache.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+test_prefix_reuse: tools/test_prefix_reuse.c src/wubu_prefix_cache.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
 test_harness_bandit: tools/test_harness_bandit.c src/wubu_harness_bandit.o
 	$(CC) $(CFLAGS) -o $@ tools/test_harness_bandit.c src/wubu_harness_bandit.o -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
