@@ -120,6 +120,42 @@ Full report: `docs/research/engine-sweeps/front-d-recent-2026-11.md`.
 Claims found only on AI-news aggregators (SGLang v1.0 consortium, "DeepSeek 3× GPU")
 were not used: no primary source was retrieved for them.
 
+## Second-degree / new-engine / Q3 aggregation (2026-11-22)
+
+Full reports: `front-e-second-degree.md`, `front-f-new-engines.md`, `front-g-q3-papers.md`.
+"Watch" items have no reserved gate; they are tracked in the gap register's deferred table.
+
+| Engine / paper | Upstream | Mechanism | T1 fit | Local landing zone |
+|---|---|---|---|---|
+| HiQCache | github.com/awesome-pro/hiqcache | INT8 row-local host KV record (1152 B aligned), per-head absmax BF16 scales, unmodified CUDA mover | HIGH | `src/wubu_kv_tier.c`, EG-47 |
+| BitNest | arXiv 2610.02800 | W4 draft nested in W8 target; one physical weight/KV representation | HIGH | `src/quantized_dot_generic.c`, EG-48 |
+| ReadKV | arXiv 2610.11245 | Progressive KV code: 8-bit store / 4-bit fetch per query | HIGH | `src/wubu_kvquant.c`, EG-49 |
+| SSD-LLaMA | arXiv 2609.18110 | Concurrent per-expert SSD reads + async H2D + in-VRAM rANS | HIGH | `src/wubu_ssd_moe.c`, EG-50 |
+| SPICE | arXiv 2608.21240 | Confidence-adaptive expert lookahead + low-rank surrogate | HIGH (lossy) | `src/wubu_moe.c`, EG-51 |
+| SeqMoE | arXiv 2609.12978 | Sequence-modelled expert activation, deadline sequencing, probabilistic Belady | HIGH | `src/wubu_mem_budget.c`, EG-52 |
+| RocketKV / proxy routes | TRT-LLM sparse docs | Prompt-KV eviction + page Top-K; unselected blocks contribute summaries | MED-HIGH | `src/wubu_attn_gate.c`, EG-53/54 |
+| UNO | arXiv 2609.04010 | Gated-LoRA diffusion drafter on verifier backbone, one KV, Psi-Spec | MED-HIGH | `src/wubu_lora.c`, EG-55 |
+| DFlash / P-EAGLE | arXiv 2602.06036 | Block-diffusion drafting + fused target hidden-state KV injection | MED | `src/wubu_eagle.c`, EG-56 |
+| FR-Spec | arXiv 2502.14856 | High-frequency draft vocabulary, full vocab at verify | MED | `src/wubu_token.c`, EG-57 |
+| SpecPrefill | arXiv 2502.02789 | Draft-attention prompt compression before base model | MED | `src/wubu_ctx_manage.c`, EG-58 |
+| LayerSkip | arXiv 2404.16710 | Layer dropout + exit-layer query cache reused by remainder pass | MED | `src/wubu_early_exit.c`, EG-60 |
+| DSpark | arXiv 2607.05147 | Rank-256 Markov correction head + 1-TV confidence head + verify budget | HIGH | `src/wubu_spec_decode.c`, EG-62 |
+| SpecQuant | arXiv 2609.21704 | Multi-precision parents from one base + complexity routing | HIGH | `src/wubu_quant_selector.c`, EG-63 |
+| MemSpec | arXiv 2608.10362 | Per-step memory-aware draft scheduling on edge | HIGH | `src/wubu_mem_budget.c`, EG-64 |
+| LeanStream | arXiv 2609.03079 | Speculate-and-refine from partial GPU results | MED | new module, EG-65 |
+| TensorFold | github.com/ashhart/TensorFold, Zig/CUDA/Metal, Apache-2.0 | Adaptive draft caps, kv8 K/V, disk prefix snapshots with exactness gate, AOT packs | MED-HIGH | `src/wubu_lmcache.c`, EG-66 |
+| titan-engine | front-f §18 | Tiered experts + prefill expert streaming + hybrid prefix cache on small GPU | MED-HIGH | `src/wubu_ssd_moe.c`, EG-67 |
+| Strata | front-f §19, Rust+HIP | Zero-allocation host, prefill launch amortization, 4-way split-KV decode | MED-HIGH | `src/wubu_arena.c`, EG-68 |
+| ReplaySSM | front-f §15 | Cache SSM inputs, not state; append-only speculative rollback | CONDITIONAL | `src/wubu_ssm.c`, EG-69 |
+| Memory-Sovereign | arXiv 2608.23805 | Output-exactness certificate with reuse generations | MED | gate discipline, EG-70 |
+| Edge0 | arXiv 2609.18063 | Prerouter prediction is the routing; unmerged recovery LoRA | HIGH | watch (EG-20 lineage) |
+| Hyperflare (ex-Flare) | front-f §2 | Prepared-graph runtime, caller-owned memory plan, Selene prefix-checkpoint pool | MED (design) | watch |
+| llm-d 1.0 | front-f §3 | KV-aware cluster routing, EPP filter-score-pick | LOW (cluster) | watch |
+| Kimi DSA / QSA / MISA | front-f §§8–10 | FP8-key/token + 32 index heads + top-2048 exact MLA; block-pooled and head-routed variants | MED | watch (after EG-44) |
+| Hymba / Zebra, cross-arch KV translation | front-f §§16–17 | Hybrid SSM+attention layout policy; MLA/recurrent/indexer KV mapping | CONDITIONAL | watch |
+| DiffusionGemma / I-DLM / DLM drafters | front-f §§12–14 | Bidirectional canvas, entropy-bound denoising, dLLM block proposals | CONDITIONAL | watch |
+| NanoFlow / Magnitude / FreeToken | front-f §5/§20, front-g G8 | Nano-batching, per-device kernel tuning, bandwidth-adaptive stack | MED | watch |
+
 ## Code to gather and compare next
 
 Highest-yield exact reads, in order. Each has a matching row in the gap register.

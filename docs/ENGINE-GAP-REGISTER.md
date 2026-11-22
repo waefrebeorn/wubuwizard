@@ -98,6 +98,56 @@ to write a gate, never evidence that wubuwizard has the feature.
 | EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | One family per gate; start with low-rank keys |
 | EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists |
 
+## Wave 6 — second-degree, new engines and 2026 Q3 (deduped)
+
+Sources: `docs/research/engine-sweeps/front-e-second-degree.md`, `front-f-new-engines.md`,
+`front-g-q3-papers.md`, `local-audit-round2.md`. All reported numbers are the authors',
+not local measurements. HiQCache, DFlash and other cross-report hits are counted once.
+
+| ID | Technique | Local evidence / relation | Reference | Gate | Size | Next action |
+|---|---|---|---|---|---|---|
+| EG-47 | INT8 host-tier KV: 1152-byte aligned row-local record, per-head absmax BF16 scales, unmodified CUDA mover | EG-18 is BF16 tiers, EG-36 is FP8 device KV; no quantized host representation | HiQCache (front-e E2 / front-f §4) | `test_eg47_hostkv` | M | Codec round-trip + host KV bytes/hit-rate gate |
+| EG-48 | BitNest: W4 draft nested inside W8 target, one physical weight/KV representation | no nested multi-precision representation | BitNest arXiv 2610.02800 | `test_eg48_bitnest` | L | 6 GB fit gate: one representation, both verification paths |
+| EG-49 | ReadKV progressive KV code: 8-bit store / 4-bit fetch per query | EG-28 is a threshold conversion, not progressive bits | ReadKV arXiv 2610.11245 | `test_eg49_readkv` | M | Gate PPL delta vs bytes fetched |
+| EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | Overlap gate: transfer/compute concurrency count |
+| EG-51 | SPICE: confidence-adaptive expert lookahead + low-rank surrogate for misses | refines EG-20 with surrogate substitution | SPICE arXiv 2608.21240 | `test_eg51_spice` | L | Lossy: opt-in behind an accuracy gate |
+| EG-52 | SeqMoE: expert activation as sequence model, deadline sequencing, probabilistic Belady | EG-06/EG-20 have no learned activation predictor or Belady policy | SeqMoE arXiv 2609.12978 | `test_eg52_seqmoe` | L | Gate hit rate at fixed residency |
+| EG-53 | RocketKV: training-free prompt-KV eviction then page-level Top-K decode | EG-23 skips tiles, EG-44 is a trained indexer; neither evicts prompt KV | front-e E10 / TRT-LLM sparse docs | `test_eg53_rocketkv` | M | Gate prompt KV bytes retained vs accuracy |
+| EG-54 | Block-sparse proxy routes: unselected KV blocks contribute a summary, not zero | no block summary path | front-e E11 | `test_eg54_proxy` | M | Gate quality vs dropped-block baseline |
+| EG-55 | UNO: gated-LoRA diffusion drafter on the verifier backbone, one KV, Psi-Spec lossless sampling | EG-17 is adapter slots, EG-24 a separate head | UNO arXiv 2609.04010 | `test_eg55_uno` | L | Gate losslessness + shared-KV memory |
+| EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | Gate accepted tokens per target pass |
+| EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | Gate LM-head memory cut vs acceptance |
+| EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | Gate TTFT vs answer fidelity |
+| EG-59 | Online speculative decoding: drafter fine-tuned from live verification corrections every I steps | EG-42 is a training objective, not post-deployment updates | Online SD arXiv 2310.07177 | `test_eg59_online` | L | Gate acceptance drift over a session |
+| EG-60 | LayerSkip: increasing layer dropout + exit-layer query cache reused by remainder pass | EG-25's "early exit" is generic, no kvq reuse | LayerSkip arXiv 2404.16710 | `test_eg60_layerskip` | L | Gate KV saved vs output parity |
+| EG-61 | Block verification keeping the longest accepted prefix with a correction distribution | EG-25 relaxed verification is not distribution-exact | SGLang speculative-decoding docs, front-e E14 | `test_eg61_blockverify` | M | Gate distribution exactness + accepted length |
+| EG-62 | DSpark: rank-256 Markov correction head + confidence head predicting 1-TV, per-position verify budget | EG-24/EG-25 have no confidence budget | DSpark arXiv 2607.05147 | `test_eg62_dspark` | L | Gate acceptance length vs budget |
+| EG-63 | SpecQuant: INT4/FP8/FP16 variants from one base, query complexity routing | EG-27 is single-precision quantize-on-load | SpecQuant arXiv 2609.21704 | `test_eg63_specquant` | M | Gate accuracy loss <2% + speedup |
+| EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | Gate throughput under a fixed memory cap |
+| EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | Gate memory reduction vs output parity |
+| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | Snapshot round-trip gate first; never vendor Zig code |
+| EG-67 | titan-engine: tiered experts + prefill expert streaming + hybrid prefix cache on a small consumer GPU | EG-07/EG-20 lack prefill streaming | titan-engine, front-f §18 | `test_eg67_titan` | L | Gate peak VRAM on 6 GB class |
+| EG-68 | Strata: zero-allocation host, prefill launch-count amortization, 4-way split-KV decode reduction | no launch-count instrumentation | Strata (Rust+HIP), front-f §19 | `test_eg68_strata` | M | Gate allocation count and KV reduction |
+| EG-69 | ReplaySSM: cache SSM inputs rather than state, making speculative rollback append-only | engine has SSM kernels but no recurrent-state rollback object | ReplaySSM, front-f §15 | `test_eg69_replayssm` | L | Conditional on hybrid models; gate rollback exactness |
+| EG-70 | Output-exactness certificate with reuse generations for cached computation | gate discipline has no certificate of exact reuse | Memory-Sovereign arXiv 2608.23805 | `test_eg70_cert` | M | Gate certificate round-trip; strengthens no-gate-no-ship |
+
+### Deferred watchlist — no gate reserved yet
+
+| Item | Why deferred |
+|---|---|
+| Gumiho asymmetric heads + Full Tree Attention (front-e E8) | variant of EG-60/EG-21 family; pick after those gates |
+| NanoFlow nano-batching (front-f §5) | operation-granularity split; needs EG-09/EG-32 first |
+| Hyperflare prepared-graph runtime, caller-owned memory plan, Selene prefix-checkpoint pool (front-f §2) | design reference; hardware class differs from T1 |
+| Kimi DSA / QSA / MISA indexer family (front-f §§8–10) | trained sparse architectures; EG-44 must gate first |
+| Hymba / Zebra hybrid layout, cross-architecture KV translation (front-f §§16–17) | requires trained hybrid architectures, not stock GGUF |
+| Magnitude per-device kernel compile/tune, AOT kernel packs (front-f §20 / TensorFold) | build-system scope; after EG-66 |
+| llm-d KV-aware cluster routing, SPADE edge-cloud split (front-f §3 / front-g G14) | multi-node, tier-gated T2/T3 |
+| SPADE/HySparse2/compute-in-flash/YOCO-style sharing (front-g G15/G16) | hardware-specific or trained architecture |
+| DiffusionGemma, I-DLM, DLM-as-drafter family (front-f §§12–14) | conditional on a diffusion-LM family in scope |
+| Speculative Actions at agent API boundary (front-e E13) | host-layer work, not engine core |
+| HyScale selection replay (front-f §11) | training-side; no training stack yet |
+| FreeToken bandwidth-adaptive full stack (front-g G8) | needs edge-device telemetry interface |
+
 ## What not to break
 
 - Engine stays ignorant of domain concepts. Grammar and tool schemas arrive as request
