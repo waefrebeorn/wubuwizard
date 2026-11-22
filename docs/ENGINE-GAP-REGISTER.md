@@ -27,7 +27,7 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 | EG-03 | Metadata-first VRAM planner (80% rule, OOM ctx shrink, recovery wait) | `src/wubu_mem_budget.c` budgets host RAM; `src/wubu_resource.c` used a coarse VRAM×quant_factor heuristic | Ollama `PredictServerVRAM` + vLLM PR #65413 UMA sizing | `test_eg03_vram_plan` | M | **DONE** — `src/wubu_vram_plan.c/.h` plans from measured bytes; Evidence below. |
 | EG-04 | StreamingLLM attention sinks | `src/wubu_swa_reclaim.c` had no pinning: every masked cell was reusable | StreamingLLM / attention-sink literature | `test_eg04_attention_sink` | S | **DONE** — sink positions pinned in `wubu_swa_reclaim`; Evidence below. |
 | EG-05 | Neuron-cluster abstraction + activation-sparsity predictor | `src/wubu_*.c` had no activation predictor, hot/cold split or cluster I/O accounting | PowerInfer SOSP 2024; PowerInfer-2 §1/§3 | `test_eg05_neuron` | L | **DONE** — `src/wubu_neuron_cluster.c/.h` with runtime sizing and cluster-read gate; Evidence below. |
-| EG-06 | Offload-placement solver + zigzag block schedule | `docs/ssd_moe.md` is a per-layer LRU slot bank; no policy solver | FlexGen ICML 2023 §4 Algorithm 1 | `test_eg06_plan` | L | Solve placement from bandwidth/capacity; gate within 2× of cost model |
+| EG-06 | Offload-placement solver + zigzag block schedule | `docs/ssd_moe.md` is a per-layer LRU slot bank; no policy solver | FlexGen ICML 2023 §4 Algorithm 1 | `test_eg06_plan` | L | **DONE** — `src/wubu_offload_plan.c/.h` solves placement and emits the zigzag order; Evidence below. |
 | EG-07 | SSD sliding-window row reuse + ≥32 KiB coalesced reads | weight streaming reads per tensor on demand; no incremental `s_agg(k+1)-s_agg(k)` reuse | LLM in a Flash §2–3 | `test_eg07_row_reuse` | M | Bundle rows into coalesced reads; gate on read syscall/byte count |
 | EG-08 | RadixAttention tree | 0 hits for `radix\|prefix_tree` in src/include (only unrelated audio/codec/kvfs hits); prefix cache is hash-based | SGLang compressed FSM + RadixAttention | `test_eg08_radix` | M | Tree with LRU eviction and incremental branch match; gate sibling-prefix sharing |
 
@@ -71,6 +71,13 @@ targets, and `predicted_reads: hot=140 no_hot=160 (10 tokens)` — the hot
 partition removes one active cluster per layer from the fetch path. `PASS`,
 exit 0. The module is a deterministic policy surface; wiring it into the
 matmul path is a separate integration gate.
+
+**EG-06 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg06_plan`
+builds; `./test_eg06_plan.exe` prints assignment `0 0 0 1 0 1`, greedy per-token
+cost `0.070000s` against an exhaustive 3^6 optimum of `0.070000s` (ratio 1.000),
+all-SSD baseline `3.500000s`, and a 24-entry zigzag schedule across four
+alternating forward/reverse passes; `PASS`, exit 0. Capacity is checked per tier
+and zero-capacity inputs are refused.
 
 ## Wave 1 — scheduling and control
 

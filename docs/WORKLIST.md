@@ -49,6 +49,7 @@ the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
 | Metadata-first VRAM planner (80% rule) | Ollama VRAM prediction + vLLM UMA sizing | `make test_eg03_vram_plan` | 8.49 GB on 6 GB → REFUSE (STREAM when allowed), UMA-corrected 5 GB → FIT vs raw 3 GB → REFUSE, large KV → SHRINK to 2867, wait=100ms; exit 0 |
 | Attention-sink KV retention | StreamingLLM lineage | `make test_eg04_attention_sink` | 2 sink cells survive reclamation at window bound 6, non-sink cell reused, sinks=0 restores old behavior, snapshot deterministic; LP-06 gate still passes |
 | Neuron-cluster hot/cold predictor | PowerInfer / PowerInfer-2 | `make test_eg05_neuron` | 616 observations, 10% hot set = 8 neurons, runtime cluster size 16→4, predicted cluster reads 140 vs 160 without predictor; exit 0 |
+| Offload placement solver + zigzag schedule | FlexGen ICML 2023 §4 | `make test_eg06_plan` | greedy 0.070s vs exhaustive optimum 0.070s (ratio 1.000), all-SSD 3.500s, 24-entry alternating schedule; exit 0 |
 | Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
 | Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
 
