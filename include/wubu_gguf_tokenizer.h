@@ -5,7 +5,7 @@
  *
  * Reads tokenizer.ggml.tokens / tokenizer.ggml.merges / special-token
  * KV pairs straight out of a .gguf file so the model file is
- * self-contained (no data/*.bin extraction step). Produces RAW arrays;
+ * self-contained (no data bin extraction step). Produces RAW arrays;
  * wubu_tokenizer.c builds the wubu_tokenizer_t from them using its own
  * helpers (no duplicated logic).
  */
@@ -25,6 +25,13 @@ typedef struct {
     char **merges;     /* "left right" pairs, [n_merges] */
     int n_merges;
     int32_t bos_id, eos_id, pad_id;
+    /* EG-02: tokenizer metadata the caller needs before choosing a
+     * pre-tokenizer or rendering a chat prompt. NULL / -1 means absent. */
+    char    *pre_tokenizer;   /* tokenizer.ggml.pre */
+    int32_t *token_type;      /* tokenizer.ggml.token_type, [n_token_type] */
+    int      n_token_type;
+    int      add_bos;         /* tokenizer.ggml.add_bos_token: -1 unknown */
+    char    *chat_template;   /* tokenizer.chat_template */
 } wubu_gguf_tokenizer_data_t;
 
 /* Walk the GGUF KV section and fill out. Returns true on success.

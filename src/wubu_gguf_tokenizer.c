@@ -49,6 +49,9 @@ void wubu_gguf_tokenizer_free(wubu_gguf_tokenizer_data_t *d) {
     if (!d) return;
     if (d->tokens) { for (int i = 0; i < d->n_tokens; i++) free(d->tokens[i]); free(d->tokens); }
     if (d->merges) { for (int i = 0; i < d->n_merges; i++) free(d->merges[i]); free(d->merges); }
+    free(d->pre_tokenizer);
+    free(d->token_type);
+    free(d->chat_template);
     memset(d, 0, sizeof(*d));
 }
 
@@ -56,6 +59,7 @@ bool wubu_gguf_tokenizer_extract(const char *gguf_path,
                                  wubu_gguf_tokenizer_data_t *out) {
     memset(out, 0, sizeof(*out));
     out->bos_id = out->eos_id = out->pad_id = -1;
+    out->add_bos = -1;
     if (!gguf_path) return false;
 
     FILE *f = fopen(gguf_path, "rb");
@@ -78,7 +82,19 @@ bool wubu_gguf_tokenizer_extract(const char *gguf_path,
 
         if (typ == GGUF_KV_STRING) {
             uint8_t sl[8]; if (fread(sl, 1, 8, f) != 8) { free(key); goto bad; }
-            if (fseek(f, (long)read_u64_le(sl), SEEK_CUR) != 0) { free(key); goto bad; }
+            uint64_t slen = read_u64_le(sl);
+            char **dst = NULL;
+            if (kv_match((const uint8_t *)key, key_len, "tokenizer.ggml.pre"))
+                dst = &out->pre_tokenizer;
+            else if (kv_match((const uint8_t *)key, key_len, "tokenizer.chat_template"))
+                dst = &out->chat_template;
+            if (dst) {
+                char *s = (char *)malloc((size_t)slen + 1);
+                if (!s) { free(key); goto bad; }
+                if (fread(s, 1, slen, f) != slen) { free(s); free(key); goto bad; }
+                s[slen] = '\0';
+                *dst = s;
+            } else if (fseek(f, (long)slen, SEEK_CUR) != 0) { free(key); goto bad; }
         } else if (typ == GGUF_KV_ARRAY) {
             uint8_t atb[4]; if (fread(atb, 1, 4, f) != 4) { free(key); goto bad; }
             int32_t arr_type = read_i32_le(atb);
@@ -110,6 +126,18 @@ bool wubu_gguf_tokenizer_extract(const char *gguf_path,
                         if (fseek(f, (long)read_u64_le(sl), SEEK_CUR) != 0) { free(key); goto bad; }
                     }
                 }
+            } else if ((arr_type == 4 || arr_type == 5) &&
+                       kv_match((const uint8_t *)key, key_len,
+                                "tokenizer.ggml.token_type")) {
+                out->token_type = (int32_t *)calloc((size_t)arr_len + 1,
+                                                    sizeof(int32_t));
+                if (!out->token_type) { free(key); goto bad; }
+                for (uint64_t j = 0; j < arr_len; j++) {
+                    uint8_t vb[4];
+                    if (fread(vb, 1, 4, f) != 4) { free(key); goto bad; }
+                    out->token_type[j] = read_i32_le(vb);
+                }
+                out->n_token_type = (int)arr_len;
             } else {
                 int elem_size = 4;
                 if (arr_type == 0 || arr_type == 1 || arr_type == 7) elem_size = 1;
@@ -124,7 +152,10 @@ bool wubu_gguf_tokenizer_extract(const char *gguf_path,
             else if (kv_match((const uint8_t *)key, key_len, "tokenizer.ggml.bos_token_id")) out->bos_id = v;
             else if (kv_match((const uint8_t *)key, key_len, "tokenizer.ggml.padding_token_id")) out->pad_id = v;
         } else if (typ == GGUF_KV_BOOL) {
-            if (fseek(f, 1, SEEK_CUR) != 0) { free(key); goto bad; }
+            uint8_t vb = 0;
+            if (fread(&vb, 1, 1, f) != 1) { free(key); goto bad; }
+            if (kv_match((const uint8_t *)key, key_len, "tokenizer.ggml.add_bos_token"))
+                out->add_bos = vb ? 1 : 0;
         } else {
             int sz = (typ == 0 || typ == 1) ? 1 : (typ == 2 || typ == 3) ? 2 :
                      (typ == 6 || typ == 5) ? 4 : 8;
