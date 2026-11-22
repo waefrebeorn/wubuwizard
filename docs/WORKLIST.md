@@ -51,6 +51,7 @@ the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
 | Neuron-cluster hot/cold predictor | PowerInfer / PowerInfer-2 | `make test_eg05_neuron` | 616 observations, 10% hot set = 8 neurons, runtime cluster size 16→4, predicted cluster reads 140 vs 160 without predictor; exit 0 |
 | Offload placement solver + zigzag schedule | FlexGen ICML 2023 §4 | `make test_eg06_plan` | greedy 0.070s vs exhaustive optimum 0.070s (ratio 1.000), all-SSD 3.500s, 24-entry alternating schedule; exit 0 |
 | SSD sliding-window row reuse | LLM in a Flash §2–3 | `make test_eg07_row_reuse` | 8 reads / 61440 B vs naive 64 reads / 262144 B over 8 windows, 7 incremental deltas, 32 KiB coalescing; exit 0 |
+| RadixAttention prefix tree | SGLang | `make test_eg08_radix` | sibling prefix sharing 7 nodes vs 9 flat, 4-token full / 3-token partial match, LRU eviction 7→6; exit 0 |
 | Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
 | Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
 

@@ -29,7 +29,7 @@ Status legend: TODO / PARTIAL / DONE(gate, evidence).
 | EG-05 | Neuron-cluster abstraction + activation-sparsity predictor | `src/wubu_*.c` had no activation predictor, hot/cold split or cluster I/O accounting | PowerInfer SOSP 2024; PowerInfer-2 §1/§3 | `test_eg05_neuron` | L | **DONE** — `src/wubu_neuron_cluster.c/.h` with runtime sizing and cluster-read gate; Evidence below. |
 | EG-06 | Offload-placement solver + zigzag block schedule | `docs/ssd_moe.md` is a per-layer LRU slot bank; no policy solver | FlexGen ICML 2023 §4 Algorithm 1 | `test_eg06_plan` | L | **DONE** — `src/wubu_offload_plan.c/.h` solves placement and emits the zigzag order; Evidence below. |
 | EG-07 | SSD sliding-window weight-row reuse + ≥32 KiB coalesced reads | weight streaming reread the full window per step; no incremental `s_agg(k+1)-s_agg(k)` | LLM in a Flash §2–3 | `test_eg07_row_reuse` | M | **DONE** — `src/wubu_ssd_row_reuse.c/.h` reuses rows and coalesces refills; Evidence below. |
-| EG-08 | RadixAttention tree | 0 hits for `radix\|prefix_tree` in src/include (only unrelated audio/codec/kvfs hits); prefix cache is hash-based | SGLang compressed FSM + RadixAttention | `test_eg08_radix` | M | Tree with LRU eviction and incremental branch match; gate sibling-prefix sharing |
+| EG-08 | RadixAttention tree | hash-prefix cache shared no sibling branches; no radix tree in src/include | SGLang compressed FSM + RadixAttention | `test_eg08_radix` | M | **DONE** — `src/wubu_radix_cache.c/.h` shares prefixes and evicts LRU leaves; Evidence below. |
 
 **EG-01 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg01_vecdot`
 builds; `./test_eg01_vecdot.exe` prints `table entries: 7`, all seven types routed to
@@ -85,6 +85,12 @@ after seven slides `reads=8 bytes=61440 deltas=7` against a naive `64` reads /
 `262144` bytes — 8× fewer reads and ~4.3× fewer bytes — with every window
 byte-identical to the source. A 16-row refill is two 32 KiB reads; bounds and
 bad construction fail closed. `PASS`, exit 0.
+
+**EG-08 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg08_radix`
+builds; `./test_eg08_radix.exe` inserts two continuations sharing a two-token
+prefix, producing `nodes=7` versus 9 for a flat cache, a 4-token full match,
+a 3-token partial match, a miss, LRU eviction `nodes=6`, and deterministic hit
+and eviction counters; `PASS`, exit 0.
 
 ## Wave 1 — scheduling and control
 
