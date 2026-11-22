@@ -99,12 +99,19 @@ than the 27-step serial baseline, no token lost or duplicated, step-0 drain
 is zero (deferred by exactly one step), and a drain cap of 1 still delivers
 all 12 tokens. `PASS`, exit 0.
 
+**EG-10 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg10_admit`
+builds; `./test_eg10_admit.exe` reserves 80 of a 100-token budget, rejects an
+over-budget request and a duplicate id without reserving, expires both queued
+requests at `now-step > 2` (not at equality), then enforces the 3-slot queue
+cap and frees reservations on release. Counters: `accepted=5 rejected=3
+expired=2`. `PASS`, exit 0.
+
 ## Wave 1 — scheduling and control
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
 | EG-09 | Overlapping scheduler with deferred result queue | `src/wubu_scheduler.c` drains and decodes in one step; no deferred result queue or round-robin admission | SGLang `event_loop_overlap`, mini-sglang `overlap_loop` | `test_eg09_overlap` | M | **DONE** — `src/wubu_overlap_sched.c/.h` defers results one step and admits round-robin; Evidence below. |
-| EG-10 | Single shared admission validator + token budget | admission scattered across request paths; no queue timeout | TGI shared validator; TensorRT capacity admission | `test_eg10_admit` | S | One validator, one budget; gate rejection of over-budget requests |
+| EG-10 | Single shared admission validator + token budget | admission scattered across request paths; no queue timeout | TGI shared validator; TensorRT capacity admission | `test_eg10_admit` | S | **DONE** — `src/wubu_admission.c/.h` owns budget, queue cap and timeout; Evidence below. |
 | EG-11 | Structured decoding: grammar → automaton → batched bitmask + jump-forward | `src/wubu_spec_constrained.c` is a hardcoded single-shape tool-call mask; no grammar engine | SGLang xgrammar backend; vLLM `StructuredOutputManager`; llama.cpp `llama-grammar.cpp` | `test_eg11_grammar` | L | GBNF stack machine + bitmask, then jump-forward; gate invalid-token rejection |
 | EG-12 | Composable sampler chain (min-p, top-n-sigma, XTC, DRY, mirostat, dynatemp, typical-p, adaptive-p) | `src/wubu_token.c` has temperature/top-k/top-p/repetition only | MLX sampler chain; llama.cpp samplers | `test_eg12_sampler` | M | Ordered chain with per-stage RNG; gate distribution invariants |
 | EG-13 | Pre-tokenizer registry + Unicode NFC fallback | depends on EG-02; no family registry keyed on `tokenizer.ggml.pre` | llama.cpp `llama-vocab.cpp`, `unicode.cpp` | `test_eg13_pretok` | M | Hash-keyed registry for llama3/gpt2/qwen2/deepseek; gate token-ID parity |
