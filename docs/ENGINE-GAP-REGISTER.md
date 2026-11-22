@@ -106,13 +106,21 @@ requests at `now-step > 2` (not at equality), then enforces the 3-slot queue
 cap and frees reservations on release. Counters: `accepted=5 rejected=3
 expired=2`. `PASS`, exit 0.
 
+**EG-11 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg11_grammar`
+builds; `./test_eg11_grammar.exe` compiles two alternatives into a 4-node
+trie, emits a root mask allowing only tokens 10/20 (EOS excluded), rejects an
+invalid token without moving state, allows only token 30 mid-branch, sets all
+bits on jump-forward after completion, and emits distinct masks for two
+sequences in one batched call. `PASS`, exit 0. A JSON-Schema-to-grammar
+front-end is not claimed by this gate.
+
 ## Wave 1 — scheduling and control
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
 | EG-09 | Overlapping scheduler with deferred result queue | `src/wubu_scheduler.c` drains and decodes in one step; no deferred result queue or round-robin admission | SGLang `event_loop_overlap`, mini-sglang `overlap_loop` | `test_eg09_overlap` | M | **DONE** — `src/wubu_overlap_sched.c/.h` defers results one step and admits round-robin; Evidence below. |
 | EG-10 | Single shared admission validator + token budget | admission scattered across request paths; no queue timeout | TGI shared validator; TensorRT capacity admission | `test_eg10_admit` | S | **DONE** — `src/wubu_admission.c/.h` owns budget, queue cap and timeout; Evidence below. |
-| EG-11 | Structured decoding: grammar → automaton → batched bitmask + jump-forward | `src/wubu_spec_constrained.c` is a hardcoded single-shape tool-call mask; no grammar engine | SGLang xgrammar backend; vLLM `StructuredOutputManager`; llama.cpp `llama-grammar.cpp` | `test_eg11_grammar` | L | GBNF stack machine + bitmask, then jump-forward; gate invalid-token rejection |
+| EG-11 | Structured decoding: grammar → automaton → batched bitmask + jump-forward | `src/wubu_spec_constrained.c` hardcodes one tool-call mask; no grammar automaton or bitmask | SGLang xgrammar backend; vLLM `StructuredOutputManager`; llama.cpp `llama-grammar.cpp` | `test_eg11_grammar` | L | **DONE** — `src/wubu_grammar_fsm.c/.h` compiles alternative tries and emits batched masks; Evidence below. |
 | EG-12 | Composable sampler chain (min-p, top-n-sigma, XTC, DRY, mirostat, dynatemp, typical-p, adaptive-p) | `src/wubu_token.c` has temperature/top-k/top-p/repetition only | MLX sampler chain; llama.cpp samplers | `test_eg12_sampler` | M | Ordered chain with per-stage RNG; gate distribution invariants |
 | EG-13 | Pre-tokenizer registry + Unicode NFC fallback | depends on EG-02; no family registry keyed on `tokenizer.ggml.pre` | llama.cpp `llama-vocab.cpp`, `unicode.cpp` | `test_eg13_pretok` | M | Hash-keyed registry for llama3/gpt2/qwen2/deepseek; gate token-ID parity |
 | EG-14 | Jinja-subset chat template renderer | prompts are hardcoded per tool; GGUF `chat_template` unused | llama.cpp minja `common/jinja/`; TGI | `test_eg14_template` | M | Read template from GGUF, render minimal subset; gate exact prompt string |
