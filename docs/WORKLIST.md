@@ -55,6 +55,7 @@ the Windows T1 host with `mingw32-make -f Makefile.win <gate>`.
 | Overlapping scheduler + deferred results | SGLang `event_loop_overlap` | `make test_eg09_overlap` | 27 tokens in 10 steps vs 27 serial (2.70×), 1-step deferred drain, max_wait=3 bounded, drain cap=1 loses no tokens; exit 0 |
 | Shared admission validator + token budget | TGI / TensorRT capacity admission | `make test_eg10_admit` | 80/100 tokens reserved, over-budget and duplicate rejected, timeout expiry at >2, 3-slot queue cap, accepted=5/rejected=3/expired=2; exit 0 |
 | Grammar automaton + batched bitmask | SGLang xgrammar / llama.cpp GBNF | `make test_eg11_grammar` | 4-node trie, root mask 10/20 with EOS excluded, invalid token rejected, mid-branch only 30, jump-forward all bits, distinct batched masks; exit 0 |
+| Composable sampler chain (6 stages) | MLX / llama.cpp samplers | `make test_eg12_sampler` | top-k=2 leaves 2/3, repetition penalty changes set to 1/2, temperature 0.5 doubles logits, min-p/top-p keep 1, chained filters never grow set; exit 0 |
 | Iteration-level continuous batching | vLLM / ORCA lineage | `make test_contbatch` | 8 requests, 35 tokens in 7 steps vs 35 serial = **5.00x**; overlap prefill/decode consumes all 104 tokens in 200 iterations with zero starvation |
 | Cross-request prefix KV reuse | SGLang RadixAttention lineage | `make test_prefix_reuse` | 512-token prefix: first miss, second full 512 hit, different prefix misses, partial 256/512 hit; hits=1 misses=2, hashes distinct |
 
