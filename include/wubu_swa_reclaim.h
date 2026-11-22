@@ -59,6 +59,12 @@ wubu_swa_status_t wubu_swa_reclaim_reuse(wubu_swa_reclaim_t *c, int cell,
 int64_t wubu_swa_reclaim_cell_pos(const wubu_swa_reclaim_t *c, int cell);
 int     wubu_swa_reclaim_cell_owner(const wubu_swa_reclaim_t *c, int cell);
 
+/* EG-04 attention sinks: the first n_sink positions are pinned and may never
+ * be reclaimed, even when every owner's sliding window has moved past them.
+ * 0 disables the feature. Setters validate and return status. */
+wubu_swa_status_t wubu_swa_set_sinks(wubu_swa_reclaim_t *c, int n_sinks);
+int     wubu_swa_sinks(const wubu_swa_reclaim_t *c);
+
 /* Per-owner overwritten-position log (positions of that owner displaced). */
 int     wubu_swa_reclaim_overwritten_count(const wubu_swa_reclaim_t *c,
                                            int owner);

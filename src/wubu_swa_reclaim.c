@@ -19,6 +19,7 @@ struct wubu_swa_reclaim {
     int64_t  *cell_pos;    /* -1 = empty */
     int      *cell_owner;  /* -1 = none */
     int64_t  *bound;       /* oldest still-needed position per owner */
+    int       n_sinks;     /* EG-04: pinned first-N positions */
     swa_log  *logs;        /* overwritten positions, one log per owner */
 };
 
@@ -103,6 +104,9 @@ int wubu_swa_reclaim_can_reuse(const wubu_swa_reclaim_t *c, int cell,
     cur = c->cell_pos[cell];
     if (cur < 0) return 1; /* empty cell holds nothing any owner needs */
 
+    /* EG-04: attention sinks are pinned regardless of the sliding window. */
+    if (cur < c->n_sinks) return 0;
+
     /* Masked for every owner: cur < bound[o] for all o. One live vetoes. */
     for (o = 0; o < c->n_owners; ++o) {
         if (cur >= c->bound[o]) return 0;
@@ -162,7 +166,20 @@ int64_t wubu_swa_reclaim_cell_pos(const wubu_swa_reclaim_t *c, int cell)
     return c->cell_pos[cell];
 }
 
-int wubu_swa_reclaim_cell_owner(const wubu_swa_reclaim_t *c, int cell)
+wubu_swa_status_t wubu_swa_set_sinks(wubu_swa_reclaim_t *c, int n_sinks)
+{
+    if (!valid(c)) return WUBU_SWA_ERR_ARG;
+    if (n_sinks < 0 || n_sinks > c->n_cells) return WUBU_SWA_ERR_POS;
+    c->n_sinks = n_sinks;
+    return WUBU_SWA_OK;
+}
+
+int wubu_swa_sinks(const wubu_swa_reclaim_t *c)
+{
+    return valid(c) ? c->n_sinks : -1;
+}
+
+int     wubu_swa_reclaim_cell_owner(const wubu_swa_reclaim_t *c, int cell)
 {
     if (!valid(c) || cell < 0 || cell >= c->n_cells) return -1;
     return c->cell_owner[cell];
@@ -190,7 +207,8 @@ size_t wubu_swa_reclaim_snapshot_size(const wubu_swa_reclaim_t *c)
     if (!valid(c)) return 0;
     sz = 2u * sizeof(int)
        + (size_t)c->n_owners * (sizeof(int64_t) + sizeof(int))
-       + (size_t)c->n_cells  * (sizeof(int64_t) + sizeof(int));
+       + (size_t)c->n_cells  * (sizeof(int64_t) + sizeof(int))
+       + sizeof(int); /* n_sinks */
     for (o = 0; o < c->n_owners; ++o)
         sz += (size_t)c->logs[o].count * sizeof(int64_t);
     return sz;
@@ -204,6 +222,7 @@ void wubu_swa_reclaim_snapshot(const wubu_swa_reclaim_t *c, unsigned char *out)
     if (!valid(c) || !out) return;
     memcpy(out + off, &c->n_cells,  sizeof(int)); off += sizeof(int);
     memcpy(out + off, &c->n_owners, sizeof(int)); off += sizeof(int);
+    memcpy(out + off, &c->n_sinks,  sizeof(int)); off += sizeof(int);
     for (o = 0; o < c->n_owners; ++o) {
         memcpy(out + off, &c->bound[o], sizeof(int64_t)); off += sizeof(int64_t);
         memcpy(out + off, &c->logs[o].count, sizeof(int)); off += sizeof(int);

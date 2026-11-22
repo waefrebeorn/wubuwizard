@@ -498,6 +498,10 @@ test_goal_resample: tools/test_goal_resample.c src/wubu_goal_resample.o
 test_eg01_vecdot: tools/test_eg01_vecdot.c src/wubu_vecdot_dispatch.c src/quantized_dot_generic.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# EG-04: attention sinks pin the first N KV positions in SWA reclaim.
+test_eg04_attention_sink: tools/test_eg04_attention_sink.c src/wubu_swa_reclaim.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 # EG-03: metadata-first VRAM planner.
 test_eg03_vram_plan: tools/test_eg03_vram_plan.c src/wubu_vram_plan.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
