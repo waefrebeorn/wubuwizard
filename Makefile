@@ -39,6 +39,7 @@ CORE_OBJ += src/wubu_reclaim_margin.o
 CORE_OBJ += src/wubu_replay_ssm.o
 CORE_OBJ += src/wubu_keyed_sample.o
 CORE_OBJ += src/wubu_accept_table.o
+CORE_OBJ += src/wubu_two_level_verify.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -263,6 +264,9 @@ src/wubu_keyed_sample.o: src/wubu_keyed_sample.c include/wubu_keyed_sample.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_accept_table.o: src/wubu_accept_table.c include/wubu_accept_table.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_two_level_verify.o: src/wubu_two_level_verify.c include/wubu_two_level_verify.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -968,6 +972,10 @@ test_eg89_keyed_sample: tools/test_eg89_keyed_sample.c src/wubu_keyed_sample.c
 
 # EG-94: empirical tree-ordering acceptance table gate.
 test_eg94_accept_table: tools/test_eg94_accept_table.c src/wubu_accept_table.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-92: two-level quantized pre-verify then exact commit gate.
+test_eg92_two_level_verify: tools/test_eg92_two_level_verify.c src/wubu_two_level_verify.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

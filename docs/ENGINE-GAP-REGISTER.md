@@ -834,7 +834,17 @@ stress runs clean. Indices are synthetic; the upstream 35us->9us GPU timing is
 not reproduced or claimed here.
 
 | EG-91 | Pointer-jumping tree accept + KV permutation | linear prefix walk | SpecPilot `specpilot_d7_accept.py` | `test_eg91_tree_accept` | S | **DONE (index gate)** — `src/wubu_tree_accept.c/.h` gates log-depth doubling acceptance and accepted-path-first KV compaction; evidence above. |
-| EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | quantized pass commits no tokens; exactness gate |
+**EG-92 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg92_two_level_verify`
+gates SpecPilot TLV on an 8-token draft: the quantized view greedily accepts
+chain [10 20 30] but commits 0 tokens. The exact pass ratifies the chain,
+hangs a 3-node subtree (parents -1, 0, 1) under it and commits 5 ids
+[10 20 30 40 50] in one pass. Exact chain flags [1,0,1] reject an optimistic
+quantized chain and commit 0 tokens. Budget 4 truncates the subtree to one
+node and commits 4. NULL buffers, bad budget and invalid parents are rejected.
+`test_eg92_two_level_verify: PASS`, exit 0; 30/30 stress runs clean. Token ids
+are synthetic; no throughput or model-quality result is claimed.
+
+| EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | **DONE (exactness gate)** — `src/wubu_two_level_verify.c/.h` gates no-commit quantized chain, exact ratification and budget-truncated subtree commit; evidence above. |
 | EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | newest checkpoint <= common; never stage decode KV |
 **EG-94 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg94_accept_table`
 fits a 10x7x18 log-acceptance table with prior weight 5: 9/10 accepts at
