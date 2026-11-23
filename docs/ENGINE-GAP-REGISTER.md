@@ -321,7 +321,20 @@ FP8 kernels and end-to-end PPL are deferred.
 
 | EG-30 | FP8 attention | T3/T4 precision ladder; FP8 quant/dequant already present but not in attention | `test_eg30_fp8attn` | L | **DONE (CPU emulation)** — `src/wubu_fp8_attn.c/.h` adds E4M3 attention with F32 accumulation; evidence above. GPU-native path deferred. |
 | EG-31 | Pipeline parallelism | 0 hits for `pipeline_parallel\|stage_id\|pp_rank`; multi-GPU only, out of scope for a single 6 GB box | `test_eg31_pp` | XL |
-| EG-32 | Capacity + micro-batch scheduler and persistent compact session | Architectural, medium fit; waits for EG-09/EG-10 | `test_eg32_capacity` | L |
+**EG-32a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg32_capacity`
+packs five requests (3/4/2/5/1 tokens, priorities 1/2/1/3/1) by descending
+priority: with a 12-token cycle capacity and a 6-token batch ceiling it admits
+12 tokens in two full batches `[6 6]` and rejects the remaining 3; with a
+6-token capacity it admits the priority-3 request plus a 1-token companion and
+reports 9 rejected. A 7-token request against a 6-token ceiling is rejected
+whole rather than split. `test_eg32_capacity: PASS`, exit 0. The persistent
+compact-session half of EG-32 is still TODO.
+
+**EG-31 (pipeline parallelism) explicitly deferred:** the register notes zero
+hits for `pipeline_parallel|stage_id|pp_rank`; this is a multi-GPU feature and
+the target box is a single 6 GB GPU. No gate is claimed.
+
+| EG-32 | Capacity + micro-batch scheduler and persistent compact session | Architectural, medium fit; waits for EG-09/EG-10 | `test_eg32_capacity` | L | **PARTIAL (scheduler done)** — `src/wubu_capacity_sched.c/.h` gates priority packing and explicit rejection; compact session deferred. |
 | EG-33 | Disaggregated connector protocol | In-tree file-backed handoff exists; network protocol only if a multi-node use case appears | `test_eg33_connector` | L |
 | EG-34 | Watermarking / typical-p logits processors | LOW fit for the target; no use case yet | `test_eg34_logits` | S |
 
