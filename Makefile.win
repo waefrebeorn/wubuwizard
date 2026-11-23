@@ -107,6 +107,7 @@ CORE_OBJ += src/wubu_ngram_pool.o
 CORE_OBJ += src/wubu_ngram_map.o
 CORE_OBJ += src/wubu_candidate_selector.o
 CORE_OBJ += src/wubu_index_reuse.o
+CORE_OBJ += src/wubu_expert_sub.o
 
 .PHONY: all cpu-build clean
 
@@ -492,6 +493,10 @@ test_eg74_selector: tools/test_eg74_selector.c src/wubu_candidate_selector.c
 
 # EG-76: cross-layer DSA index reuse gate.
 test_eg76_index_reuse: tools/test_eg76_index_reuse.c src/wubu_index_reuse.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-78: constant novice expert substitution gate.
+test_eg78_expert_sub: tools/test_eg78_expert_sub.c src/wubu_expert_sub.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

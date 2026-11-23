@@ -831,7 +831,16 @@ claimed.
 
 | EG-76 | Reuse DSA top-k indices across layers, skip index-key KV alloc | **DONE (reuse/bytes gate)** — `src/wubu_index_reuse.c/.h` + `test_eg76_index_reuse`; evidence above. | vLLM `docs/features/index_cache.md`; `vllm/model_executor/layers/mla.py:109` | `test_eg76_index_reuse` | M | F/S pattern, measure KV bytes saved |
 | EG-77 | E4M3 V residual restored in online softmax + Hadamard low-bit QK | EG-30/36 lack residual-V | FlashInfer `flashinfer/attention/prims_ts/README.md:674-690` | `test_eg77_vc_attn` | L | requires per-tile mean and 128-pt normalized Hadamard |
-| EG-78 | Constant-vector novice experts, zero MLP bytes | EG-51 low-rank surrogate | vLLM `docs/design/expert_substitution.md`; `.../fused_moe/expert_substitution.py` | `test_eg78_expert_sub` | M | load-time prune, preserve logical ids, no renormalize |
+**EG-78 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg78_expert_sub`
+gates MoNE-style load-time substitution: marking 2 of 8 experts frees 2048
+bytes (2 x 1024) of MLP weights. With router weights 0.3 and 0.2 on the
+substituted experts, the constant-vector contribution is [0.5 1.0 1.5 2.0],
+logical expert ids and router weights are unchanged (no renormalization), and
+double-marking is rejected. Invalid ids, NULL vectors and bad capacities are
+refused. `test_eg78_expert_sub: PASS`, exit 0; 30/30 stress runs clean. Byte
+counts and vectors are synthetic; no model-quality result is claimed.
+
+| EG-78 | Constant-vector novice experts, zero MLP bytes | **DONE (substitution gate)** — `src/wubu_expert_sub.c/.h` + `test_eg78_expert_sub`; evidence above. | vLLM `docs/design/expert_substitution.md`; `.../fused_moe/expert_substitution.py` | `test_eg78_expert_sub` | M | load-time prune, preserve logical ids, no renormalize |
 | EG-79 | Stream-K quantized GEMM with partial-sum fixup | EG-01 vec_dot/GEMV only | llama.cpp `ggml/src/ggml-cuda/mmq.cuh:1011-1024` | `test_eg79_streamk` | L | CTA work partition + host native-tiling escape |
 | EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | EG-25/61 exact | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
 | EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | EG-24/55/56 separate draft KV | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
