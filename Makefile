@@ -60,6 +60,7 @@ CORE_OBJ += src/wubu_hadamard.o
 CORE_OBJ += src/wubu_streamk.o
 CORE_OBJ += src/wubu_vc_attn.o
 CORE_OBJ += src/wubu_dfly.o
+CORE_OBJ += src/wubu_sparse_retrieve.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -344,6 +345,9 @@ src/wubu_vc_attn.o: src/wubu_vc_attn.c include/wubu_vc_attn.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_dfly.o: src/wubu_dfly.c include/wubu_dfly.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_sparse_retrieve.o: src/wubu_sparse_retrieve.c include/wubu_sparse_retrieve.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1137,6 +1141,10 @@ test_eg77_vc_attn: tools/test_eg77_vc_attn.c src/wubu_vc_attn.c
 
 # EG-81: checkpoint-native shared-KV drafting gate.
 test_eg81_dfly: tools/test_eg81_dfly.c src/wubu_dfly.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-75: sparse-KV retrieval lifecycle gate.
+test_eg75_sparse_retrieve: tools/test_eg75_sparse_retrieve.c src/wubu_sparse_retrieve.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

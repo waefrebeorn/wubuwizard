@@ -818,7 +818,16 @@ Probabilities and scores are synthetic; no acceptance-rate or quality result
 is claimed.
 
 | EG-74 | DFlash2 / LiliCorr candidate selector + p-min cut | **DONE (selector gate)** — `src/wubu_candidate_selector.c/.h` + `test_eg74_selector`; evidence above. | llama.cpp `docs/speculative.md:86-164` | `test_eg74_selector` | M | confidence truncation, hidden-state-conditioned scorer |
-| EG-75 | Training-free sparse-KV retrieval lifecycle (repr → update → query top-k) | EG-44 trained indexer; EG-53/54 evict | SGLang `python/sglang/srt/mem_cache/sparsity/algorithms/base_algorithm.py:10-106`; `quest_algorithm.py:21,55,120` | `test_eg75_sparse_retrieve` | L | accuracy gate before speed gate; page_size=1 token-wise |
+**EG-75 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg75_sparse_retrieve`
+gates the repr/update/query lifecycle with page_size=1: after eight 4-dim
+token pages, querying [1.5 0 0 0] returns [4 6 7] with scores [3.0 0.0 0.0],
+i.e. the highest-scoring page plus the two most recent pages retained.
+Capacity eviction shifts the oldest page out; NULL queries and bad dimensions
+are rejected. `test_eg75_sparse_retrieve: PASS`, exit 0; 30/30 stress runs
+clean. Scores are dot products on synthetic keys; no accuracy or speed result
+is claimed.
+
+| EG-75 | Training-free sparse-KV retrieval lifecycle (repr → update → query top-k) | **DONE (retrieval gate)** — `src/wubu_sparse_retrieve.c/.h` + `test_eg75_sparse_retrieve`; evidence above. | SGLang `python/sglang/srt/mem_cache/sparsity/algorithms/base_algorithm.py:10-106`; `quest_algorithm.py:21,55,120` | `test_eg75_sparse_retrieve` | L | accuracy gate before speed gate; page_size=1 token-wise |
 **EG-76 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg76_index_reuse`
 gates a 4-layer / top-3 / 8-dim / 2-byte scenario: the selector layer computes
 [1 3 5] and publishes one 48-byte index-key KV set; two layers with the same
