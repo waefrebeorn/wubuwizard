@@ -213,7 +213,18 @@ adaptation. Final: `hits=1 misses=3 loads=3 evictions=1 decay=1 bytes=12288`;
 latency model remain deferred; this gate covers the trace policy.
 
 | EG-20 | Compute-centric MoE offload + expert activation traces | `src/wubu_moe.c`, `docs/ssd_moe.md` have no trace cache or latency model | MoE-Infinity iEAM/pEAM; Fiddler AVX512_BF16 | `test_eg20_expert` | L | **DONE (trace policy)** — `src/wubu_expert_trace.c/.h` with per-layer decayed scores, top-score prediction and lowest-score eviction; evidence above. BF16 kernels/latency model deferred. |
-| EG-21 | Full Medusa tree verification | `src/wubu_medusa.c` is 39 lines: init + EMA adapt only, no draft-head forward or tree verify | Medusa self-draft heads | `test_eg21_medusa_tree` | L | Tree attention + verification path; gate acceptance length |
+**EG-21 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg21_tree`
+builds a six-node parent-indexed tree: the ancestor mask gives row 3 four
+ancestors and row 5 three. Verification picks the longest accepted chain
+(`[11,12,13]`, three tokens) over a competing branch whose node 5 is rejected.
+A rejected branch emits the accepted prefix `[14]` plus target bonus 105; a
+high-probability variant accepts both `[14,15]`. Undersized output buffers,
+NULL pointers, bad parent ids and short strides are rejected. The gate exposed
+a real bug: the rejected leaf was emitted instead of the accepted root-side
+prefix. `test_eg21_tree: PASS`, exit 0. Draft-head forward and attention-kernel
+integration remain deferred; this gate covers tree layout and verify policy.
+
+| EG-21 | Full Medusa tree verification | `src/wubu_medusa.c` is 39 lines: init + EMA adapt only, no draft-head forward or tree verify | Medusa self-draft heads | `test_eg21_tree` | L | **DONE (verify policy)** — `src/wubu_tree_verify.c/.h` with ancestor masks, longest-prefix acceptance and rejection bonus; evidence above. Draft heads/kernel integration deferred. |
 | EG-22 | Auto-configured pipelined offload at 6 GB | weight streaming exists; no per-iteration adaptive policy or proven 6 GB pipeline | PIPO (RTX 3060 6 GB, <40%→>90% util, 3.1×), TightLLM | `test_eg22_pipo` | L | depends EG-06; gate measured GPU util and throughput |
 
 ## Wave 3 — precision and decode acceleration
