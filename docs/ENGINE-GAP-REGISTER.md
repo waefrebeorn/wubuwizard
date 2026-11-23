@@ -786,7 +786,17 @@ reports are authors' claims, **not** local measurements. Nothing is vendored.
 
 | ID | Technique | Local state | Exact reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
-| EG-71 | Shared rolling-hash n-gram pool, occupancy + low-acceptance resets | no draftless pool | llama.cpp `common/ngram-mod.cpp:15,27,37`; `common/speculative.cpp:2447,2492,2586` | `test_eg71_ngram_pool` | M | 4M-entry (~16 MB) pool, cross-slot, reset on occupancy/streak |
+**EG-71 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg71_ngram_pool`
+gates a fixed 8-slot shared pool: [10 11]->12 and [11 10]->99 coexist, so the
+rolling hash is order-sensitive. A 7th distinct entry crosses the 0.75
+occupancy threshold and clears the table (resets=1, old key absent). Two
+consecutive rejections reset the pool; an acceptance breaks the streak. Bad
+pool size, n-gram length, occupancy, NULL buffers and non-binary outcomes are
+rejected. `test_eg71_ngram_pool: PASS`, exit 0; 30/30 stress runs clean. The
+table is 8 synthetic slots, not the production 4M-entry (~16 MB) pool; no
+draft-speed result is claimed.
+
+| EG-71 | Shared rolling-hash n-gram pool, occupancy + low-acceptance resets | **DONE (policy gate)** — `src/wubu_ngram_pool.c/.h` + `test_eg71_ngram_pool`; evidence above. | llama.cpp `common/ngram-mod.cpp:15,27,37`; `common/speculative.cpp:2447,2492,2586` | `test_eg71_ngram_pool` | M | 4M-entry (~16 MB) pool, cross-slot, reset on occupancy/streak |
 | EG-72 | n-gram-map k4v: up to 4 values with hit counts + persisted files | EG-08 only prefix reuse | llama.cpp `common/ngram-map.h:24,45,52,61`; `common/speculative.cpp:2332,2375,2615` | `test_eg72_ngram_map` | M | multi-value map, merge/save, count-eviction gate |
 | EG-73 | Suffix decoding from finished-request GPU corpus | no corpus drafting | vLLM `docs/features/speculative_decoding/suffix.md`; `vllm/v1/worker/gpu/spec_decode/suffix/speculator.py` | `test_eg73_suffix_spec` | L | corpus + frequency proposal + online per-slot acceptance |
 | EG-74 | DFlash2 / LiliCorr candidate selector + p-min cut | EG-56/62 lack selector | llama.cpp `docs/speculative.md:86-164` | `test_eg74_selector` | M | confidence truncation, hidden-state-conditioned scorer |

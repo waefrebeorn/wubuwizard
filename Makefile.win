@@ -103,6 +103,7 @@ CORE_OBJ += src/wubu_exact_cert.o
 CORE_OBJ += src/wubu_dynamic_tree.o
 CORE_OBJ += src/wubu_conv_store.o
 CORE_OBJ += src/wubu_logits_proc.o
+CORE_OBJ += src/wubu_ngram_pool.o
 
 .PHONY: all cpu-build clean
 
@@ -472,6 +473,10 @@ test_eg99_conv_blocks: tools/test_eg99_conv_blocks.c src/wubu_conv_store.c
 
 # EG-34: typical-p + watermark logits processors gate.
 test_eg34_logits: tools/test_eg34_logits.c src/wubu_logits_proc.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-71: shared rolling-hash n-gram pool gate.
+test_eg71_ngram_pool: tools/test_eg71_ngram_pool.c src/wubu_ngram_pool.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

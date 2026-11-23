@@ -48,6 +48,7 @@ CORE_OBJ += src/wubu_exact_cert.o
 CORE_OBJ += src/wubu_dynamic_tree.o
 CORE_OBJ += src/wubu_conv_store.o
 CORE_OBJ += src/wubu_logits_proc.o
+CORE_OBJ += src/wubu_ngram_pool.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -299,6 +300,9 @@ src/wubu_conv_store.o: src/wubu_conv_store.c include/wubu_conv_store.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_logits_proc.o: src/wubu_logits_proc.c include/wubu_logits_proc.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_ngram_pool.o: src/wubu_ngram_pool.c include/wubu_ngram_pool.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1040,6 +1044,10 @@ test_eg99_conv_blocks: tools/test_eg99_conv_blocks.c src/wubu_conv_store.c
 
 # EG-34: typical-p + watermark logits processors gate.
 test_eg34_logits: tools/test_eg34_logits.c src/wubu_logits_proc.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-71: shared rolling-hash n-gram pool gate.
+test_eg71_ngram_pool: tools/test_eg71_ngram_pool.c src/wubu_ngram_pool.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
