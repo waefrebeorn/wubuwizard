@@ -90,6 +90,7 @@ CORE_OBJ += src/wubu_ev_depth.o
 CORE_OBJ += src/wubu_adapt_len.o
 CORE_OBJ += src/wubu_tree_accept.o
 CORE_OBJ += src/wubu_prefetch_feedback.o
+CORE_OBJ += src/wubu_reclaim_margin.o
 
 .PHONY: all cpu-build clean
 
@@ -407,6 +408,10 @@ test_eg91_tree_accept: tools/test_eg91_tree_accept.c src/wubu_tree_accept.c
 
 # EG-95: closed-loop prefetch depth gate.
 test_eg95_prefetch_feedback: tools/test_eg95_prefetch_feedback.c src/wubu_prefetch_feedback.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-97: overflow-class memory margin gate.
+test_eg97_reclaim_margin: tools/test_eg97_reclaim_margin.c src/wubu_reclaim_margin.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

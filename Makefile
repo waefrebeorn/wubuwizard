@@ -35,6 +35,7 @@ CORE_OBJ += src/wubu_ev_depth.o
 CORE_OBJ += src/wubu_adapt_len.o
 CORE_OBJ += src/wubu_tree_accept.o
 CORE_OBJ += src/wubu_prefetch_feedback.o
+CORE_OBJ += src/wubu_reclaim_margin.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -247,6 +248,9 @@ src/wubu_tree_accept.o: src/wubu_tree_accept.c include/wubu_tree_accept.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_prefetch_feedback.o: src/wubu_prefetch_feedback.c include/wubu_prefetch_feedback.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_reclaim_margin.o: src/wubu_reclaim_margin.c include/wubu_reclaim_margin.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -936,6 +940,10 @@ test_eg91_tree_accept: tools/test_eg91_tree_accept.c src/wubu_tree_accept.c
 
 # EG-95: closed-loop prefetch depth gate.
 test_eg95_prefetch_feedback: tools/test_eg95_prefetch_feedback.c src/wubu_prefetch_feedback.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-97: overflow-class memory margin gate.
+test_eg97_reclaim_margin: tools/test_eg97_reclaim_margin.c src/wubu_reclaim_margin.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

@@ -827,7 +827,19 @@ windows are synthetic policy inputs; no measured prefetch speedup is claimed.
 
 | EG-95 | Feedback-controlled prefetch depth with rejected-transition memory | no adaptive read-ahead | MemVanta `AdaptivePrefetchController::observe` | `test_eg95_prefetch_feedback` | S | **DONE (policy gate)** — `src/wubu_prefetch_feedback.c/.h` gates bounded probes, 2-window cooldown, rejected-transition memory and phase-change reset; evidence above. |
 | EG-96 | Cross-layer early expert read, adopted on router miss | EG-51 MoE routing only | turbo-fieldfare `NextLayerExpertPrefetcher` | `test_eg96_early_expert` | M | lossless, scored by next layer's router |
-| EG-97 | Memory margin from kernel overflow class | EG-03/35 static budget | BigMoeOnEdge `margin_frac`, `reclaim_is_cheap` | `test_eg97_reclaim_margin` | S | measure overflow class, derive margin |
+**EG-97 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg97_reclaim_margin`
+on a 1 GiB budget derives class margins of 102 MiB (compress), 204 MiB
+(swap), 256 MiB (kill) and 153 MiB (unknown); `None` reserves nothing. A 100
+MiB budget is floored to the 64 MiB minimum and a margin above the budget
+leaves zero residency. Only Compress and Refault are cheap, Unknown inherits
+no verdict, and a 0.05 refault override on 2 GiB gives 102 MiB. NaN and
+out-of-range fractions are rejected; the NaN check inspects the IEEE bit
+pattern because the project's `-ffast-math` elides float comparisons on NaN
+(the real Makefile build caught what a hand compile missed).
+`test_eg97_reclaim_margin: PASS`, exit 0; 30/30 stress runs clean. Byte counts
+are synthetic budget inputs, not measured reclaim behaviour.
+
+| EG-97 | Memory margin from kernel overflow class | EG-03/35 static budget | BigMoeOnEdge `margin_frac`, `reclaim_is_cheap` | `test_eg97_reclaim_margin` | S | **DONE (policy gate)** — `src/wubu_reclaim_margin.c/.h` gates class-derived margins, min floor and the narrow cheap-reclaim set; evidence above. |
 | EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | T1 needs portable batching path, not CUDA-only |
 | EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | per-1MiB hashes, prefix+byte key |
 | EG-100 | Real-layer microbenchmark probe for device-tier pricing | EG-06 uses static costs | BigMoeOnEdge `layer_probe.cpp:probe_layer` | `test_eg100_layer_probe` | M | gate measures then prices layers |
