@@ -531,7 +531,7 @@ Subspace iteration reconstructs it with relative Frobenius error 0.000000 while
 rank 1 gives 0.295834; the rank-2 factors store 28 values instead of 48
 (ratio 0.583). A dead scratch loop that read uninitialized memory was removed
 when the gate surfaced it. `test_eg45_lowrank: PASS`, exit 0. Variable-bit VQ
-is gated as EG-45b; coordinated expert staging is still TODO.
+and expert staging are gated as EG-45b/c below.
 
 **EG-45b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg45_varbit_vq`
 gates variable-bit packed VQ codes: values [0.9, -0.5, 0.2] with widths
@@ -542,7 +542,16 @@ values are checked. `test_eg45_varbit_vq: PASS`, exit 0; 30/30 stress runs
 clean. Codes are scalar synthetic values, not a learned KV codebook; no
 compression ratio on real tensors or model-quality result is claimed.
 
-| EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam`, `test_eg45_varbit_vq` | L | **PARTIAL (low-rank + VQ done)** — `src/wubu_lowrank_kv.c/.h` gates reconstruction error and storage ratio; `src/wubu_varbit_vq.c/.h` gates variable-width bit packing (EG-45b); expert staging deferred. |
+**EG-45c evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg45_expert_stage`
+gates coordinated expert layer staging: with three 1000-byte layers, 2.0s
+compute windows and 1000 B/s staging, both next-layer handoffs overlap fully
+(0.000s stall, 2000 bytes staged). At 250 B/s each 4.0s stage overruns a 2.0s
+window and the two handoffs accumulate 4.000s of stall. Bad buffers, zero
+layers, zero bandwidth and NULL stall outputs are rejected.
+`test_eg45_expert_stage: PASS`, exit 0; 30/30 stress runs clean. Bandwidth and
+compute windows are synthetic; no measured I/O trace or speedup is claimed.
+
+| EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam`, `test_eg45_varbit_vq`, `test_eg45_expert_stage` | L | **DONE (all three halves gated)** — `src/wubu_lowrank_kv.c/.h` gates reconstruction error/storage; `src/wubu_varbit_vq.c/.h` gates variable-width bit packing (EG-45b); `src/wubu_expert_stage.c/.h` gates overlapped staging and stall arithmetic (EG-45c). |
 | EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists | **DEFERRED (2026-11-23):** tier-gated T4; no multi-GPU tier exists on this target.
 
 ## Wave 6 — second-degree, new engines and 2026 Q3 (deduped)

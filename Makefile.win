@@ -124,6 +124,7 @@ CORE_OBJ += src/wubu_compact_session.o
 CORE_OBJ += src/wubu_model_surgery.o
 CORE_OBJ += src/wubu_varbit_vq.o
 CORE_OBJ += src/wubu_gqa_index.o
+CORE_OBJ += src/wubu_expert_stage.o
 
 .PHONY: all cpu-build clean
 
@@ -585,6 +586,10 @@ test_eg45_varbit_vq: tools/test_eg45_varbit_vq.c src/wubu_varbit_vq.c
 
 # EG-44b: GQA grouping for sparse index gate.
 test_eg44_gqa_index: tools/test_eg44_gqa_index.c src/wubu_gqa_index.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-45c: coordinated expert layer staging gate.
+test_eg45_expert_stage: tools/test_eg45_expert_stage.c src/wubu_expert_stage.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
