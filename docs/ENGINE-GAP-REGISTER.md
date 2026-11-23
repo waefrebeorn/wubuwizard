@@ -540,7 +540,17 @@ retained. Invalid pointers, retain fraction and empty page sets are rejected;
 on a synthetic key/query set, not a model perplexity run.
 
 | EG-53 | RocketKV: training-free prompt-KV eviction then page-level Top-K decode | EG-23 skips tiles, EG-44 is a trained indexer; neither evicts prompt KV | front-e E10 / TRT-LLM sparse docs | `test_eg53_rocketkv` | M | **DONE (eviction policy)** — `src/wubu_rocketkv.c/.h` gates 50% KV bytes retained with 0.00008 error vs 4.65 baseline; evidence above. |
-| EG-54 | Block-sparse proxy routes: unselected KV blocks contribute a summary, not zero | no block summary path | front-e E11 | `test_eg54_proxy` | M | Gate quality vs dropped-block baseline |
+**EG-54 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg54_proxy`
+builds mean-key summaries for 6 blocks of 4x6 keys and routes to the top-3
+blocks. At the same 3-block fetch budget, zeroing unselected blocks gives
+attention-output error 0.07356 while adding their precomputed mean summaries
+reduces it to 0.00000. The first gate run showed a near-zero dropped baseline
+because block contrast was too high; the fixture was rebalanced so unselected
+blocks carry real mass rather than relaxing the assertion. Invalid block
+count, negative proxy weight and null summary are rejected; 30-run stress
+clean. `test_eg54_proxy: PASS`, exit 0. No latency claim is made.
+
+| EG-54 | Block-sparse proxy routes: unselected KV blocks contribute a summary, not zero | no block summary path | front-e E11 | `test_eg54_proxy` | M | **DONE (proxy route)** — `src/wubu_proxy_route.c/.h` gates 0.07356→0.00000 error at equal fetch budget; evidence above. |
 | EG-55 | UNO: gated-LoRA diffusion drafter on the verifier backbone, one KV, Psi-Spec lossless sampling | EG-17 is adapter slots, EG-24 a separate head | UNO arXiv 2609.04010 | `test_eg55_uno` | L | Gate losslessness + shared-KV memory |
 | EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | Gate accepted tokens per target pass |
 | EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | Gate LM-head memory cut vs acceptance |

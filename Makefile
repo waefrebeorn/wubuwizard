@@ -29,7 +29,7 @@ test_sse: tools/api_server.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 # Object files
-CORE_OBJ = src/wubu_ssm.o src/wubu_ssm_chunked.o src/wubu_mobius.o src/wubu_nested_ssm.o src/wubu_nested_ssm_backward.o src/wubu_moe.o src/wubu_moe_backward.o src/wubu_moe_hyperbolic.o src/wubu_poincare_ssm_backward.o src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_model_arch.o src/wubu_rotate.o src/wubu_ops.o src/wubu_dense_ffn.o src/gguf_reader.o src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o src/wubu_sleep_alloc.o src/wubu_lora_slots.o src/wubu_hicache.o src/wubu_recompute_sched.o src/wubu_expert_trace.o src/wubu_tree_verify.o src/wubu_skip_softmax.o src/wubu_eagle3.o src/wubu_spec_size.o src/wubu_dynact.o src/wubu_isq_plan.o src/wubu_kv_lazy.o src/wubu_blob_store.o src/wubu_fp8_attn.o src/wubu_capacity_sched.o src/wubu_ext_kv.o src/wubu_fp8_kv.o src/wubu_unified_arena.o src/wubu_page_radix.o src/wubu_agent_state.o src/wubu_invalid_kv.o src/wubu_spec_search.o src/wubu_tv_accept.o src/wubu_draft_kv.o src/wubu_sparse_indexer.o src/wubu_lowrank_kv.o src/wubu_sq_agreement.o src/wubu_mx8.o src/wubu_zero_logits.o src/wubu_markov_w4.o src/wubu_hostkv.o src/wubu_bitnest.o src/wubu_readkv.o src/wubu_ssd_expert.o src/wubu_seqmoe.o src/wubu_spice.o src/wubu_rocketkv.o src/wubu_goal.o src/wubu_goal_steer.o src/wubu_goal_resample.o src/wubu_harness_bandit.o src/wubu_ttc_budget.o src/wubu_kv_exact.o src/wubu_swa_reclaim.o src/wubu_spec_budget.o src/wubu_spec_seed.o src/wubu_spec_constrained.o src/wubu_kernel_spec.o src/wubu_kv_qfmt.o src/wubu_kv_fetch.o src/wubu_simd_quant.o src/wubu_diff_sampler.o src/wubu_state_version.o
+CORE_OBJ = src/wubu_ssm.o src/wubu_ssm_chunked.o src/wubu_mobius.o src/wubu_nested_ssm.o src/wubu_nested_ssm_backward.o src/wubu_moe.o src/wubu_moe_backward.o src/wubu_moe_hyperbolic.o src/wubu_poincare_ssm_backward.o src/wubu_poincare_gqa.o src/wubu_poincare_gqa_backward.o src/wubu_mobius_linear.o src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_model_arch.o src/wubu_rotate.o src/wubu_ops.o src/wubu_dense_ffn.o src/gguf_reader.o src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o src/wubu_sleep_alloc.o src/wubu_lora_slots.o src/wubu_hicache.o src/wubu_recompute_sched.o src/wubu_expert_trace.o src/wubu_tree_verify.o src/wubu_skip_softmax.o src/wubu_eagle3.o src/wubu_spec_size.o src/wubu_dynact.o src/wubu_isq_plan.o src/wubu_kv_lazy.o src/wubu_blob_store.o src/wubu_fp8_attn.o src/wubu_capacity_sched.o src/wubu_ext_kv.o src/wubu_fp8_kv.o src/wubu_unified_arena.o src/wubu_page_radix.o src/wubu_agent_state.o src/wubu_invalid_kv.o src/wubu_spec_search.o src/wubu_tv_accept.o src/wubu_draft_kv.o src/wubu_sparse_indexer.o src/wubu_lowrank_kv.o src/wubu_sq_agreement.o src/wubu_mx8.o src/wubu_zero_logits.o src/wubu_markov_w4.o src/wubu_hostkv.o src/wubu_bitnest.o src/wubu_readkv.o src/wubu_ssd_expert.o src/wubu_seqmoe.o src/wubu_spice.o src/wubu_rocketkv.o src/wubu_proxy_route.o src/wubu_goal.o src/wubu_goal_steer.o src/wubu_goal_resample.o src/wubu_harness_bandit.o src/wubu_ttc_budget.o src/wubu_kv_exact.o src/wubu_swa_reclaim.o src/wubu_spec_budget.o src/wubu_spec_seed.o src/wubu_spec_constrained.o src/wubu_kernel_spec.o src/wubu_kv_qfmt.o src/wubu_kv_fetch.o src/wubu_simd_quant.o src/wubu_diff_sampler.o src/wubu_state_version.o
 MODEL_OBJ = src/wubu_model.o $(CORE_OBJ)
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
@@ -186,6 +186,9 @@ src/wubu_spice.o: src/wubu_spice.c include/wubu_spice.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_rocketkv.o: src/wubu_rocketkv.c include/wubu_rocketkv.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_proxy_route.o: src/wubu_proxy_route.c include/wubu_proxy_route.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -799,6 +802,10 @@ test_eg51_spice: tools/test_eg51_spice.c src/wubu_spice.c
 
 # EG-53: RocketKV training-free prompt-KV eviction.
 test_eg53_rocketkv: tools/test_eg53_rocketkv.c src/wubu_rocketkv.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-54: block-sparse proxy routes.
+test_eg54_proxy: tools/test_eg54_proxy.c src/wubu_proxy_route.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
