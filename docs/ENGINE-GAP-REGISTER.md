@@ -255,7 +255,16 @@ tree verifier accepts both drafted tokens (`2/2`) with deterministic uniforms.
 weights and an end-to-end model harness remain deferred.
 
 | EG-24 | EAGLE-3 direct token prediction + tri-layer fusion | `src/wubu_eagle.c` implements EAGLE-1 truncated-layer drafting only | EAGLE-3 arXiv 2503.01840 | `test_eg24_eagle3` | L | **DONE (prediction policy)** — `src/wubu_eagle3.c/.h` fuses tri-layer hidden states, direct logits and softmax-gap confidence; evidence above. Trained weights deferred. |
-| EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam` | L | One mechanism per gate, starting with Sequoia sizing |
+**EG-25a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg25_specfam`
+maximises `expected accepted tokens / (k*draft_cost + verify_cost)` over
+`k in [1,8]`: acceptance 0.2 picks k=2 (1.000 tok/unit), 0.9 picks k=8
+(3.164), a perfect drafter picks k=8 (4.444), and an expensive draft with the
+same 0.9 acceptance drops to k=3 (0.387). The reported expectation matches the
+truncated geometric formula; zero/over-unity acceptance and zero verify cost
+are rejected. `test_eg25_specfam: PASS`, exit 0. SpecTr, DAG verify, token
+recycling and relaxed verification remain TODO under this same gate family.
+
+| EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam` | L | **PARTIAL (Sequoia sizing done)** — `src/wubu_spec_size.c/.h` gates cost-optimal draft length; SpecTr/DAG/recycling/relaxed still TODO. |
 | EG-26 | Per-token dynamic activation quantization | `act_quant` hits scattered; no named module or gate | W4A16 / FP8 literature | `test_eg26_dynact` | M | Scale per token, gate max absolute error vs reference |
 | EG-27 | ISQ quantize-on-CPU before GPU load | quant routines exist; no safetensors quantize-on-load path | mistral.rs ISQ + topology | `test_eg27_isq` | M | depends EG-03; gate peak VRAM during load |
 | EG-28 | Lazy per-layer quantized-KV conversion with budget guard | KV quantization + chunked prefill exist; no threshold conversion score | mlx-lm `maybe_quantize_kv_cache` | `test_eg28_kvquant` | M | depends EG-03; gate quality score vs memory saved |
