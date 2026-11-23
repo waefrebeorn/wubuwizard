@@ -295,7 +295,16 @@ converts none. `test_eg28_kvquant: PASS`, exit 0. The gate covers the lazy
 conversion policy; real KV tensor re-encoding remains in `wubu_kv_qfmt`.
 
 | EG-28 | Lazy per-layer quantized-KV conversion with budget guard | KV quantization + chunked prefill exist; no threshold conversion score | mlx-lm `maybe_quantize_kv_cache` | `test_eg28_kvquant` | M | **DONE (selection policy)** — `src/wubu_kv_lazy.c/.h` picks layers by sensitivity/byte with a budget guard; evidence above. Tensor re-encoding deferred. |
-| EG-29 | Content-addressed sha256 blob store + manifests | sha1/torrent/CID primitives exist; no blob store | Ollama manifest/blob layout | `test_eg29_blob` | M | Digest validation, dedup, resumable writes; gate round-trip + corrupt blob rejection |
+**EG-29 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg29_blob`
+implements SHA-256 in-tree (`sha256("abc")` matches the NIST vector
+`ba7816bf...f20015ad`) and writes `hello world` to a digest-named blob: the
+second put deduplicates to the same digest `b94d27b9...2efcde9`, a get returns
+the exact payload, and a manifest path maps back to that digest and byte count.
+Overwriting the blob with a single wrong byte makes get fail with -1; malformed
+hex and NULL data are rejected. 20/20 stress runs passed.
+`test_eg29_blob: PASS`, exit 0.
+
+| EG-29 | Content-addressed sha256 blob store + manifests | sha1/torrent/CID primitives exist; no blob store | Ollama manifest/blob layout | `test_eg29_blob` | M | **DONE** — `src/wubu_blob_store.c/.h` owns SHA-256, atomic put, digest-verified get and manifest; evidence above. |
 
 ## Wave 4 — tier-gated / deferred (do not start before T1 gates pass)
 
