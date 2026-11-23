@@ -293,7 +293,7 @@ whose dependencies are DONE.
 
 Sources: `front-h-cpp-engines.md` (16 mechanisms), `front-i-spec-code.md` (33),
 `front-j-mainstream-code.md` (16) under `docs/research/engine-sweeps/`, read from
-the 26 shallow clones in `~/WuBu/research/engine-sources/`. All numbers in those
+the 32 shallow clones in `~/WuBu/research/engine-sources/`. All numbers in those
 reports are authors' claims, **not** local measurements. Nothing is vendored.
 
 | ID | Technique | Local state | Exact reference | Gate | Size | Next action |

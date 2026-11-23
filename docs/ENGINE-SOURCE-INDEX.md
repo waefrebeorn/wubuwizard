@@ -158,7 +158,7 @@ Full reports: `front-e-second-degree.md`, `front-f-new-engines.md`, `front-g-q3-
 
 ## Local reference code (do not vendor)
 
-Shallow clones of 26 engines live at `~/WuBu/research/engine-sources/` outside the
+Shallow clones of 32 engines live at `~/WuBu/research/engine-sources/` outside the
 wubuwizard tree. They are **study material only**: never link, copy verbatim, or add
 them to `CORE_OBJ`. Read a file, extract the mechanism, reimplement it in C11 with a
 gate. See `docs/research/engine-sweeps/q3q4-2026-repos.md` for the Q3/Q4 2026
