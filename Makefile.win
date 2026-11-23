@@ -97,6 +97,7 @@ CORE_OBJ += src/wubu_accept_table.o
 CORE_OBJ += src/wubu_two_level_verify.o
 CORE_OBJ += src/wubu_kv_rollback.o
 CORE_OBJ += src/wubu_early_expert.o
+CORE_OBJ += src/wubu_batch_h2d.o
 
 .PHONY: all cpu-build clean
 
@@ -442,6 +443,10 @@ test_eg93_kv_rollback: tools/test_eg93_kv_rollback.c src/wubu_kv_rollback.c
 
 # EG-96: cross-layer early expert read gate.
 test_eg96_early_expert: tools/test_eg96_early_expert.c src/wubu_early_expert.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-98: batched expert H2D upload gate.
+test_eg98_batch_h2d: tools/test_eg98_batch_h2d.c src/wubu_batch_h2d.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

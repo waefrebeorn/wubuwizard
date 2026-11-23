@@ -905,7 +905,17 @@ pattern because the project's `-ffast-math` elides float comparisons on NaN
 are synthetic budget inputs, not measured reclaim behaviour.
 
 | EG-97 | Memory margin from kernel overflow class | EG-03/35 static budget | BigMoeOnEdge `margin_frac`, `reclaim_is_cheap` | `test_eg97_reclaim_margin` | S | **DONE (policy gate)** — `src/wubu_reclaim_margin.c/.h` gates class-derived margins, min floor and the narrow cheap-reclaim set; evidence above. |
-| EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | T1 needs portable batching path, not CUDA-only |
+**EG-98 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg98_batch_h2d`
+gates a portable batching planner: 17 pinned 16-byte expert blobs give 17
+submissions in mode 0 and 1 in mode 1, with byte-identical device buffers;
+129 blobs give 2 groups under the 128 cap. An injected failure at group 0
+commits zero bytes (no stale weights), and clearing it lets the batch succeed.
+Overlapping destinations, unpinned sources and invalid mode are rejected.
+`test_eg98_batch_h2d: PASS`, exit 0; 30/30 stress runs clean. Submission counts
+are modeled host calls, not CUDA APIs; no transfer-time or tok/s gain is
+claimed by this gate.
+
+| EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | **DONE (portable planner gate)** — `src/wubu_batch_h2d.c/.h` gates group capping, disjoint pinned blobs and abort-without-commit; evidence above. |
 | EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | per-1MiB hashes, prefix+byte key |
 | EG-100 | Real-layer microbenchmark probe for device-tier pricing | EG-06 uses static costs | BigMoeOnEdge `layer_probe.cpp:probe_layer` | `test_eg100_layer_probe` | M | gate measures then prices layers |
 
