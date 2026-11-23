@@ -201,6 +201,10 @@ a near tie (25.17 vs 24.58 ms) from recompute to restore. A 2 GiB KV against a
 1 GiB device budget forces recompute even when it is the slower option.
 Cumulative counters after the first two plans: `moved=16777216 tokens=512
 restores=1 recomputes=1`; `test_eg19_recompute: PASS`, exit 0.
+Stability fix: this policy-only gate is built with `CFLAGS_NOAVX` (AVX flags
+filtered out) because MinGW's 16-byte Windows stack faults on GCC's aligned
+32-byte AVX stores in `main()` under `-ffast-math -mavx2`; 0/30 crashes after
+the change (was ~50%).
 
 | EG-19 | KV restore-vs-recompute scheduler | `src/wubu_kv_tier.c` moves KV but has no recompute decision | ALISA §3, KVPR, mzCache | `test_eg19_recompute` | L | **DONE** — `src/wubu_recompute_sched.c/.h` compares byte/I/O time against token-layer recompute time with margin and VRAM budget; evidence above. |
 **EG-20 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg20_expert`
@@ -231,7 +235,17 @@ integration remain deferred; this gate covers tree layout and verify policy.
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
-| EG-23 | Skip-Softmax / BLASST calibrated block pruning | flash attention exists; no per-length calibrated threshold | NVIDIA Skip Softmax blog, TensorRT sparse-attention docs | `test_eg23_skipsoftmax` | M | Calibration table + block skip; gate accuracy delta AND speedup |
+**EG-23 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg23_skipsoftmax`
+calibrates bucket 0 from block maxima `[-6,-5,-4,4,5,6]` to threshold `-3.000`,
+then selects `[-7,-4,0,4,7]` down to 3 kept blocks (2 skipped) with an
+estimated lost softmax mass of `1.67e-05`, within the 0.01 budget. A bucket
+whose blocks all carry comparable mass triggers the guard and keeps all 4
+blocks instead of pruning. Cumulative: `skipped=2 kept=7 worst_err=1.66869e-05`;
+`test_eg23_skipsoftmax: PASS`, exit 0. The gate covers calibration and the
+accuracy guard, not a measured kernel speedup (no GPU-util/throughput telemetry
+on this host; EG-22 remains deferred for the same reason).
+
+| EG-23 | Skip-Softmax / BLASST calibrated block pruning | flash attention exists; no per-length calibrated threshold | NVIDIA Skip Softmax blog, TensorRT sparse-attention docs | `test_eg23_skipsoftmax` | M | **DONE (policy + accuracy guard)** — `src/wubu_skip_softmax.c/.h` with per-bucket percentile threshold and lost-mass guard; evidence above. Kernel speedup unmeasured. |
 | EG-24 | EAGLE-3 direct token prediction + tri-layer fusion | `src/wubu_eagle.c` implements EAGLE-1 truncated-layer drafting only | EAGLE-3 arXiv 2503.01840 | `test_eg24_eagle3` | L | Direct prediction head + dynamic tree; gate acceptance rate |
 | EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam` | L | One mechanism per gate, starting with Sequoia sizing |
 | EG-26 | Per-token dynamic activation quantization | `act_quant` hits scattered; no named module or gate | W4A16 / FP8 literature | `test_eg26_dynact` | M | Scale per token, gate max absolute error vs reference |

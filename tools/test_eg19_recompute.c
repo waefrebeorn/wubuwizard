@@ -8,8 +8,12 @@ static int failures = 0;
     fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #c); failures++; \
 } } while (0)
 
+int main(void) __attribute__((force_align_arg_pointer));
 int main(void) {
-    wubu_recompute_config_t cfg = { 1e9, 2e6, 1u << 30, 1.0 };
+    setvbuf(stdout, NULL, _IONBF, 0);
+    wubu_recompute_config_t cfg;
+    cfg.cold_bandwidth_bps = 1e9; cfg.token_layers_per_s = 2e6;
+    cfg.device_budget = 1u << 30; cfg.restore_margin = 1.0;
     wubu_recompute_sched_t *s = wubu_recompute_sched_create(cfg);
     wubu_recompute_decision_t d;
     size_t moved = 0;
@@ -39,8 +43,10 @@ int main(void) {
 
     /* Margin flips a near-tie toward restore. */
     {
-        wubu_recompute_config_t c2 = { 1e9, 5e5, 1u << 30, 1.0 };
-        wubu_recompute_config_t c3 = c2;
+        wubu_recompute_config_t c2, c3;
+        c2.cold_bandwidth_bps = 1e9; c2.token_layers_per_s = 5e5;
+        c2.device_budget = 1u << 30; c2.restore_margin = 1.0;
+        c3 = c2;
         wubu_recompute_sched_t *a = wubu_recompute_sched_create(c2);
         wubu_recompute_sched_t *b;
         c3.restore_margin = 1.1;
@@ -60,7 +66,9 @@ int main(void) {
 
     /* KV larger than the device budget forces recompute even when cheaper. */
     {
-        wubu_recompute_config_t c4 = { 1e12, 2e6, 1u << 30, 1.0 };
+        wubu_recompute_config_t c4;
+        c4.cold_bandwidth_bps = 1e12; c4.token_layers_per_s = 2e6;
+        c4.device_budget = 1u << 30; c4.restore_margin = 1.0;
         wubu_recompute_sched_t *big = wubu_recompute_sched_create(c4);
         CHECK(big != NULL);
         if (big) {
@@ -77,7 +85,12 @@ int main(void) {
     CHECK(wubu_recompute_plan(s, 16, 0, 16u << 20, &d) == -1);
     CHECK(wubu_recompute_plan(NULL, 16, 32, 16u << 20, &d) == -1);
     CHECK(wubu_recompute_sched_create(cfg) != NULL);
-    CHECK(wubu_recompute_sched_create((wubu_recompute_config_t){0}) == NULL);
+    {
+        wubu_recompute_config_t z;
+        z.cold_bandwidth_bps = 0; z.token_layers_per_s = 0;
+        z.device_budget = 0; z.restore_margin = 0;
+        CHECK(wubu_recompute_sched_create(z) == NULL);
+    }
 
     wubu_recompute_sched_free(s);
     if (failures) {

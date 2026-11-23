@@ -55,7 +55,14 @@ int wubu_recompute_plan(wubu_recompute_sched_t *s, int tokens, int layers,
         s->tokens_recomputed += tokens;
         s->recomputes++;
     }
-    *out = d;
+    /* Field-wise: a whole-struct copy compiles to an aligned 32-byte AVX
+     * store that faults on MinGW's 16-byte Windows stack. */
+    out->restore = d.restore;
+    out->restore_ms = d.restore_ms;
+    out->recompute_ms = d.recompute_ms;
+    out->bytes_moved = d.bytes_moved;
+    out->tokens_recomputed = d.tokens_recomputed;
+    out->forced_by_budget = d.forced_by_budget;
     return 0;
 }
 
