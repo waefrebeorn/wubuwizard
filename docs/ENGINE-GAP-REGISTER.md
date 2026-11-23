@@ -679,7 +679,16 @@ read/modify stream ambiguously and was replaced with an explicit byte overwrite.
 vendored; this is project-owned C11.
 
 | EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | **PARTIAL (EG-66a snapshot round-trip DONE)** — `src/wubu_tensorfold.c/.h` gates byte-exact disk snapshot/restore and serial equivalence; adaptive caps, kv8 K/V and AOT kernel packs remain TODO. |
-| EG-67 | titan-engine: tiered experts + prefill expert streaming + hybrid prefix cache on a small consumer GPU | EG-07/EG-20 lack prefill streaming | titan-engine, front-f §18 | `test_eg67_titan` | L | Gate peak VRAM on 6 GB class |
+**EG-67 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg67_titan`
+plans 8 one-GB experts under a 6 GB cap: 4 hot experts resident plus one
+streamed warm/cold expert give a modeled 5 GB peak, versus 8 GB if all were
+resident; 4 experts are marked for streaming. The hybrid prefix table reports
+2 tier-aware hits across a 6-token prefix trace. Over-cap plans, null input and
+empty prefix traces are rejected; 30-run stress clean. `test_eg67_titan: PASS`,
+exit 0. Bytes are modeled, and no real GPU prefill stream is claimed by this
+policy gate.
+
+| EG-67 | titan-engine: tiered experts + prefill expert streaming + hybrid prefix cache on a small consumer GPU | EG-07/EG-20 lack prefill streaming | titan-engine, front-f §18 | `test_eg67_titan` | L | **DONE (planning gate)** — `src/wubu_titan.c/.h` gates 5 GB peak under a 6 GB cap with 4 streamed experts; evidence above. |
 | EG-68 | Strata: zero-allocation host, prefill launch-count amortization, 4-way split-KV decode reduction | no launch-count instrumentation | Strata (Rust+HIP), front-f §19 | `test_eg68_strata` | M | Gate allocation count and KV reduction |
 | EG-69 | ReplaySSM: cache SSM inputs rather than state, making speculative rollback append-only | engine has SSM kernels but no recurrent-state rollback object | ReplaySSM, front-f §15 | `test_eg69_replayssm` | L | Conditional on hybrid models; gate rollback exactness |
 | EG-70 | Output-exactness certificate with reuse generations for cached computation | gate discipline has no certificate of exact reuse | Memory-Sovereign arXiv 2608.23805 | `test_eg70_cert` | M | Gate certificate round-trip; strengthens no-gate-no-ship |
