@@ -385,7 +385,16 @@ releasing A/B zeroes all refcounts. `test_eg38_pages: PASS`, exit 0. Multi-rank
 sharding stays deferred.
 
 | EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | **DONE (single-rank)** — `src/wubu_page_radix.c/.h` gates page-owning prefix reuse and draft rollback; evidence above. |
-| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | Preserve state across turns; gate no re-prefill on resume |
+**EG-39 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg39_agentstate`
+saves a 10-token prefix for `agent-1` (turn 1) and resumes it with 0 prefill
+tokens. Appending two tokens requires exactly 2 prefill tokens and advances to
+turn 2; resuming the extended prefix again needs 0. A diverged 4-token prefix
+correctly asks for a full 4-token re-prefill, and an unknown agent asks for
+all 10. `test_eg39_agentstate: PASS`, exit 0. Model surgery and adaptive
+speculation from Hibana are not claimed by this gate; only state persistence
+and re-prefill avoidance are.
+
+| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | **PARTIAL (state persistence)** — `src/wubu_agent_state.c/.h` gates zero-re-prefill resume and prefix extension; surgery/adaptive speculation deferred. |
 | EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | Gate lossless commit + preemption threshold |
 | EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | Search over draft config; gate parity + measured speedup per tier |
 | EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | Validate acceptance-probability identity; gate calibration |
