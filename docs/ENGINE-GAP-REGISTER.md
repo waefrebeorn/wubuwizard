@@ -1282,10 +1282,10 @@ the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate nam
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=109 FAIL=0`, no failed targets. The
-remaining undone rows are either explicitly gated off (EG-22/31/33/46 need
-host-unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific
-and record-only) or retain documented TODO sub-techniques under PARTIAL rows
-(EG-25 SpecTr, EG-39 adaptive speculation, EG-44 trained indexer/tile speed,
-EG-66 adaptive caps/kv8). All shipped sub-gates carry named evidence.
+was rebuilt and executed in one loop: `PASS=113 FAIL=0`, no failed targets. The
+remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
+unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
+record-only; EG-44's trained indexer and tile-speed half needs trained weights
+and kernel telemetry this host cannot produce. Every other row and sub-gate
+carries a named target and measured evidence.
 
