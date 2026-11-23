@@ -115,6 +115,7 @@ CORE_OBJ += src/wubu_streamk.o
 CORE_OBJ += src/wubu_vc_attn.o
 CORE_OBJ += src/wubu_dfly.o
 CORE_OBJ += src/wubu_sparse_retrieve.o
+CORE_OBJ += src/wubu_suffix_spec.o
 
 .PHONY: all cpu-build clean
 
@@ -540,6 +541,10 @@ test_eg81_dfly: tools/test_eg81_dfly.c src/wubu_dfly.c
 
 # EG-75: sparse-KV retrieval lifecycle gate.
 test_eg75_sparse_retrieve: tools/test_eg75_sparse_retrieve.c src/wubu_sparse_retrieve.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-73: suffix decoding from finished-request corpus gate.
+test_eg73_suffix_spec: tools/test_eg73_suffix_spec.c src/wubu_suffix_spec.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

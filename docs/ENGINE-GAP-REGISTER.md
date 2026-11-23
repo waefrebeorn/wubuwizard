@@ -807,7 +807,17 @@ NULL buffers and short/truncated encodings are rejected.
 synthetic entries; no production-scale persistence or speed result is claimed.
 
 | EG-72 | n-gram-map k4v: up to 4 values with hit counts + persisted files | **DONE (map gate)** — `src/wubu_ngram_map.c/.h` + `test_eg72_ngram_map`; evidence above. | llama.cpp `common/ngram-map.h:24,45,52,61`; `common/speculative.cpp:2332,2375,2615` | `test_eg72_ngram_map` | M | multi-value map, merge/save, count-eviction gate |
-| EG-73 | Suffix decoding from finished-request GPU corpus | no corpus drafting | vLLM `docs/features/speculative_decoding/suffix.md`; `vllm/v1/worker/gpu/spec_decode/suffix/speculator.py` | `test_eg73_suffix_spec` | L | corpus + frequency proposal + online per-slot acceptance |
+**EG-73 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg73_suffix_spec`
+gates suffix decoding from a finished-request corpus: a prompt ending in the
+last four tokens of a finished response finds match length 4 and copies
+[40 50 60 70]; an unrelated prompt finds 0. Unmatched draft slots are filled
+with the last sampled token. With corpus capacity 2, ingesting three responses
+evicts the oldest and a suffix from it no longer matches while the newest one
+does. Bad capacities and NULL buffers are rejected. `test_eg73_suffix_spec:
+PASS`, exit 0; 30/30 stress runs clean. Corpus token ids are synthetic; no
+GPU-corpus or acceptance-rate result is claimed.
+
+| EG-73 | Suffix decoding from finished-request GPU corpus | **DONE (lookup gate)** — `src/wubu_suffix_spec.c/.h` + `test_eg73_suffix_spec`; evidence above. | vLLM `docs/features/speculative_decoding/suffix.md`; `vllm/v1/worker/gpu/spec_decode/suffix/speculator.py` | `test_eg73_suffix_spec` | L | corpus + frequency proposal + online per-slot acceptance |
 **EG-74 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg74_selector`
 gates the DFlash2/LiliCorr selector: with p_min=0.05 it keeps candidates
 [0 1 2 3] of 6; adding hidden-conditioned scores promotes candidate 2 to
