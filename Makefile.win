@@ -129,6 +129,7 @@ CORE_OBJ += src/wubu_aot_pack.o
 CORE_OBJ += src/wubu_adaptive_cap.o
 CORE_OBJ += src/wubu_kv8.o
 CORE_OBJ += src/wubu_agent_spec.o
+CORE_OBJ += src/wubu_spectr_select.o
 
 .PHONY: all cpu-build clean
 
@@ -610,6 +611,10 @@ test_eg66_kv8: tools/test_eg66_kv8.c src/wubu_kv8.c
 
 # EG-39c: adaptive agent speculation gate.
 test_eg39_agent_spec: tools/test_eg39_agent_spec.c src/wubu_agent_spec.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-25e: SpecTr candidate mass selection gate.
+test_eg25_spectr: tools/test_eg25_spectr.c src/wubu_spectr_select.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
