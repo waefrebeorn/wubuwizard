@@ -116,6 +116,7 @@ CORE_OBJ += src/wubu_vc_attn.o
 CORE_OBJ += src/wubu_dfly.o
 CORE_OBJ += src/wubu_sparse_retrieve.o
 CORE_OBJ += src/wubu_suffix_spec.o
+CORE_OBJ += src/wubu_token_recycle.o
 
 .PHONY: all cpu-build clean
 
@@ -545,6 +546,10 @@ test_eg75_sparse_retrieve: tools/test_eg75_sparse_retrieve.c src/wubu_sparse_ret
 
 # EG-73: suffix decoding from finished-request corpus gate.
 test_eg73_suffix_spec: tools/test_eg73_suffix_spec.c src/wubu_suffix_spec.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-25b: token recycling from verified chains.
+test_eg25_recycle: tools/test_eg25_recycle.c src/wubu_token_recycle.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
