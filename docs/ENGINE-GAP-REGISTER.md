@@ -583,7 +583,15 @@ as the contract's origin, not as local measurements. `test_eg101_sq_agreement:
 PASS`, exit 0.
 
 | EG-101 | SQ build agreement/KL validation gate | no acceptance contract for quantized builds | Strata v0.2.19 SQ-10/15/20 | `test_eg101_sq_agreement` | S | **DONE** — `src/wubu_sq_agreement.c/.h` gates top-1 agreement, KL and bit-exactness; evidence above. |
-| EG-102 | SF4+MX8 block microscaling with bit-exactness | EG-26/36/43 lack shared block exponent | Strata v0.2.19 SQ-20 | `test_eg102_mx8` | M | block scale + lossless round-trip gate |
+**EG-102 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg102_mx8`
+encodes 64 values that are exact multiples of 2^-3 into two 32-value MX blocks
+with a shared E8M0 exponent 124 and signed 4-bit codes; decode is bit-exact
+(err 0.000000). Adding 0.03 to every value gives max error 0.030000, within
+half a 0.125 step. A 33-value tail produces two blocks and decodes only 33
+outputs. `test_eg102_mx8: PASS`, exit 0. This gates the format; the GPU-side
+SF4 tensor-core kernel is not claimed.
+
+| EG-102 | SF4+MX8 block microscaling with bit-exactness | EG-26/36/43 lack shared block exponent | Strata v0.2.19 SQ-20 | `test_eg102_mx8` | M | **DONE (format)** — `src/wubu_mx8.c/.h` gates shared-exponent blocks and lossless round-trip; evidence above. |
 | EG-103 | Zero-logits D2H: transfer sampled ids only | no sampled-token-only transfer path | Strata v0.2.19 Inkling 0.1.65 | `test_eg103_zero_logits` | S | bytes avoided + distribution equality |
 | EG-104 | W=4 Markov beam-tree branch selection | EG-21 verifies trees but has no branch policy | Strata v0.2.19 DSpark | `test_eg104_markov_tree` | M | branch prior + exact verification |
 
