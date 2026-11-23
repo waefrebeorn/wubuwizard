@@ -615,7 +615,16 @@ clean. `test_eg60_layerskip: PASS`, exit 0. Byte counts model a synthetic
 layer stack, not a measured model memory profile.
 
 | EG-60 | LayerSkip: increasing layer dropout + exit-layer query cache reused by remainder pass | EG-25's "early exit" is generic, no kvq reuse | LayerSkip arXiv 2404.16710 | `test_eg60_layerskip` | L | **DONE (skip/cache gate)** — `src/wubu_layerskip.c/.h` gates 58% KV saved at 0.99971 parity; evidence above. |
-| EG-61 | Block verification keeping the longest accepted prefix with a correction distribution | EG-25 relaxed verification is not distribution-exact | SGLang speculative-decoding docs, front-e E14 | `test_eg61_blockverify` | M | Gate distribution exactness + accepted length |
+**EG-61 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg61_blockverify`
+verifies 4-token blocks over 200,000 trials. The first emitted token matches
+the target distribution within 0.00078, confirming the pointwise `(p-q)+`
+correction is distribution-exact. Mean accepted prefix is 4.0000/4 when draft
+and target match versus 3.3449/4 under a mismatched draft. Invalid block size
+and out-of-range token ids are rejected; 30-run stress clean.
+`test_eg61_blockverify: PASS`, exit 0. Synthetic distributions, not a measured
+model acceptance rate.
+
+| EG-61 | Block verification keeping the longest accepted prefix with a correction distribution | EG-25 relaxed verification is not distribution-exact | SGLang speculative-decoding docs, front-e E14 | `test_eg61_blockverify` | M | **DONE (exactness gate)** — `src/wubu_blockverify.c/.h` gates 0.00078 distribution error and accepted-prefix length; evidence above. |
 | EG-62 | DSpark: rank-256 Markov correction head + confidence head predicting 1-TV, per-position verify budget | EG-24/EG-25 have no confidence budget | DSpark arXiv 2607.05147 | `test_eg62_dspark` | L | Gate acceptance length vs budget |
 | EG-63 | SpecQuant: INT4/FP8/FP16 variants from one base, query complexity routing | EG-27 is single-precision quantize-on-load | SpecQuant arXiv 2609.21704 | `test_eg63_specquant` | M | Gate accuracy loss <2% + speedup |
 | EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | Gate throughput under a fixed memory cap |
