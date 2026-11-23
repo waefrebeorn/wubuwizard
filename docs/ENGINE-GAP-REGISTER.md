@@ -842,7 +842,18 @@ counts and vectors are synthetic; no model-quality result is claimed.
 
 | EG-78 | Constant-vector novice experts, zero MLP bytes | **DONE (substitution gate)** — `src/wubu_expert_sub.c/.h` + `test_eg78_expert_sub`; evidence above. | vLLM `docs/design/expert_substitution.md`; `.../fused_moe/expert_substitution.py` | `test_eg78_expert_sub` | M | load-time prune, preserve logical ids, no renormalize |
 | EG-79 | Stream-K quantized GEMM with partial-sum fixup | EG-01 vec_dot/GEMV only | llama.cpp `ggml/src/ggml-cuda/mmq.cuh:1011-1024` | `test_eg79_streamk` | L | CTA work partition + host native-tiling escape |
-| EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | EG-25/61 exact | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
+**EG-80 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg80_fly`
+gates FLy's policy: normalized entropy is 1.0 for a uniform 4-way score row
+and 0.118 for a peaked one. With threshold 0.7 and a 3-decision window, a
+high-entropy rejection with all three subsequent decisions aligned is deferred
+(1 deferral, 2 rejections kept); low entropy, a misaligned window, no native
+rejection, and opt-in disabled all keep the rejection. Invalid threshold,
+window, NULL buffers and bad entropy inputs are rejected.
+`test_eg80_fly: PASS`, exit 0; 30/30 stress runs clean. This gate measures
+policy decisions only; the intentionally lossy distribution delta is not
+measured and no speed result is claimed.
+
+| EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | **DONE (policy gate)** — `src/wubu_fly_defer.c/.h` + `test_eg80_fly`; evidence above. | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
 | EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | EG-24/55/56 separate draft KV | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
 | EG-82 | Engram conditional memory: NFKC + XOR n-gram hash, gated fusion | EG-05 neuron predictor, no cond memory | vLLM `docs/features/engram.md` | `test_eg82_engram` | M | prime-size disjoint buckets, SSD-offloadable tables |
 | EG-83 | POD split-K decode: float workspace + reusable per-plan aux | refines EG-68 split-KV | FlashInfer `flashinfer/flashinfer/pod.py:49-63,127-145` | `test_eg83_pod_plan` | M | reuse aux across layers, measure workspace bytes |
