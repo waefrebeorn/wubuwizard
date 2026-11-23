@@ -563,7 +563,15 @@ in `wubu_uno.c`. Invalid token indices, uniforms and dimensions are rejected;
 claim is made.
 
 | EG-55 | UNO: gated-LoRA diffusion drafter on verifier backbone, one KV, Psi-Spec lossless sampling | EG-17 is adapter slots, EG-24 a separate head | UNO arXiv 2609.04010 | `test_eg55_uno` | L | **DONE (sampling + shared KV)** — `src/wubu_uno.c/.h` gates lossless distribution and one KV; evidence above. |
-| EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | Gate accepted tokens per target pass |
+**EG-56 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg56_dflash`
+drafts an 8-token block with target hidden states injected at 2 draft layers.
+At uniform 0.5 the fused draft has p0=0.9272 and accepts 8/8 tokens per target
+pass; the same block without injection has p0=0.3862 and accepts 0/8. Invalid
+layer counts, null pointers and negative injection are rejected; 30-run stress
+clean. `test_eg56_dflash: PASS`, exit 0. Acceptance is computed from synthetic
+hidden-state distances, not from a real model pass.
+
+| EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | **DONE (acceptance gate)** — `src/wubu_dflash.c/.h` gates 8/8 fused vs 0/8 uninjected per pass; evidence above. |
 | EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | Gate LM-head memory cut vs acceptance |
 | EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | Gate TTFT vs answer fidelity |
 | EG-59 | Online speculative decoding: drafter fine-tuned from live verification corrections every I steps | EG-42 is a training objective, not post-deployment updates | Online SD arXiv 2310.07177 | `test_eg59_online` | L | Gate acceptance drift over a session |
