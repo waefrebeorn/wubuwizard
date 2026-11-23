@@ -476,7 +476,15 @@ rejected. `test_eg47_hostkv: PASS`, exit 0. Hit-rate is covered by EG-18;
 this gate measures codec and record fit, not end-to-end host latency.
 
 | EG-47 | INT8 host-tier KV: 1152-byte aligned row-local record, per-head absmax BF16 scales, unmodified CUDA mover | EG-18 is BF16 tiers, EG-36 is FP8 device KV; no quantized host representation | HiQCache (front-e E2 / front-f §4) | `test_eg47_hostkv` | M | **DONE (codec)** — `src/wubu_hostkv.c/.h` gates 1152-byte fit, per-head BF16 scales and opaque mover equality; evidence above. |
-| EG-48 | BitNest: W4 draft nested inside W8 target, one physical weight/KV representation | no nested multi-precision representation | BitNest arXiv 2610.02800 | `test_eg48_bitnest` | L | 6 GB fit gate: one representation, both verification paths |
+**EG-48 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg48_bitnest`
+quantizes 256 floats once onto a signed 4-bit grid held as one `signed char`
+array. Target (W8) dot `12.62346` vs reference `12.44704` (1.42% relative to
+the sum of absolute products); draft (W4) dot `6.31173` vs half-scale reference
+`6.22352`. Both views share one 256-byte physical buffer (pointer unchanged),
+with no second weight copy. `test_eg48_bitnest: PASS`, exit 0. This gate proves
+one-representation correctness, not a measured speedup.
+
+| EG-48 | BitNest: W4 draft nested inside W8 target, one physical weight/KV representation | no nested multi-precision representation | BitNest arXiv 2610.02800 | `test_eg48_bitnest` | L | **DONE (weight view)** — `src/wubu_bitnest.c/.h` gates both W8/W4 paths on one physical array; evidence above. |
 | EG-49 | ReadKV progressive KV code: 8-bit store / 4-bit fetch per query | EG-28 is a threshold conversion, not progressive bits | ReadKV arXiv 2610.11245 | `test_eg49_readkv` | M | Gate PPL delta vs bytes fetched |
 | EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | Overlap gate: transfer/compute concurrency count |
 | EG-51 | SPICE: confidence-adaptive expert lookahead + low-rank surrogate for misses | refines EG-20 with surrogate substitution | SPICE arXiv 2608.21240 | `test_eg51_spice` | L | Lossy: opt-in behind an accuracy gate |
