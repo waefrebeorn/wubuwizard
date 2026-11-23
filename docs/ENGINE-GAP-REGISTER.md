@@ -364,7 +364,16 @@ rows and zero scales are rejected. `test_eg36_fp8kv: PASS`, exit 0. The MoE
 expert LRFU/ClassLRU half of EG-36 is a separate mechanism and still TODO.
 
 | EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv` | M | **PARTIAL (FP8 KV done)** — `src/wubu_fp8_kv.c/.h` packs/restores E4M3 KV rows with per-row scale; evidence above. Expert LRFU deferred. |
-| EG-37 | Unified arena, one entry per token, compaction, whole-request admission | new; EG-18 is tiers, not one allocator | SGLang unified memory (11 Nov 2026) | `test_eg37_arena` | L | Highest T1 fit in this sweep; gate mixed KV/state capacity under 6 GB |
+**EG-37 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg37_arena`
+allocates a 3-token KV request plus standalone STATE and KV token slots in one
+1000-byte arena (650 used, no overlaps). After freeing four tokens the arena
+has 700 bytes free but fragmented; a 2-token 400-byte request is admitted only
+after compaction, putting its first block at offset >=250 and restoring 650
+used bytes with `validate=1`. A second 400-byte request is rejected whole with
+no partial allocation. `test_eg37_arena: PASS`, exit 0. The arena is a size
+model, not a wired allocator for real KV tensors.
+
+| EG-37 | Unified arena, one entry per token, compaction, whole-request admission | new; EG-18 is tiers, not one allocator | SGLang unified memory (11 Nov 2026) | `test_eg37_arena` | L | **DONE (allocator policy)** — `src/wubu_unified_arena.c/.h` gates one-entry-per-token, compaction and all-or-nothing requests; evidence above. Real tensor wiring deferred. |
 | EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | T1: decode-side prefix reuse; defer multi-rank sharding |
 | EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | Preserve state across turns; gate no re-prefill on resume |
 | EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | Gate lossless commit + preemption threshold |
