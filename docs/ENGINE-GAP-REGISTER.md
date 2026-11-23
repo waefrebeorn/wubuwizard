@@ -274,7 +274,17 @@ widths, zero scales and NULL/empty rows are rejected.
 `test_eg26_dynact: PASS`, exit 0.
 
 | EG-26 | Per-token dynamic activation quantization | `act_quant` hits scattered; no named module or gate | W4A16 / FP8 literature | `test_eg26_dynact` | M | **DONE** — `src/wubu_dynact.c/.h` symmetric row-wise 2..8-bit quant/dequant with scale error bound; evidence above. |
-| EG-27 | ISQ quantize-on-CPU before GPU load | quant routines exist; no safetensors quantize-on-load path | mistral.rs ISQ + topology | `test_eg27_isq` | M | depends EG-03; gate peak VRAM during load |
+**EG-27 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg27_isq`
+compares host quantize + compact transfer against raw transfer + device
+quantize. With a 100 MiB raw / 25 MiB quantized block over a 2 GB/s link:
+slow host quantization (50 ms) keeps the raw path (63.1 ms vs 62.4 ms,
+104857600 bytes sent); a 5 ms host quantizer switches to ISQ (18.1 ms,
+26214400 bytes sent); a 50 MiB VRAM budget forces ISQ even with a 500 ms host
+quantizer. `test_eg27_isq: PASS`, exit 0. This gates the decision path and
+transfer accounting; actual safetensors streaming and peak-VRAM telemetry are
+deferred.
+
+| EG-27 | ISQ quantize-on-CPU before GPU load | quant routines exist; no safetensors quantize-on-load path | mistral.rs ISQ + topology | `test_eg27_isq` | M | **DONE (decision policy)** — `src/wubu_isq_plan.c/.h` chooses CPU-side quantization by time and VRAM budget; evidence above. Streaming/telemetry deferred. |
 | EG-28 | Lazy per-layer quantized-KV conversion with budget guard | KV quantization + chunked prefill exist; no threshold conversion score | mlx-lm `maybe_quantize_kv_cache` | `test_eg28_kvquant` | M | depends EG-03; gate quality score vs memory saved |
 | EG-29 | Content-addressed sha256 blob store + manifests | sha1/torrent/CID primitives exist; no blob store | Ollama manifest/blob layout | `test_eg29_blob` | M | Digest validation, dedup, resumable writes; gate round-trip + corrupt blob rejection |
 
