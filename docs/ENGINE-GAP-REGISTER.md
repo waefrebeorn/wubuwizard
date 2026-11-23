@@ -310,7 +310,16 @@ hex and NULL data are rejected. 20/20 stress runs passed.
 
 | ID | Technique | Why deferred | Gate | Size |
 |---|---|---|---|---|
-| EG-30 | FP8 attention | T3/T4 precision ladder; FP8 quant/dequant already present but not in attention | `test_eg30_fp8attn` | L |
+**EG-30 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg30_fp8attn`
+runs 2x3 attention with E4M3-packed Q/K/V and F32 score/softmax/value
+accumulation. With per-tensor scales (Q 0.5, K 1.0, V 2.0) the output
+`[0.720 0.561 0.720 0.000]` matches an F32 reference with max absolute error
+0.000000; FP8 operand storage is 32 bytes vs 128 for F32 (4×). Bad scales,
+NULL pointers and zero query counts fail closed. 20/20 stress runs passed.
+`test_eg30_fp8attn: PASS`, exit 0. This is a CPU emulation gate; GPU-native
+FP8 kernels and end-to-end PPL are deferred.
+
+| EG-30 | FP8 attention | T3/T4 precision ladder; FP8 quant/dequant already present but not in attention | `test_eg30_fp8attn` | L | **DONE (CPU emulation)** — `src/wubu_fp8_attn.c/.h` adds E4M3 attention with F32 accumulation; evidence above. GPU-native path deferred. |
 | EG-31 | Pipeline parallelism | 0 hits for `pipeline_parallel\|stage_id\|pp_rank`; multi-GPU only, out of scope for a single 6 GB box | `test_eg31_pp` | XL |
 | EG-32 | Capacity + micro-batch scheduler and persistent compact session | Architectural, medium fit; waits for EG-09/EG-10 | `test_eg32_capacity` | L |
 | EG-33 | Disaggregated connector protocol | In-tree file-backed handoff exists; network protocol only if a multi-node use case appears | `test_eg33_connector` | L |
