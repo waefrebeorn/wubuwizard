@@ -178,7 +178,7 @@ tools/agent_gauntlet/download_colonels.out
 /tools/find_*
 /tools/layer_cos_sim
 /tools/ref_*
-/tools/test_*
+/tools/test_*.exe
 /tools/test_kv_embedding.c
 /tools/test_kv_hierarchy.c
 /ENCODERS/hash-mind/c/train
