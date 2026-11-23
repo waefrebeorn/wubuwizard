@@ -37,6 +37,7 @@ CORE_OBJ += src/wubu_tree_accept.o
 CORE_OBJ += src/wubu_prefetch_feedback.o
 CORE_OBJ += src/wubu_reclaim_margin.o
 CORE_OBJ += src/wubu_replay_ssm.o
+CORE_OBJ += src/wubu_keyed_sample.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -255,6 +256,9 @@ src/wubu_reclaim_margin.o: src/wubu_reclaim_margin.c include/wubu_reclaim_margin
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_replay_ssm.o: src/wubu_replay_ssm.c include/wubu_replay_ssm.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_keyed_sample.o: src/wubu_keyed_sample.c include/wubu_keyed_sample.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -952,6 +956,10 @@ test_eg97_reclaim_margin: tools/test_eg97_reclaim_margin.c src/wubu_reclaim_marg
 
 # EG-69: checkpoint+input-buffer SSM rollback gate.
 test_eg69_replayssm: tools/test_eg69_replayssm.c src/wubu_replay_ssm.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-89: position-keyed exponential-race sampling gate.
+test_eg89_keyed_sample: tools/test_eg89_keyed_sample.c src/wubu_keyed_sample.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

@@ -92,6 +92,7 @@ CORE_OBJ += src/wubu_tree_accept.o
 CORE_OBJ += src/wubu_prefetch_feedback.o
 CORE_OBJ += src/wubu_reclaim_margin.o
 CORE_OBJ += src/wubu_replay_ssm.o
+CORE_OBJ += src/wubu_keyed_sample.o
 
 .PHONY: all cpu-build clean
 
@@ -417,6 +418,10 @@ test_eg97_reclaim_margin: tools/test_eg97_reclaim_margin.c src/wubu_reclaim_marg
 
 # EG-69: checkpoint+input-buffer SSM rollback gate.
 test_eg69_replayssm: tools/test_eg69_replayssm.c src/wubu_replay_ssm.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-89: position-keyed exponential-race sampling gate.
+test_eg89_keyed_sample: tools/test_eg89_keyed_sample.c src/wubu_keyed_sample.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

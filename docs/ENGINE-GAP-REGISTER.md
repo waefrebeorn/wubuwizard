@@ -808,7 +808,19 @@ rejected. `test_eg88_adapt_len: PASS`, exit 0; 30/30 stress runs clean. Row
 counts and probabilities are synthetic policy values, not measured latency.
 
 | EG-88 | Adaptive candidate length: truncate at first 1-prod(p)>threshold | fixed draft length | AdaFlash `specforge/modeling/draft/dflash.py:133-145,446-560` | `test_eg88_adapt_len` | S | **DONE (policy gate)** — `src/wubu_adapt_len.c/.h` gates scalar-threshold truncation, len_min clamp and greedy accept/KV crop; evidence above. |
-| EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | argmin E(seed,pos,v)/p for tree verify |
+**EG-89 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg89_keyed_sample`
+gates `x[pos] = argmin_v E(seed,pos,v)/p[v]` with a counter-based Exp(1) field
+keyed on (seed, absolute position, vocab id). At seed 0x12345678 and pos 5 the
+draw is repeatable (id 0). Over 20,000 seeds at pos 7 with p=[.6,.3,.1] the
+counts are [11877, 6069, 2054] against [12000, 6000, 2000] (within 3%). Six
+nodes at absolute positions 10..15 sample identically whether placed by
+(prefix=10, depth=d) or (prefix=10+d, depth=0), so tree shape cannot change a
+committed token. Bad pos/vocab/NULL/zero-probability input is rejected.
+`test_eg89_keyed_sample: PASS`, exit 0; 30/30 stress runs clean. Frequencies
+are a Monte Carlo check over synthetic seeds; no model-quality or T>0 speed
+result is claimed.
+
+| EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | **DONE (sampling gate)** — `src/wubu_keyed_sample.c/.h` gates counter-based Exp(1) keys and tree-shape-independent draws; evidence above. |
 | EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_eagle2_tree` | L | cum-logprob score + ancestor mask, static tree buffers |
 **EG-91 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg91_tree_accept`
 on an 8-node tree with a broken branch selects the deepest fully-matching leaf
