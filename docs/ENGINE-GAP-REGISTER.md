@@ -876,7 +876,16 @@ PASS`, exit 0; 30/30 stress runs clean. Byte counts are modeled from synthetic
 dimensions; no CUDA launch or measured speedup is claimed.
 
 | EG-83 | POD split-K decode: float workspace + reusable per-plan aux | **DONE (plan/bytes gate)** — `src/wubu_pod_plan.c/.h` + `test_eg83_pod_plan`; evidence above. | FlashInfer `flashinfer/flashinfer/pod.py:49-63,127-145` | `test_eg83_pod_plan` | M | reuse aux across layers, measure workspace bytes |
-| EG-84 | AWQ activation-aware uint4 weight scales per channel/group | EG-26 activations; EG-27 load-time quant | vLLM `vllm/model_executor/layers/quantization/auto_awq.py:176-190` | `test_eg84_awq` | M | group_size + zero-point exactness gate |
+**EG-84 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg84_awq`
+gates per-group affine uint4 packing added to `src/wubu_awq.c`: 16 weights in
+two 8-wide groups give scales [0.1000, 0.0933] and zero points [7, 9] with a
+0.04000 max round-trip error. A constant 0.5 group round-trips exactly;
+changing one weight in group 1 leaves all group-0 codes unchanged. Bad group
+sizes, NULL buffers and out-of-range codes are rejected. `test_eg84_awq: PASS`,
+exit 0; 30/30 stress runs clean. Codes are one-per-byte in this gate; no
+activation-magnitude saliency or accuracy result is claimed.
+
+| EG-84 | AWQ activation-aware uint4 weight scales per channel/group | **DONE (quant gate)** — `src/wubu_awq.c/.h` u4 pack/unpack + `test_eg84_awq`; evidence above. | vLLM `vllm/model_executor/layers/quantization/auto_awq.py:176-190` | `test_eg84_awq` | M | group_size + zero-point exactness gate |
 **EG-85 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg85_hadamard`
 gates the existing stateless `src/wubu_hadamard.c`: applying normalized n=8
 rotation twice returns the input within 0.00000012 and preserves energy

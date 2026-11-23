@@ -40,6 +40,14 @@ void wubu_awq_apply_scale_weights(float *W, const float *scales, int n);
 /* Apply AWQ inverse scaling to activations: x[i] /= scale[i] */
 void wubu_awq_apply_scale_activations(float *x, const float *scales, int n);
 
+/* EG-84: uint4 affine group quantization (per-group scale + zero point). */
+#define WUBU_AWQ_U4_MAX_W 4096
+
+int wubu_awq_u4_pack(const float *w, int n, int group,
+                     unsigned char *codes, float *scales, int *zeros);
+int wubu_awq_u4_unpack(const unsigned char *codes, const float *scales,
+                       const int *zeros, int n, int group, float *out);
+
 #ifdef __cplusplus
 }
 #endif

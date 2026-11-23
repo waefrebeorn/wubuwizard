@@ -121,3 +121,61 @@ void wubu_awq_apply_scale_activations(float *x, const float *scales, int n) {
         x[i] /= scales[i];
     }
 }
+
+/* EG-84: per-group affine uint4 pack/unpack, independent of AWQ channel scales. */
+int wubu_awq_u4_pack(const float *w, int n, int group,
+                     unsigned char *codes, float *scales, int *zeros)
+{
+    int groups;
+    if (!w || !codes || !scales || !zeros || n < 1 ||
+        n > WUBU_AWQ_U4_MAX_W || group < 1 || group > n) return -1;
+    groups = (n + group - 1) / group;
+    for (int g = 0; g < groups; ++g) {
+        int lo = g * group, hi = lo + group < n ? lo + group : n;
+        float mn = w[lo], mx = w[lo], scale, zf;
+        for (int i = lo + 1; i < hi; ++i) {
+            if (w[i] < mn) mn = w[i];
+            if (w[i] > mx) mx = w[i];
+        }
+        if (mx == mn) {                  /* exact constant group */
+            if (mn > 0.0f) {
+                scale = mn / 8.0f;
+                zeros[g] = 0;
+            } else if (mn < 0.0f) {
+                scale = -mn / 8.0f;
+                zeros[g] = 15;
+            } else {
+                scale = 1.0f;
+                zeros[g] = 0;
+            }
+        } else {
+            scale = (mx - mn) / 15.0f;
+            zf = -mn / scale;
+            zeros[g] = zf < 0.0f ? 0 : (zf > 15.0f ? 15 : (int)(zf + 0.5f));
+        }
+        scales[g] = scale;
+        for (int i = lo; i < hi; ++i) {
+            double q = (double)w[i] / scale + zeros[g];
+            if (q < 0.0) q = 0.0;
+            if (q > 15.0) q = 15.0;
+            codes[i] = (unsigned char)(int)(q + 0.5);
+        }
+    }
+    return groups;
+}
+
+int wubu_awq_u4_unpack(const unsigned char *codes, const float *scales,
+                       const int *zeros, int n, int group, float *out)
+{
+    int groups;
+    if (!codes || !scales || !zeros || !out || n < 1 ||
+        n > WUBU_AWQ_U4_MAX_W || group < 1 || group > n) return -1;
+    groups = (n + group - 1) / group;
+    for (int g = 0; g < groups; ++g) {
+        int lo = g * group, hi = lo + group < n ? lo + group : n;
+        for (int i = lo; i < hi; ++i)
+            out[i] = scales[g] * (float)((int)codes[i] - zeros[g]);
+    }
+    return 0;
+}
+

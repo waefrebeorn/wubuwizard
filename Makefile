@@ -1111,6 +1111,10 @@ test_eg82_engram: tools/test_eg82_engram.c src/wubu_cond_mem.c
 test_eg85_hadamard: tools/test_eg85_hadamard.c src/wubu_hadamard.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# EG-84: AWQ uint4 group scale/zero-point gate.
+test_eg84_awq: tools/test_eg84_awq.c src/wubu_awq.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 # EG-12: composable sampler chain.
 test_eg12_sampler: tools/test_eg12_sampler.c src/wubu_sampler_chain.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
