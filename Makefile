@@ -46,6 +46,7 @@ CORE_OBJ += src/wubu_batch_h2d.o
 CORE_OBJ += src/wubu_layer_probe.o
 CORE_OBJ += src/wubu_exact_cert.o
 CORE_OBJ += src/wubu_dynamic_tree.o
+CORE_OBJ += src/wubu_conv_store.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -291,6 +292,9 @@ src/wubu_exact_cert.o: src/wubu_exact_cert.c include/wubu_exact_cert.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_dynamic_tree.o: src/wubu_dynamic_tree.c include/wubu_dynamic_tree.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_conv_store.o: src/wubu_conv_store.c include/wubu_conv_store.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1024,6 +1028,10 @@ test_eg70_cert: tools/test_eg70_cert.c src/wubu_exact_cert.c
 
 # EG-90: EAGLE-2 confidence-shaped dynamic tree gate.
 test_eg90_dynamic_tree: tools/test_eg90_dynamic_tree.c src/wubu_dynamic_tree.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-99: content-addressed conversation blocks gate.
+test_eg99_conv_blocks: tools/test_eg99_conv_blocks.c src/wubu_conv_store.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

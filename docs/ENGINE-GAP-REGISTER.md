@@ -936,7 +936,17 @@ are modeled host calls, not CUDA APIs; no transfer-time or tok/s gain is
 claimed by this gate.
 
 | EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | **DONE (portable planner gate)** — `src/wubu_batch_h2d.c/.h` gates group capping, disjoint pinned blobs and abort-without-commit; evidence above. |
-| EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | per-1MiB hashes, prefix+byte key |
+**EG-99 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg99_conv_blocks`
+gates basalt's prefix+byte keying: a 24-byte payload at 8-byte blocks writes 3
+physical files; rewriting the same prefix and bytes writes 0 new files, while
+a different prefix or changed bytes writes 3 new each (9 total). Checkpoints
+are bounded to the root plus the last three turn ends (count 4 after root plus
+four turns). Invalid block size, turn count, NULL buffers and negative token
+positions are rejected. `test_eg99_conv_blocks: PASS`, exit 0; 30/30 stress runs
+clean. Blocks are synthetic 8-byte chunks, not real 1 MiB KV files; no disk I/O
+or resumed-logit equality is measured here.
+
+| EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | **DONE (dedup/bound gate)** — `src/wubu_conv_store.c/.h` gates (prefix,bytes) block keys, cross-conversation dedup and root+3 checkpoint cap; evidence above. |
 **EG-100 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg100_layer_probe`
 probes a synthetic 8-expert / 16-dim layer at decode (1 token) and prompt
 (128 tokens) widths for 2000 reps; this run measured 1024 and 131072 synthetic

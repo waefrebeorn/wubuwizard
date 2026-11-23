@@ -101,6 +101,7 @@ CORE_OBJ += src/wubu_batch_h2d.o
 CORE_OBJ += src/wubu_layer_probe.o
 CORE_OBJ += src/wubu_exact_cert.o
 CORE_OBJ += src/wubu_dynamic_tree.o
+CORE_OBJ += src/wubu_conv_store.o
 
 .PHONY: all cpu-build clean
 
@@ -462,6 +463,10 @@ test_eg70_cert: tools/test_eg70_cert.c src/wubu_exact_cert.c
 
 # EG-90: EAGLE-2 confidence-shaped dynamic tree gate.
 test_eg90_dynamic_tree: tools/test_eg90_dynamic_tree.c src/wubu_dynamic_tree.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-99: content-addressed conversation blocks gate.
+test_eg99_conv_blocks: tools/test_eg99_conv_blocks.c src/wubu_conv_store.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
