@@ -356,7 +356,14 @@ give 1.55 GiB free and 1.24 GiB KV. A 2 GiB page cache drives the UMA case to
 sampling hooks are deferred; this gates the sizing policy.
 
 | EG-35 | Extensible KV sized after warmup, UMA page-cache-corrected free memory | refines EG-03; `wubu_mem_budget.c` estimates before load | vLLM v0.34.0, PR #65413 | `test_eg35_extkv` | M | **DONE (policy)** — `src/wubu_ext_kv.c/.h` takes warmup-minimum free memory, UMA discount and refusal reasons; evidence above. |
-| EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv` | M | FP8 KV round-trip + expert LRFU hit-rate gate |
+**EG-36a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg36_fp8kv`
+packs representative K and V rows (values in [-2,2]) to E4M3 with per-row
+scales of 0.004464 and restores them with max absolute error 0.035714 for both
+(1.8% of the row maximum); storage is 16 FP8 bytes vs 64 F32 bytes. Zero/NULL
+rows and zero scales are rejected. `test_eg36_fp8kv: PASS`, exit 0. The MoE
+expert LRFU/ClassLRU half of EG-36 is a separate mechanism and still TODO.
+
+| EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv` | M | **PARTIAL (FP8 KV done)** — `src/wubu_fp8_kv.c/.h` packs/restores E4M3 KV rows with per-row scale; evidence above. Expert LRFU deferred. |
 | EG-37 | Unified arena, one entry per token, compaction, whole-request admission | new; EG-18 is tiers, not one allocator | SGLang unified memory (11 Nov 2026) | `test_eg37_arena` | L | Highest T1 fit in this sweep; gate mixed KV/state capacity under 6 GB |
 | EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | T1: decode-side prefix reuse; defer multi-rank sharding |
 | EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | Preserve state across turns; gate no re-prefill on resume |
