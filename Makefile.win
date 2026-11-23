@@ -106,6 +106,7 @@ CORE_OBJ += src/wubu_logits_proc.o
 CORE_OBJ += src/wubu_ngram_pool.o
 CORE_OBJ += src/wubu_ngram_map.o
 CORE_OBJ += src/wubu_candidate_selector.o
+CORE_OBJ += src/wubu_index_reuse.o
 
 .PHONY: all cpu-build clean
 
@@ -487,6 +488,10 @@ test_eg72_ngram_map: tools/test_eg72_ngram_map.c src/wubu_ngram_map.c
 
 # EG-74: candidate selector with p-min cut gate.
 test_eg74_selector: tools/test_eg74_selector.c src/wubu_candidate_selector.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-76: cross-layer DSA index reuse gate.
+test_eg76_index_reuse: tools/test_eg76_index_reuse.c src/wubu_index_reuse.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

@@ -51,6 +51,7 @@ CORE_OBJ += src/wubu_logits_proc.o
 CORE_OBJ += src/wubu_ngram_pool.o
 CORE_OBJ += src/wubu_ngram_map.o
 CORE_OBJ += src/wubu_candidate_selector.o
+CORE_OBJ += src/wubu_index_reuse.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -311,6 +312,9 @@ src/wubu_ngram_map.o: src/wubu_ngram_map.c include/wubu_ngram_map.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_candidate_selector.o: src/wubu_candidate_selector.c include/wubu_candidate_selector.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_index_reuse.o: src/wubu_index_reuse.c include/wubu_index_reuse.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1064,6 +1068,10 @@ test_eg72_ngram_map: tools/test_eg72_ngram_map.c src/wubu_ngram_map.c
 
 # EG-74: candidate selector with p-min cut gate.
 test_eg74_selector: tools/test_eg74_selector.c src/wubu_candidate_selector.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-76: cross-layer DSA index reuse gate.
+test_eg76_index_reuse: tools/test_eg76_index_reuse.c src/wubu_index_reuse.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

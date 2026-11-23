@@ -819,7 +819,17 @@ is claimed.
 
 | EG-74 | DFlash2 / LiliCorr candidate selector + p-min cut | **DONE (selector gate)** — `src/wubu_candidate_selector.c/.h` + `test_eg74_selector`; evidence above. | llama.cpp `docs/speculative.md:86-164` | `test_eg74_selector` | M | confidence truncation, hidden-state-conditioned scorer |
 | EG-75 | Training-free sparse-KV retrieval lifecycle (repr → update → query top-k) | EG-44 trained indexer; EG-53/54 evict | SGLang `python/sglang/srt/mem_cache/sparsity/algorithms/base_algorithm.py:10-106`; `quest_algorithm.py:21,55,120` | `test_eg75_sparse_retrieve` | L | accuracy gate before speed gate; page_size=1 token-wise |
-| EG-76 | Reuse DSA top-k indices across layers, skip index-key KV alloc | EG-44 builds indexer only | vLLM `docs/features/index_cache.md`; `vllm/model_executor/layers/mla.py:109` | `test_eg76_index_reuse` | M | F/S pattern, measure KV bytes saved |
+**EG-76 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg76_index_reuse`
+gates a 4-layer / top-3 / 8-dim / 2-byte scenario: the selector layer computes
+[1 3 5] and publishes one 48-byte index-key KV set; two layers with the same
+top-3 reuse it (96 bytes saved), while a divergent top-3 is rejected and must
+recompute. The selector layer cannot reuse its own publication. Invalid layer,
+top-k, NULL buffers and short score rows are rejected.
+`test_eg76_index_reuse: PASS`, exit 0; 30/30 stress runs clean. Byte counts are
+modeled from synthetic dimensions; no measured VRAM or latency result is
+claimed.
+
+| EG-76 | Reuse DSA top-k indices across layers, skip index-key KV alloc | **DONE (reuse/bytes gate)** — `src/wubu_index_reuse.c/.h` + `test_eg76_index_reuse`; evidence above. | vLLM `docs/features/index_cache.md`; `vllm/model_executor/layers/mla.py:109` | `test_eg76_index_reuse` | M | F/S pattern, measure KV bytes saved |
 | EG-77 | E4M3 V residual restored in online softmax + Hadamard low-bit QK | EG-30/36 lack residual-V | FlashInfer `flashinfer/attention/prims_ts/README.md:674-690` | `test_eg77_vc_attn` | L | requires per-tile mean and 128-pt normalized Hadamard |
 | EG-78 | Constant-vector novice experts, zero MLP bytes | EG-51 low-rank surrogate | vLLM `docs/design/expert_substitution.md`; `.../fused_moe/expert_substitution.py` | `test_eg78_expert_sub` | M | load-time prune, preserve logical ids, no renormalize |
 | EG-79 | Stream-K quantized GEMM with partial-sum fixup | EG-01 vec_dot/GEMV only | llama.cpp `ggml/src/ggml-cuda/mmq.cuh:1011-1024` | `test_eg79_streamk` | L | CTA work partition + host native-tiling escape |
