@@ -265,7 +265,15 @@ are rejected. `test_eg25_specfam: PASS`, exit 0. SpecTr, DAG verify, token
 recycling and relaxed verification remain TODO under this same gate family.
 
 | EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam` | L | **PARTIAL (Sequoia sizing done)** — `src/wubu_spec_size.c/.h` gates cost-optimal draft length; SpecTr/DAG/recycling/relaxed still TODO. |
-| EG-26 | Per-token dynamic activation quantization | `act_quant` hits scattered; no named module or gate | W4A16 / FP8 literature | `test_eg26_dynact` | M | Scale per token, gate max absolute error vs reference |
+**EG-26 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg26_dynact`
+quantizes an 8-value loud row to 4-bit with scale 1.1429 (max error 0.57143)
+and a quiet row with scale 0.0286 (max error 0.01429); both errors are within
+half a quantization step. A shared scale borrowed from the loud row gives the
+quiet row max error 0.20000 — 14× worse than the per-token scale. Bad bit
+widths, zero scales and NULL/empty rows are rejected.
+`test_eg26_dynact: PASS`, exit 0.
+
+| EG-26 | Per-token dynamic activation quantization | `act_quant` hits scattered; no named module or gate | W4A16 / FP8 literature | `test_eg26_dynact` | M | **DONE** — `src/wubu_dynact.c/.h` symmetric row-wise 2..8-bit quant/dequant with scale error bound; evidence above. |
 | EG-27 | ISQ quantize-on-CPU before GPU load | quant routines exist; no safetensors quantize-on-load path | mistral.rs ISQ + topology | `test_eg27_isq` | M | depends EG-03; gate peak VRAM during load |
 | EG-28 | Lazy per-layer quantized-KV conversion with budget guard | KV quantization + chunked prefill exist; no threshold conversion score | mlx-lm `maybe_quantize_kv_cache` | `test_eg28_kvquant` | M | depends EG-03; gate quality score vs memory saved |
 | EG-29 | Content-addressed sha256 blob store + manifests | sha1/torrent/CID primitives exist; no blob store | Ollama manifest/blob layout | `test_eg29_blob` | M | Digest validation, dedup, resumable writes; gate round-trip + corrupt blob rejection |
