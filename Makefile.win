@@ -1,6 +1,6 @@
-# Makefile.win — Windows port of wubuwizard (MSYS2 gcc 16 + CUDA 12.4 nvcc).
+# Makefile.win — Windows port of wubuwizard (MSYS2 gcc 16 + CUDA 13.5 nvcc).
 #
-# CPU-only first (proves the port compiles+links); CUDA/sm_75 target is phase 2.
+# CPU gates plus a real CUDA/sm_89 kernel gate (RTX 4050 Laptop).
 # POSIX surface is covered by include/wubu_win.h (force-included) + include/win32 stubs.
 # AVX-512 is disabled (Ryzen 5 3600 has no AVX-512) via WUBU_NO_AVX512; the
 # engine's AVX-512 paths are runtime-dispatched and gated behind that macro.
@@ -8,10 +8,16 @@
 
 CC      = gcc
 CXX     = g++
-NVCC    = nvcc
-CUDA_DIR = C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4
-CUDA_INC = -I"$(CUDA_DIR)/include"
+NVCC    = C:/PROGRA~1/NVIDIA~2/CUDA/v13.5/bin/nvcc.exe
+CUDA_DIR = C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.5
+CUDA_INC = -IC:/PROGRA~1/NVIDIA~2/CUDA/v13.5/include
 CUDA_LIB  = "$(CUDA_DIR)/lib/x64"
+
+# MSVC x64 host environment for nvcc, captured from vcvars64.bat.
+export INCLUDE := C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\include;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.26100.0\\cppwinrt
+export LIB := C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\lib\x64;C:\Program Files (x86)\Windows Kits\10\lib\10.0.26100.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\\lib\10.0.26100.0\\um\x64
+export LIBPATH := C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\lib\x64;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\lib\x86\store\references;C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.26100.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.26100.0;C:\Windows\Microsoft.NET\Framework64\v4.0.30319
+export PATH := C:/PROGRA~1/NVIDIA~2/CUDA/v13.5/bin:C:/PROGRA~1/NVIDIA~2/CUDA/v13.5/bin/x64:C:/PROGRA~2/MICROS~2/2022/BUILDT~1/VC/Tools/MSVC/1444~1.352/bin/HostX64/x64:$(PATH)
 
 CFLAGS  = -O2 -std=c11 -ffast-math -funroll-loops -ftree-vectorize \
           -mavx2 -mfma -mavx -mf16c -DWUBU_NO_AVX512 -D_USE_MATH_DEFINES \
@@ -20,8 +26,8 @@ CFLAGS  = -O2 -std=c11 -ffast-math -funroll-loops -ftree-vectorize \
 # Scalar flags for policy-only gates: MinGW's 16-byte stack faults on GCC's
 # aligned 32-byte AVX stores in main() with -ffast-math + -mavx2.
 CFLAGS_NOAVX = $(filter-out -mavx2 -mfma -mavx -mf16c,$(CFLAGS))
-NVCCFLAGS = -O2 -std=c++17 -I include -DWUBU_BUILD_WIN -arch=sm_75 \
-            $(CUDA_INC) -Xcompiler "-fopenmp"
+NVCCFLAGS = -O2 -std=c++17 -I include -DWUBU_BUILD_WIN -arch=sm_89 \
+            $(CUDA_INC)
 
 LDLIBS  = -L$(CUDA_LIB) -lcudart -lcublas \
           -lws2_32 -ladvapi32 -lkernel32 -luser32 \
@@ -442,3 +448,8 @@ test_gaad: tools/test_gaad.c src/wubu_gaad.o src/wubu_win.o
 test_bear_mlp: tools/test_bear_mlp.c src/wubu_bear_mlp.o src/wubu_win.o
 	$(CC) $(CFLAGS) -o $@ tools/test_bear_mlp.c src/wubu_bear_mlp.o src/wubu_win.o -lm $(LDLIBS)
 	@echo "test_bear_mlp built"
+
+# Real GPU gate: device identity + in-tree cuda_kernels SiLU vs host formula.
+test_gpu_smoke: tools/gpu_smoke.cu
+	$(NVCC) $(NVCCFLAGS) -o $@ tools/gpu_smoke.cu -lcublas -lcudart
+	./$@

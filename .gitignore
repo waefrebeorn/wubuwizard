@@ -194,6 +194,7 @@ fixture*.safetensors
 lfm2_test
 
 # Build artifacts
+/test_gpu_smoke.exe
 bin/
 wubu_cli
 gen_text
