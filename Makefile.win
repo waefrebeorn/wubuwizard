@@ -35,7 +35,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o \
   src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o \
   src/wubu_model_arch.o src/wubu_dense_ffn.o \
-  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o  src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o src/wubu_sleep_alloc.o src/wubu_lora_slots.o src/wubu_hicache.o src/wubu_recompute_sched.o src/wubu_expert_trace.o src/wubu_tree_verify.o src/wubu_skip_softmax.o src/wubu_eagle3.o src/wubu_spec_size.o src/wubu_dynact.o src/wubu_isq_plan.o src/wubu_kv_lazy.o src/wubu_blob_store.o src/wubu_fp8_attn.o src/wubu_capacity_sched.o src/wubu_ext_kv.o src/wubu_fp8_kv.o src/wubu_unified_arena.o src/wubu_page_radix.o src/wubu_agent_state.o src/wubu_invalid_kv.o src/wubu_spec_search.o \
+  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o  src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o src/wubu_sleep_alloc.o src/wubu_lora_slots.o src/wubu_hicache.o src/wubu_recompute_sched.o src/wubu_expert_trace.o src/wubu_tree_verify.o src/wubu_skip_softmax.o src/wubu_eagle3.o src/wubu_spec_size.o src/wubu_dynact.o src/wubu_isq_plan.o src/wubu_kv_lazy.o src/wubu_blob_store.o src/wubu_fp8_attn.o src/wubu_capacity_sched.o src/wubu_ext_kv.o src/wubu_fp8_kv.o src/wubu_unified_arena.o src/wubu_page_radix.o src/wubu_agent_state.o src/wubu_invalid_kv.o src/wubu_spec_search.o src/wubu_tv_accept.o \
   src/safetensors_reader.o \
   src/wubu_repetition.o src/wubu_lora.o src/wubu_model_adapter.o \
   src/wubu_model_safetensors_bridge.o src/wubu_safetensors_shard.o \
@@ -261,6 +261,10 @@ test_eg40_invalidkv: tools/test_eg40_invalidkv.c src/wubu_invalid_kv.c
 
 # EG-41: hardware/memory-aware speculative config search.
 test_eg41_specsearch: tools/test_eg41_specsearch.c src/wubu_spec_search.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-42: TV acceptance identity and calibration.
+test_eg42_tv: tools/test_eg42_tv.c src/wubu_tv_accept.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

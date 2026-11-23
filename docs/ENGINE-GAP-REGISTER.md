@@ -415,7 +415,16 @@ values here are supplied, not measured on a local model; the tiered speedup
 claim is limited to the cost model.
 
 | EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | **DONE (search policy)** — `src/wubu_spec_search.c/.h` gates feasible-set search under VRAM; evidence above. Measured per-tier model speedup deferred. |
-| EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | Validate acceptance-probability identity; gate calibration |
+**EG-42 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg42_tv`
+validates the identity `accept(p,q) = sum min(p,q) = 1 - TV(p,q)` on
+p=[0.5,0.3,0.2], q=[0.4,0.4,0.2]: acceptance 0.9000, TV 0.1000. Identical
+distributions give 1.0/0.0 and disjoint distributions give 0.0/1.0. A seeded
+20,000-trial speculative-sampling calibration gives empirical acceptance
+0.9018 against the predicted 0.9000. Malformed rows and zero trials are
+rejected. `test_eg42_tv: PASS`, exit 0. Actual drafter training is not claimed;
+this gates the objective identity and calibration.
+
+| EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | **DONE (identity + calibration)** — `src/wubu_tv_accept.c/.h` gates the TV acceptance identity and seeded empirical check; drafter training deferred. |
 | EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | Gate draft memory saved vs acceptance drop |
 | EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | Needs an accuracy gate before any speed claim |
 | EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | One family per gate; start with low-rank keys |
