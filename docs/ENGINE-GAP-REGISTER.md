@@ -701,7 +701,18 @@ split-KV reduction over a 64x4 float KV matches the direct sum exactly
 trace is claimed by this gate.
 
 | EG-68 | Strata: zero-allocation host, prefill launch-count amortization, 4-way split-KV decode reduction | no launch-count instrumentation | Strata (Rust+HIP), front-f §19 | `test_eg68_strata` | M | **DONE (policy gate)** — `src/wubu_strata.c/.h` gates one-allocation host bump arena, 8x prefill launch amortization and exact 4-way split-KV reduction; evidence above. |
-| EG-69 | ReplaySSM: cache SSM inputs rather than state, making speculative rollback append-only | engine has SSM kernels but no recurrent-state rollback object | ReplaySSM, front-f §15 | `test_eg69_replayssm` | L | Conditional on hybrid models; gate rollback exactness |
+**EG-69 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg69_replayssm`
+replays a dim-2 Mamba-2 recurrence `S = alpha*S + v*k^T`, `o = S*q` over 40
+steps with an 8-input buffer: 4 checkpoint commits, a bounded buffer and
+max error 0.00000011 against an independent scalar recurrence. After 7 inputs,
+truncating the buffer back to 5 and continuing 3 steps matches a fresh
+controller exactly (maxerr 0.00000000), proving rollback needs no state
+snapshot. Invalid dim/cap, NULL pointers and out-of-range rollback are
+rejected. `test_eg69_replayssm: PASS`, exit 0; 30/30 stress runs clean. This is
+an exactness gate over a synthetic recurrence; no kernel throughput or
+model-quality result is claimed.
+
+| EG-69 | ReplaySSM: cache SSM inputs rather than state, making speculative rollback append-only | engine has SSM kernels but no recurrent-state rollback object | ReplaySSM, front-f §15 | `test_eg69_replayssm` | L | **DONE (exactness gate)** — `src/wubu_replay_ssm.c/.h` gates checkpoint+buffer replay, bounded buffer and truncation-only rollback; evidence above. |
 | EG-70 | Output-exactness certificate with reuse generations for cached computation | gate discipline has no certificate of exact reuse | Memory-Sovereign arXiv 2608.23805 | `test_eg70_cert` | M | Gate certificate round-trip; strengthens no-gate-no-ship |
 
 ### Deferred watchlist — no gate reserved yet

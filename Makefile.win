@@ -91,6 +91,7 @@ CORE_OBJ += src/wubu_adapt_len.o
 CORE_OBJ += src/wubu_tree_accept.o
 CORE_OBJ += src/wubu_prefetch_feedback.o
 CORE_OBJ += src/wubu_reclaim_margin.o
+CORE_OBJ += src/wubu_replay_ssm.o
 
 .PHONY: all cpu-build clean
 
@@ -412,6 +413,10 @@ test_eg95_prefetch_feedback: tools/test_eg95_prefetch_feedback.c src/wubu_prefet
 
 # EG-97: overflow-class memory margin gate.
 test_eg97_reclaim_margin: tools/test_eg97_reclaim_margin.c src/wubu_reclaim_margin.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-69: checkpoint+input-buffer SSM rollback gate.
+test_eg69_replayssm: tools/test_eg69_replayssm.c src/wubu_replay_ssm.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
