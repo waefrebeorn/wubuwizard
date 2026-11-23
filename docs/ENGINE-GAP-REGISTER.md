@@ -845,7 +845,18 @@ node and commits 4. NULL buffers, bad budget and invalid parents are rejected.
 are synthetic; no throughput or model-quality result is claimed.
 
 | EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | **DONE (exactness gate)** — `src/wubu_two_level_verify.c/.h` gates no-commit quantized chain, exact ratification and budget-truncated subtree commit; evidence above. |
-| EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | newest checkpoint <= common; never stage decode KV |
+**EG-93 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg93_kv_rollback`
+gates an 8-token sliding KV ring: checkpoints at positions 10 and 20 are capped
+at the newest 2, and the ring hash 0x3b8f6a5c3f26787f matches an independently
+computed prefill ring. A new prompt sharing a 15-token prefix then diverging
+selects the newest checkpoint at position <= common (10), discards the later
+checkpoint (count 1) and replays the suffix with prefill arithmetic to position
+17; its ring hash equals a fresh full prefill of the new prompt. No eligible
+checkpoint and bad inputs return -1. `test_eg93_kv_rollback: PASS`, exit 0;
+30/30 stress runs clean. Token ids are synthetic; no latency or memory saving
+is measured here.
+
+| EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | **DONE (exactness gate)** — `src/wubu_kv_rollback.c/.h` gates two-checkpoint cap, newest-eligible selection and byte-equal prefill-only replay; evidence above. |
 **EG-94 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg94_accept_table`
 fits a 10x7x18 log-acceptance table with prior weight 5: 9/10 accepts at
 (slot 2, rank 1, p≈0.55) give logq -0.2657 versus -1.4553 for 1/10, and an

@@ -95,6 +95,7 @@ CORE_OBJ += src/wubu_replay_ssm.o
 CORE_OBJ += src/wubu_keyed_sample.o
 CORE_OBJ += src/wubu_accept_table.o
 CORE_OBJ += src/wubu_two_level_verify.o
+CORE_OBJ += src/wubu_kv_rollback.o
 
 .PHONY: all cpu-build clean
 
@@ -432,6 +433,10 @@ test_eg94_accept_table: tools/test_eg94_accept_table.c src/wubu_accept_table.c
 
 # EG-92: two-level quantized pre-verify then exact commit gate.
 test_eg92_two_level_verify: tools/test_eg92_two_level_verify.c src/wubu_two_level_verify.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-93: bounded-checkpoint KV prefix rollback gate.
+test_eg93_kv_rollback: tools/test_eg93_kv_rollback.c src/wubu_kv_rollback.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
