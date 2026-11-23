@@ -836,7 +836,18 @@ not reproduced or claimed here.
 | EG-91 | Pointer-jumping tree accept + KV permutation | linear prefix walk | SpecPilot `specpilot_d7_accept.py` | `test_eg91_tree_accept` | S | **DONE (index gate)** — `src/wubu_tree_accept.c/.h` gates log-depth doubling acceptance and accepted-path-first KV compaction; evidence above. |
 | EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | quantized pass commits no tokens; exactness gate |
 | EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | newest checkpoint <= common; never stage decode KV |
-| EG-94 | Empirical acceptance table for tree ordering | fixed ordering | SpecPilot `d3m_calib_table.py` | `test_eg94_accept_table` | S | data-only, LOG_Q[slot,rank,bin], pairs with EG-90 |
+**EG-94 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg94_accept_table`
+fits a 10x7x18 log-acceptance table with prior weight 5: 9/10 accepts at
+(slot 2, rank 1, p≈0.55) give logq -0.2657 versus -1.4553 for 1/10, and an
+unobserved cell stays neutral at 0.0. Best-first ordering with an empty table
+picks the p=0.5 candidate; after ten calibration observations that mark it
+low and the p=0.3 candidate high, the 0.5-blended score flips the choice to
+the latter. Bad slot/rank/probability, NULL buffers and zero candidates are
+rejected. `test_eg94_accept_table: PASS`, exit 0; 30/30 stress runs clean.
+Counts are synthetic; the upstream +0.75%/+0.55% held-out token gains are not
+reproduced or claimed here.
+
+| EG-94 | Empirical acceptance table for tree ordering | fixed ordering | SpecPilot `d3m_calib_table.py` | `test_eg94_accept_table` | S | **DONE (data/ordering gate)** — `src/wubu_accept_table.c/.h` gates prior-weighted log-Q fitting and 0.5-blended best-first selection; evidence above. |
 **EG-95 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg95_prefetch_feedback`
 gates MemVanta's closed-loop prefetch policy over synthetic telemetry windows:
 usefulness 5/10 drops depth 3->2 and a budget-skip window drops 2->1. Two

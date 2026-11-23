@@ -93,6 +93,7 @@ CORE_OBJ += src/wubu_prefetch_feedback.o
 CORE_OBJ += src/wubu_reclaim_margin.o
 CORE_OBJ += src/wubu_replay_ssm.o
 CORE_OBJ += src/wubu_keyed_sample.o
+CORE_OBJ += src/wubu_accept_table.o
 
 .PHONY: all cpu-build clean
 
@@ -422,6 +423,10 @@ test_eg69_replayssm: tools/test_eg69_replayssm.c src/wubu_replay_ssm.c
 
 # EG-89: position-keyed exponential-race sampling gate.
 test_eg89_keyed_sample: tools/test_eg89_keyed_sample.c src/wubu_keyed_sample.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-94: empirical tree-ordering acceptance table gate.
+test_eg94_accept_table: tools/test_eg94_accept_table.c src/wubu_accept_table.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
