@@ -356,13 +356,23 @@ priority: with a 12-token cycle capacity and a 6-token batch ceiling it admits
 6-token capacity it admits the priority-3 request plus a 1-token companion and
 reports 9 rejected. A 7-token request against a 6-token ceiling is rejected
 whole rather than split. `test_eg32_capacity: PASS`, exit 0. The persistent
-compact-session half of EG-32 is still TODO.
+compact-session half is gated separately as EG-32b below.
 
 **EG-31 (pipeline parallelism) explicitly deferred:** the register notes zero
 hits for `pipeline_parallel|stage_id|pp_rank`; this is a multi-GPU feature and
 the target box is a single 6 GB GPU. No gate is claimed.
 
-| EG-32 | Capacity + micro-batch scheduler and persistent compact session | Architectural, medium fit; waits for EG-09/EG-10 | `test_eg32_capacity` | L | **PARTIAL (scheduler done)** — `src/wubu_capacity_sched.c/.h` gates priority packing and explicit rejection; compact session deferred. |
+**EG-32b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg32_compact_session`
+gates a long-lived session: three queued requests (prompt 1, decode 2, prompt 3)
+fold at the step boundary into a padded-free compact step `[1 3 2]` with slot 3
+left untouched; a later request fills the free slot. With compact disabled the
+step is refused and capability reports `(compact=0, reason=1)`; a full session
+holds a third command pending instead of padding or dropping it. Duplicate ids,
+bad kinds, zero token counts and bad capacities are rejected.
+`test_eg32_compact_session: PASS`, exit 0; 30/30 stress runs clean. Resident
+counts are synthetic; no GPU runtime or throughput claim is made.
+
+| EG-32 | Capacity + micro-batch scheduler and persistent compact session | Architectural, medium fit; waits for EG-09/EG-10 | `test_eg32_capacity`, `test_eg32_compact_session` | L | **DONE (both halves gated)** — `src/wubu_capacity_sched.c/.h` gates priority packing and explicit rejection; `src/wubu_compact_session.c/.h` gates the long-lived command queue and padded-free compact step (EG-32b). |
 | EG-33 | Disaggregated connector protocol | In-tree file-backed handoff exists; network protocol only if a multi-node use case appears | `test_eg33_connector` | L | **DEFERRED (2026-11-23):** network connector only if a multi-node use case appears; in-tree file-backed handoff remains the local path.
 **EG-34 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg34_logits`
 gates two composable processors: typical_p=0.5 on four logits keeps only the
