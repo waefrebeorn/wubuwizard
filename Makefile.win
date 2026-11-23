@@ -126,6 +126,7 @@ CORE_OBJ += src/wubu_varbit_vq.o
 CORE_OBJ += src/wubu_gqa_index.o
 CORE_OBJ += src/wubu_expert_stage.o
 CORE_OBJ += src/wubu_aot_pack.o
+CORE_OBJ += src/wubu_adaptive_cap.o
 
 .PHONY: all cpu-build clean
 
@@ -595,6 +596,10 @@ test_eg45_expert_stage: tools/test_eg45_expert_stage.c src/wubu_expert_stage.c
 
 # EG-66c: AOT kernel pack selector gate.
 test_eg66_aot_pack: tools/test_eg66_aot_pack.c src/wubu_aot_pack.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-66b: adaptive draft cap gate.
+test_eg66_adaptive_cap: tools/test_eg66_adaptive_cap.c src/wubu_adaptive_cap.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

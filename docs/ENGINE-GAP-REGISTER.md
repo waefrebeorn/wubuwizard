@@ -782,7 +782,15 @@ table construction, as are bad ranges, NULL tables and zero/negative shapes.
 `test_eg66_aot_pack: PASS`, exit 0; 30/30 stress runs clean. Variants are
 synthetic ids; no compiled kernel is claimed.
 
-| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold`, `test_eg66_aot_pack` | L | **PARTIAL (snapshot + AOT selection done)** — `src/wubu_tensorfold.c/.h` gates byte-exact disk snapshot/restore; `src/wubu_aot_pack.c/.h` gates unambiguous shape-to-variant dispatch (EG-66c); adaptive caps and kv8 K/V still TODO. |
+**EG-66b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg66_adaptive_cap`
+gates adaptive draft caps against acceptance and free KV slots: from cap 4, a
+full-accept window grows to 5, a fully rejected window shrinks to 3, a half-
+accept window holds at 4, and a 3-slot KV budget clamps a would-be 5 to 3.
+Bounds [1,8], impossible accept counts, zero drafted tokens and bad caps are
+rejected. `test_eg66_adaptive_cap: PASS`, exit 0; 30/30 stress runs clean.
+Counts are synthetic; no acceptance-rate or throughput result is claimed.
+
+| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold`, `test_eg66_aot_pack`, `test_eg66_adaptive_cap` | L | **PARTIAL (snapshot + AOT + adaptive caps done)** — `src/wubu_tensorfold.c/.h` gates byte-exact snapshots; `src/wubu_aot_pack.c/.h` gates shape dispatch (EG-66c); `src/wubu_adaptive_cap.c/.h` gates cap adaptation under a KV budget (EG-66b); kv8 K/V still TODO. |
 **EG-67 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg67_titan`
 plans 8 one-GB experts under a 6 GB cap: 4 hot experts resident plus one
 streamed warm/cold expert give a modeled 5 GB peak, versus 8 GB if all were
