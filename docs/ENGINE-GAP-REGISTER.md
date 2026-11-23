@@ -841,7 +841,15 @@ refused. `test_eg78_expert_sub: PASS`, exit 0; 30/30 stress runs clean. Byte
 counts and vectors are synthetic; no model-quality result is claimed.
 
 | EG-78 | Constant-vector novice experts, zero MLP bytes | **DONE (substitution gate)** — `src/wubu_expert_sub.c/.h` + `test_eg78_expert_sub`; evidence above. | vLLM `docs/design/expert_substitution.md`; `.../fused_moe/expert_substitution.py` | `test_eg78_expert_sub` | M | load-time prune, preserve logical ids, no renormalize |
-| EG-79 | Stream-K quantized GEMM with partial-sum fixup | EG-01 vec_dot/GEMV only | llama.cpp `ggml/src/ggml-cuda/mmq.cuh:1011-1024` | `test_eg79_streamk` | L | CTA work partition + host native-tiling escape |
+**EG-79 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg79_streamk`
+gates a portable Stream-K partition: two output-row blocks split m=2 as
+[0,1)+[1,2); an uneven m=3 split gives [0,1)+[1,3), and blocks>m is rejected.
+A 2x3 GEMM with k=4 computed from two partial sets and fixed up matches the
+direct dot products exactly (maxerr 0); the fixup count is 2. NULL buffers are
+rejected. `test_eg79_streamk: PASS`, exit 0; 30/30 stress runs clean. This is a
+host partition/fixup gate; no CUDA CTA launch or speedup is claimed.
+
+| EG-79 | Stream-K quantized GEMM with partial-sum fixup | **DONE (partition gate)** — `src/wubu_streamk.c/.h` + `test_eg79_streamk`; evidence above. | llama.cpp `ggml/src/ggml-cuda/mmq.cuh:1011-1024` | `test_eg79_streamk` | L | CTA work partition + host native-tiling escape |
 **EG-80 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg80_fly`
 gates FLy's policy: normalized entropy is 1.0 for a uniform 4-way score row
 and 0.118 for a peaked one. With threshold 0.7 and a 3-decision window, a

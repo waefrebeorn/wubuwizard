@@ -57,6 +57,7 @@ CORE_OBJ += src/wubu_fly_defer.o
 CORE_OBJ += src/wubu_pod_plan.o
 CORE_OBJ += src/wubu_cond_mem.o
 CORE_OBJ += src/wubu_hadamard.o
+CORE_OBJ += src/wubu_streamk.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -332,6 +333,9 @@ src/wubu_pod_plan.o: src/wubu_pod_plan.c include/wubu_pod_plan.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_cond_mem.o: src/wubu_cond_mem.c include/wubu_cond_mem.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_streamk.o: src/wubu_streamk.c include/wubu_streamk.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1113,6 +1117,10 @@ test_eg85_hadamard: tools/test_eg85_hadamard.c src/wubu_hadamard.c
 
 # EG-84: AWQ uint4 group scale/zero-point gate.
 test_eg84_awq: tools/test_eg84_awq.c src/wubu_awq.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-79: Stream-K partition and partial-sum fixup gate.
+test_eg79_streamk: tools/test_eg79_streamk.c src/wubu_streamk.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
