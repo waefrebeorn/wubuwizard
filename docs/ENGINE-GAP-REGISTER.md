@@ -648,7 +648,17 @@ the accuracy gate. Invalid variant, null query and zero scale are rejected;
 bandwidth proxy, not measured wall-clock speedup.
 
 | EG-63 | SpecQuant: INT4/FP8/FP16 variants from one base, query complexity routing | EG-27 is single-precision quantize-on-load | SpecQuant arXiv 2609.21704 | `test_eg63_specquant` | M | **DONE (routing gate)** — `src/wubu_specquant.c/.h` gates <2% routed loss and 75% bytes cut; evidence above. |
-| EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | Gate throughput under a fixed memory cap |
+**EG-64 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg64_memspec`
+schedules six draft steps under a fixed 100-byte cap. Backfilling around a
+step that cannot fit finishes in 18 ticks versus 26 for head-of-line FIFO —
+1.44x throughput proxy — with peak resident bytes 80 in both cases. The first
+implementation draft had undefined helper calls; it was rewritten as a single
+tick loop with explicit started/running state before the gate was run.
+Zero cap, invalid policy and oversized steps are rejected; 30-run stress clean.
+`test_eg64_memspec: PASS`, exit 0. Ticks are a deterministic simulation, not
+measured edge-device throughput.
+
+| EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | **DONE (schedule gate)** — `src/wubu_memspec.c/.h` gates 18 vs 26 ticks at the same 100-byte cap; evidence above. |
 | EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | Gate memory reduction vs output parity |
 | EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | Snapshot round-trip gate first; never vendor Zig code |
 | EG-67 | titan-engine: tiered experts + prefill expert streaming + hybrid prefix cache on a small consumer GPU | EG-07/EG-20 lack prefill streaming | titan-engine, front-f §18 | `test_eg67_titan` | L | Gate peak VRAM on 6 GB class |
