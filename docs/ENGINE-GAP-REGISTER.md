@@ -395,7 +395,16 @@ speculation from Hibana are not claimed by this gate; only state persistence
 and re-prefill avoidance are.
 
 | EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | **PARTIAL (state persistence)** — `src/wubu_agent_state.c/.h` gates zero-re-prefill resume and prefix extension; surgery/adaptive speculation deferred. |
-| EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | Gate lossless commit + preemption threshold |
+**EG-40 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg40_invalidkv`
+verifies stale KV tokens `[1,2,3,4]` against freshly prefilled `[1,2,9,4]`:
+longest common prefix 2 gives rate 0.50, which commits 2 accepted tokens at a
+0.5 threshold but preempts to 0 accepted tokens at a 0.75 threshold. An
+unchanged prefix accepts all 4 with rate 1.00. Invalid pointers, zero lengths
+and out-of-range thresholds fail closed. `test_eg40_invalidkv: PASS`, exit 0.
+Actual KV tensor commit is the caller's responsibility; this gate owns the
+accept/preempt decision.
+
+| EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | **DONE (decision policy)** — `src/wubu_invalid_kv.c/.h` gates longest-prefix verification and threshold preemption; evidence above. |
 | EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | Search over draft config; gate parity + measured speedup per tier |
 | EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | Validate acceptance-probability identity; gate calibration |
 | EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | Gate draft memory saved vs acceptance drop |
