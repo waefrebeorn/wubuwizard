@@ -381,9 +381,20 @@ packs representative K and V rows (values in [-2,2]) to E4M3 with per-row
 scales of 0.004464 and restores them with max absolute error 0.035714 for both
 (1.8% of the row maximum); storage is 16 FP8 bytes vs 64 F32 bytes. Zero/NULL
 rows and zero scales are rejected. `test_eg36_fp8kv: PASS`, exit 0. The MoE
-expert LRFU/ClassLRU half of EG-36 is a separate mechanism and still TODO.
+expert LRFU/ClassLRU half is gated separately as EG-36b below.
 
-| EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv` | M | **PARTIAL (FP8 KV done)** — `src/wubu_fp8_kv.c/.h` packs/restores E4M3 KV rows with per-row scale; evidence above. Expert LRFU deferred. |
+**EG-36b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg36_expert_cache`
+gates ClassLRU-protected LRFU replacement: a four-slot cache holds routed
+experts 10/11/12 and protected expert 0; after refreshing 10 at t=2, a miss at
+t=3 evicts the older unprotected slot 11, keeps 0/10/12/20, and reports 1
+eviction with 0 protected evictions. When every slot is protected, a miss
+still evicts and increments the protected-eviction counter. All misses are
+pending fetches with 0 synchronous wait units. Bad slots, NULL pointers and
+negative ids are rejected. `test_eg36_expert_cache: PASS`, exit 0; 30/30 stress
+runs clean. Slot counts and wait units are synthetic policy counters, not
+measured residency or CPU timings.
+
+| EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv`, `test_eg36_expert_cache` | M | **DONE (both halves gated)** — `src/wubu_fp8_kv.c/.h` packs/restores E4M3 KV rows with per-row scale; `src/wubu_expert_cache.c/.h` gates LRFU victim choice with ClassLRU protection and non-waiting misses (EG-36b). |
 **EG-37 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg37_arena`
 allocates a 3-token KV request plus standalone STATE and KV token slots in one
 1000-byte arena (650 used, no overlaps). After freeing four tokens the arena

@@ -117,6 +117,7 @@ CORE_OBJ += src/wubu_dfly.o
 CORE_OBJ += src/wubu_sparse_retrieve.o
 CORE_OBJ += src/wubu_suffix_spec.o
 CORE_OBJ += src/wubu_token_recycle.o
+CORE_OBJ += src/wubu_expert_cache.o
 
 .PHONY: all cpu-build clean
 
@@ -550,6 +551,10 @@ test_eg73_suffix_spec: tools/test_eg73_suffix_spec.c src/wubu_suffix_spec.c
 
 # EG-25b: token recycling from verified chains.
 test_eg25_recycle: tools/test_eg25_recycle.c src/wubu_token_recycle.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-36b: MoE expert LRFU/ClassLRU cache gate.
+test_eg36_expert_cache: tools/test_eg36_expert_cache.c src/wubu_expert_cache.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
