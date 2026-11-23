@@ -246,7 +246,15 @@ accuracy guard, not a measured kernel speedup (no GPU-util/throughput telemetry
 on this host; EG-22 remains deferred for the same reason).
 
 | EG-23 | Skip-Softmax / BLASST calibrated block pruning | flash attention exists; no per-length calibrated threshold | NVIDIA Skip Softmax blog, TensorRT sparse-attention docs | `test_eg23_skipsoftmax` | M | **DONE (policy + accuracy guard)** — `src/wubu_skip_softmax.c/.h` with per-bucket percentile threshold and lost-mass guard; evidence above. Kernel speedup unmeasured. |
-| EG-24 | EAGLE-3 direct token prediction + tri-layer fusion | `src/wubu_eagle.c` implements EAGLE-1 truncated-layer drafting only | EAGLE-3 arXiv 2503.01840 | `test_eg24_eagle3` | L | Direct prediction head + dynamic tree; gate acceptance rate |
+**EG-24 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg24_eagle3`
+fuses three hidden states with weights 0.1/0.2/0.7 into `[0.56, 0.89]`, predicts
+token 1 directly (a layer-0-only prediction picks the wrong token 0), and
+reports softmax-gap confidence 0.1106. Feeding that confidence into the EG-21
+tree verifier accepts both drafted tokens (`2/2`) with deterministic uniforms.
+30/30 stress runs passed. `test_eg24_eagle3: PASS`, exit 0. Trained fusion
+weights and an end-to-end model harness remain deferred.
+
+| EG-24 | EAGLE-3 direct token prediction + tri-layer fusion | `src/wubu_eagle.c` implements EAGLE-1 truncated-layer drafting only | EAGLE-3 arXiv 2503.01840 | `test_eg24_eagle3` | L | **DONE (prediction policy)** — `src/wubu_eagle3.c/.h` fuses tri-layer hidden states, direct logits and softmax-gap confidence; evidence above. Trained weights deferred. |
 | EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam` | L | One mechanism per gate, starting with Sequoia sizing |
 | EG-26 | Per-token dynamic activation quantization | `act_quant` hits scattered; no named module or gate | W4A16 / FP8 literature | `test_eg26_dynact` | M | Scale per token, gate max absolute error vs reference |
 | EG-27 | ISQ quantize-on-CPU before GPU load | quant routines exist; no safetensors quantize-on-load path | mistral.rs ISQ + topology | `test_eg27_isq` | M | depends EG-03; gate peak VRAM during load |
