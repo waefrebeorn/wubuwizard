@@ -659,7 +659,15 @@ Zero cap, invalid policy and oversized steps are rejected; 30-run stress clean.
 measured edge-device throughput.
 
 | EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | **DONE (schedule gate)** — `src/wubu_memspec.c/.h` gates 18 vs 26 ticks at the same 100-byte cap; evidence above. |
-| EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | Gate memory reduction vs output parity |
+**EG-65 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg65_leanstream`
+compares full materialization of 64x8 hidden states (2048 bytes) with an
+8-token chunked stream plus a refined running summary (288 bytes), a 7.111x
+peak working-set reduction. Outputs are byte-identical (`memcmp` clean, maxerr
+0.00000000). Zero chunk size and null input are rejected; 30-run stress clean.
+`test_eg65_leanstream: PASS`, exit 0. Working set is modeled in host memory,
+not measured GPU VRAM; no partial-result GPU kernel is shipped by this gate.
+
+| EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | **DONE (streaming parity gate)** — `src/wubu_leanstream.c/.h` gates 7.111x working-set cut at byte-identical output; evidence above. |
 | EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | Snapshot round-trip gate first; never vendor Zig code |
 | EG-67 | titan-engine: tiered experts + prefill expert streaming + hybrid prefix cache on a small consumer GPU | EG-07/EG-20 lack prefill streaming | titan-engine, front-f §18 | `test_eg67_titan` | L | Gate peak VRAM on 6 GB class |
 | EG-68 | Strata: zero-allocation host, prefill launch-count amortization, 4-way split-KV decode reduction | no launch-count instrumentation | Strata (Rust+HIP), front-f §19 | `test_eg68_strata` | M | Gate allocation count and KV reduction |
