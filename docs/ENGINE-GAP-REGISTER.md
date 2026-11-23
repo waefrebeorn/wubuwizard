@@ -447,7 +447,15 @@ This is an untrained indexer policy; the trained indexer, GQA grouping and
 tile-size speed claims remain deferred.
 
 | EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | **PARTIAL (accuracy gate only)** — `src/wubu_sparse_indexer.c/.h` gates top-k recall before any speed claim; trained indexer and tile speed deferred. |
-| EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | One family per gate; start with low-rank keys |
+**EG-45a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg45_lowrank`
+approximates an 8x6 key matrix constructed from an exact rank-2 factorization.
+Subspace iteration reconstructs it with relative Frobenius error 0.000000 while
+rank 1 gives 0.295834; the rank-2 factors store 28 values instead of 48
+(ratio 0.583). A dead scratch loop that read uninitialized memory was removed
+when the gate surfaced it. `test_eg45_lowrank: PASS`, exit 0. Variable-bit VQ
+and coordinated expert staging are separate families and still TODO.
+
+| EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | **PARTIAL (low-rank keys done)** — `src/wubu_lowrank_kv.c/.h` gates reconstruction error and storage ratio; VQ and expert staging deferred. |
 | EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists |
 
 ## Wave 6 — second-degree, new engines and 2026 Q3 (deduped)
