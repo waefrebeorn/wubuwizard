@@ -713,7 +713,17 @@ an exactness gate over a synthetic recurrence; no kernel throughput or
 model-quality result is claimed.
 
 | EG-69 | ReplaySSM: cache SSM inputs rather than state, making speculative rollback append-only | engine has SSM kernels but no recurrent-state rollback object | ReplaySSM, front-f §15 | `test_eg69_replayssm` | L | **DONE (exactness gate)** — `src/wubu_replay_ssm.c/.h` gates checkpoint+buffer replay, bounded buffer and truncation-only rollback; evidence above. |
-| EG-70 | Output-exactness certificate with reuse generations for cached computation | gate discipline has no certificate of exact reuse | Memory-Sovereign arXiv 2608.23805 | `test_eg70_cert` | M | Gate certificate round-trip; strengthens no-gate-no-ship |
+**EG-70 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg70_cert`
+gates a certificate with identity 0x1234, semantic-demand bound 4096, hard
+authority and horizon 128: it verifies a bit-identical 4-float logit row and
+rejects a 1e-4 delta or a wrong row length. Encode/decode round-trips in 72
+bytes with an FNV checksum; a tampered byte is rejected. Async reuse 1->2 is
+accepted while stale or repeated generations are rejected. Bad identity,
+zero bound and out-of-range authority are refused. `test_eg70_cert: PASS`,
+exit 0; 30/30 stress runs clean. Certificate fields are synthetic; this is not
+a whole-process memory audit or a model-quality claim.
+
+| EG-70 | Output-exactness certificate with reuse generations for cached computation | gate discipline has no certificate of exact reuse | Memory-Sovereign arXiv 2608.23805 | `test_eg70_cert` | M | **DONE (exactness/reuse gate)** — `src/wubu_exact_cert.c/.h` gates bit-exact logit equivalence, checksummed round-trip and advancing reuse generations; evidence above. |
 
 ### Deferred watchlist — no gate reserved yet
 
