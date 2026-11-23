@@ -551,7 +551,18 @@ count, negative proxy weight and null summary are rejected; 30-run stress
 clean. `test_eg54_proxy: PASS`, exit 0. No latency claim is made.
 
 | EG-54 | Block-sparse proxy routes: unselected KV blocks contribute a summary, not zero | no block summary path | front-e E11 | `test_eg54_proxy` | M | **DONE (proxy route)** — `src/wubu_proxy_route.c/.h` gates 0.07356→0.00000 error at equal fetch budget; evidence above. |
-| EG-55 | UNO: gated-LoRA diffusion drafter on the verifier backbone, one KV, Psi-Spec lossless sampling | EG-17 is adapter slots, EG-24 a separate head | UNO arXiv 2609.04010 | `test_eg55_uno` | L | Gate losslessness + shared-KV memory |
+**EG-55 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg55_uno`
+uses a single 64-float KV allocation shared by backbone and drafter. A closed
+LoRA gate reproduces the backbone output exactly; an open gate adds the low-rank
+delta. Over 200,000 speculative samples the emitted token distribution matches
+the target within 0.00114 (tolerance 0.01). The gate caught a real sampling
+defect: the residual used the drawn token's acceptance probability globally
+instead of the pointwise `(p-q)+` correction, biasing token 0 by ~0.01; fixed
+in `wubu_uno.c`. Invalid token indices, uniforms and dimensions are rejected;
+30-run stress clean. `test_eg55_uno: PASS`, exit 0. No real model perplexity
+claim is made.
+
+| EG-55 | UNO: gated-LoRA diffusion drafter on verifier backbone, one KV, Psi-Spec lossless sampling | EG-17 is adapter slots, EG-24 a separate head | UNO arXiv 2609.04010 | `test_eg55_uno` | L | **DONE (sampling + shared KV)** — `src/wubu_uno.c/.h` gates lossless distribution and one KV; evidence above. |
 | EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | Gate accepted tokens per target pass |
 | EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | Gate LM-head memory cut vs acceptance |
 | EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | Gate TTFT vs answer fidelity |
