@@ -790,7 +790,15 @@ Bounds [1,8], impossible accept counts, zero drafted tokens and bad caps are
 rejected. `test_eg66_adaptive_cap: PASS`, exit 0; 30/30 stress runs clean.
 Counts are synthetic; no acceptance-rate or throughput result is claimed.
 
-| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold`, `test_eg66_aot_pack`, `test_eg66_adaptive_cap` | L | **PARTIAL (snapshot + AOT + adaptive caps done)** — `src/wubu_tensorfold.c/.h` gates byte-exact snapshots; `src/wubu_aot_pack.c/.h` gates shape dispatch (EG-66c); `src/wubu_adaptive_cap.c/.h` gates cap adaptation under a KV budget (EG-66b); kv8 K/V still TODO. |
+**EG-66d evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg66_kv8`
+gates kv8 INT8 K/V codecs: an eight-value row packs to INT8 codes with a
+per-row f32 scale of 0.015748 and decodes with 0.007874 max error; storage is
+12 bytes (8 codes + 4-byte scale) versus 32 bytes as F32. Zero-length rows,
+NULL buffers and non-positive scales are rejected. `test_eg66_kv8: PASS`,
+exit 0; 30/30 stress runs clean. Values and byte counts are synthetic; no
+attention-quality or measured bandwidth result is claimed.
+
+| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold`, `test_eg66_aot_pack`, `test_eg66_adaptive_cap`, `test_eg66_kv8` | L | **DONE (all four sub-gates)** — `src/wubu_tensorfold.c/.h` byte-exact snapshots; `src/wubu_aot_pack.c/.h` shape dispatch (EG-66c); `src/wubu_adaptive_cap.c/.h` KV-budgeted cap adaptation (EG-66b); `src/wubu_kv8.c/.h` INT8 K/V codec and byte accounting (EG-66d). |
 **EG-67 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg67_titan`
 plans 8 one-GB experts under a 6 GB cap: 4 hot experts resident plus one
 streamed warm/cold expert give a modeled 5 GB peak, versus 8 GB if all were
