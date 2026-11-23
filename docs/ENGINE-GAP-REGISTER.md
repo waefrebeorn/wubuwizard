@@ -203,7 +203,16 @@ Cumulative counters after the first two plans: `moved=16777216 tokens=512
 restores=1 recomputes=1`; `test_eg19_recompute: PASS`, exit 0.
 
 | EG-19 | KV restore-vs-recompute scheduler | `src/wubu_kv_tier.c` moves KV but has no recompute decision | ALISA §3, KVPR, mzCache | `test_eg19_recompute` | L | **DONE** — `src/wubu_recompute_sched.c/.h` compares byte/I/O time against token-layer recompute time with margin and VRAM budget; evidence above. |
-| EG-20 | Compute-centric MoE offload + expert activation traces | `src/wubu_moe.c`, `docs/ssd_moe.md` have no trace cache or latency model | MoE-Infinity iEAM/pEAM; Fiddler AVX512_BF16 | `test_eg20_expert` | L | Activation trace cache + layer-decay eviction; gate expert hit rate |
+**EG-20 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg20_expert`
+observes layer-0 experts 2,2,2,3; `predict(0)` returns 2. Prefetching expert 2
+twice yields one miss then one hit; two more experts fill the 2-slot cache and
+evict the lowest-score resident. After two ticks (one decay step) four new
+observations of expert 1 flip the prediction from 2 to 1, showing routing-drift
+adaptation. Final: `hits=1 misses=3 loads=3 evictions=1 decay=1 bytes=12288`;
+`test_eg20_expert: PASS`, exit 0. Fiddler-style BF16 kernels and a full
+latency model remain deferred; this gate covers the trace policy.
+
+| EG-20 | Compute-centric MoE offload + expert activation traces | `src/wubu_moe.c`, `docs/ssd_moe.md` have no trace cache or latency model | MoE-Infinity iEAM/pEAM; Fiddler AVX512_BF16 | `test_eg20_expert` | L | **DONE (trace policy)** — `src/wubu_expert_trace.c/.h` with per-layer decayed scores, top-score prediction and lowest-score eviction; evidence above. BF16 kernels/latency model deferred. |
 | EG-21 | Full Medusa tree verification | `src/wubu_medusa.c` is 39 lines: init + EMA adapt only, no draft-head forward or tree verify | Medusa self-draft heads | `test_eg21_medusa_tree` | L | Tree attention + verification path; gate acceptance length |
 | EG-22 | Auto-configured pipelined offload at 6 GB | weight streaming exists; no per-iteration adaptive policy or proven 6 GB pipeline | PIPO (RTX 3060 6 GB, <40%→>90% util, 3.1×), TightLLM | `test_eg22_pipo` | L | depends EG-06; gate measured GPU util and throughput |
 
