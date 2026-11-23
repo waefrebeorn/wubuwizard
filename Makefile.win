@@ -123,6 +123,7 @@ CORE_OBJ += src/wubu_relaxed_verify.o
 CORE_OBJ += src/wubu_compact_session.o
 CORE_OBJ += src/wubu_model_surgery.o
 CORE_OBJ += src/wubu_varbit_vq.o
+CORE_OBJ += src/wubu_gqa_index.o
 
 .PHONY: all cpu-build clean
 
@@ -580,6 +581,10 @@ test_eg39_surgery: tools/test_eg39_surgery.c src/wubu_model_surgery.c
 
 # EG-45b: variable-bit packed VQ gate.
 test_eg45_varbit_vq: tools/test_eg45_varbit_vq.c src/wubu_varbit_vq.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-44b: GQA grouping for sparse index gate.
+test_eg44_gqa_index: tools/test_eg44_gqa_index.c src/wubu_gqa_index.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

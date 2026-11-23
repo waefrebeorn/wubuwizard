@@ -511,10 +511,20 @@ used a seeded random projection and returned only 2/8 overlap, so the gate
 correctly refused an accuracy claim; the shipped deterministic projection over
 the first four channels reaches 8/8 overlap at 25% sparsity. Bad dimensions,
 rank > dim and out-of-range k are rejected. `test_eg44_indexer: PASS`, exit 0.
-This is an untrained indexer policy; the trained indexer, GQA grouping and
-tile-size speed claims remain deferred.
+This is an untrained indexer policy; GQA grouping is gated as EG-44b below,
+while the trained indexer and tile-size speed claims remain deferred.
 
-| EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | **PARTIAL (accuracy gate only)** — `src/wubu_sparse_indexer.c/.h` gates top-k recall before any speed claim; trained indexer and tile speed deferred. |
+**EG-44b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg44_gqa_index`
+gates GQA grouping for a sparse index: with 4 query heads and 2 KV heads
+(G=2), averaging the two-query-head scores in KV head 0 selects shared top-2
+tokens [3 4]; KV head 1 selects [2 5]. The shared index performs 4 selection
+slots for k=2 versus 8 with one index per query head. Bad head ratios, NULL
+score buffers, wrong item counts, out-of-range KV heads and zero k are
+rejected. `test_eg44_gqa_index: PASS`, exit 0; 30/30 stress runs clean. Work
+counts are synthetic selection slots; no recall, latency or tile-speed result
+is claimed.
+
+| EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer`, `test_eg44_gqa_index` | L | **PARTIAL (accuracy + GQA grouping)** — `src/wubu_sparse_indexer.c/.h` gates top-k recall; `src/wubu_gqa_index.c/.h` gates shared KV-head index selection (EG-44b); trained indexer and tile speed deferred. |
 **EG-45a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg45_lowrank`
 approximates an 8x6 key matrix constructed from an exact rank-2 factorization.
 Subspace iteration reconstructs it with relative Frobenius error 0.000000 while
