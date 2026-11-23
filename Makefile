@@ -56,6 +56,7 @@ CORE_OBJ += src/wubu_expert_sub.o
 CORE_OBJ += src/wubu_fly_defer.o
 CORE_OBJ += src/wubu_pod_plan.o
 CORE_OBJ += src/wubu_cond_mem.o
+CORE_OBJ += src/wubu_hadamard.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -1104,6 +1105,10 @@ test_eg83_pod_plan: tools/test_eg83_pod_plan.c src/wubu_pod_plan.c
 
 # EG-82: Engram conditional-memory gate.
 test_eg82_engram: tools/test_eg82_engram.c src/wubu_cond_mem.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-85: stateless Sylvester-Hadamard rotation gate (existing module).
+test_eg85_hadamard: tools/test_eg85_hadamard.c src/wubu_hadamard.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

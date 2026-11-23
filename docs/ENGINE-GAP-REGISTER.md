@@ -877,7 +877,15 @@ dimensions; no CUDA launch or measured speedup is claimed.
 
 | EG-83 | POD split-K decode: float workspace + reusable per-plan aux | **DONE (plan/bytes gate)** — `src/wubu_pod_plan.c/.h` + `test_eg83_pod_plan`; evidence above. | FlashInfer `flashinfer/flashinfer/pod.py:49-63,127-145` | `test_eg83_pod_plan` | M | reuse aux across layers, measure workspace bytes |
 | EG-84 | AWQ activation-aware uint4 weight scales per channel/group | EG-26 activations; EG-27 load-time quant | vLLM `vllm/model_executor/layers/quantization/auto_awq.py:176-190` | `test_eg84_awq` | M | group_size + zero-point exactness gate |
-| EG-85 | Sylvester-Hadamard rotation, no transform weight | EG-26/27 no rotation | vLLM `vllm/vllm/_custom_ops.py:3547-3557` | `test_eg85_hadamard` | S | symmetric inverse; pairs with EG-77 |
+**EG-85 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg85_hadamard`
+gates the existing stateless `src/wubu_hadamard.c`: applying normalized n=8
+rotation twice returns the input within 0.00000012 and preserves energy
+5.750000 -> 5.750000 (Parseval). A non-power-of-two width leaves the buffer
+unchanged; the transform matrix is never stored. `test_eg85_hadamard: PASS`,
+exit 0; 30/30 stress runs clean. This gates the rotation primitive only; no
+FP8 distortion or speed result is claimed.
+
+| EG-85 | Sylvester-Hadamard rotation, no transform weight | **DONE (primitive gate)** — existing `src/wubu_hadamard.c` gated by `test_eg85_hadamard`; evidence above. | vLLM `vllm/vllm/_custom_ops.py:3547-3557` | `test_eg85_hadamard` | S | symmetric inverse; pairs with EG-77 |
 | EG-86 | DeepSeek V4 multi-stream hyper-connections | checkpoint-specific | llama.cpp `ggml/include/ggml.h:2461-2470` | `test_eg86_hyperconn` | S | CONDITIONAL: record only, do not prioritize |
 **EG-87 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg87_ev_depth`
 gates the expected-value depth policy with configured priors .92/.64/.32:
