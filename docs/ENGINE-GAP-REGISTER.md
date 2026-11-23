@@ -881,7 +881,17 @@ the probe. Evictions at 10/10 usefulness are not treated as pressure.
 windows are synthetic policy inputs; no measured prefetch speedup is claimed.
 
 | EG-95 | Feedback-controlled prefetch depth with rejected-transition memory | no adaptive read-ahead | MemVanta `AdaptivePrefetchController::observe` | `test_eg95_prefetch_feedback` | S | **DONE (policy gate)** — `src/wubu_prefetch_feedback.c/.h` gates bounded probes, 2-window cooldown, rejected-transition memory and phase-change reset; evidence above. |
-| EG-96 | Cross-layer early expert read, adopted on router miss | EG-51 MoE routing only | turbo-fieldfare `NextLayerExpertPrefetcher` | `test_eg96_early_expert` | M | lossless, scored by next layer's router |
+**EG-96 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg96_early_expert`
+gates turbo-fieldfare's lossless cross-layer pread: a 2-read budget stages the
+highest-scoring uncached experts 7 and 2, skipping cached expert 3 and
+low-score expert 9. The real plan [7,5,2] adopts both staged buffers while
+expert 5 takes a normal read; the output plan is byte-identical to the input
+(no expert substituted), adopted=2 and wasted=0. A plan with no hits adopts 0
+and wastes 2. Invalid budget, staging capacity and NULL inputs are rejected.
+`test_eg96_early_expert: PASS`, exit 0; 30/30 stress runs clean. Expert ids and
+scores are synthetic; no measured I/O saving or text change is claimed.
+
+| EG-96 | Cross-layer early expert read, adopted on router miss | EG-51 MoE routing only | turbo-fieldfare `NextLayerExpertPrefetcher` | `test_eg96_early_expert` | M | **DONE (losslessness gate)** — `src/wubu_early_expert.c/.h` gates top-k uncached staging, adoption on miss and unchanged expert plan; evidence above. |
 **EG-97 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg97_reclaim_margin`
 on a 1 GiB budget derives class margins of 102 MiB (compress), 204 MiB
 (swap), 256 MiB (kill) and 153 MiB (unknown); `None` reserves nothing. A 100
