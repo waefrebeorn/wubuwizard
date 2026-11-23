@@ -88,6 +88,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_win.o
 CORE_OBJ += src/wubu_ev_depth.o
 CORE_OBJ += src/wubu_adapt_len.o
+CORE_OBJ += src/wubu_tree_accept.o
 
 .PHONY: all cpu-build clean
 
@@ -397,6 +398,10 @@ test_eg87_ev_depth: tools/test_eg87_ev_depth.c src/wubu_ev_depth.c
 
 # EG-88: adaptive candidate length gate.
 test_eg88_adapt_len: tools/test_eg88_adapt_len.c src/wubu_adapt_len.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-91: pointer-jumping tree acceptance gate.
+test_eg91_tree_accept: tools/test_eg91_tree_accept.c src/wubu_tree_accept.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

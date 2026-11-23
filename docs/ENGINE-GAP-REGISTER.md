@@ -799,7 +799,18 @@ counts and probabilities are synthetic policy values, not measured latency.
 | EG-88 | Adaptive candidate length: truncate at first 1-prod(p)>threshold | fixed draft length | AdaFlash `specforge/modeling/draft/dflash.py:133-145,446-560` | `test_eg88_adapt_len` | S | **DONE (policy gate)** — `src/wubu_adapt_len.c/.h` gates scalar-threshold truncation, len_min clamp and greedy accept/KV crop; evidence above. |
 | EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | argmin E(seed,pos,v)/p for tree verify |
 | EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_eagle2_tree` | L | cum-logprob score + ancestor mask, static tree buffers |
-| EG-91 | Pointer-jumping tree accept + KV permutation | linear prefix walk | SpecPilot `specpilot_d7_accept.py` | `test_eg91_tree_accept` | S | pure index algorithm, claimed 9us vs 35us @ N=32 |
+**EG-91 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg91_tree_accept`
+on an 8-node tree with a broken branch selects the deepest fully-matching leaf
+by max key depth*(N+1)+(N-index): accepted path [0 1 3 7], with ceil(log2 8)=3
+doubling rounds (N=32 -> 5). The KV permutation compacts the accepted path
+first and the remaining slots ascending: [0 1 3 7 2 4 5 6]. Two hundred
+hashed-random trees of 2..32 nodes give zero path mismatches against an
+independent linear prefix walk. Invalid parent, NULL buffers and out-of-range
+permutation lengths are rejected. `test_eg91_tree_accept: PASS`, exit 0; 30/30
+stress runs clean. Indices are synthetic; the upstream 35us->9us GPU timing is
+not reproduced or claimed here.
+
+| EG-91 | Pointer-jumping tree accept + KV permutation | linear prefix walk | SpecPilot `specpilot_d7_accept.py` | `test_eg91_tree_accept` | S | **DONE (index gate)** — `src/wubu_tree_accept.c/.h` gates log-depth doubling acceptance and accepted-path-first KV compaction; evidence above. |
 | EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | quantized pass commits no tokens; exactness gate |
 | EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | newest checkpoint <= common; never stage decode KV |
 | EG-94 | Empirical acceptance table for tree ordering | fixed ordering | SpecPilot `d3m_calib_table.py` | `test_eg94_accept_table` | S | data-only, LOG_Q[slot,rank,bin], pairs with EG-90 |
