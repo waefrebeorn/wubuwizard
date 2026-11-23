@@ -139,7 +139,16 @@ full Unicode normalization table.
 | EG-11 | Structured decoding: grammar → automaton → batched bitmask + jump-forward | `src/wubu_spec_constrained.c` hardcodes one tool-call mask; no grammar automaton or bitmask | SGLang xgrammar backend; vLLM `StructuredOutputManager`; llama.cpp `llama-grammar.cpp` | `test_eg11_grammar` | L | **DONE** — `src/wubu_grammar_fsm.c/.h` compiles alternative tries and emits batched masks; Evidence below. |
 | EG-12 | Composable sampler chain (min-p, top-n-sigma, XTC, DRY, mirostat, dynatemp, typical-p, adaptive-p) | `src/wubu_token.c` has temperature/top-k/top-p/repetition only | MLX sampler chain; llama.cpp samplers | `test_eg12_sampler` | M | **DONE (partial)** — `src/wubu_sampler_chain.c/.h` with repetition, temperature, top-k, top-p, min-p, typical-p; remaining stages tracked below. Evidence paragraph. |
 | EG-13 | Pre-tokenizer registry + Unicode NFC fallback | depends on EG-02; no family registry keyed on `tokenizer.ggml.pre` | llama.cpp `llama-vocab.cpp`, `unicode.cpp` | `test_eg13_pretok` | M | **DONE** — `src/wubu_pretoken.c/.h` with 5 families and a byte-level NFC fallback; Evidence below. |
-| EG-14 | Jinja-subset chat template renderer | prompts are hardcoded per tool; GGUF `chat_template` unused | llama.cpp minja `common/jinja/`; TGI | `test_eg14_template` | M | Read template from GGUF, render minimal subset; gate exact prompt string |
+| EG-14 | Jinja-subset chat template renderer | prompts are hardcoded per tool; GGUF `chat_template` unused | llama.cpp minja `common/jinja/`; TGI | `test_eg14_template` | M | **DONE (minimal)** — `src/wubu_chat_template.c/.h`, Jinja subset (for/if/else/expr, bos/eos); Evidence below. Full Jinja deferred. |
+**EG-14 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg14_template`
+rendered `User: Hi\nAssistant: Hello\n` (26 bytes with CRLF) from
+`{% for m in messages %}{% if m.role == 'user' %}...{% else %}...{% endif %}{% endfor %}`,
+and `<bos>X<eos>` from global expressions. Malformed `{% for %}` with no
+`{% endfor %}` fails closed at compile; short output buffer, NULL args and
+negative message count all return -1. `test_eg14_template: PASS`, exit 0.
+The gate exposes and fixes two real bugs: literal text was whitespace-trimmed
+(losing spaces/newlines) and unclosed blocks were accepted.
+
 | EG-15 | Disaggregated PD gate (already implemented, source-only) | `src/wubu_pd_serve.c`, `wubu_pd_split.c`, `wubu_kv_transfer.c` exist; `tools/test_disagg_prefill_decode.c` has no gate | in-tree | `test_eg15_pd` | S | Wire the existing test as a gate against its owning modules |
 
 ## Wave 2 — memory and tiering

@@ -32,7 +32,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o \
   src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o \
   src/wubu_model_arch.o src/wubu_dense_ffn.o \
-  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o  src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o \
+  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o  src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o \
   src/safetensors_reader.o \
   src/wubu_repetition.o src/wubu_lora.o src/wubu_model_adapter.o \
   src/wubu_model_safetensors_bridge.o src/wubu_safetensors_shard.o \
@@ -162,6 +162,10 @@ test_eg01_vecdot: tools/test_eg01_vecdot.c src/wubu_vecdot_dispatch.c src/quanti
 
 # EG-13: pre-tokenizer family registry + NFC fallback.
 test_eg13_pretok: tools/test_eg13_pretok.c src/wubu_pretoken.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-14: Jinja-subset chat template renderer.
+test_eg14_template: tools/test_eg14_template.c src/wubu_chat_template.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
