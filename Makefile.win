@@ -110,6 +110,7 @@ CORE_OBJ += src/wubu_index_reuse.o
 CORE_OBJ += src/wubu_expert_sub.o
 CORE_OBJ += src/wubu_fly_defer.o
 CORE_OBJ += src/wubu_pod_plan.o
+CORE_OBJ += src/wubu_cond_mem.o
 
 .PHONY: all cpu-build clean
 
@@ -507,6 +508,10 @@ test_eg80_fly: tools/test_eg80_fly.c src/wubu_fly_defer.c
 
 # EG-83: POD split-K workspace and aux reuse gate.
 test_eg83_pod_plan: tools/test_eg83_pod_plan.c src/wubu_pod_plan.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-82: Engram conditional-memory gate.
+test_eg82_engram: tools/test_eg82_engram.c src/wubu_cond_mem.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

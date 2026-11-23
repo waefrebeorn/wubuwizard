@@ -855,7 +855,17 @@ measured and no speed result is claimed.
 
 | EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | **DONE (policy gate)** — `src/wubu_fly_defer.c/.h` + `test_eg80_fly`; evidence above. | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
 | EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | EG-24/55/56 separate draft KV | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
-| EG-82 | Engram conditional memory: NFKC + XOR n-gram hash, gated fusion | EG-05 neuron predictor, no cond memory | vLLM `docs/features/engram.md` | `test_eg82_engram` | M | prime-size disjoint buckets, SSD-offloadable tables |
+**EG-82 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg82_engram`
+gates Engram-style conditional memory: two-head multiplicative-XOR hashing
+places a 3-gram in disjoint prime buckets [1007, 1137] (ranges 1009 and 1013),
+and store/lookup round-trips a 4-float vector. NFKC-style id compression makes
+surface variants 0x101/0x201 share buckets; gated fusion gives
+hidden + 0.5*memory = 1.25 on the first dimension. Duplicate primes, NULL
+buffers and negative ids are rejected. `test_eg82_engram: PASS`, exit 0; 30/30
+stress runs clean. The id normalization is a stand-in and the tables are
+synthetic; no model-quality or SSD-offload measurement is claimed.
+
+| EG-82 | Engram conditional memory: NFKC + XOR n-gram hash, gated fusion | **DONE (lookup gate)** — `src/wubu_cond_mem.c/.h` + `test_eg82_engram`; evidence above. | vLLM `docs/features/engram.md` | `test_eg82_engram` | M | prime-size disjoint buckets, SSD-offloadable tables |
 **EG-83 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg83_pod_plan`
 gates a 2-head / 4-split / 3-dim decode plan: the float partial workspace is
 96 bytes and the per-plan aux is 16 bytes. Splitting 8 KV rows into four
