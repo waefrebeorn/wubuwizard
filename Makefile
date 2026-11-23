@@ -49,6 +49,7 @@ CORE_OBJ += src/wubu_dynamic_tree.o
 CORE_OBJ += src/wubu_conv_store.o
 CORE_OBJ += src/wubu_logits_proc.o
 CORE_OBJ += src/wubu_ngram_pool.o
+CORE_OBJ += src/wubu_ngram_map.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -303,6 +304,9 @@ src/wubu_logits_proc.o: src/wubu_logits_proc.c include/wubu_logits_proc.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ngram_pool.o: src/wubu_ngram_pool.c include/wubu_ngram_pool.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_ngram_map.o: src/wubu_ngram_map.c include/wubu_ngram_map.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1048,6 +1052,10 @@ test_eg34_logits: tools/test_eg34_logits.c src/wubu_logits_proc.c
 
 # EG-71: shared rolling-hash n-gram pool gate.
 test_eg71_ngram_pool: tools/test_eg71_ngram_pool.c src/wubu_ngram_pool.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-72: k4v n-gram map gate.
+test_eg72_ngram_map: tools/test_eg72_ngram_map.c src/wubu_ngram_map.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
