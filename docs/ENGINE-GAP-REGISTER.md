@@ -279,3 +279,50 @@ dependencies, `mingw32-make -f Makefile.win <gate>` builds it, `./<gate>.exe` ex
 its mechanism assertions, measured numbers are quoted in `docs/WORKLIST.md`, and the change
 is committed. The next session starts at the lowest-numbered TODO in the earliest wave
 whose dependencies are DONE.
+---
+
+## Wave 7 — Q3/Q4 2026 code-mined gaps (source-reading pass, 2026-11-22)
+
+Sources: `front-h-cpp-engines.md` (16 mechanisms), `front-i-spec-code.md` (33),
+`front-j-mainstream-code.md` (16) under `docs/research/engine-sweeps/`, read from
+the 26 shallow clones in `~/WuBu/research/engine-sources/`. All numbers in those
+reports are authors' claims, **not** local measurements. Nothing is vendored.
+
+| ID | Technique | Local state | Exact reference | Gate | Size | Next action |
+|---|---|---|---|---|---|---|
+| EG-71 | Shared rolling-hash n-gram pool, occupancy + low-acceptance resets | no draftless pool | llama.cpp `common/ngram-mod.cpp:15,27,37`; `common/speculative.cpp:2447,2492,2586` | `test_eg71_ngram_pool` | M | 4M-entry (~16 MB) pool, cross-slot, reset on occupancy/streak |
+| EG-72 | n-gram-map k4v: up to 4 values with hit counts + persisted files | EG-08 only prefix reuse | llama.cpp `common/ngram-map.h:24,45,52,61`; `common/speculative.cpp:2332,2375,2615` | `test_eg72_ngram_map` | M | multi-value map, merge/save, count-eviction gate |
+| EG-73 | Suffix decoding from finished-request GPU corpus | no corpus drafting | vLLM `docs/features/speculative_decoding/suffix.md`; `vllm/v1/worker/gpu/spec_decode/suffix/speculator.py` | `test_eg73_suffix_spec` | L | corpus + frequency proposal + online per-slot acceptance |
+| EG-74 | DFlash2 / LiliCorr candidate selector + p-min cut | EG-56/62 lack selector | llama.cpp `docs/speculative.md:86-164` | `test_eg74_selector` | M | confidence truncation, hidden-state-conditioned scorer |
+| EG-75 | Training-free sparse-KV retrieval lifecycle (repr → update → query top-k) | EG-44 trained indexer; EG-53/54 evict | SGLang `python/sglang/srt/mem_cache/sparsity/algorithms/base_algorithm.py:10-106`; `quest_algorithm.py:21,55,120` | `test_eg75_sparse_retrieve` | L | accuracy gate before speed gate; page_size=1 token-wise |
+| EG-76 | Reuse DSA top-k indices across layers, skip index-key KV alloc | EG-44 builds indexer only | vLLM `docs/features/index_cache.md`; `vllm/model_executor/layers/mla.py:109` | `test_eg76_index_reuse` | M | F/S pattern, measure KV bytes saved |
+| EG-77 | E4M3 V residual restored in online softmax + Hadamard low-bit QK | EG-30/36 lack residual-V | FlashInfer `flashinfer/attention/prims_ts/README.md:674-690` | `test_eg77_vc_attn` | L | requires per-tile mean and 128-pt normalized Hadamard |
+| EG-78 | Constant-vector novice experts, zero MLP bytes | EG-51 low-rank surrogate | vLLM `docs/design/expert_substitution.md`; `.../fused_moe/expert_substitution.py` | `test_eg78_expert_sub` | M | load-time prune, preserve logical ids, no renormalize |
+| EG-79 | Stream-K quantized GEMM with partial-sum fixup | EG-01 vec_dot/GEMV only | llama.cpp `ggml/src/ggml-cuda/mmq.cuh:1011-1024` | `test_eg79_streamk` | L | CTA work partition + host native-tiling escape |
+| EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | EG-25/61 exact | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
+| EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | EG-24/55/56 separate draft KV | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
+| EG-82 | Engram conditional memory: NFKC + XOR n-gram hash, gated fusion | EG-05 neuron predictor, no cond memory | vLLM `docs/features/engram.md` | `test_eg82_engram` | M | prime-size disjoint buckets, SSD-offloadable tables |
+| EG-83 | POD split-K decode: float workspace + reusable per-plan aux | refines EG-68 split-KV | FlashInfer `flashinfer/flashinfer/pod.py:49-63,127-145` | `test_eg83_pod_plan` | M | reuse aux across layers, measure workspace bytes |
+| EG-84 | AWQ activation-aware uint4 weight scales per channel/group | EG-26 activations; EG-27 load-time quant | vLLM `vllm/model_executor/layers/quantization/auto_awq.py:176-190` | `test_eg84_awq` | M | group_size + zero-point exactness gate |
+| EG-85 | Sylvester-Hadamard rotation, no transform weight | EG-26/27 no rotation | vLLM `vllm/vllm/_custom_ops.py:3547-3557` | `test_eg85_hadamard` | S | symmetric inverse; pairs with EG-77 |
+| EG-86 | DeepSeek V4 multi-stream hyper-connections | checkpoint-specific | llama.cpp `ggml/include/ggml.h:2461-2470` | `test_eg86_hyperconn` | S | CONDITIONAL: record only, do not prioritize |
+| EG-87 | Expected-value depth gate: EWMA accept/depth × cost | no confidence scheduler | MTPLX `adaptive.py:69-236` | `test_eg87_ev_depth` | S | no weights, one EWMA + cycle timer; best immediate fit |
+| EG-88 | Adaptive candidate length: truncate at first 1-prod(p)>threshold | fixed draft length | AdaFlash `specforge/modeling/draft/dflash.py:133-145,446-560` | `test_eg88_adapt_len` | S | scalar threshold, no trained head for v1 |
+| EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | argmin E(seed,pos,v)/p for tree verify |
+| EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_eagle2_tree` | L | cum-logprob score + ancestor mask, static tree buffers |
+| EG-91 | Pointer-jumping tree accept + KV permutation | linear prefix walk | SpecPilot `specpilot_d7_accept.py` | `test_eg91_tree_accept` | S | pure index algorithm, claimed 9us vs 35us @ N=32 |
+| EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | quantized pass commits no tokens; exactness gate |
+| EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | newest checkpoint <= common; never stage decode KV |
+| EG-94 | Empirical acceptance table for tree ordering | fixed ordering | SpecPilot `d3m_calib_table.py` | `test_eg94_accept_table` | S | data-only, LOG_Q[slot,rank,bin], pairs with EG-90 |
+| EG-95 | Feedback-controlled prefetch depth with rejected-transition memory | no adaptive read-ahead | MemVanta `AdaptivePrefetchController::observe` | `test_eg95_prefetch_feedback` | S | bounded probes + hysteresis |
+| EG-96 | Cross-layer early expert read, adopted on router miss | EG-51 MoE routing only | turbo-fieldfare `NextLayerExpertPrefetcher` | `test_eg96_early_expert` | M | lossless, scored by next layer's router |
+| EG-97 | Memory margin from kernel overflow class | EG-03/35 static budget | BigMoeOnEdge `margin_frac`, `reclaim_is_cheap` | `test_eg97_reclaim_margin` | S | measure overflow class, derive margin |
+| EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | T1 needs portable batching path, not CUDA-only |
+| EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | per-1MiB hashes, prefix+byte key |
+| EG-100 | Real-layer microbenchmark probe for device-tier pricing | EG-06 uses static costs | BigMoeOnEdge `layer_probe.cpp:probe_layer` | `test_eg100_layer_probe` | M | gate measures then prices layers |
+
+Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
+EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
+the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
+unique) before reserving any new id.
+

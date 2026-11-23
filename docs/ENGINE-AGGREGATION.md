@@ -74,7 +74,7 @@ reported, not independently benchmarked.
 
 ## Navigation for the next session
 
-- `docs/ENGINE-GAP-REGISTER.md` — ordered TODO: 70 gaps, gate names, dependencies, next action
+- `docs/ENGINE-GAP-REGISTER.md` — ordered TODO: 100 gaps; Q3/Q4 2026 code-mined reports `front-h/i/j`; gate names, dependencies, next action
 - `docs/ENGINE-SOURCE-INDEX.md` — engine catalog with exact upstream file/symbol pointers
 - `docs/research/engine-sweeps/` — seven cited reports: serving, edge, offload, time-bounded
   recent gains, second-degree traversal, new engines, Q3 papers, plus local audits
