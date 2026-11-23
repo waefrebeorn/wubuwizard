@@ -374,7 +374,17 @@ no partial allocation. `test_eg37_arena: PASS`, exit 0. The arena is a size
 model, not a wired allocator for real KV tensors.
 
 | EG-37 | Unified arena, one entry per token, compaction, whole-request admission | new; EG-18 is tiers, not one allocator | SGLang unified memory (11 Nov 2026) | `test_eg37_arena` | L | **DONE (allocator policy)** — `src/wubu_unified_arena.c/.h` gates one-entry-per-token, compaction and all-or-nothing requests; evidence above. Real tensor wiring deferred. |
-| EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | T1: decode-side prefix reuse; defer multi-rank sharding |
+**EG-38 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg38_pages`
+registers two 4-token sequences backed by page pairs. Longest-prefix queries
+borrow their pages (`[1,2,3,9]` -> entry A, prefix 3, pages 0/1; `[1,2,5,9]` ->
+entry B, prefix 3, pages 2/3), and the gate caught an initial tie-break
+assumption: equal-length prefixes resolve to the first-registered entry. A
+speculative branch registers a third sequence and borrows pages 4/5; snapshot
+restore returns those refcounts to zero while the original loans survive, and
+releasing A/B zeroes all refcounts. `test_eg38_pages: PASS`, exit 0. Multi-rank
+sharding stays deferred.
+
+| EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | **DONE (single-rank)** — `src/wubu_page_radix.c/.h` gates page-owning prefix reuse and draft rollback; evidence above. |
 | EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | Preserve state across turns; gate no re-prefill on resume |
 | EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | Gate lossless commit + preemption threshold |
 | EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | Search over draft config; gate parity + measured speedup per tier |
