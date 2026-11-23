@@ -814,7 +814,18 @@ not reproduced or claimed here.
 | EG-92 | Two-level quantized pre-verify, chain then exact pass | EG-61 single-level verify | SpecPilot `specpilot_d8_tlv.py` | `test_eg92_two_level_verify` | M | quantized pass commits no tokens; exactness gate |
 | EG-93 | Bounded-checkpoint sliding-KV prefix rollback | no session resume KV rollback | rec `prefix.py:82-118` | `test_eg93_kv_rollback` | M | newest checkpoint <= common; never stage decode KV |
 | EG-94 | Empirical acceptance table for tree ordering | fixed ordering | SpecPilot `d3m_calib_table.py` | `test_eg94_accept_table` | S | data-only, LOG_Q[slot,rank,bin], pairs with EG-90 |
-| EG-95 | Feedback-controlled prefetch depth with rejected-transition memory | no adaptive read-ahead | MemVanta `AdaptivePrefetchController::observe` | `test_eg95_prefetch_feedback` | S | bounded probes + hysteresis |
+**EG-95 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg95_prefetch_feedback`
+gates MemVanta's closed-loop prefetch policy over synthetic telemetry windows:
+usefulness 5/10 drops depth 3->2 and a budget-skip window drops 2->1. Two
+late, stable 10/10 windows with 50% free byte budget start a bounded 2->3
+probe; a 0.2% latency drift keeps it, while a 10% regression reverts to 2,
+records rejection 2->3 and blocks four following stable windows (cooldown plus
+transition memory). A 110->130us baseline shift clears the memory and reopens
+the probe. Evictions at 10/10 usefulness are not treated as pressure.
+`test_eg95_prefetch_feedback: PASS`, exit 0; 30/30 stress runs clean. All
+windows are synthetic policy inputs; no measured prefetch speedup is claimed.
+
+| EG-95 | Feedback-controlled prefetch depth with rejected-transition memory | no adaptive read-ahead | MemVanta `AdaptivePrefetchController::observe` | `test_eg95_prefetch_feedback` | S | **DONE (policy gate)** — `src/wubu_prefetch_feedback.c/.h` gates bounded probes, 2-window cooldown, rejected-transition memory and phase-change reset; evidence above. |
 | EG-96 | Cross-layer early expert read, adopted on router miss | EG-51 MoE routing only | turbo-fieldfare `NextLayerExpertPrefetcher` | `test_eg96_early_expert` | M | lossless, scored by next layer's router |
 | EG-97 | Memory margin from kernel overflow class | EG-03/35 static budget | BigMoeOnEdge `margin_frac`, `reclaim_is_cheap` | `test_eg97_reclaim_margin` | S | measure overflow class, derive margin |
 | EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | T1 needs portable batching path, not CUDA-only |
