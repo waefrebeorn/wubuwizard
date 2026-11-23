@@ -496,7 +496,16 @@ within 0.20. Invalid widths and null stores are rejected; 30-run stress clean.
 measured end-to-end latency claim.
 
 | EG-49 | ReadKV progressive KV code: 8-bit store / 4-bit fetch per query | EG-28 is a threshold conversion, not progressive bits | ReadKV arXiv 2610.11245 | `test_eg49_readkv` | M | **DONE (progressive fetch)** — `src/wubu_readkv.c/.h` gates 3x fewer fetched bytes and small PPL delta; evidence above. |
-| EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | Overlap gate: transfer/compute concurrency count |
+**EG-50 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg50_ssdexpert`
+schedules 8 expert reads across 4 SSD lanes with 2 async H2D lanes and a
+VRAM-local rANS-style decode on completion. Sequential cost would be 48 ticks;
+the overlapped schedule finishes in 12 ticks with max concurrency 6 (4 reads +
+2 transfers), and all 8 payloads decode correctly. Invalid lane counts,
+undersized result buffers and out-of-range symbols are rejected; 30-run stress
+clean. `test_eg50_ssdexpert: PASS`, exit 0. This is a deterministic scheduler
+gate; no real SSD throughput or GPU overlap is claimed.
+
+| EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | **DONE (scheduler)** — `src/wubu_ssd_expert.c/.h` gates 48→12 ticks and overlap 6; evidence above. |
 | EG-51 | SPICE: confidence-adaptive expert lookahead + low-rank surrogate for misses | refines EG-20 with surrogate substitution | SPICE arXiv 2608.21240 | `test_eg51_spice` | L | Lossy: opt-in behind an accuracy gate |
 | EG-52 | SeqMoE: expert activation as sequence model, deadline sequencing, probabilistic Belady | EG-06/EG-20 have no learned activation predictor or Belady policy | SeqMoE arXiv 2609.12978 | `test_eg52_seqmoe` | L | Gate hit rate at fixed residency |
 | EG-53 | RocketKV: training-free prompt-KV eviction then page-level Top-K decode | EG-23 skips tiles, EG-44 is a trained indexer; neither evicts prompt KV | front-e E10 / TRT-LLM sparse docs | `test_eg53_rocketkv` | M | Gate prompt KV bytes retained vs accuracy |
