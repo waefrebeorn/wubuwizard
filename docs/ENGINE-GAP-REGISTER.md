@@ -830,7 +830,16 @@ modeled from synthetic dimensions; no measured VRAM or latency result is
 claimed.
 
 | EG-76 | Reuse DSA top-k indices across layers, skip index-key KV alloc | **DONE (reuse/bytes gate)** — `src/wubu_index_reuse.c/.h` + `test_eg76_index_reuse`; evidence above. | vLLM `docs/features/index_cache.md`; `vllm/model_executor/layers/mla.py:109` | `test_eg76_index_reuse` | M | F/S pattern, measure KV bytes saved |
-| EG-77 | E4M3 V residual restored in online softmax + Hadamard low-bit QK | EG-30/36 lack residual-V | FlashInfer `flashinfer/attention/prims_ts/README.md:674-690` | `test_eg77_vc_attn` | L | requires per-tile mean and 128-pt normalized Hadamard |
+**EG-77 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg77_vc_attn`
+gates V stored as a residual around a per-128-token tile mean: a 256-value
+vector produces two tile means near +4 and -2, and 4-bit residual
+dequantization has a 0.01646 max error. Softmax-weighted V from the restored
+values is 1.25216 against 1.25145 from full values (delta 0.00071). Bad tile
+sizes and NULL buffers are rejected. `test_eg77_vc_attn: PASS`, exit 0; 30/30
+stress runs clean. The residual code is a stand-in for E4M3; no GPU kernel or
+model-quality result is claimed.
+
+| EG-77 | E4M3 V residual restored in online softmax + Hadamard low-bit QK | **DONE (residual gate)** — `src/wubu_vc_attn.c/.h` + `test_eg77_vc_attn`; QK Hadamard half covered by EG-85. | FlashInfer `flashinfer/attention/prims_ts/README.md:674-690` | `test_eg77_vc_attn` | L | requires per-tile mean and 128-pt normalized Hadamard |
 **EG-78 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg78_expert_sub`
 gates MoNE-style load-time substitution: marking 2 of 8 experts frees 2048
 bytes (2 x 1024) of MLP weights. With router weights 0.3 and 0.2 on the

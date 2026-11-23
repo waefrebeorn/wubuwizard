@@ -112,6 +112,7 @@ CORE_OBJ += src/wubu_fly_defer.o
 CORE_OBJ += src/wubu_pod_plan.o
 CORE_OBJ += src/wubu_cond_mem.o
 CORE_OBJ += src/wubu_streamk.o
+CORE_OBJ += src/wubu_vc_attn.o
 
 .PHONY: all cpu-build clean
 
@@ -525,6 +526,10 @@ test_eg84_awq: tools/test_eg84_awq.c src/wubu_awq.c
 
 # EG-79: Stream-K partition and partial-sum fixup gate.
 test_eg79_streamk: tools/test_eg79_streamk.c src/wubu_streamk.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-77: V-residual attention gate.
+test_eg77_vc_attn: tools/test_eg77_vc_attn.c src/wubu_vc_attn.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
