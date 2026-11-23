@@ -601,7 +601,16 @@ logprob or out-of-range id is rejected. `test_eg103_zero_logits: PASS`, exit 0.
 Real CUDA pinned-memory transfer is not claimed by this policy gate.
 
 | EG-103 | Zero-logits D2H: transfer sampled ids only | no sampled-token-only transfer path | Strata v0.2.19 Inkling 0.1.65 | `test_eg103_zero_logits` | S | **DONE (handoff policy)** — `src/wubu_zero_logits.c/.h` gates bytes avoided and logprob equality; evidence above. |
-| EG-104 | W=4 Markov beam-tree branch selection | EG-21 verifies trees but has no branch policy | Strata v0.2.19 DSpark | `test_eg104_markov_tree` | M | branch prior + exact verification |
+**EG-104 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg104_markov_tree`
+trains order-4 transition counts on a 400-token stream with known next-token
+frequencies 0.50/0.30/0.15/0.04/0.01. Given shuffled candidates it selects the
+W=4 highest-probability branches `[4 5 6 7]` (dropping 8 and 9), reduces the
+tree from 7 to 5 nodes, and EG-21 exactly verifies all four drafted tokens:
+`accepted=4 tokens=[4 5 6 7]`. Unseen contexts fall back to uniform; invalid
+beam width, cap, and short streams are rejected. `test_eg104_markov_tree: PASS`,
+exit 0. This is a branch-prior policy gate; no throughput claim is made.
+
+| EG-104 | W=4 Markov beam-tree branch selection | EG-21 verifies trees but has no branch policy | Strata v0.2.19 DSpark | `test_eg104_markov_tree` | M | **DONE** — `src/wubu_markov_w4.c/.h` selects top-4 branches from order-4 counts; exact EG-21 verification passes; evidence above. |
 
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
