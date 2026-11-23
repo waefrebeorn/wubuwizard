@@ -68,6 +68,7 @@ CORE_OBJ += src/wubu_dag_verify.o
 CORE_OBJ += src/wubu_relaxed_verify.o
 CORE_OBJ += src/wubu_compact_session.o
 CORE_OBJ += src/wubu_model_surgery.o
+CORE_OBJ += src/wubu_varbit_vq.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -376,6 +377,9 @@ src/wubu_compact_session.o: src/wubu_compact_session.c include/wubu_compact_sess
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_model_surgery.o: src/wubu_model_surgery.c include/wubu_model_surgery.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_varbit_vq.o: src/wubu_varbit_vq.c include/wubu_varbit_vq.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1201,6 +1205,10 @@ test_eg32_compact_session: tools/test_eg32_compact_session.c src/wubu_compact_se
 
 # EG-39b: model surgery planner gate.
 test_eg39_surgery: tools/test_eg39_surgery.c src/wubu_model_surgery.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-45b: variable-bit packed VQ gate.
+test_eg45_varbit_vq: tools/test_eg45_varbit_vq.c src/wubu_varbit_vq.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
