@@ -1153,3 +1153,9 @@ EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) befo
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
+Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
+was rebuilt and executed in one loop: `PASS=99 FAIL=0`, no failed targets. The
+five remaining undone rows are explicitly gated off (EG-22/31/33/46 need host-
+unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
+record-only). All other register rows carry their own named gate and evidence.
+
