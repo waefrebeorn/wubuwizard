@@ -193,7 +193,16 @@ two real bugs (uninitialised slot pointer in insert_l1, lower-tier hits
 reporting tier 1). Real SSD I/O and cross-process tiering remain deferred.
 
 | EG-18 | HiCache L1/L2/L3 with async prefetch/write-back + deadline policy | flat file-backed `src/wubu_lmcache.c`; `wubu_tier_advice()` is a policy function, not a cache engine | Mooncake HiCache design, SGLang blog | `test_eg18_hicache` | L | **DONE (in-memory tiers)** — `src/wubu_hicache.c/.h` with LRU tiers, promotion, queued write-back and deadline-gated prefetch; evidence above. Real SSD I/O deferred. |
-| EG-19 | KV restore-vs-recompute scheduler | `src/wubu_kv_tier.c` moves KV but has no recompute decision | ALISA §3, KVPR, mzCache | `test_eg19_recompute` | L | Cost compare restore vs recompute; gate bytes moved vs tokens recomputed |
+**EG-19 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg19_recompute`
+compares `restore_ms` against `recompute_ms = tokens*layers/rate`: a 512-token
+prefix at 16 MiB chooses recompute (16.78 ms restore vs 8.19 ms recompute),
+a 4096-token prefix chooses restore (16.78 vs 65.54 ms). A 1.1× margin flips
+a near tie (25.17 vs 24.58 ms) from recompute to restore. A 2 GiB KV against a
+1 GiB device budget forces recompute even when it is the slower option.
+Cumulative counters after the first two plans: `moved=16777216 tokens=512
+restores=1 recomputes=1`; `test_eg19_recompute: PASS`, exit 0.
+
+| EG-19 | KV restore-vs-recompute scheduler | `src/wubu_kv_tier.c` moves KV but has no recompute decision | ALISA §3, KVPR, mzCache | `test_eg19_recompute` | L | **DONE** — `src/wubu_recompute_sched.c/.h` compares byte/I/O time against token-layer recompute time with margin and VRAM budget; evidence above. |
 | EG-20 | Compute-centric MoE offload + expert activation traces | `src/wubu_moe.c`, `docs/ssd_moe.md` have no trace cache or latency model | MoE-Infinity iEAM/pEAM; Fiddler AVX512_BF16 | `test_eg20_expert` | L | Activation trace cache + layer-decay eviction; gate expert hit rate |
 | EG-21 | Full Medusa tree verification | `src/wubu_medusa.c` is 39 lines: init + EMA adapt only, no draft-head forward or tree verify | Medusa self-draft heads | `test_eg21_medusa_tree` | L | Tree attention + verification path; gate acceptance length |
 | EG-22 | Auto-configured pipelined offload at 6 GB | weight streaming exists; no per-iteration adaptive policy or proven 6 GB pipeline | PIPO (RTX 3060 6 GB, <40%→>90% util, 3.1×), TightLLM | `test_eg22_pipo` | L | depends EG-06; gate measured GPU util and throughput |
