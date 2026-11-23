@@ -41,7 +41,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_hyperbolic_output_proj.o src/wubu_vision.o src/gguf_reader.o \
   src/qlearner.o src/rsgd.o src/wubu_tst.o src/dequant_iq2_xxs.o \
   src/wubu_model_arch.o src/wubu_dense_ffn.o \
-  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o  src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o src/wubu_sleep_alloc.o src/wubu_lora_slots.o src/wubu_hicache.o src/wubu_recompute_sched.o src/wubu_expert_trace.o src/wubu_tree_verify.o src/wubu_skip_softmax.o src/wubu_eagle3.o src/wubu_spec_size.o src/wubu_dynact.o src/wubu_isq_plan.o src/wubu_kv_lazy.o src/wubu_blob_store.o src/wubu_fp8_attn.o src/wubu_capacity_sched.o src/wubu_ext_kv.o src/wubu_fp8_kv.o src/wubu_unified_arena.o src/wubu_page_radix.o src/wubu_agent_state.o src/wubu_invalid_kv.o src/wubu_spec_search.o src/wubu_tv_accept.o src/wubu_draft_kv.o src/wubu_sparse_indexer.o src/wubu_lowrank_kv.o src/wubu_sq_agreement.o src/wubu_mx8.o \
+  src/quantized_matmul.o src/quantized_dot_generic.o src/wubu_vecdot_dispatch.o src/wubu_vram_plan.o src/wubu_neuron_cluster.o src/wubu_offload_plan.o src/wubu_ssd_row_reuse.o src/wubu_radix_cache.o src/wubu_overlap_sched.o src/wubu_admission.o  src/wubu_grammar_fsm.o src/wubu_sampler_chain.o src/wubu_pretoken.o src/wubu_chat_template.o src/wubu_sleep_alloc.o src/wubu_lora_slots.o src/wubu_hicache.o src/wubu_recompute_sched.o src/wubu_expert_trace.o src/wubu_tree_verify.o src/wubu_skip_softmax.o src/wubu_eagle3.o src/wubu_spec_size.o src/wubu_dynact.o src/wubu_isq_plan.o src/wubu_kv_lazy.o src/wubu_blob_store.o src/wubu_fp8_attn.o src/wubu_capacity_sched.o src/wubu_ext_kv.o src/wubu_fp8_kv.o src/wubu_unified_arena.o src/wubu_page_radix.o src/wubu_agent_state.o src/wubu_invalid_kv.o src/wubu_spec_search.o src/wubu_tv_accept.o src/wubu_draft_kv.o src/wubu_sparse_indexer.o src/wubu_lowrank_kv.o src/wubu_sq_agreement.o src/wubu_mx8.o src/wubu_zero_logits.o \
   src/safetensors_reader.o \
   src/wubu_repetition.o src/wubu_lora.o src/wubu_model_adapter.o \
   src/wubu_model_safetensors_bridge.o src/wubu_safetensors_shard.o \
@@ -291,6 +291,10 @@ test_eg101_sq_agreement: tools/test_eg101_sq_agreement.c src/wubu_sq_agreement.c
 
 # EG-102: MX8 block microscaling.
 test_eg102_mx8: tools/test_eg102_mx8.c src/wubu_mx8.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-103: zero-logits D2H handoff.
+test_eg103_zero_logits: tools/test_eg103_zero_logits.c src/wubu_zero_logits.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

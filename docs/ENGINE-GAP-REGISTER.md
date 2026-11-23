@@ -592,7 +592,15 @@ outputs. `test_eg102_mx8: PASS`, exit 0. This gates the format; the GPU-side
 SF4 tensor-core kernel is not claimed.
 
 | EG-102 | SF4+MX8 block microscaling with bit-exactness | EG-26/36/43 lack shared block exponent | Strata v0.2.19 SQ-20 | `test_eg102_mx8` | M | **DONE (format)** — `src/wubu_mx8.c/.h` gates shared-exponent blocks and lossless round-trip; evidence above. |
-| EG-103 | Zero-logits D2H: transfer sampled ids only | no sampled-token-only transfer path | Strata v0.2.19 Inkling 0.1.65 | `test_eg103_zero_logits` | S | bytes avoided + distribution equality |
+**EG-103 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg103_zero_logits`
+compares 16 rows of a 32,000-token vocabulary: full logits transfer would be
+2,048,000 bytes, while (id, logprob) handoff is 128 bytes (0.0000625 ratio).
+The gate recomputes softmax log-probabilities from full logits for the returned
+ids (e.g. -0.47669, -0.47767) and accepts only exact agreement; a tampered
+logprob or out-of-range id is rejected. `test_eg103_zero_logits: PASS`, exit 0.
+Real CUDA pinned-memory transfer is not claimed by this policy gate.
+
+| EG-103 | Zero-logits D2H: transfer sampled ids only | no sampled-token-only transfer path | Strata v0.2.19 Inkling 0.1.65 | `test_eg103_zero_logits` | S | **DONE (handoff policy)** — `src/wubu_zero_logits.c/.h` gates bytes avoided and logprob equality; evidence above. |
 | EG-104 | W=4 Markov beam-tree branch selection | EG-21 verifies trees but has no branch policy | Strata v0.2.19 DSpark | `test_eg104_markov_tree` | M | branch prior + exact verification |
 
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
