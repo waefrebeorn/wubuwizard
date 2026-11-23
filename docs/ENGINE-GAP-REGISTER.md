@@ -405,7 +405,16 @@ Actual KV tensor commit is the caller's responsibility; this gate owns the
 accept/preempt decision.
 
 | EG-40 | Callo: invalidated KV as drafts, verified after prefill, preempt on low acceptance | new; agent context edits invalidate prefix cache | Callo arXiv 2611.18459 | `test_eg40_invalidkv` | L | **DONE (decision policy)** — `src/wubu_invalid_kv.c/.h` gates longest-prefix verification and threshold preemption; evidence above. |
-| EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | Search over draft config; gate parity + measured speedup per tier |
+**EG-41 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg41_specsearch`
+searches four draft configurations (k=2/4/6/8, 1/1/2/4 heads, 100/100/300/600
+MiB, acceptance 0.7/0.8/0.9/0.95) at 0.1 draft / 1.0 verify cost. With 400 MiB
+free it finds 3 feasible candidates and picks k=6 (2.928 tokens/unit); with
+150 MiB it drops to 2 feasible and picks k=4 (2.109); with 50 MiB none are
+feasible and best_id=-1. `test_eg41_specsearch: PASS`, exit 0. Acceptance
+values here are supplied, not measured on a local model; the tiered speedup
+claim is limited to the cost model.
+
+| EG-41 | Hardware/workload/memory-aware speculative configuration search | refines EG-25 | SpecSearch arXiv 2611.22296 | `test_eg41_specsearch` | M | **DONE (search policy)** — `src/wubu_spec_search.c/.h` gates feasible-set search under VRAM; evidence above. Measured per-tier model speedup deferred. |
 | EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | Validate acceptance-probability identity; gate calibration |
 | EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | Gate draft memory saved vs acceptance drop |
 | EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | Needs an accuracy gate before any speed claim |
