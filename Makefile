@@ -71,6 +71,7 @@ CORE_OBJ += src/wubu_model_surgery.o
 CORE_OBJ += src/wubu_varbit_vq.o
 CORE_OBJ += src/wubu_gqa_index.o
 CORE_OBJ += src/wubu_expert_stage.o
+CORE_OBJ += src/wubu_aot_pack.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -388,6 +389,9 @@ src/wubu_gqa_index.o: src/wubu_gqa_index.c include/wubu_gqa_index.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_expert_stage.o: src/wubu_expert_stage.c include/wubu_expert_stage.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_aot_pack.o: src/wubu_aot_pack.c include/wubu_aot_pack.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1225,6 +1229,10 @@ test_eg44_gqa_index: tools/test_eg44_gqa_index.c src/wubu_gqa_index.c
 
 # EG-45c: coordinated expert layer staging gate.
 test_eg45_expert_stage: tools/test_eg45_expert_stage.c src/wubu_expert_stage.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-66c: AOT kernel pack selector gate.
+test_eg66_aot_pack: tools/test_eg66_aot_pack.c src/wubu_aot_pack.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

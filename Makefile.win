@@ -125,6 +125,7 @@ CORE_OBJ += src/wubu_model_surgery.o
 CORE_OBJ += src/wubu_varbit_vq.o
 CORE_OBJ += src/wubu_gqa_index.o
 CORE_OBJ += src/wubu_expert_stage.o
+CORE_OBJ += src/wubu_aot_pack.o
 
 .PHONY: all cpu-build clean
 
@@ -590,6 +591,10 @@ test_eg44_gqa_index: tools/test_eg44_gqa_index.c src/wubu_gqa_index.c
 
 # EG-45c: coordinated expert layer staging gate.
 test_eg45_expert_stage: tools/test_eg45_expert_stage.c src/wubu_expert_stage.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-66c: AOT kernel pack selector gate.
+test_eg66_aot_pack: tools/test_eg66_aot_pack.c src/wubu_aot_pack.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

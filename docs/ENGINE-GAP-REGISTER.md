@@ -774,7 +774,15 @@ read/modify stream ambiguously and was replaced with an explicit byte overwrite.
 30-run stress clean. `test_eg66_tensorfold: PASS`, exit 0. No Zig code was
 vendored; this is project-owned C11.
 
-| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | **PARTIAL (EG-66a snapshot round-trip DONE)** — `src/wubu_tensorfold.c/.h` gates byte-exact disk snapshot/restore and serial equivalence; adaptive caps, kv8 K/V and AOT kernel packs remain TODO. |
+**EG-66c evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg66_aot_pack`
+gates AOT kernel pack selection: a three-entry build table maps dtype 0 to
+variants 11 (n<=8) and 12 (9..64), and dtype 1 to variant 21 (n<=16); dtype 1
+at n=32 is unsupported. Overlapping ranges for the same dtype are refused at
+table construction, as are bad ranges, NULL tables and zero/negative shapes.
+`test_eg66_aot_pack: PASS`, exit 0; 30/30 stress runs clean. Variants are
+synthetic ids; no compiled kernel is claimed.
+
+| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold`, `test_eg66_aot_pack` | L | **PARTIAL (snapshot + AOT selection done)** — `src/wubu_tensorfold.c/.h` gates byte-exact disk snapshot/restore; `src/wubu_aot_pack.c/.h` gates unambiguous shape-to-variant dispatch (EG-66c); adaptive caps and kv8 K/V still TODO. |
 **EG-67 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg67_titan`
 plans 8 one-GB experts under a 6 GB cap: 4 hot experts resident plus one
 streamed warm/cold expert give a modeled 5 GB peak, versus 8 GB if all were
