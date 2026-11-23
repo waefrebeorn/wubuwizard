@@ -466,7 +466,16 @@ not local measurements. HiQCache, DFlash and other cross-report hits are counted
 
 | ID | Technique | Local evidence / relation | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
-| EG-47 | INT8 host-tier KV: 1152-byte aligned row-local record, per-head absmax BF16 scales, unmodified CUDA mover | EG-18 is BF16 tiers, EG-36 is FP8 device KV; no quantized host representation | HiQCache (front-e E2 / front-f §4) | `test_eg47_hostkv` | M | Codec round-trip + host KV bytes/hit-rate gate |
+**EG-47 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg47_hostkv`
+packs 8 heads x 128 dims into a 1152-byte row-local record: 64-byte header,
+one BF16 absmax scale per head, INT8 payload; 1104 bytes used vs 4096 raw F32
+(73.05% saved). Round-trip maxerr 0.00263, mean relative error 0.00410. An
+opaque 1152-byte mover copy is byte-identical, so the device mover needs no
+format change. Oversized rows, undersized buffers, and corrupt magic are
+rejected. `test_eg47_hostkv: PASS`, exit 0. Hit-rate is covered by EG-18;
+this gate measures codec and record fit, not end-to-end host latency.
+
+| EG-47 | INT8 host-tier KV: 1152-byte aligned row-local record, per-head absmax BF16 scales, unmodified CUDA mover | EG-18 is BF16 tiers, EG-36 is FP8 device KV; no quantized host representation | HiQCache (front-e E2 / front-f §4) | `test_eg47_hostkv` | M | **DONE (codec)** — `src/wubu_hostkv.c/.h` gates 1152-byte fit, per-head BF16 scales and opaque mover equality; evidence above. |
 | EG-48 | BitNest: W4 draft nested inside W8 target, one physical weight/KV representation | no nested multi-precision representation | BitNest arXiv 2610.02800 | `test_eg48_bitnest` | L | 6 GB fit gate: one representation, both verification paths |
 | EG-49 | ReadKV progressive KV code: 8-bit store / 4-bit fetch per query | EG-28 is a threshold conversion, not progressive bits | ReadKV arXiv 2610.11245 | `test_eg49_readkv` | M | Gate PPL delta vs bytes fetched |
 | EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | Overlap gate: transfer/compute concurrency count |
