@@ -536,6 +536,10 @@ test_eg13_pretok: tools/test_eg13_pretok.c src/wubu_pretoken.c
 test_eg14_template: tools/test_eg14_template.c src/wubu_chat_template.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
+# EG-15: disaggregated prefill/decode handoff.
+test_eg15_pd: tools/test_eg15_pd.c src/wubu_pd_serve.c src/wubu_pd_split.c src/wubu_kv_transfer.c src/wubu_win.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
 # EG-12: composable sampler chain.
 test_eg12_sampler: tools/test_eg12_sampler.c src/wubu_sampler_chain.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)

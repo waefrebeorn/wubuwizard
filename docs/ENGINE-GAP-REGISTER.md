@@ -149,12 +149,20 @@ negative message count all return -1. `test_eg14_template: PASS`, exit 0.
 The gate exposes and fixes two real bugs: literal text was whitespace-trimmed
 (losing spaces/newlines) and unclosed blocks were accepted.
 
-| EG-15 | Disaggregated PD gate (already implemented, source-only) | `src/wubu_pd_serve.c`, `wubu_pd_split.c`, `wubu_kv_transfer.c` exist; `tools/test_disagg_prefill_decode.c` has no gate | in-tree | `test_eg15_pd` | S | Wire the existing test as a gate against its owning modules |
+| EG-15 | Disaggregated PD gate (wired) | `src/wubu_pd_serve.c`, `wubu_pd_split.c`, `wubu_kv_transfer.c` existed source-only | in-tree (DistServe/Splitwise/Mooncake lineage) | `test_eg15_pd` | S | **DONE** — `tools/test_eg15_pd.c` gates AB01-AB06 + AC01-AC03 policy, transfer cost model and a real localhost KV put/get handoff. Evidence below. |
 
 ## Wave 2 — memory and tiering
 
 | ID | Technique | Local evidence | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
+**EG-15 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg15_pd`
+links the three owning modules directly plus `src/wubu_win.c` for the Windows
+mmap shim. Output: `EG-15 kv_transfer_ms=2.684355 route=1 mode=1`,
+`test_eg15_pd: PASS`, exit 0. 64-byte KV block round-tripped through the
+transfer buffer with `used=64`; an oversized slot write was rejected.
+Gate also verifies handoff readiness, pull routing, tier mapping, TTFT fit,
+prefix reuse, MoD layer-skip/capacity and early exit.
+
 | EG-16 | Tagged CUDA sleep/wake allocator with partial restore | no sleep lifecycle or tagged restore in allocator | vLLM `gpu_worker.py` `Worker.sleep/wake_up`, `CuMemAllocator.sleep(offload_tags=)` | `test_eg16_sleep` | M | Tag allocations, sleep to host, restore subset; gate VRAM after wake |
 | EG-17 | Multi-adapter LoRA slots + grouped apply | one adapter merged at load time | Punica `bgmv`/`sgmv`, `LoRALRUCache` | `test_eg17_lora_slots` | L | depends EG-16 host paging; gate per-request adapter isolation |
 | EG-18 | HiCache L1/L2/L3 with async prefetch/write-back + deadline policy | flat file-backed `src/wubu_lmcache.c`; `wubu_tier_advice()` is a policy function, not a cache engine | Mooncake HiCache design, SGLang blog | `test_eg18_hicache` | L | New module beside lmcache; gate hit/miss counts and transfer overlap |
