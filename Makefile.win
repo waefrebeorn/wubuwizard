@@ -113,6 +113,7 @@ CORE_OBJ += src/wubu_pod_plan.o
 CORE_OBJ += src/wubu_cond_mem.o
 CORE_OBJ += src/wubu_streamk.o
 CORE_OBJ += src/wubu_vc_attn.o
+CORE_OBJ += src/wubu_dfly.o
 
 .PHONY: all cpu-build clean
 
@@ -530,6 +531,10 @@ test_eg79_streamk: tools/test_eg79_streamk.c src/wubu_streamk.c
 
 # EG-77: V-residual attention gate.
 test_eg77_vc_attn: tools/test_eg77_vc_attn.c src/wubu_vc_attn.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-81: checkpoint-native shared-KV drafting gate.
+test_eg81_dfly: tools/test_eg81_dfly.c src/wubu_dfly.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

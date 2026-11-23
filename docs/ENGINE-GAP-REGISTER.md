@@ -871,7 +871,16 @@ policy decisions only; the intentionally lossy distribution delta is not
 measured and no speed result is claimed.
 
 | EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | **DONE (policy gate)** — `src/wubu_fly_defer.c/.h` + `test_eg80_fly`; evidence above. | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
-| EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | EG-24/55/56 separate draft KV | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
+**EG-81 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg81_dfly`
+gates checkpoint-native shared-KV drafting: three draft layers bind to the
+target KV store, avoiding 3 x 8 x 64 = 1536 bytes with zero separate KV
+allocations. Duplicate or invalid layer binds add no bytes. A sparse index
+set [2 5 7 11] is stored once and matches on equality, rejects a changed
+index, and invalid sizes/NULL buffers are rejected. `test_eg81_dfly: PASS`,
+exit 0; 30/30 stress runs clean. Byte counts are modeled from synthetic
+dimensions; no FP8 path or speed result is claimed.
+
+| EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | **DONE (shared-KV gate)** — `src/wubu_dfly.c/.h` + `test_eg81_dfly`; evidence above. | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
 **EG-82 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg82_engram`
 gates Engram-style conditional memory: two-head multiplicative-XOR hashing
 places a 3-gram in disjoint prime buckets [1007, 1137] (ranges 1009 and 1013),
