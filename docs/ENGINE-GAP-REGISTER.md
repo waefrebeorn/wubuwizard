@@ -173,7 +173,15 @@ Scope: portable policy/accounting model with real host staging; actual CUDA
 VRAM release is a backend concern and is not claimed here.
 
 | EG-16 | Tagged sleep/wake allocator with partial restore | no sleep lifecycle or tagged restore in allocator | vLLM `gpu_worker.py` `Worker.sleep/wake_up`, `CuMemAllocator.sleep(offload_tags=)` | `test_eg16_sleep` | M | **DONE (host model)** — `src/wubu_sleep_alloc.c/.h` tags blocks, stages to host on sleep and restores a tag subset; evidence above. CUDA VRAM release deferred. |
-| EG-17 | Multi-adapter LoRA slots + grouped apply | one adapter merged at load time | Punica `bgmv`/`sgmv`, `LoRALRUCache` | `test_eg17_lora_slots` | L | depends EG-16 host paging; gate per-request adapter isolation |
+**EG-17 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg17_lora_slots`
+installs three rank-1 adapters in four slots. Adapter 0 alone yields `[6, 0]`,
+adapters 0+1 grouped yield `[6, 20]`, and adapter 1 alone immediately after
+yields `[0, 20]` — proving per-request output isolation. Empty selection zeroes
+the output; duplicate ids, unknown ids and dimension-mismatched slots are
+rejected; removing a slot drops the count and makes its id unusable.
+`test_eg17_lora_slots: PASS`, exit 0.
+
+| EG-17 | Multi-adapter LoRA slots + grouped apply | one adapter merged at load time | Punica `bgmv`/`sgmv`, `LoRALRUCache` | `test_eg17_lora_slots` | L | **DONE** — `src/wubu_lora_slots.c/.h` owns slot table, grouped sum and isolation; evidence above. LRU eviction and batched multi-request gather deferred. |
 | EG-18 | HiCache L1/L2/L3 with async prefetch/write-back + deadline policy | flat file-backed `src/wubu_lmcache.c`; `wubu_tier_advice()` is a policy function, not a cache engine | Mooncake HiCache design, SGLang blog | `test_eg18_hicache` | L | New module beside lmcache; gate hit/miss counts and transfer overlap |
 | EG-19 | KV restore-vs-recompute scheduler | `src/wubu_kv_tier.c` moves KV but has no recompute decision | ALISA §3, KVPR, mzCache | `test_eg19_recompute` | L | Cost compare restore vs recompute; gate bytes moved vs tokens recomputed |
 | EG-20 | Compute-centric MoE offload + expert activation traces | `src/wubu_moe.c`, `docs/ssd_moe.md` have no trace cache or latency model | MoE-Infinity iEAM/pEAM; Fiddler AVX512_BF16 | `test_eg20_expert` | L | Activation trace cache + layer-decay eviction; gate expert hit rate |
