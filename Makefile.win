@@ -86,6 +86,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_ops.o src/wubu_hive.o src/wubu_gguf_tokenizer.o src/wubu_linear_attn.o \
   src/wubu_backend.o src/wubu_agentic_os.o \
   src/wubu_win.o
+CORE_OBJ += src/wubu_ev_depth.o
 
 .PHONY: all cpu-build clean
 
@@ -387,6 +388,10 @@ test_eg67_titan: tools/test_eg67_titan.c src/wubu_titan.c
 
 # EG-68: Strata host/launch/split-KV gate.
 test_eg68_strata: tools/test_eg68_strata.c src/wubu_strata.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-87: expected-value speculative depth gate.
+test_eg87_ev_depth: tools/test_eg87_ev_depth.c src/wubu_ev_depth.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

@@ -771,7 +771,20 @@ reports are authors' claims, **not** local measurements. Nothing is vendored.
 | EG-84 | AWQ activation-aware uint4 weight scales per channel/group | EG-26 activations; EG-27 load-time quant | vLLM `vllm/model_executor/layers/quantization/auto_awq.py:176-190` | `test_eg84_awq` | M | group_size + zero-point exactness gate |
 | EG-85 | Sylvester-Hadamard rotation, no transform weight | EG-26/27 no rotation | vLLM `vllm/vllm/_custom_ops.py:3547-3557` | `test_eg85_hadamard` | S | symmetric inverse; pairs with EG-77 |
 | EG-86 | DeepSeek V4 multi-stream hyper-connections | checkpoint-specific | llama.cpp `ggml/include/ggml.h:2461-2470` | `test_eg86_hyperconn` | S | CONDITIONAL: record only, do not prioritize |
-| EG-87 | Expected-value depth gate: EWMA accept/depth × cost | no confidence scheduler | MTPLX `adaptive.py:69-236` | `test_eg87_ev_depth` | S | no weights, one EWMA + cycle timer; best immediate fit |
+**EG-87 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg87_ev_depth`
+gates the expected-value depth policy with configured priors .92/.64/.32:
+four warmup cycles choose depth 3, then P1=0.9200, P2=0.5888, P3=0.1884
+against a cost threshold of 0.110 (20 tok/s * 0.005 s * 1.10). Twenty
+immediate rejects decay P1 to 0.0714 and depth to 0; twenty full accepts
+restore depth 3. Four observed samples with 0.05 s extra flip the cost source
+to observed and force depth 0 (threshold 1.1). Cycle 32 probes depth 3, the
+next cycle returns 0. Confidence 0.1 collapses the gate, 2.0 clamps to 1.0;
+invalid depth, negative time and NULL inputs are rejected.
+`test_eg87_ev_depth: PASS`, exit 0; 30/30 stress runs clean. Probabilities and
+costs are synthetic policy values: no wall-clock speedup or model-quality
+result is claimed.
+
+| EG-87 | Expected-value depth gate: EWMA accept/depth × cost | no confidence scheduler | MTPLX `adaptive.py:69-236` | `test_eg87_ev_depth` | S | **DONE (policy gate)** — `src/wubu_ev_depth.c/.h` gates EWMA acceptance, 0.18 floor, warmup, 32-cycle probe and observed-cost switch; evidence above. |
 | EG-88 | Adaptive candidate length: truncate at first 1-prod(p)>threshold | fixed draft length | AdaFlash `specforge/modeling/draft/dflash.py:133-145,446-560` | `test_eg88_adapt_len` | S | scalar threshold, no trained head for v1 |
 | EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | argmin E(seed,pos,v)/p for tree verify |
 | EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_eagle2_tree` | L | cum-logprob score + ancestor mask, static tree buffers |
