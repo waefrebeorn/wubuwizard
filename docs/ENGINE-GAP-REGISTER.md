@@ -583,7 +583,17 @@ is a proxy for acceptance on a synthetic Zipf distribution, not a measured
 model acceptance rate.
 
 | EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | **DONE (shortlist policy)** — `src/wubu_frspec.c/.h` gates 87.5% head cut at 0.573 coverage; evidence above. |
-| EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | Gate TTFT vs answer fidelity |
+**EG-58 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg58_specprefill`
+uses a 4-dim draft projection over 64 prompt tokens to retain 16 (prefill
+token proxy 0.25 of full, i.e. 4x less work before the base model). Answer-logit
+cosine fidelity is 0.99999 versus 0.90756 for dropping the first 16 tokens.
+The first fixture put salient tokens across the whole prompt, making both
+baselines near-perfect; salient tokens were moved to the tail rather than
+relaxing the fidelity assertion. Invalid projection dim, keep count and empty
+retained set are rejected; 30-run stress clean. `test_eg58_specprefill: PASS`,
+exit 0. TTFT is a token-count proxy, not a measured wall-clock latency.
+
+| EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | **DONE (compression gate)** — `src/wubu_specprefill.c/.h` gates 4x prefill cut at 0.99999 fidelity; evidence above. |
 | EG-59 | Online speculative decoding: drafter fine-tuned from live verification corrections every I steps | EG-42 is a training objective, not post-deployment updates | Online SD arXiv 2310.07177 | `test_eg59_online` | L | Gate acceptance drift over a session |
 | EG-60 | LayerSkip: increasing layer dropout + exit-layer query cache reused by remainder pass | EG-25's "early exit" is generic, no kvq reuse | LayerSkip arXiv 2404.16710 | `test_eg60_layerskip` | L | Gate KV saved vs output parity |
 | EG-61 | Block verification keeping the longest accepted prefix with a correction distribution | EG-25 relaxed verification is not distribution-exact | SGLang speculative-decoding docs, front-e E14 | `test_eg61_blockverify` | M | Gate distribution exactness + accepted length |
