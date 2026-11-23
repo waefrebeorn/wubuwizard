@@ -425,7 +425,17 @@ rejected. `test_eg42_tv: PASS`, exit 0. Actual drafter training is not claimed;
 this gates the objective identity and calibration.
 
 | EG-42 | TV-objective drafter training | new; current acceptance logic has no TV objective | TVP arXiv 2611.00588 | `test_eg42_tv` | M | **DONE (identity + calibration)** — `src/wubu_tv_accept.c/.h` gates the TV acceptance identity and seeded empirical check; drafter training deferred. |
-| EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | Gate draft memory saved vs acceptance drop |
+**EG-43 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg43_draftkv`
+packs a 4x4 K and V draft cache as signed 4-bit nibbles: keys use 4 per-channel
+scales, values use 4 per-token scales. Max absolute restore error is 0.1429
+against a 0.2857 scale (half a quantization step), and 16 nibbles occupy 8
+bytes per matrix versus 64 bytes as F32 (4x). The gate caught two real codec
+bugs: an asymmetric ±8/±7 nibble range that clipped positive peaks at full
+scale, and a test assertion that compared two channels with equal maxima.
+`test_eg43_draftkv: PASS`, exit 0. End-to-end acceptance-rate measurement on a
+draft model remains deferred.
+
+| EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | **DONE (codec)** — `src/wubu_draft_kv.c/.h` gates K4V4 pack/unpack with error bound and 4x compression; acceptance measurement deferred. |
 | EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | Needs an accuracy gate before any speed claim |
 | EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | One family per gate; start with low-rank keys |
 | EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists |
