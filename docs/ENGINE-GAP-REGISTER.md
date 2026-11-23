@@ -506,7 +506,18 @@ clean. `test_eg50_ssdexpert: PASS`, exit 0. This is a deterministic scheduler
 gate; no real SSD throughput or GPU overlap is claimed.
 
 | EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | **DONE (scheduler)** — `src/wubu_ssd_expert.c/.h` gates 48→12 ticks and overlap 6; evidence above. |
-| EG-51 | SPICE: confidence-adaptive expert lookahead + low-rank surrogate for misses | refines EG-20 with surrogate substitution | SPICE arXiv 2608.21240 | `test_eg51_spice` | L | Lossy: opt-in behind an accuracy gate |
+**EG-51 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg51_spice`
+builds rank-3 and rank-1 surrogates of an 8x6 expert weight matrix (relerr
+0.00186 vs 0.00631). With confidence `[0.95 0.4 0.2 0.8]` and tol 0.05, routing
+gives `[lookahead surrogate surrogate lookahead]`; tightening tol below the
+rank-1 error flips both low-confidence experts back to exact, so the lossy path
+is opt-in behind the accuracy gate. Surrogate row-2 dot relerr 0.00003. The gate
+caught a real defect in `wubu_spice_surrogate_apply` (extra rank factor made the
+scalar output ~2x too small); fixed in the owning module. Invalid rows/rank and
+out-of-range row indices are rejected; 30-run stress clean. `test_eg51_spice:
+PASS`, exit 0. No real model quality measurement is claimed.
+
+| EG-51 | SPICE: confidence-adaptive expert lookahead + low-rank surrogate for misses | refines EG-20 with surrogate substitution | SPICE arXiv 2608.21240 | `test_eg51_spice` | L | **DONE (opt-in surrogate)** — `src/wubu_spice.c/.h` gates confidence routing and accuracy fallback; evidence above. |
 **EG-52 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg52_seqmoe`
 trains an order-2 expert-transition model on 48 tokens of a 6-expert cycle,
 then simulates residency 3 over 18 held-out tokens. Predicted next experts
