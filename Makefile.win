@@ -105,6 +105,7 @@ CORE_OBJ += src/wubu_conv_store.o
 CORE_OBJ += src/wubu_logits_proc.o
 CORE_OBJ += src/wubu_ngram_pool.o
 CORE_OBJ += src/wubu_ngram_map.o
+CORE_OBJ += src/wubu_candidate_selector.o
 
 .PHONY: all cpu-build clean
 
@@ -482,6 +483,10 @@ test_eg71_ngram_pool: tools/test_eg71_ngram_pool.c src/wubu_ngram_pool.c
 
 # EG-72: k4v n-gram map gate.
 test_eg72_ngram_map: tools/test_eg72_ngram_map.c src/wubu_ngram_map.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-74: candidate selector with p-min cut gate.
+test_eg74_selector: tools/test_eg74_selector.c src/wubu_candidate_selector.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

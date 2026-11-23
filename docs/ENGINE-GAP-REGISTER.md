@@ -808,7 +808,16 @@ synthetic entries; no production-scale persistence or speed result is claimed.
 
 | EG-72 | n-gram-map k4v: up to 4 values with hit counts + persisted files | **DONE (map gate)** — `src/wubu_ngram_map.c/.h` + `test_eg72_ngram_map`; evidence above. | llama.cpp `common/ngram-map.h:24,45,52,61`; `common/speculative.cpp:2332,2375,2615` | `test_eg72_ngram_map` | M | multi-value map, merge/save, count-eviction gate |
 | EG-73 | Suffix decoding from finished-request GPU corpus | no corpus drafting | vLLM `docs/features/speculative_decoding/suffix.md`; `vllm/v1/worker/gpu/spec_decode/suffix/speculator.py` | `test_eg73_suffix_spec` | L | corpus + frequency proposal + online per-slot acceptance |
-| EG-74 | DFlash2 / LiliCorr candidate selector + p-min cut | EG-56/62 lack selector | llama.cpp `docs/speculative.md:86-164` | `test_eg74_selector` | M | confidence truncation, hidden-state-conditioned scorer |
+**EG-74 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg74_selector`
+gates the DFlash2/LiliCorr selector: with p_min=0.05 it keeps candidates
+[0 1 2 3] of 6; adding hidden-conditioned scores promotes candidate 2 to
+[2 0 1 3]. An over-high p_min still keeps the single best candidate, p_min=0
+keeps all six, and bad probabilities, capacities, NULL buffers and out-of-range
+p_min are rejected. `test_eg74_selector: PASS`, exit 0; 30/30 stress runs clean.
+Probabilities and scores are synthetic; no acceptance-rate or quality result
+is claimed.
+
+| EG-74 | DFlash2 / LiliCorr candidate selector + p-min cut | **DONE (selector gate)** — `src/wubu_candidate_selector.c/.h` + `test_eg74_selector`; evidence above. | llama.cpp `docs/speculative.md:86-164` | `test_eg74_selector` | M | confidence truncation, hidden-state-conditioned scorer |
 | EG-75 | Training-free sparse-KV retrieval lifecycle (repr → update → query top-k) | EG-44 trained indexer; EG-53/54 evict | SGLang `python/sglang/srt/mem_cache/sparsity/algorithms/base_algorithm.py:10-106`; `quest_algorithm.py:21,55,120` | `test_eg75_sparse_retrieve` | L | accuracy gate before speed gate; page_size=1 token-wise |
 | EG-76 | Reuse DSA top-k indices across layers, skip index-key KV alloc | EG-44 builds indexer only | vLLM `docs/features/index_cache.md`; `vllm/model_executor/layers/mla.py:109` | `test_eg76_index_reuse` | M | F/S pattern, measure KV bytes saved |
 | EG-77 | E4M3 V residual restored in online softmax + Hadamard low-bit QK | EG-30/36 lack residual-V | FlashInfer `flashinfer/attention/prims_ts/README.md:674-690` | `test_eg77_vc_attn` | L | requires per-tile mean and 128-pt normalized Hadamard |
