@@ -182,7 +182,17 @@ rejected; removing a slot drops the count and makes its id unusable.
 `test_eg17_lora_slots: PASS`, exit 0.
 
 | EG-17 | Multi-adapter LoRA slots + grouped apply | one adapter merged at load time | Punica `bgmv`/`sgmv`, `LoRALRUCache` | `test_eg17_lora_slots` | L | **DONE** — `src/wubu_lora_slots.c/.h` owns slot table, grouped sum and isolation; evidence above. LRU eviction and batched multi-request gather deferred. |
-| EG-18 | HiCache L1/L2/L3 with async prefetch/write-back + deadline policy | flat file-backed `src/wubu_lmcache.c`; `wubu_tier_advice()` is a policy function, not a cache engine | Mooncake HiCache design, SGLang blog | `test_eg18_hicache` | L | New module beside lmcache; gate hit/miss counts and transfer overlap |
+**EG-18 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg18_hicache`
+runs a 2/2/2-slot L1/L2/L3 cache: four inserts queue two asynchronous L1→L2
+write-backs (2 completions at t=10), an L2 hit at t=10 promotes to L1 and
+queues one more write-back, a prefetch at t=20 completes at t=70 so the
+following get is an L1 hit, a 71 ms deadline rejects the 50 ms promotion, and
+an absent key is a miss. Final stats: `hits L1=1 L2=1 L3=0 miss=1 moves=5
+pending=0 l1=2 l2=1 l3=0`; `test_eg18_hicache: PASS`, exit 0. The gate exposed
+two real bugs (uninitialised slot pointer in insert_l1, lower-tier hits
+reporting tier 1). Real SSD I/O and cross-process tiering remain deferred.
+
+| EG-18 | HiCache L1/L2/L3 with async prefetch/write-back + deadline policy | flat file-backed `src/wubu_lmcache.c`; `wubu_tier_advice()` is a policy function, not a cache engine | Mooncake HiCache design, SGLang blog | `test_eg18_hicache` | L | **DONE (in-memory tiers)** — `src/wubu_hicache.c/.h` with LRU tiers, promotion, queued write-back and deadline-gated prefetch; evidence above. Real SSD I/O deferred. |
 | EG-19 | KV restore-vs-recompute scheduler | `src/wubu_kv_tier.c` moves KV but has no recompute decision | ALISA §3, KVPR, mzCache | `test_eg19_recompute` | L | Cost compare restore vs recompute; gate bytes moved vs tokens recomputed |
 | EG-20 | Compute-centric MoE offload + expert activation traces | `src/wubu_moe.c`, `docs/ssd_moe.md` have no trace cache or latency model | MoE-Infinity iEAM/pEAM; Fiddler AVX512_BF16 | `test_eg20_expert` | L | Activation trace cache + layer-decay eviction; gate expert hit rate |
 | EG-21 | Full Medusa tree verification | `src/wubu_medusa.c` is 39 lines: init + EMA adapt only, no draft-head forward or tree verify | Medusa self-draft heads | `test_eg21_medusa_tree` | L | Tree attention + verification path; gate acceptance length |
