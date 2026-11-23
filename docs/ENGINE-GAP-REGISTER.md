@@ -436,7 +436,17 @@ scale, and a test assertion that compared two channels with equal maxima.
 draft model remains deferred.
 
 | EG-43 | Quantized draft KV: K4V4 per-channel keys / per-token values | refines EG-28; target cache unchanged | Quantized draft KV arXiv 2611.20565 | `test_eg43_draftkv` | M | **DONE (codec)** — `src/wubu_draft_kv.c/.h` gates K4V4 pack/unpack with error bound and 4x compression; acceptance measurement deferred. |
-| EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | Needs an accuracy gate before any speed claim |
+**EG-44 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg44_indexer`
+compares a rank-4 indexer against exact top-8 selection over 32 eight-dimensional
+keys with dominant low-rank structure and a small residual. The first attempt
+used a seeded random projection and returned only 2/8 overlap, so the gate
+correctly refused an accuracy claim; the shipped deterministic projection over
+the first four channels reaches 8/8 overlap at 25% sparsity. Bad dimensions,
+rank > dim and out-of-range k are rejected. `test_eg44_indexer: PASS`, exit 0.
+This is an untrained indexer policy; the trained indexer, GQA grouping and
+tile-size speed claims remain deferred.
+
+| EG-44 | Trained sparse-attention indexer (G=QH/KH, D+1, ~200-row tile, head dim 128/256) | new vs EG-23's post-training BLASST | NVIDIA sparse-attention blog (17 Nov 2026) | `test_eg44_indexer` | L | **PARTIAL (accuracy gate only)** — `src/wubu_sparse_indexer.c/.h` gates top-k recall before any speed claim; trained indexer and tile speed deferred. |
 | EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | One family per gate; start with low-rank keys |
 | EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists |
 
