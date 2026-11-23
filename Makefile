@@ -65,6 +65,7 @@ CORE_OBJ += src/wubu_suffix_spec.o
 CORE_OBJ += src/wubu_token_recycle.o
 CORE_OBJ += src/wubu_expert_cache.o
 CORE_OBJ += src/wubu_dag_verify.o
+CORE_OBJ += src/wubu_relaxed_verify.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -364,6 +365,9 @@ src/wubu_expert_cache.o: src/wubu_expert_cache.c include/wubu_expert_cache.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_dag_verify.o: src/wubu_dag_verify.c include/wubu_dag_verify.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_relaxed_verify.o: src/wubu_relaxed_verify.c include/wubu_relaxed_verify.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1177,6 +1181,10 @@ test_eg36_expert_cache: tools/test_eg36_expert_cache.c src/wubu_expert_cache.c
 
 # EG-25c: DAG verification of shared draft prefixes.
 test_eg25_dag_verify: tools/test_eg25_dag_verify.c src/wubu_dag_verify.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-25d: relaxed speculative verification gate.
+test_eg25_relaxed: tools/test_eg25_relaxed.c src/wubu_relaxed_verify.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

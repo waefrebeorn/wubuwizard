@@ -119,6 +119,7 @@ CORE_OBJ += src/wubu_suffix_spec.o
 CORE_OBJ += src/wubu_token_recycle.o
 CORE_OBJ += src/wubu_expert_cache.o
 CORE_OBJ += src/wubu_dag_verify.o
+CORE_OBJ += src/wubu_relaxed_verify.o
 
 .PHONY: all cpu-build clean
 
@@ -560,6 +561,10 @@ test_eg36_expert_cache: tools/test_eg36_expert_cache.c src/wubu_expert_cache.c
 
 # EG-25c: DAG verification of shared draft prefixes.
 test_eg25_dag_verify: tools/test_eg25_dag_verify.c src/wubu_dag_verify.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-25d: relaxed speculative verification gate.
+test_eg25_relaxed: tools/test_eg25_relaxed.c src/wubu_relaxed_verify.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

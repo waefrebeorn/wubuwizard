@@ -261,8 +261,8 @@ maximises `expected accepted tokens / (k*draft_cost + verify_cost)` over
 (3.164), a perfect drafter picks k=8 (4.444), and an expensive draft with the
 same 0.9 acceptance drops to k=3 (0.387). The reported expectation matches the
 truncated geometric formula; zero/over-unity acceptance and zero verify cost
-are rejected. `test_eg25_specfam: PASS`, exit 0. SpecTr and relaxed
-verification remain TODO under this same gate family (EG-25b/c below).
+are rejected. `test_eg25_specfam: PASS`, exit 0. SpecTr remains TODO under
+this same gate family (EG-25b/c/d below).
 
 **EG-25b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg25_recycle`
 gates token recycling from verified chains: recording the accepted chain
@@ -282,7 +282,17 @@ adds no nodes. Bad capacities, NULL paths, empty paths and a short plan buffer
 are rejected. `test_eg25_dag_verify: PASS`, exit 0; 30/30 stress runs clean.
 Node counts are synthetic; no acceptance-rate or latency result is claimed.
 
-| EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam`, `test_eg25_recycle`, `test_eg25_dag_verify` | L | **PARTIAL (sizing + recycling + DAG done)** — `src/wubu_spec_size.c/.h` gates draft length; `src/wubu_token_recycle.c/.h` gates chain reuse (EG-25b); `src/wubu_dag_verify.c/.h` gates shared-prefix node dedup (EG-25c); SpecTr/relaxed still TODO. |
+**EG-25d evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg25_relaxed`
+gates relaxed verification as a policy trade: with draft probabilities
+[0.90 0.80 0.70] and target probabilities [0.85 0.70 0.65], exact comparison
+rejects at token 0 while delta=0.10 accepts it (ratio 0.944) and then rejects
+at token 1, giving 1 extra accepted token. Zero delta is exact, a shortfall
+within delta is accepted, and invalid probabilities/deltas/NULL buffers are
+rejected. `test_eg25_relaxed: PASS`, exit 0; 30/30 stress runs clean. Probabilities
+are synthetic and the acceptance comparison is deterministic; no distribution
+equality, acceptance-rate or latency claim is made.
+
+| EG-25 | Speculative family additions (Sequoia DP sizing, SpecTr optimal transport, DAG verify, token recycling, relaxed verification) | `src/wubu_more_spec.c` has REST/tree-restructure/contrastive/distil/spec-MoE/cascade/swap/early-exit only | speculative decoding survey 2502.19732v3 | `test_eg25_specfam`, `test_eg25_recycle`, `test_eg25_dag_verify`, `test_eg25_relaxed` | L | **PARTIAL (sizing + recycling + DAG + relaxed done)** — `src/wubu_spec_size.c/.h` gates draft length; `src/wubu_token_recycle.c/.h` gates chain reuse (EG-25b); `src/wubu_dag_verify.c/.h` gates shared-prefix dedup (EG-25c); `src/wubu_relaxed_verify.c/.h` gates the delta trade (EG-25d); SpecTr still TODO. |
 **EG-26 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg26_dynact`
 quantizes an 8-value loud row to 4-bit with scale 1.1429 (max error 0.57143)
 and a quiet row with scale 0.0286 (max error 0.01429); both errors are within
