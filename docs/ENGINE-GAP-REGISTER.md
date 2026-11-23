@@ -229,7 +229,7 @@ prefix. `test_eg21_tree: PASS`, exit 0. Draft-head forward and attention-kernel
 integration remain deferred; this gate covers tree layout and verify policy.
 
 | EG-21 | Full Medusa tree verification | `src/wubu_medusa.c` is 39 lines: init + EMA adapt only, no draft-head forward or tree verify | Medusa self-draft heads | `test_eg21_tree` | L | **DONE (verify policy)** — `src/wubu_tree_verify.c/.h` with ancestor masks, longest-prefix acceptance and rejection bonus; evidence above. Draft heads/kernel integration deferred. |
-| EG-22 | Auto-configured pipelined offload at 6 GB | weight streaming exists; no per-iteration adaptive policy or proven 6 GB pipeline | PIPO (RTX 3060 6 GB, <40%→>90% util, 3.1×), TightLLM | `test_eg22_pipo` | L | depends EG-06; gate measured GPU util and throughput |
+| EG-22 | Auto-configured pipelined offload at 6 GB | weight streaming exists; no per-iteration adaptive policy or proven 6 GB pipeline | PIPO (RTX 3060 6 GB, <40%→>90% util, 3.1×), TightLLM | `test_eg22_pipo` | L | depends EG-06; gate measured GPU util and throughput | **DEFERRED (2026-11-23):** a falsifiable gate needs measured GPU utilisation and throughput; this host cannot produce that telemetry and no proxy is promoted to measured evidence.
 
 ## Wave 3 — precision and decode acceleration
 
@@ -320,7 +320,7 @@ NULL pointers and zero query counts fail closed. 20/20 stress runs passed.
 FP8 kernels and end-to-end PPL are deferred.
 
 | EG-30 | FP8 attention | T3/T4 precision ladder; FP8 quant/dequant already present but not in attention | `test_eg30_fp8attn` | L | **DONE (CPU emulation)** — `src/wubu_fp8_attn.c/.h` adds E4M3 attention with F32 accumulation; evidence above. GPU-native path deferred. |
-| EG-31 | Pipeline parallelism | 0 hits for `pipeline_parallel\|stage_id\|pp_rank`; multi-GPU only, out of scope for a single 6 GB box | `test_eg31_pp` | XL |
+| EG-31 | Pipeline parallelism | 0 hits for `pipeline_parallel\|stage_id\|pp_rank`; multi-GPU only, out of scope for a single 6 GB box | `test_eg31_pp` | XL | **DEFERRED (2026-11-23):** multi-GPU only; the single 6 GB target has no second device to pipeline across.
 **EG-32a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg32_capacity`
 packs five requests (3/4/2/5/1 tokens, priorities 1/2/1/3/1) by descending
 priority: with a 12-token cycle capacity and a 6-token batch ceiling it admits
@@ -335,8 +335,18 @@ hits for `pipeline_parallel|stage_id|pp_rank`; this is a multi-GPU feature and
 the target box is a single 6 GB GPU. No gate is claimed.
 
 | EG-32 | Capacity + micro-batch scheduler and persistent compact session | Architectural, medium fit; waits for EG-09/EG-10 | `test_eg32_capacity` | L | **PARTIAL (scheduler done)** — `src/wubu_capacity_sched.c/.h` gates priority packing and explicit rejection; compact session deferred. |
-| EG-33 | Disaggregated connector protocol | In-tree file-backed handoff exists; network protocol only if a multi-node use case appears | `test_eg33_connector` | L |
-| EG-34 | Watermarking / typical-p logits processors | LOW fit for the target; no use case yet | `test_eg34_logits` | S |
+| EG-33 | Disaggregated connector protocol | In-tree file-backed handoff exists; network protocol only if a multi-node use case appears | `test_eg33_connector` | L | **DEFERRED (2026-11-23):** network connector only if a multi-node use case appears; in-tree file-backed handoff remains the local path.
+**EG-34 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg34_logits`
+gates two composable processors: typical_p=0.5 on four logits keeps only the
+highest-mass token, masking the other three below -1e30. With typical_p=1 and
+delta=1, the keyed green list marks 3 of 8 tokens at position 3; green logits
+receive +1 while red logits stay unchanged, raising the synthetic green
+softmax mass from 0.047 to 0.633. Membership is deterministic; invalid
+typical_p, negative delta, NULL buffers and zero-length rows are rejected.
+`test_eg34_logits: PASS`, exit 0; 30/30 stress runs clean. This is a transform
+gate; no watermark detectability or model-quality result is claimed.
+
+| EG-34 | Watermarking / typical-p logits processors | LOW fit for the target; no use case yet | `test_eg34_logits` | S | **DONE (processor gate)** — `src/wubu_logits_proc.c/.h` gates cumulative-mass typical-p masking and a keyed green-list bias; evidence above. |
 
 ## Wave 5 — recent gains (2026-10-31 → 2026-11-22, time-bounded sweep)
 
@@ -456,7 +466,7 @@ when the gate surfaced it. `test_eg45_lowrank: PASS`, exit 0. Variable-bit VQ
 and coordinated expert staging are separate families and still TODO.
 
 | EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam` | L | **PARTIAL (low-rank keys done)** — `src/wubu_lowrank_kv.c/.h` gates reconstruction error and storage ratio; VQ and expert staging deferred. |
-| EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists |
+| EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists | **DEFERRED (2026-11-23):** tier-gated T4; no multi-GPU tier exists on this target.
 
 ## Wave 6 — second-degree, new engines and 2026 Q3 (deduped)
 
