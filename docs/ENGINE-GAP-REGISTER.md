@@ -594,7 +594,16 @@ retained set are rejected; 30-run stress clean. `test_eg58_specprefill: PASS`,
 exit 0. TTFT is a token-count proxy, not a measured wall-clock latency.
 
 | EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | **DONE (compression gate)** — `src/wubu_specprefill.c/.h` gates 4x prefill cut at 0.99999 fidelity; evidence above. |
-| EG-59 | Online speculative decoding: drafter fine-tuned from live verification corrections every I steps | EG-42 is a training objective, not post-deployment updates | Online SD arXiv 2310.07177 | `test_eg59_online` | L | Gate acceptance drift over a session |
+**EG-59 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg59_online`
+runs 4000 propose/verify steps with an 8-token Zipf target. A drafter updated
+every 16 steps from verifier corrections moves acceptance from 0.9210 (first
+quarter) to 1.0000 (last quarter); a frozen control stays 0.7120 → 0.6940.
+The gate caught a shared static update counter that cross-talked between two
+instances; the counter is now per-instance in `wubu_online_t`. Invalid vocab,
+null target and zero interval are rejected; 30-run stress clean.
+`test_eg59_online: PASS`, exit 0. Synthetic target, not a live model session.
+
+| EG-59 | Online speculative decoding: drafter fine-tuned from live verification corrections every I steps | EG-42 is a training objective, not post-deployment updates | Online SD arXiv 2310.07177 | `test_eg59_online` | L | **DONE (drift gate)** — `src/wubu_online_sd.c/.h` gates 0.921→1.000 acceptance vs frozen 0.712→0.694; evidence above. |
 | EG-60 | LayerSkip: increasing layer dropout + exit-layer query cache reused by remainder pass | EG-25's "early exit" is generic, no kvq reuse | LayerSkip arXiv 2404.16710 | `test_eg60_layerskip` | L | Gate KV saved vs output parity |
 | EG-61 | Block verification keeping the longest accepted prefix with a correction distribution | EG-25 relaxed verification is not distribution-exact | SGLang speculative-decoding docs, front-e E14 | `test_eg61_blockverify` | M | Gate distribution exactness + accepted length |
 | EG-62 | DSpark: rank-256 Markov correction head + confidence head predicting 1-TV, per-position verify budget | EG-24/EG-25 have no confidence budget | DSpark arXiv 2607.05147 | `test_eg62_dspark` | L | Gate acceptance length vs budget |
