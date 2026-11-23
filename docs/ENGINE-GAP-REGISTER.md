@@ -668,7 +668,17 @@ peak working-set reduction. Outputs are byte-identical (`memcmp` clean, maxerr
 not measured GPU VRAM; no partial-result GPU kernel is shipped by this gate.
 
 | EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | **DONE (streaming parity gate)** — `src/wubu_leanstream.c/.h` gates 7.111x working-set cut at byte-identical output; evidence above. |
-| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | Snapshot round-trip gate first; never vendor Zig code |
+**EG-66a evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg66_tensorfold`
+writes a 16-token x 8-dim prefix snapshot (576-byte payload) to a TMPDIR file
+and restores it byte-identically for both token ids and KV rows. Restored KV
+matches an independent serial recomputation exactly. Flipping a payload byte
+makes restore reject via the FNV-1a digest; wrong dimensions, wrong token count
+and a missing file are rejected. The first corruption fixture wrote through a
+read/modify stream ambiguously and was replaced with an explicit byte overwrite.
+30-run stress clean. `test_eg66_tensorfold: PASS`, exit 0. No Zig code was
+vendored; this is project-owned C11.
+
+| EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | **PARTIAL (EG-66a snapshot round-trip DONE)** — `src/wubu_tensorfold.c/.h` gates byte-exact disk snapshot/restore and serial equivalence; adaptive caps, kv8 K/V and AOT kernel packs remain TODO. |
 | EG-67 | titan-engine: tiered experts + prefill expert streaming + hybrid prefix cache on a small consumer GPU | EG-07/EG-20 lack prefill streaming | titan-engine, front-f §18 | `test_eg67_titan` | L | Gate peak VRAM on 6 GB class |
 | EG-68 | Strata: zero-allocation host, prefill launch-count amortization, 4-way split-KV decode reduction | no launch-count instrumentation | Strata (Rust+HIP), front-f §19 | `test_eg68_strata` | M | Gate allocation count and KV reduction |
 | EG-69 | ReplaySSM: cache SSM inputs rather than state, making speculative rollback append-only | engine has SSM kernels but no recurrent-state rollback object | ReplaySSM, front-f §15 | `test_eg69_replayssm` | L | Conditional on hybrid models; gate rollback exactness |
