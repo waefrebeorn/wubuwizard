@@ -917,7 +917,18 @@ claimed by this gate.
 
 | EG-98 | Batched expert H2D uploads | per-expert copies | Strata `copy_expert_blobs`, `cudaMemcpyBatchAsync` | `test_eg98_batch_h2d` | M | **DONE (portable planner gate)** — `src/wubu_batch_h2d.c/.h` gates group capping, disjoint pinned blobs and abort-without-commit; evidence above. |
 | EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | per-1MiB hashes, prefix+byte key |
-| EG-100 | Real-layer microbenchmark probe for device-tier pricing | EG-06 uses static costs | BigMoeOnEdge `layer_probe.cpp:probe_layer` | `test_eg100_layer_probe` | M | gate measures then prices layers |
+**EG-100 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg100_layer_probe`
+probes a synthetic 8-expert / 16-dim layer at decode (1 token) and prompt
+(128 tokens) widths for 2000 reps; this run measured 1024 and 131072 synthetic
+MB/s (clock-tick granularity), both finite. A 5% device deviation (NMSE
+~0.0025) is refused at one token (limit 1e-3) but accepted at 128 (limit 1e-2).
+The device tier is chosen only when validation passes and the measured rate
+exceeds the host rate; without a probe, pricing falls back to the 50 MB/s host
+rate. `test_eg100_layer_probe: PASS`, exit 0; 30/30 stress runs clean. The
+workload is synthetic, not a real ggml layer or device timing; no device
+throughput result is claimed.
+
+| EG-100 | Real-layer microbenchmark probe for device-tier pricing | EG-06 uses static costs | BigMoeOnEdge `layer_probe.cpp:probe_layer` | `test_eg100_layer_probe` | M | **DONE (measured-pricing gate)** — `src/wubu_layer_probe.c/.h` gates width-timed rates, NMSE validation and fallback pricing; evidence above. |
 
 **EG-101 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg101_sq_agreement`
 compares reference and candidate logit rows per Strata's SQ contract. A close

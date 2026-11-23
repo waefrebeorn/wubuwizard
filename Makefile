@@ -43,6 +43,7 @@ CORE_OBJ += src/wubu_two_level_verify.o
 CORE_OBJ += src/wubu_kv_rollback.o
 CORE_OBJ += src/wubu_early_expert.o
 CORE_OBJ += src/wubu_batch_h2d.o
+CORE_OBJ += src/wubu_layer_probe.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -279,6 +280,9 @@ src/wubu_early_expert.o: src/wubu_early_expert.c include/wubu_early_expert.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_batch_h2d.o: src/wubu_batch_h2d.c include/wubu_batch_h2d.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_layer_probe.o: src/wubu_layer_probe.c include/wubu_layer_probe.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1000,6 +1004,10 @@ test_eg96_early_expert: tools/test_eg96_early_expert.c src/wubu_early_expert.c
 
 # EG-98: batched expert H2D upload gate.
 test_eg98_batch_h2d: tools/test_eg98_batch_h2d.c src/wubu_batch_h2d.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-100: measured layer probe pricing gate.
+test_eg100_layer_probe: tools/test_eg100_layer_probe.c src/wubu_layer_probe.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
