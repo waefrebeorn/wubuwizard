@@ -485,7 +485,17 @@ with no second weight copy. `test_eg48_bitnest: PASS`, exit 0. This gate proves
 one-representation correctness, not a measured speedup.
 
 | EG-48 | BitNest: W4 draft nested inside W8 target, one physical weight/KV representation | no nested multi-precision representation | BitNest arXiv 2610.02800 | `test_eg48_bitnest` | L | **DONE (weight view)** — `src/wubu_bitnest.c/.h` gates both W8/W4 paths on one physical array; evidence above. |
-| EG-49 | ReadKV progressive KV code: 8-bit store / 4-bit fetch per query | EG-28 is a threshold conversion, not progressive bits | ReadKV arXiv 2610.11245 | `test_eg49_readkv` | M | Gate PPL delta vs bytes fetched |
+**EG-49 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg49_readkv`
+stores 1024 KV values as one 8-bit code split into a nibble-packed coarse array
+and a refinement array. A 4-bit query fetches 512 bytes (coarse only) vs 1536
+for 8-bit — a 3x reduction. Relative error 0.06594 at 4 bits and 0.00398 at 8
+bits; the 4-bit figure is the expected half-bucket midpoint error of a 16-level
+fetch. Toy-head PPL is 70.5281 (4-bit) vs 70.7538 (8-bit), delta -0.00320 nats
+within 0.20. Invalid widths and null stores are rejected; 30-run stress clean.
+`test_eg49_readkv: PASS`, exit 0. This is a fetched-bytes/accuracy gate, not a
+measured end-to-end latency claim.
+
+| EG-49 | ReadKV progressive KV code: 8-bit store / 4-bit fetch per query | EG-28 is a threshold conversion, not progressive bits | ReadKV arXiv 2610.11245 | `test_eg49_readkv` | M | **DONE (progressive fetch)** — `src/wubu_readkv.c/.h` gates 3x fewer fetched bytes and small PPL delta; evidence above. |
 | EG-50 | Concurrent per-expert SSD reads with async H2D on completion, in-VRAM rANS | `docs/ssd_moe.md` is sequential per-layer LRU | SSD-LLaMA arXiv 2609.18110 | `test_eg50_ssdexpert` | L | Overlap gate: transfer/compute concurrency count |
 | EG-51 | SPICE: confidence-adaptive expert lookahead + low-rank surrogate for misses | refines EG-20 with surrogate substitution | SPICE arXiv 2608.21240 | `test_eg51_spice` | L | Lossy: opt-in behind an accuracy gate |
 | EG-52 | SeqMoE: expert activation as sequence model, deadline sequencing, probabilistic Belady | EG-06/EG-20 have no learned activation predictor or Belady policy | SeqMoE arXiv 2609.12978 | `test_eg52_seqmoe` | L | Gate hit rate at fixed residency |
