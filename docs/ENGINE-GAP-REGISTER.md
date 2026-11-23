@@ -572,7 +572,17 @@ clean. `test_eg56_dflash: PASS`, exit 0. Acceptance is computed from synthetic
 hidden-state distances, not from a real model pass.
 
 | EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | **DONE (acceptance gate)** — `src/wubu_dflash.c/.h` gates 8/8 fused vs 0/8 uninjected per pass; evidence above. |
-| EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | Gate LM-head memory cut vs acceptance |
+**EG-57 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg57_frspec`
+selects the top 8 of a 64-token Zipf frequency table. Draft-head memory drops
+87.5% (8 rows instead of 64) while the shortlist still covers 0.57316 of the
+target distribution, versus 0.02784 for an equal-size tail-token baseline.
+The gate caught an out-of-bounds swap in the first selection implementation;
+fixed in `wubu_frspec.c` before green. Invalid k and out-of-range subset ids
+are rejected; 30-run stress clean. `test_eg57_frspec: PASS`, exit 0. Coverage
+is a proxy for acceptance on a synthetic Zipf distribution, not a measured
+model acceptance rate.
+
+| EG-57 | FR-Spec: high-frequency-only draft LM head, full vocab at verification | no frequency-ranked vocabulary path | FR-Spec arXiv 2502.14856 | `test_eg57_frspec` | S | **DONE (shortlist policy)** — `src/wubu_frspec.c/.h` gates 87.5% head cut at 0.573 coverage; evidence above. |
 | EG-58 | SpecPrefill: draft-attention prompt compression before the base model | no pre-model prompt dropping | SpecPrefill arXiv 2502.02789 | `test_eg58_specprefill` | M | Gate TTFT vs answer fidelity |
 | EG-59 | Online speculative decoding: drafter fine-tuned from live verification corrections every I steps | EG-42 is a training objective, not post-deployment updates | Online SD arXiv 2310.07177 | `test_eg59_online` | L | Gate acceptance drift over a session |
 | EG-60 | LayerSkip: increasing layer dropout + exit-layer query cache reused by remainder pass | EG-25's "early exit" is generic, no kvq reuse | LayerSkip arXiv 2404.16710 | `test_eg60_layerskip` | L | Gate KV saved vs output parity |
