@@ -831,7 +831,17 @@ are a Monte Carlo check over synthetic seeds; no model-quality or T>0 speed
 result is claimed.
 
 | EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | **DONE (sampling gate)** — `src/wubu_keyed_sample.c/.h` gates counter-based Exp(1) keys and tree-shape-independent draws; evidence above. |
-| EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_eagle2_tree` | L | cum-logprob score + ancestor mask, static tree buffers |
+**EG-90 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg90_dynamic_tree`
+gates EAGLE-2's cumulative-logprob tree builder: on a 6-node tree with a
+4-token budget and top_k=2 it selects [0 1 3 4] with parent positions
+[-1 0 1 1] and depths [0 1 2 2]. Raising sibling 2's log-prob reshapes the tree
+to [0 2 1 5], proving draft confidence chooses the shape. Over 100 hashed
+random trees, parent positions and depths have zero mismatches against an
+independent walk. Invalid parent, log-prob, buffer and capacity inputs are
+rejected. `test_eg90_dynamic_tree: PASS`, exit 0; 30/30 stress runs clean.
+Log-probs are synthetic; no acceptance-rate or speed result is claimed.
+
+| EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_dynamic_tree` | L | **DONE (tree-shape gate)** — `src/wubu_dynamic_tree.c/.h` gates cumulative-score selection, top_k sibling limit and ancestor-closed parent/depth layout; evidence above. |
 **EG-91 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg91_tree_accept`
 on an 8-node tree with a broken branch selects the deepest fully-matching leaf
 by max key depth*(N+1)+(N-index): accepted path [0 1 3 7], with ceil(log2 8)=3
