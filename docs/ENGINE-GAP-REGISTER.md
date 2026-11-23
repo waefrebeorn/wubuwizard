@@ -449,8 +449,8 @@ saves a 10-token prefix for `agent-1` (turn 1) and resumes it with 0 prefill
 tokens. Appending two tokens requires exactly 2 prefill tokens and advances to
 turn 2; resuming the extended prefix again needs 0. A diverged 4-token prefix
 correctly asks for a full 4-token re-prefill, and an unknown agent asks for
-all 10. `test_eg39_agentstate: PASS`, exit 0. Hibana adaptive speculation is
-not claimed by this gate; surgery is gated as EG-39b below.
+all 10. `test_eg39_agentstate: PASS`, exit 0. Surgery and adaptive speculation
+are gated as EG-39b/c below.
 
 **EG-39b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg39_surgery`
 gates Hibana-style model surgery as a planner: four layers with byte/importance
@@ -462,7 +462,16 @@ out-of-range caps are rejected. `test_eg39_surgery: PASS`, exit 0; 30/30 stress
 runs clean. Byte counts and importance scores are synthetic; no model-quality
 or measured memory-traffic result is claimed.
 
-| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate`, `test_eg39_surgery` | L | **PARTIAL (state persistence + surgery)** — `src/wubu_agent_state.c/.h` gates zero-re-prefill resume; `src/wubu_model_surgery.c/.h` gates budgeted importance-aware layer cuts (EG-39b); adaptive speculation still deferred. |
+**EG-39c evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg39_agent_spec`
+gates Hibana-style adaptive speculation: within an agent turn, a four-token
+acceptance streak widens draft depth to 3, no streak keeps depth 1, and a
+changed turn resets depth to 1 regardless of streak. The depth is clamped by
+a two-token remaining budget and a configured max of 2; zero turn, negative
+streak/budget and zero max are rejected. `test_eg39_agent_spec: PASS`, exit 0;
+30/30 stress runs clean. Streaks and budgets are synthetic; no task-throughput
+result is claimed.
+
+| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate`, `test_eg39_surgery`, `test_eg39_agent_spec` | L | **DONE (all three mechanisms gated)** — `src/wubu_agent_state.c/.h` gates zero-re-prefill resume; `src/wubu_model_surgery.c/.h` gates budgeted layer cuts (EG-39b); `src/wubu_agent_spec.c/.h` gates turn-aware adaptive depth (EG-39c). |
 **EG-40 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg40_invalidkv`
 verifies stale KV tokens `[1,2,3,4]` against freshly prefilled `[1,2,9,4]`:
 longest common prefix 2 gives rate 0.50, which commits 2 accepted tokens at a

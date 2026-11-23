@@ -128,6 +128,7 @@ CORE_OBJ += src/wubu_expert_stage.o
 CORE_OBJ += src/wubu_aot_pack.o
 CORE_OBJ += src/wubu_adaptive_cap.o
 CORE_OBJ += src/wubu_kv8.o
+CORE_OBJ += src/wubu_agent_spec.o
 
 .PHONY: all cpu-build clean
 
@@ -605,6 +606,10 @@ test_eg66_adaptive_cap: tools/test_eg66_adaptive_cap.c src/wubu_adaptive_cap.c
 
 # EG-66d: kv8 INT8 K/V codec gate.
 test_eg66_kv8: tools/test_eg66_kv8.c src/wubu_kv8.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-39c: adaptive agent speculation gate.
+test_eg39_agent_spec: tools/test_eg39_agent_spec.c src/wubu_agent_spec.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
