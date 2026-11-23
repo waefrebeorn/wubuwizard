@@ -636,7 +636,18 @@ head is exercised here at rank 2 on a synthetic distribution; no real model
 acceptance-length claim is made.
 
 | EG-62 | DSpark: rank-256 Markov correction head + confidence head predicting 1-TV, per-position verify budget | EG-24/EG-25 have no confidence budget | DSpark arXiv 2607.05147 | `test_eg62_dspark` | L | **DONE (budget gate)** — `src/wubu_dspark.c/.h` gates 0.778→0.974 confidence and 9.4 vs 6.6 accepted length; evidence above. |
-| EG-63 | SpecQuant: INT4/FP8/FP16 variants from one base, query complexity routing | EG-27 is single-precision quantize-on-load | SpecQuant arXiv 2609.21704 | `test_eg63_specquant` | M | Gate accuracy loss <2% + speedup |
+**EG-63 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg63_specquant`
+derives INT4 (per-8 block scales), E4M3 FP8 and FP16 packs from one 256-weight
+base: 256/256/512 bytes versus 1024 F32 (75% cut for INT4/FP8). Dot relative
+errors are 0.01127 / 0.00346 / 0.00061. Query-complexity routing sends a low-
+variance query to INT4 (1.127% loss, within the 2% gate) and a high-variance
+query to FP16. The first gate run showed 16.25% INT4 error with a single whole-
+vector scale; block scales were added to the owning codec rather than relaxing
+the accuracy gate. Invalid variant, null query and zero scale are rejected;
+30-run stress clean. `test_eg63_specquant: PASS`, exit 0. Bytes saved is a
+bandwidth proxy, not measured wall-clock speedup.
+
+| EG-63 | SpecQuant: INT4/FP8/FP16 variants from one base, query complexity routing | EG-27 is single-precision quantize-on-load | SpecQuant arXiv 2609.21704 | `test_eg63_specquant` | M | **DONE (routing gate)** — `src/wubu_specquant.c/.h` gates <2% routed loss and 75% bytes cut; evidence above. |
 | EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | Gate throughput under a fixed memory cap |
 | EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | Gate memory reduction vs output parity |
 | EG-66 | TensorFold: adaptive draft caps, kv8 K/V, disk prefix snapshots with serial-equivalence gate, AOT kernel packs | no disk prefix snapshot or exactness gate | TensorFold (Zig/CUDA/Metal, Apache-2.0), front-f §1 | `test_eg66_tensorfold` | L | Snapshot round-trip gate first; never vendor Zig code |
