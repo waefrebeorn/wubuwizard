@@ -87,6 +87,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_backend.o src/wubu_agentic_os.o \
   src/wubu_win.o
 CORE_OBJ += src/wubu_ev_depth.o
+CORE_OBJ += src/wubu_adapt_len.o
 
 .PHONY: all cpu-build clean
 
@@ -392,6 +393,10 @@ test_eg68_strata: tools/test_eg68_strata.c src/wubu_strata.c
 
 # EG-87: expected-value speculative depth gate.
 test_eg87_ev_depth: tools/test_eg87_ev_depth.c src/wubu_ev_depth.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-88: adaptive candidate length gate.
+test_eg88_adapt_len: tools/test_eg88_adapt_len.c src/wubu_adapt_len.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

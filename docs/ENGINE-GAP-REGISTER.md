@@ -785,7 +785,18 @@ costs are synthetic policy values: no wall-clock speedup or model-quality
 result is claimed.
 
 | EG-87 | Expected-value depth gate: EWMA accept/depth × cost | no confidence scheduler | MTPLX `adaptive.py:69-236` | `test_eg87_ev_depth` | S | **DONE (policy gate)** — `src/wubu_ev_depth.c/.h` gates EWMA acceptance, 0.18 floor, warmup, 32-cycle probe and observed-cost switch; evidence above. |
-| EG-88 | Adaptive candidate length: truncate at first 1-prod(p)>threshold | fixed draft length | AdaFlash `specforge/modeling/draft/dflash.py:133-145,446-560` | `test_eg88_adapt_len` | S | scalar threshold, no trained head for v1 |
+**EG-88 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg88_adapt_len`
+gates AdaFlash's fixed-threshold candidate-length rule on an 8-token block:
+with per-position acceptance 0.5 and threshold 0.5, cum_accept crosses
+1-cum>0.5 at k=2, so the candidate is truncated to length 3 (5 target rows
+saved versus the full block). An early rejection clamps to len_min=2; all-ones
+probabilities keep the full length 8. On a 3-token prefix, greedy acceptance
+counts 1 token and the target KV crop keeps 2 rows; a 5-token prefix accepts 4
+and keeps 5 rows. Invalid block size, threshold, length and NULL inputs are
+rejected. `test_eg88_adapt_len: PASS`, exit 0; 30/30 stress runs clean. Row
+counts and probabilities are synthetic policy values, not measured latency.
+
+| EG-88 | Adaptive candidate length: truncate at first 1-prod(p)>threshold | fixed draft length | AdaFlash `specforge/modeling/draft/dflash.py:133-145,446-560` | `test_eg88_adapt_len` | S | **DONE (policy gate)** — `src/wubu_adapt_len.c/.h` gates scalar-threshold truncation, len_min clamp and greedy accept/KV crop; evidence above. |
 | EG-89 | Position-keyed exponential-race sampling, lossless T>0 | EG-12 chain lacks tree sampling | SpecPilot `specpilot_k001_sample.py` | `test_eg89_keyed_sample` | S | argmin E(seed,pos,v)/p for tree verify |
 | EG-90 | EAGLE-2 confidence-shaped dynamic tree | EG-24 covers EAGLE-3 only | EAGLE `eagle/model/cnets.py:670-819`; `model/utils.py:89-207` | `test_eg90_eagle2_tree` | L | cum-logprob score + ancestor mask, static tree buffers |
 | EG-91 | Pointer-jumping tree accept + KV permutation | linear prefix walk | SpecPilot `specpilot_d7_accept.py` | `test_eg91_tree_accept` | S | pure index algorithm, claimed 9us vs 35us @ N=32 |
