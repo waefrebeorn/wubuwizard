@@ -856,7 +856,16 @@ measured and no speed result is claimed.
 | EG-80 | Entropy-gated rejection deferral (FLy, intentionally lossy) | **DONE (policy gate)** — `src/wubu_fly_defer.c/.h` + `test_eg80_fly`; evidence above. | vLLM `docs/features/speculative_decoding/fly.md` | `test_eg80_fly` | S | opt-in behind accuracy gate; entropy / log(top_k) |
 | EG-81 | Checkpoint-native drafting with shared KV + sparse indices (DFly) | EG-24/55/56 separate draft KV | vLLM `docs/features/speculative_decoding/dfly.md` | `test_eg81_dfly` | M | no separate draft KV; online MoE-only block FP8 |
 | EG-82 | Engram conditional memory: NFKC + XOR n-gram hash, gated fusion | EG-05 neuron predictor, no cond memory | vLLM `docs/features/engram.md` | `test_eg82_engram` | M | prime-size disjoint buckets, SSD-offloadable tables |
-| EG-83 | POD split-K decode: float workspace + reusable per-plan aux | refines EG-68 split-KV | FlashInfer `flashinfer/flashinfer/pod.py:49-63,127-145` | `test_eg83_pod_plan` | M | reuse aux across layers, measure workspace bytes |
+**EG-83 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg83_pod_plan`
+gates a 2-head / 4-split / 3-dim decode plan: the float partial workspace is
+96 bytes and the per-plan aux is 16 bytes. Splitting 8 KV rows into four
+partials and reducing them reproduces the direct sum exactly (maxerr 0).
+Binding three layers reuses the same aux (one allocation total). Bad heads,
+splits, dim, short rows and NULL buffers are rejected. `test_eg83_pod_plan:
+PASS`, exit 0; 30/30 stress runs clean. Byte counts are modeled from synthetic
+dimensions; no CUDA launch or measured speedup is claimed.
+
+| EG-83 | POD split-K decode: float workspace + reusable per-plan aux | **DONE (plan/bytes gate)** — `src/wubu_pod_plan.c/.h` + `test_eg83_pod_plan`; evidence above. | FlashInfer `flashinfer/flashinfer/pod.py:49-63,127-145` | `test_eg83_pod_plan` | M | reuse aux across layers, measure workspace bytes |
 | EG-84 | AWQ activation-aware uint4 weight scales per channel/group | EG-26 activations; EG-27 load-time quant | vLLM `vllm/model_executor/layers/quantization/auto_awq.py:176-190` | `test_eg84_awq` | M | group_size + zero-point exactness gate |
 | EG-85 | Sylvester-Hadamard rotation, no transform weight | EG-26/27 no rotation | vLLM `vllm/vllm/_custom_ops.py:3547-3557` | `test_eg85_hadamard` | S | symmetric inverse; pairs with EG-77 |
 | EG-86 | DeepSeek V4 multi-stream hyper-connections | checkpoint-specific | llama.cpp `ggml/include/ggml.h:2461-2470` | `test_eg86_hyperconn` | S | CONDITIONAL: record only, do not prioritize |

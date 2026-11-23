@@ -54,6 +54,7 @@ CORE_OBJ += src/wubu_candidate_selector.o
 CORE_OBJ += src/wubu_index_reuse.o
 CORE_OBJ += src/wubu_expert_sub.o
 CORE_OBJ += src/wubu_fly_defer.o
+CORE_OBJ += src/wubu_pod_plan.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -323,6 +324,9 @@ src/wubu_expert_sub.o: src/wubu_expert_sub.c include/wubu_expert_sub.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_fly_defer.o: src/wubu_fly_defer.c include/wubu_fly_defer.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_pod_plan.o: src/wubu_pod_plan.c include/wubu_pod_plan.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1088,6 +1092,10 @@ test_eg78_expert_sub: tools/test_eg78_expert_sub.c src/wubu_expert_sub.c
 
 # EG-80: entropy-gated rejection deferral gate.
 test_eg80_fly: tools/test_eg80_fly.c src/wubu_fly_defer.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-83: POD split-K workspace and aux reuse gate.
+test_eg83_pod_plan: tools/test_eg83_pod_plan.c src/wubu_pod_plan.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

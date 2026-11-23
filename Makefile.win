@@ -109,6 +109,7 @@ CORE_OBJ += src/wubu_candidate_selector.o
 CORE_OBJ += src/wubu_index_reuse.o
 CORE_OBJ += src/wubu_expert_sub.o
 CORE_OBJ += src/wubu_fly_defer.o
+CORE_OBJ += src/wubu_pod_plan.o
 
 .PHONY: all cpu-build clean
 
@@ -502,6 +503,10 @@ test_eg78_expert_sub: tools/test_eg78_expert_sub.c src/wubu_expert_sub.c
 
 # EG-80: entropy-gated rejection deferral gate.
 test_eg80_fly: tools/test_eg80_fly.c src/wubu_fly_defer.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-83: POD split-K workspace and aux reuse gate.
+test_eg83_pod_plan: tools/test_eg83_pod_plan.c src/wubu_pod_plan.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
