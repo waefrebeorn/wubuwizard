@@ -285,7 +285,16 @@ transfer accounting; actual safetensors streaming and peak-VRAM telemetry are
 deferred.
 
 | EG-27 | ISQ quantize-on-CPU before GPU load | quant routines exist; no safetensors quantize-on-load path | mistral.rs ISQ + topology | `test_eg27_isq` | M | **DONE (decision policy)** — `src/wubu_isq_plan.c/.h` chooses CPU-side quantization by time and VRAM budget; evidence above. Streaming/telemetry deferred. |
-| EG-28 | Lazy per-layer quantized-KV conversion with budget guard | KV quantization + chunked prefill exist; no threshold conversion score | mlx-lm `maybe_quantize_kv_cache` | `test_eg28_kvquant` | M | depends EG-03; gate quality score vs memory saved |
+**EG-28 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg28_kvquant`
+starts from 500 bytes of raw KV across four layers. With a 350-byte budget it
+converts layers 1 and 0 (cheapest sensitivity per byte saved), saving 150 bytes
+at quality cost 11.0 and reporting `within_budget=1`; layers 2 and 3 remain
+raw. A second call converts nothing. A 100-byte budget converts all four layers
+and honestly reports `bytes_after=125 within_budget=0`; a 600-byte budget
+converts none. `test_eg28_kvquant: PASS`, exit 0. The gate covers the lazy
+conversion policy; real KV tensor re-encoding remains in `wubu_kv_qfmt`.
+
+| EG-28 | Lazy per-layer quantized-KV conversion with budget guard | KV quantization + chunked prefill exist; no threshold conversion score | mlx-lm `maybe_quantize_kv_cache` | `test_eg28_kvquant` | M | **DONE (selection policy)** — `src/wubu_kv_lazy.c/.h` picks layers by sensitivity/byte with a budget guard; evidence above. Tensor re-encoding deferred. |
 | EG-29 | Content-addressed sha256 blob store + manifests | sha1/torrent/CID primitives exist; no blob store | Ollama manifest/blob layout | `test_eg29_blob` | M | Digest validation, dedup, resumable writes; gate round-trip + corrupt blob rejection |
 
 ## Wave 4 — tier-gated / deferred (do not start before T1 gates pass)
