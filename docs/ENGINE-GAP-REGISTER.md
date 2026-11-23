@@ -346,7 +346,16 @@ to write a gate, never evidence that wubuwizard has the feature.
 
 | ID | Technique | Local evidence / gap relation | Reference | Gate | Size | Next action |
 |---|---|---|---|---|---|---|
-| EG-35 | Extensible KV sized after warmup, UMA page-cache-corrected free memory | refines EG-03; `wubu_mem_budget.c` estimates before load | vLLM v0.34.0, PR #65413 | `test_eg35_extkv` | M | Measure free memory after graph capture; gate 6 GB refusal + UMA accounting |
+**EG-35 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg35_extkv`
+uses the minimum of three warmup free-memory samples (1.8 GiB) on a 6 GiB card
+with 4 GiB used and 256 MiB reserved. UMA page-cache correction discounts
+1 GiB, leaving 0.55 GiB effective and 0.44 GiB KV; without UMA the same samples
+give 1.55 GiB free and 1.24 GiB KV. A 2 GiB page cache drives the UMA case to
+`accepted=0 reason=3`, and a 0.3 GiB warmup sample drives the non-UMA case to
+`accepted=0 reason=2`. `test_eg35_extkv: PASS`, exit 0. Graph-capture-aware
+sampling hooks are deferred; this gates the sizing policy.
+
+| EG-35 | Extensible KV sized after warmup, UMA page-cache-corrected free memory | refines EG-03; `wubu_mem_budget.c` estimates before load | vLLM v0.34.0, PR #65413 | `test_eg35_extkv` | M | **DONE (policy)** — `src/wubu_ext_kv.c/.h` takes warmup-minimum free memory, UMA discount and refusal reasons; evidence above. |
 | EG-36 | OCP FP8 KV + MoE expert cache LRFU/ClassLRU with no CPU wait | refines EG-20/EG-30; `wubu_fp8.c` has no KV path, `wubu_ssd_moe.c` has no replacement policy | llama.cpp v1.0.0 | `test_eg36_fp8kv` | M | FP8 KV round-trip + expert LRFU hit-rate gate |
 | EG-37 | Unified arena, one entry per token, compaction, whole-request admission | new; EG-18 is tiers, not one allocator | SGLang unified memory (11 Nov 2026) | `test_eg37_arena` | L | Highest T1 fit in this sweep; gate mixed KV/state capacity under 6 GB |
 | EG-38 | Logical radix tree with page ownership + draft-state restore + decode-side reuse | extends EG-08/EG-18 | SGLang HiCache distributed (2 Nov 2026) | `test_eg38_pages` | L | T1: decode-side prefix reuse; defer multi-rank sharding |
