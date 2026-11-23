@@ -573,6 +573,20 @@ reports are authors' claims, **not** local measurements. Nothing is vendored.
 | EG-99 | Content-addressed conversation/KV blocks with turn checkpoints | EG-66 disk snapshots, no conv blocks | basalt `ConversationStore` | `test_eg99_conv_blocks` | M | per-1MiB hashes, prefix+byte key |
 | EG-100 | Real-layer microbenchmark probe for device-tier pricing | EG-06 uses static costs | BigMoeOnEdge `layer_probe.cpp:probe_layer` | `test_eg100_layer_probe` | M | gate measures then prices layers |
 
+**EG-101 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg101_sq_agreement`
+compares reference and candidate logit rows per Strata's SQ contract. A close
+candidate gets top-1 agreement 1.00 and mean KL 0.000074, accepted at a 0.01
+limit; a bit-identical candidate gets KL 0 and takes the bit-exact shortcut even
+at a zero KL limit; a flipped candidate gets 0.00 agreement and is rejected.
+The release's own 96.68%/0.00889 (SQ-15) and 100%/0 (SQ-20) figures are cited
+as the contract's origin, not as local measurements. `test_eg101_sq_agreement:
+PASS`, exit 0.
+
+| EG-101 | SQ build agreement/KL validation gate | no acceptance contract for quantized builds | Strata v0.2.19 SQ-10/15/20 | `test_eg101_sq_agreement` | S | **DONE** — `src/wubu_sq_agreement.c/.h` gates top-1 agreement, KL and bit-exactness; evidence above. |
+| EG-102 | SF4+MX8 block microscaling with bit-exactness | EG-26/36/43 lack shared block exponent | Strata v0.2.19 SQ-20 | `test_eg102_mx8` | M | block scale + lossless round-trip gate |
+| EG-103 | Zero-logits D2H: transfer sampled ids only | no sampled-token-only transfer path | Strata v0.2.19 Inkling 0.1.65 | `test_eg103_zero_logits` | S | bytes avoided + distribution equality |
+| EG-104 | W=4 Markov beam-tree branch selection | EG-21 verifies trees but has no branch policy | Strata v0.2.19 DSpark | `test_eg104_markov_tree` | M | branch prior + exact verification |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
