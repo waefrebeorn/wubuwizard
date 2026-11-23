@@ -449,11 +449,20 @@ saves a 10-token prefix for `agent-1` (turn 1) and resumes it with 0 prefill
 tokens. Appending two tokens requires exactly 2 prefill tokens and advances to
 turn 2; resuming the extended prefix again needs 0. A diverged 4-token prefix
 correctly asks for a full 4-token re-prefill, and an unknown agent asks for
-all 10. `test_eg39_agentstate: PASS`, exit 0. Model surgery and adaptive
-speculation from Hibana are not claimed by this gate; only state persistence
-and re-prefill avoidance are.
+all 10. `test_eg39_agentstate: PASS`, exit 0. Hibana adaptive speculation is
+not claimed by this gate; surgery is gated as EG-39b below.
 
-| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate` | L | **PARTIAL (state persistence)** — `src/wubu_agent_state.c/.h` gates zero-re-prefill resume and prefix extension; surgery/adaptive speculation deferred. |
+**EG-39b evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg39_surgery`
+gates Hibana-style model surgery as a planner: four layers with byte/importance
+costs (400/10, 300/1, 200/2, 100/8) meet a 700-byte budget by dropping the
+cheapest importance-per-byte layer (300 bytes, importance 1), keeping
+[1 0 1 1]; 300 bytes are saved, 700 remain, and the importance loss is 0.0476.
+A 0.01 loss cap refuses the same cut; zero-byte layers, NULL buffers, n=0 and
+out-of-range caps are rejected. `test_eg39_surgery: PASS`, exit 0; 30/30 stress
+runs clean. Byte counts and importance scores are synthetic; no model-quality
+or measured memory-traffic result is claimed.
+
+| EG-39 | Hibana: model surgery + persistent per-agent state + adaptive speculation | new engine; agentic state persistence absent | Hibana arXiv 2611.10469 | `test_eg39_agentstate`, `test_eg39_surgery` | L | **PARTIAL (state persistence + surgery)** — `src/wubu_agent_state.c/.h` gates zero-re-prefill resume; `src/wubu_model_surgery.c/.h` gates budgeted importance-aware layer cuts (EG-39b); adaptive speculation still deferred. |
 **EG-40 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg40_invalidkv`
 verifies stale KV tokens `[1,2,3,4]` against freshly prefilled `[1,2,9,4]`:
 longest common prefix 2 gives rate 0.50, which commits 2 accepted tokens at a

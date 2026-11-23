@@ -121,6 +121,7 @@ CORE_OBJ += src/wubu_expert_cache.o
 CORE_OBJ += src/wubu_dag_verify.o
 CORE_OBJ += src/wubu_relaxed_verify.o
 CORE_OBJ += src/wubu_compact_session.o
+CORE_OBJ += src/wubu_model_surgery.o
 
 .PHONY: all cpu-build clean
 
@@ -570,6 +571,10 @@ test_eg25_relaxed: tools/test_eg25_relaxed.c src/wubu_relaxed_verify.c
 
 # EG-32b: long-lived compact session gate.
 test_eg32_compact_session: tools/test_eg32_compact_session.c src/wubu_compact_session.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-39b: model surgery planner gate.
+test_eg39_surgery: tools/test_eg39_surgery.c src/wubu_model_surgery.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.
