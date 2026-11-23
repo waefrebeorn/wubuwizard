@@ -530,7 +530,16 @@ clean. `test_eg52_seqmoe: PASS`, exit 0. Hit rate is measured on a synthetic
 trace, not a real model workload.
 
 | EG-52 | SeqMoE: expert activation as sequence model, deadline sequencing, probabilistic Belady | EG-06/EG-20 have no learned activation predictor or Belady policy | SeqMoE arXiv 2609.12978 | `test_eg52_seqmoe` | L | **DONE (residency policy)** — `src/wubu_seqmoe.c/.h` gates 18/18 vs LRU 0/18 at capacity 3; evidence above. |
-| EG-53 | RocketKV: training-free prompt-KV eviction then page-level Top-K decode | EG-23 skips tiles, EG-44 is a trained indexer; neither evicts prompt KV | front-e E10 / TRT-LLM sparse docs | `test_eg53_rocketkv` | M | Gate prompt KV bytes retained vs accuracy |
+**EG-53 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg53_rocketkv`
+scores 16 prompt pages x 4 tokens x 8 dims by mean calibration attention mass,
+keeps 8 pages (1024 of 2048 KV bytes), then runs page-level Top-K decode.
+Attention-output relative error is 0.00008 versus 4.64563 for a first-half
+baseline at the same byte budget; all four high-mass pages (9, 11, 13, 15) are
+retained. Invalid pointers, retain fraction and empty page sets are rejected;
+30-run stress clean. `test_eg53_rocketkv: PASS`, exit 0. Accuracy is measured
+on a synthetic key/query set, not a model perplexity run.
+
+| EG-53 | RocketKV: training-free prompt-KV eviction then page-level Top-K decode | EG-23 skips tiles, EG-44 is a trained indexer; neither evicts prompt KV | front-e E10 / TRT-LLM sparse docs | `test_eg53_rocketkv` | M | **DONE (eviction policy)** — `src/wubu_rocketkv.c/.h` gates 50% KV bytes retained with 0.00008 error vs 4.65 baseline; evidence above. |
 | EG-54 | Block-sparse proxy routes: unselected KV blocks contribute a summary, not zero | no block summary path | front-e E11 | `test_eg54_proxy` | M | Gate quality vs dropped-block baseline |
 | EG-55 | UNO: gated-LoRA diffusion drafter on the verifier backbone, one KV, Psi-Spec lossless sampling | EG-17 is adapter slots, EG-24 a separate head | UNO arXiv 2609.04010 | `test_eg55_uno` | L | Gate losslessness + shared-KV memory |
 | EG-56 | DFlash: block-diffusion drafter with fused target hidden states injected into every draft layer's KV | no block-diffusion draft family | DFlash arXiv 2602.06036 | `test_eg56_dflash` | L | Gate accepted tokens per target pass |
