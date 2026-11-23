@@ -625,7 +625,17 @@ and out-of-range token ids are rejected; 30-run stress clean.
 model acceptance rate.
 
 | EG-61 | Block verification keeping the longest accepted prefix with a correction distribution | EG-25 relaxed verification is not distribution-exact | SGLang speculative-decoding docs, front-e E14 | `test_eg61_blockverify` | M | **DONE (exactness gate)** — `src/wubu_blockverify.c/.h` gates 0.00078 distribution error and accepted-prefix length; evidence above. |
-| EG-62 | DSpark: rank-256 Markov correction head + confidence head predicting 1-TV, per-position verify budget | EG-24/EG-25 have no confidence budget | DSpark arXiv 2607.05147 | `test_eg62_dspark` | L | Gate acceptance length vs budget |
+**EG-62 evidence (2026-11-22):** `mingw32-make -f Makefile.win test_eg62_dspark`
+applies a rank-2 Markov correction to a uniform base distribution over 8
+tokens: confidence (1-TV) rises from 0.77778 to 0.97391. With a fixed total
+verification budget of 12 across 4 positions, confidence-guided allocation
+`[9 1 1 1]` yields expected accepted length 9.4000 versus 6.6000 for uniform
+`[3 3 3 3]`. Invalid rank, zero vocabulary and under-budget totals are
+rejected; 30-run stress clean. `test_eg62_dspark: PASS`, exit 0. The 256-rank
+head is exercised here at rank 2 on a synthetic distribution; no real model
+acceptance-length claim is made.
+
+| EG-62 | DSpark: rank-256 Markov correction head + confidence head predicting 1-TV, per-position verify budget | EG-24/EG-25 have no confidence budget | DSpark arXiv 2607.05147 | `test_eg62_dspark` | L | **DONE (budget gate)** — `src/wubu_dspark.c/.h` gates 0.778→0.974 confidence and 9.4 vs 6.6 accepted length; evidence above. |
 | EG-63 | SpecQuant: INT4/FP8/FP16 variants from one base, query complexity routing | EG-27 is single-precision quantize-on-load | SpecQuant arXiv 2609.21704 | `test_eg63_specquant` | M | Gate accuracy loss <2% + speedup |
 | EG-64 | MemSpec: per-step memory-aware draft scheduling on edge | EG-41 is offline config search | MemSpec arXiv 2608.10362 | `test_eg64_memspec` | M | Gate throughput under a fixed memory cap |
 | EG-65 | LeanStream: speculate-and-refine from partial GPU results | no partial-result refinement | LeanStream arXiv 2609.03079 | `test_eg65_leanstream` | L | Gate memory reduction vs output parity |
