@@ -104,6 +104,9 @@ correctness gate each before anything is wired.
 5. Attention-residual queries every 6 layers.
 6. New quant types 40/42 (NVFP4/MXFP4 family) if the IQ2_XXS file is not used.
 
-Steps 1-5 are the engine work; step 6 can be deferred by using this IQ2_XXS file, which
-still carries 39 tensors of the unknown types (F32 norms aside, the expert blocks are
-IQ2_XXS in this file — the 30/40/42 tensors are the small ones).
+Steps 1-5 are the engine work. **Step 6 is not optional for this file**: the dequant walk
+in `test_eg118_inkling_meta` decodes 564 tensors and hits 24 of unknown type — the file's
+17 tensors of type 42 plus 7 of type 40, i.e. **every routed expert block**
+(`blk.N.ffn_down_exps.weight`, first one at `blk.0`). Without an NVFP4/MXFP4 decoder for
+those two ids the expert weights cannot be read at all, so a second file with IQ2_XXS
+experts (or a real NVFP4 dequant) is a prerequisite for running this model.

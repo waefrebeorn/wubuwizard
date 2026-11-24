@@ -7,6 +7,7 @@
 #include "wubu_inkling2.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The gguf_kv_get_* helpers return 1 on success and 0 when the key is absent
@@ -119,6 +120,56 @@ int wubu_inkling2_global_tensor(gguf_ctx *ctx, const char *name, gguf_tensor_inf
 
 /* dims[0] is the innermost (row) dimension in GGUF, so the projections are
  * stored as (out_features, in_features): attn_q is (d_model, 2*d_model). */
+/* Quant types present in Inkling GGUFs that this engine cannot decode yet. The
+ * ids come from ggml's enum; 30 is BF16 in upstream ggml, 40/42 are the newer
+ * 4-bit float family (project-maya documents NVFP4/MXFP4 for the same model).
+ * Everything else in the file already has a dequantiser. */
+static int inkling2_type_supported(int ggml_type)
+{
+    switch (ggml_type) {
+    case GGML_TYPE_F32: case GGML_TYPE_F16: case GGML_TYPE_BF16:
+    case GGML_TYPE_Q4_0: case GGML_TYPE_Q4_1: case GGML_TYPE_Q5_0: case GGML_TYPE_Q5_1:
+    case GGML_TYPE_Q8_0: case GGML_TYPE_Q2_K: case GGML_TYPE_Q3_K: case GGML_TYPE_Q4_K:
+    case GGML_TYPE_Q5_K: case GGML_TYPE_Q6_K:
+    case GGML_TYPE_IQ1_S: case GGML_TYPE_IQ1_M: case GGML_TYPE_IQ2_XXS: case GGML_TYPE_IQ2_XS:
+    case GGML_TYPE_IQ2_S: case GGML_TYPE_IQ3_XXS: case GGML_TYPE_IQ3_S: case GGML_TYPE_IQ4_XS:
+    case GGML_TYPE_IQ4_NL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int wubu_inkling2_tensor_f32(gguf_ctx *ctx, const char *name, float *out,
+                             int64_t max_elems, int64_t *n_out)
+{
+    if (!ctx || !name || !out) return WUBU_INKLING2_ERR_IO;
+    gguf_tensor_info *t = gguf_find_tensor(ctx, name);
+    if (!t) return WUBU_INKLING2_ERR_MISSING_TENSOR;
+    if (!inkling2_type_supported(t->ggml_type)) return WUBU_INKLING2_ERR_UNKNOWN_TYPE;
+
+    int64_t n = 1;
+    for (int i = 0; i < t->n_dims; ++i) n *= t->dims[i];
+    if (n <= 0 || n > max_elems) return WUBU_INKLING2_ERR_SHAPE;
+    if (n_out) *n_out = n;
+
+    const uint8_t *raw = NULL;
+    uint8_t *owned = NULL;
+    if (ctx->data_blob) {
+        raw = (const uint8_t *)ctx->data_blob + t->data_offset;
+    } else {
+        const int64_t bytes = gguf_raw_size(t->ggml_type, n);
+        if (bytes <= 0) return WUBU_INKLING2_ERR_UNKNOWN_TYPE;
+        owned = (uint8_t *)malloc((size_t)bytes);
+        if (!owned) return WUBU_INKLING2_ERR_IO;
+        if (!gguf_read_raw_tensor(ctx, t, owned)) { free(owned); return WUBU_INKLING2_ERR_IO; }
+        raw = owned;
+    }
+    gguf_dequantize(raw, t->ggml_type, n, out);
+    free(owned);
+    return 0;
+}
+
 static int check2(gguf_ctx *ctx, int il, const char *family, int64_t d0, int64_t d1,
                   int *problems, int *shown)
 {

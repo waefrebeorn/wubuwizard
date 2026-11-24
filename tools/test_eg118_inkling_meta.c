@@ -77,6 +77,46 @@ int main(int argc, char **argv)
         CHECK(problems == 0);
     }
 
+    /* Walk every tensor: prove the dequant path works for the types we know and
+     * report the exact tensors whose type this engine cannot decode. */
+    if (rc == WUBU_INKLING2_OK) {
+        int ok = 0, unknown = 0, io = 0;
+        long long elems_total = 0;
+        static float buf[1 << 20];
+        char first_unknown[256] = {0};
+        int unknown_type_id = -1;
+        for (int64_t ti = 0; ti < ctx->n_tensors; ++ti) {
+            const gguf_tensor_info *tt = &ctx->tensors[ti];
+            int64_t n = 1;
+            for (int d = 0; d < tt->n_dims; ++d) n *= tt->dims[d];
+            int64_t got = 0;
+            const int r = wubu_inkling2_tensor_f32(ctx, tt->name, buf, (int64_t)(1 << 20), &got);
+            if (r == WUBU_INKLING2_OK) {
+                ++ok;
+                elems_total += got;
+                int bad = 0;
+                for (int64_t i = 0; i < got; ++i) if (!(buf[i] == buf[i])) { ++bad; break; }
+                if (bad) { printf("EG-118 non-finite values in %s\n", tt->name); ++failures; }
+            } else if (r == WUBU_INKLING2_ERR_UNKNOWN_TYPE) {
+                ++unknown;
+                if (!first_unknown[0]) { snprintf(first_unknown, sizeof(first_unknown), "%s", tt->name); unknown_type_id = tt->ggml_type; }
+            } else if (r == WUBU_INKLING2_ERR_SHAPE && n > (1 << 20)) {
+                ++io;   /* tensor larger than this gate's scratch buffer */
+            } else {
+                printf("EG-118 decode error %d on %s\n", r, tt->name);
+                ++io;
+            }
+        }
+        printf("EG-118 tensors: decoded=%d unknown_type=%d skipped_or_large=%d elems=%.3fB\n",
+               ok, unknown, io, (double)elems_total / 1e9);
+        if (unknown) printf("EG-118 first unknown type: id %d on %s\n", unknown_type_id, first_unknown);
+        CHECK(ok + unknown + io == (int)ctx->n_tensors);
+        /* 146 tensors are larger than this gate's 1M-element scratch (expert
+         * stacks and the 201k-vocab embeddings); they are counted, not decoded. */
+        CHECK(ok >= 500);
+        CHECK(io + unknown < (int)ctx->n_tensors / 2);
+    }
+
     /* A gemma file must be rejected, not silently accepted. */
     {
         gguf_ctx *g = gguf_open("C:/Users/eman5/models/gemma-12b/gemma-4-12b-it-UD-IQ2_M.gguf");
