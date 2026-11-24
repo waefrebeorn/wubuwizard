@@ -258,6 +258,28 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Decode, measured per phase (G4_PROF=1, 85 tokens, RTX 4050)
+
+    layer total        61.48 ms
+    norm+qkv            0.16      fused, one call per layer
+    qk norm+rope        0.02
+    attention           0.04
+    attn out + resid   27.27      o-projection, IQ3_S
+    ffn all            33.57      of which ffn proj 33.13
+    head               10.78      12.6% of the 85 ms token
+
+    decode matvecs/token: 1.6 on GPU, 0.0 on CPU     type 11: 1.0/token   type 21: 0.6/token
+
+The two dominant items are the FFN projections and the o-projection, and both are the M=1 shape:
+27.27 ms for 48 o-projections is 0.57 ms each for 6.9 MB of IQ3_S, i.e. **12 GB/s** - the same ceiling
+the prefill kernel hits, from the same cause. Nothing in decode is on the CPU any more (1.6 matvecs per
+token, all device), and attention and norms are 0.06 ms combined.
+
+The head is worth noting for the opposite reason: the generic `matvec_kernel`, 127 registers and no
+specialisation, still moves 377 MB of Q3_K in 10.78 ms = **35 GB/s**, the fastest rate anywhere in the
+model. The register count looked like the alarm; the measurement says it is the best-behaved kernel in
+the file. That is the third guess in this document that ptxas or a stopwatch has overturned.
+
 ### Prefill is at 9% of the card's bandwidth, so the limit is the decode, not the memory
 
 Arithmetic on the measured numbers, not a profile - the M-row kernel re-reads the whole weight set once
