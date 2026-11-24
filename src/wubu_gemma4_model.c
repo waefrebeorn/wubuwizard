@@ -1366,11 +1366,16 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     {
         static int half_enabled = -1;
         if (half_enabled < 0) {
-            /* Opt-in. Measured 13.5 tok/s against 11.4, but the fused order changes the
-             * accumulation: q/k/v/attn match the CPU sequence to 4e-07 and the o-projection
-             * output to 1.5e-05 (EG-124), which is enough to flip a near-tie by the third
-             * token (45518, 107, then 140 instead of 236775). The default path keeps the
-             * identical-token bar; this one is for measuring the ceiling. */
+            /* Opt-in, and the reason is quality, not bookkeeping. It is the faster path -
+             * 14.1-14.3 tok/s against 12.8-12.9 at 65 tokens of context and 13.5 against
+             * 12.0 at 257 - and its arithmetic matches the CPU sequence closely (q/k/v/attn
+             * to 4e-07, o-projection to 1.5e-05, EG-124). But the continuation it produces
+             * on this model is not a paraphrase of the default one: measured over 40 tokens
+             * it collapses into a loop of control tokens (237542, 236779, 236756 repeating)
+             * and decodes to "_", where the CPU-attention path reaches
+             * "This is a classic philosophical question". Same weights, same prompt, a
+             * 1.5e-05 deviation per layer compounding into a degenerate loop - so this stays
+             * opt-in for measurement, not default. */
             const char *e = getenv("G4_ATTN_DEV");
             half_enabled = (e != NULL && *e != '0');
         }
