@@ -150,7 +150,24 @@ that has just idled through the CPU attention), not the block decode. Removing i
 fusing across the attention boundary, which changes the numerics and so breaks token
 identity - the same trade the fused half-layer makes.
 
-## Device attention half-layer (opt-in, `G4_ATTN_DEV=1`) - why it is not the default
+## Device attention half-layer: full-attention layers only, now the default
+
+Bisected by layer kind, which finally localised the difference:
+
+| fused subset | result over 64 tokens |
+|---|---|
+| full-attention layers only | **identical to the CPU reference, all 64** |
+| sliding layers only | parts at generated token 2, then a stutter |
+| all layers | same as sliding (the sliding layers dominate) |
+
+So the composite reproduces the reference exactly on the full-attention layers - q, k, v, the
+KV rows and the span all verified to ~1e-06 there - and the sliding layers are where the
+remaining bug is. The default now fuses the full-attention layers only: token-identical,
++2% (13.1-13.2 against 12.9-13.0 tok/s at 65 tokens, 12.3 at 257). `G4_ATTN_DEV=all` gets the
+other 8.5% and still parts from the reference; `G4_ATTN_DEV=slide` isolates the broken kind;
+`G4_ATTN_DEV=0` turns the whole thing off.
+
+## Device attention half-layer (all layers, `G4_ATTN_DEV=all`) - still not shippable
 
 It is the faster path: **14.1-14.3 tok/s** against 12.8-12.9 at 65 tokens of context, and
 **13.5** against 12.0 at 257, with the fused q/k/v, FFN and incremental prefill all in

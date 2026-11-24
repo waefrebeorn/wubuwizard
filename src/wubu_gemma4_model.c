@@ -1377,12 +1377,17 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
              * "This is a classic philosophical question". Same weights, same prompt, a
              * 1.5e-05 deviation per layer compounding into a degenerate loop - so this stays
              * opt-in for measurement, not default. */
+            /* Default: full-attention layers only. Measured token-identical to the CPU path
+             * over 64 tokens (the whole sequence, not just the first few), because on those
+             * layers the composite reproduces q, k, v, the KV rows and the span exactly.
+             * G4_ATTN_DEV=all also fuses the sliding layers, which is another 8.5% but still
+             * parts from the reference around generated token 2 - that is the open bug.
+             * G4_ATTN_DEV=slide fuses only the sliding layers, G4_ATTN_DEV=0 disables. */
             const char *e = getenv("G4_ATTN_DEV");
-            half_enabled = (e != NULL && *e != '0');
-            /* Bisect which layer kind the composite gets wrong: G4_ATTN_DEV=full runs it
-             * only on the full-attention layers, =slide only on the sliding ones. */
-            if (e && strcmp(e, "full") == 0) half_mode = 1;
+            half_enabled = !(e != NULL && *e == '0');
+            if (e && strcmp(e, "all") == 0) half_mode = 0;
             else if (e && strcmp(e, "slide") == 0) half_mode = 2;
+            else half_mode = 1;
         }
         const int mode_ok = (half_mode == 0) || (half_mode == 1 && layer->is_full) ||
                             (half_mode == 2 && !layer->is_full);
@@ -1400,6 +1405,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
              * position 1 the composite attended 1 row where the CPU sequence attends 2).
              * That is a different attention than the reference, which is why k, v and the
              * KV rows all matched while the attention output did not. */
+            { static int shown2;
+              if (!shown2 && pos_h == 21 && getenv("G4_ATTN_WARM")) { shown2 = 1;
+                  fprintf(stderr, "[SPAN] layer %d full=%d size=%d pos=%d kv_len=%d kv_start=%d\n",
+                          il, (int)layer->is_full, cache_h->size, pos_h, kv_len_h, kv_start_h); } }
             if (layer->is_full) {
                 kv_len_h = pos_h + 1;
             } else {
@@ -1430,7 +1439,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 /* the composite writes its o-projection into the same buffer it reads, so
                  * the input has to be copied out before the call for any comparison */
                 static float *qdump_x;
-                const int qdump_now = getenv("G4_QDUMP") && il == 0 && pos_h == 21;
+                const int qdump_now = getenv("G4_QDUMP") && il == 0 && pos_h == 23;
                 if (qdump_now) {
                     if (!qdump_x) qdump_x = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
                     if (qdump_x) memcpy(qdump_x, normed, (size_t)G4_HIDDEN * sizeof(float));
