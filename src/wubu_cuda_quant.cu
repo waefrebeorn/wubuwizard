@@ -641,6 +641,10 @@ WUBU_EXPORT int wubu_cuda_qkv_mrow(const void *d_wq, int tq, const void *d_wk, i
  *
  * The uniform test passed while the scaling was still wrong, which is why both tests exist. */
 #define IQ2S_MMA_COLS (IQ2S_MMA_WPB * 8)
+/* 260 bytes = 65 words per row, an odd stride: with 256 every column's tile started at the same
+ * bank offset and the b-fragment reads collided. chondrule-free staging is what upstream's
+ * "+1 int per row" padding is for. */
+#define IQ2S_MMA_PAD  260
 #define IQ2S_MMA_WPB  4
 
 __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
@@ -649,7 +653,7 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                                        int64_t col_stride_bytes, int nblocks,
                                        int n_cols, int M, int q8_row_blocks)
 {
-    __shared__ int8_t sW[IQ2S_MMA_COLS][256];
+    __shared__ int8_t sW[IQ2S_MMA_COLS][IQ2S_MMA_PAD];
     __shared__ float  sLo[IQ2S_MMA_COLS][8];
     __shared__ float  sHi[IQ2S_MMA_COLS][8];
 
@@ -690,7 +694,7 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                     else if (entry == 2) sHi[c][g] = 0.125f * f16_fast(db) * (float)(1 + 2 * (sc[g] >> 4));
                 }
             } else {
-                memset(&sW[c][0], 0, 256);
+                memset(&sW[c][0], 0, IQ2S_MMA_PAD);
                 for (int g = 0; g < 8; ++g) { sLo[c][g] = 0.0f; sHi[c][g] = 0.0f; }
             }
         }
@@ -905,7 +909,7 @@ __global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                                        int64_t col_stride_bytes, int nblocks,
                                        int n_cols, int M, int q8_row_blocks)
 {
-    __shared__ int8_t sW[IQ2S_MMA_COLS][256];
+    __shared__ int8_t sW[IQ2S_MMA_COLS][IQ2S_MMA_PAD];
     __shared__ float  sSc[IQ2S_MMA_COLS][8];
 
     const int lane = threadIdx.x & 31;
@@ -947,7 +951,7 @@ __global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                                                         : (2 * (xb->scales[g >> 1] & 0x0f))) + 1);
                 }
             } else {
-                memset(&sW[c][0], 0, 256);
+                memset(&sW[c][0], 0, IQ2S_MMA_PAD);
                 for (int g = 0; g < 8; ++g) sSc[c][g] = 0.0f;
             }
         }
