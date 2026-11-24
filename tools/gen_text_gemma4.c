@@ -228,6 +228,7 @@ int main(int argc, char **argv) {
     }
 #else
     g4_gpu_ctx_t *gpu_ctx = NULL;
+    (void)gpu_ctx;   /* prefill no longer uses it: one token at a time through the model's own dispatch */
     fprintf(stderr, "CPU mode (no GPU)\n");
 #endif
 
@@ -325,31 +326,22 @@ int main(int argc, char **argv) {
     logits = (float*)realloc(logits, (size_t)n_prompt * G4_VOCAB * sizeof(float));
     if (!logits) { fprintf(stderr, "logits alloc failed\n"); return 1; }
 
-#ifdef GPU_SUPPORT
-    /* Get embeddings for prompt tokens (GPU path only; CPU path dequantizes
-     * inside g4_model_forward_from_tokens). */
-    float *embd = (float*)malloc((size_t)n_prompt * G4_HIDDEN * sizeof(float));
-    int row_bytes = (int)(model.token_embd.raw_bytes / G4_VOCAB);
-    for (int i = 0; i < n_prompt; i++) {
-        int tok = prompt_tokens[i];
-        if (tok < 0 || tok >= G4_VOCAB) tok = 0;
-        gguf_dequantize(model.token_embd.data + (size_t)tok * row_bytes,
-                       model.token_embd.ggml_type, G4_HIDDEN,
-                       embd + (size_t)i * G4_HIDDEN);
-    }
-    float scale = sqrtf((float)G4_HIDDEN);
-    for (int i = 0; i < n_prompt * G4_HIDDEN; i++) embd[i] *= scale;
-#endif
-
-#ifdef GPU_SUPPORT
-    if (gpu_ctx) {
-        g4_model_forward_gpu(gpu_ctx, &model, embd, 1, n_prompt, logits);
+    /* Prefill one token at a time through the same single-row call the decode loop uses.
+     * The N-row batch forward quantises activations for M rows and runs CPU matmuls, which
+     * measured 6.5-6.8 tok/s against 12.0-13.6 tok/s for this loop at every prompt length
+     * tried (21, 54 and 321 tokens), with identical greedy tokens. */
+    if (getenv("G4_PREFILL_STEPS")) {
+        for (int i = 0; i < n_prompt; i++) {
+            const double t0 = wall_time();
+            g4_model_forward_from_tokens(&model, prompt_tokens + i, 1, 1,
+                                         logits + (size_t)i * G4_VOCAB);
+            fprintf(stderr, "[PSTEP %d] %.1f ms\n", i, (wall_time() - t0) * 1000.0);
+        }
     } else {
-        g4_model_forward_from_tokens(&model, prompt_tokens, 1, n_prompt, logits);
+        for (int i = 0; i < n_prompt; i++)
+            g4_model_forward_from_tokens(&model, prompt_tokens + i, 1, 1,
+                                         logits + (size_t)i * G4_VOCAB);
     }
-#else
-    g4_model_forward_from_tokens(&model, prompt_tokens, 1, n_prompt, logits);
-#endif
 
     t_prefill = wall_time() - t_start;
     fprintf(stderr, "[PREFILL] %.2f s (%.1f tok/s)\n", t_prefill, n_prompt / t_prefill);

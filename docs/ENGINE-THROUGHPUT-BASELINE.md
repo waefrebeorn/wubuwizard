@@ -110,24 +110,28 @@ and every submission after that gap pays to resume. `nvidia-smi -pm 1` reports `
 this GeForce part, so there is no driver-side persistence mode to hold it up - the fix is
 to stop going idle, which is precisely what the fused half-layer does.
 
-## Open: prefill costs exactly twice decode per token
+## Prefill: one token at a time, 2x faster and token-identical
 
-Prefill is one `N = n_prompt` forward that quantises activations for M rows and runs the
-CPU matvecs, so it was worth testing whether feeding the prompt one token at a time through
-the fast single-row device path is cheaper. It is not:
+Prefill used to be a single `N = n_prompt` forward: it quantises activations for M rows and
+runs the CPU matvecs. Feeding the prompt one token at a time through the same single-row
+call the decode loop uses is **twice as fast at every length tested**, with identical
+greedy tokens:
 
-| prompt | batch prefill | one-token-at-a-time |
+| prompt | batch forward | one token at a time |
 |---|---|---|
-| 21 tokens | 3.09 s (6.8 tok/s) | 3.12 s (6.7 tok/s) |
-| 54 tokens | 7.90 s (6.8 tok/s) | 7.94 s (6.8 tok/s) |
+| 21 tokens | 3.11 s (6.8 tok/s) | **1.54 s (13.6 tok/s)** |
+| 54 tokens | 7.96 s (6.8 tok/s) | **4.10 s (13.2 tok/s)** |
+| 321 tokens | 49.46 s (6.5 tok/s) | **26.77 s (12.0 tok/s)** |
 
-Both give identical greedy tokens. Fitting the two prompt lengths gives a slope of
-0.146 s/token and essentially **zero fixed cost**, so prefill is not paying a one-off
-upload - every prompt token genuinely costs 146 ms while a decode token costs 78 ms. The
-same single-row code path therefore runs twice as slow during prefill as it does during
-generation, which points at model state that differs between the two (KV span, buffer
-shapes, or the harness's batch sync-up) rather than at the matvec itself. That is the next
-thing to bisect; the incremental variant was removed because it measured neutral.
+Per-token cost during the loop starts at 81 ms and settles at 70-77 ms, i.e. the same as
+decode. The batch path is now gone.
+
+Correction: an earlier revision of this document recorded this experiment as neutral
+(3.09 vs 3.12 s). That measurement was wrong - the new branch had been put inside
+`#ifdef GPU_SUPPORT`, which this tool is built *without* (the model object owns the device
+dispatch), so both runs executed the old batch path and the "incremental" timing was a
+second copy of the batch timing. The tell was `strings` finding none of the instrumentation
+in the rebuilt binary. Measure the binary you built.
 
 ## Tried and removed: IQ3_S kernel micro-optimisation
 
