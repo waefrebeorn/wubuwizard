@@ -221,6 +221,24 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Quantiser exonerated on real data; one instrument removed for lying
+
+EG-127 was extended to take a file so it can compare the device and host Q8_K quantisers on a
+real activation instead of synthetic floats (`G4_DUMP_NORMED=<path>` writes the pre-attention
+vector at layer 0, position 23). Result on real data:
+
+    EG-127 q8_K dev vs cpu: d_mismatch_blocks=0/15  qs=0/3840 worst_step=0
+
+So quantisation of the pre-attention activation is not the residual either.
+
+`G4_QDUMP` was removed. It compared the composite's staged q against a q reconstructed in the
+diagnostic, and after the trig change it reported a 0.49 difference - which contradicts
+`G4_ATTN_ADIFF` measuring the *end-to-end* attention row at 2.8e-07 in the same build. A q
+difference of 0.49 could not produce an attention difference of 2.8e-07, so the reconstruction
+was wrong, not the composite. ADIFF measures the real CPU attention for the same layer and
+position and is the trustworthy one. An instrument that reports a wrong number is worse than no
+instrument, so it is gone rather than left with a caveat.
+
 ### Shared sin/cos and iterative theta: reference re-baselined, +2% default speed
 
 `include/wubu_trig.h` implements one sin/cos (Cody-Waite reduction in double - theta reaches

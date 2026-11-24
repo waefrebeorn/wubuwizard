@@ -27,10 +27,22 @@ int main(int argc, char **argv)
     fn_t q8 = (fn_t)(void *)GetProcAddress(h, "wubu_cuda_q8k_host");
     if (!q8) { printf("EG-127: SKIP (no export)\n"); FreeLibrary(h); return 0; }
 
-    enum { N = 4096 };          /* the o-projection's K in the 12B model */
-    static float x[N];
-    static unsigned char dev[N / 256 * 292], cpu[N / 256 * 292];
-    for (int i = 0; i < N; ++i) x[i] = rnd() * 3.0f;
+    /* N is the o-projection's K (4096) by default; a file argument replaces the synthetic
+     * values with real activations, which is the case the synthetic one cannot vouch for. */
+    enum { NMAX = 4096 };
+    static float x[NMAX];
+    static unsigned char dev[NMAX / 256 * 292], cpu[NMAX / 256 * 292];
+    int N = NMAX;
+    if (argc > 2) {
+        FILE *f = fopen(argv[2], "rb");
+        if (!f) { printf("EG-127 FAIL open %s\n", argv[2]); return 1; }
+        const long sz = (long)fread(x, sizeof(float), NMAX, f);
+        fclose(f);
+        if (sz <= 0 || (sz % 256) != 0) { printf("EG-127 FAIL size %ld\n", sz); return 1; }
+        N = (int)sz;
+    } else {
+        for (int i = 0; i < N; ++i) x[i] = rnd() * 3.0f;
+    }
 
     const int rc = q8(x, dev, N);
     if (rc != 0) { printf("EG-127 FAIL rc=%d\n", rc); return 1; }

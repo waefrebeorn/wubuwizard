@@ -1449,13 +1449,14 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 const long long sk_h = (long long)(layer->attn_k.raw_bytes / kvd);
                 const long long sv_h = (long long)(layer->attn_v.raw_bytes / kvd);
                 const long long so_h = (long long)(layer->attn_out.raw_bytes / G4_HIDDEN);
-                /* the composite writes its o-projection into the same buffer it reads, so
-                 * the input has to be copied out before the call for any comparison */
-                static float *qdump_x;
-                const int qdump_now = getenv("G4_QDUMP") && il == 0 && pos_h == 23;
-                if (qdump_now) {
-                    if (!qdump_x) qdump_x = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
-                    if (qdump_x) memcpy(qdump_x, normed, (size_t)G4_HIDDEN * sizeof(float));
+                /* G4_DUMP_NORMED: write the pre-attention activation so the device and host
+                 * Q8_K quantisers can be compared on real data rather than synthetic. */
+                {
+                    const char *dp = getenv("G4_DUMP_NORMED");
+                    if (dp && pos_h == 23 && il == 0) {
+                        FILE *f = fopen(dp, "wb");
+                        if (f) { fwrite(normed, sizeof(float), (size_t)G4_HIDDEN, f); fclose(f); }
+                    }
                 }
                 /* G4_ATTN_ADIFF: stage the attention on the device into a host buffer and
                  * let the CPU path run too, so the two attention rows for the same layer and
@@ -1489,40 +1490,6 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 }
                 if (rc_h == 0) {
                     g4_kv_store(cache_h, pos_h, k, v);
-                    /* G4_QDUMP: compare the composite's q against the same matvec + q-norm +
-                     * rope done on the CPU from the same input. k, v and the KV rows already
-                     * match exactly, so q is the last stage that can differ. */
-                    if (qdump_now && qdump_x) {
-                        static float *qref, *qdev;
-                        if (!qref) {
-                            qref = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
-                            qdev = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
-                        }
-                        memcpy(qref, qdump_x, (size_t)G4_HIDDEN * sizeof(float));
-                        g4_batched_qmatmul(qref, &layer->attn_q, 1, qd, G4_HIDDEN, qref);
-                        for (int hh = 0; hh < G4_HEADS; ++hh)
-                            g4_rms_norm(qref + (size_t)hh * hd, layer->attn_q_norm_weight, hd,
-                                        G4_RMS_EPS, qref + (size_t)hh * hd);
-                        g4_rope_apply(qref, NULL, 1, hd, qd, 0, positions,
-                                      layer->n_rot, layer->rope_base, layer->rope_freqs, layer->is_full);
-                        { extern int wubu_gpu_get_qdump(float *, int);
-                          wubu_gpu_get_qdump(qdev, qd); }
-                        double wq4 = 0.0; int wi4 = -1;
-                        for (int i = 0; i < qd; ++i) {
-                            const double d = fabs((double)qdev[i] - (double)qref[i]);
-                            if (d > wq4) { wq4 = d; wi4 = i; }
-                        }
-                        fprintf(stderr, "[QDUMP] layer0 pos21 q dev-vs-cpu=%.3e at %d: dev %.6f cpu %.6f\n",
-                                wq4, wi4, wi4 >= 0 ? qdev[wi4] : 0.0f, wi4 >= 0 ? qref[wi4] : 0.0f);
-                        for (int hh = 0; hh < G4_HEADS; ++hh) {
-                            double wh = 0.0;
-                            for (int d = 0; d < hd; ++d) {
-                                const double dd = fabs((double)qdev[hh * hd + d] - (double)qref[hh * hd + d]);
-                                if (dd > wh) wh = dd;
-                            }
-                            if (wh > 1e-2) fprintf(stderr, "[QDUMP] head %d worst %.3e\n", hh, wh);
-                        }
-                    }
                     primed[il] = 1;
                     half_done = 1;
                 }
