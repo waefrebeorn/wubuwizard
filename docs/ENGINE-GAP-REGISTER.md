@@ -1342,13 +1342,25 @@ ratio is claimed.
 
 | EG-108 | Engine-agnostic chunked KV connector with pin/lookup/compress control | EG-18 tiers exist but no chunk-vs-page connector boundary | LMCache arXiv 2510.09665 / `LMCache/LMCache` | `test_eg108_kv_connector` | L | **DONE (connector-contract gate)** — `src/wubu_kv_connector.c/.h` gates chunk/block granularity and control ops; study clone is read-only. |
 
+**EG-109 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg109_fp8_shift`
+gates table-free arithmetic E4M3 decode from the KTransformers AVX2 patch
+(`fp8x8_to_fp32x8`, issue #2245): normals decode via `(mag<<20)+0x3c000000`,
+subnormals via `mag/512`, magnitude 127 maps to zero with the sign bit kept.
+All 256 codes match the independent arithmetic reference with zero mismatches;
+checks include 0x38=1.0, 0x7E=448.0, 0x01=0.001953125 and both signed NaNs to
+zero. NULL buffers and zero length fail closed. `test_eg109_fp8_shift: PASS`,
+exit 0; 30/30 stress runs clean. This is a scalar contract gate, not an AVX2
+kernel or a measured speedup.
+
+| EG-109 | Table-free arithmetic E4M3 decode (KTransformers) | EG-36 uses table-based FP8 KV | KTransformers issue #2245 / `kt-kernel/operators/avx2/fp8_dequant.hpp` | `test_eg109_fp8_shift` | S | **DONE (format-contract gate)** — `src/wubu_fp8_shift.c/.h` exhaustively matches arithmetic E4M3 decode; study clone is read-only. |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=117 FAIL=0`, no failed targets (EG-105/106/107/108 included). The
+was rebuilt and executed in one loop: `PASS=118 FAIL=0`, no failed targets (EG-105..109 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
