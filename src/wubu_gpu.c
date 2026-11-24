@@ -63,6 +63,22 @@ int wubu_gpu_init(void)
     if (!path) path = "wubu_cuda.dll";
     G.h = LoadLibraryA(path);
     if (!G.h) return 0;
+    /* Wait policy first: cudaSetDeviceFlags only works before the context exists, and this
+     * is the first CUDA call in the process. G4_WAIT=spin|yield|block selects it; spin is
+     * the default because ~200 syncs per token each pay the wake-up when the thread sleeps. */
+    {
+        typedef int (*fn_wait_t)(int);
+        fn_wait_t w = (fn_wait_t)(void *)GetProcAddress(G.h, "wubu_cuda_set_wait_policy");
+        if (w) {
+            const char *e = getenv("G4_WAIT");
+            int mode = 0;
+            if (e && e[0] == 'y') mode = 1;
+            else if (e && e[0] == 'b') mode = 2;
+            const int rc = w(mode);
+            printf("[GPU] wait policy %s (rc=%d)\n",
+                   mode == 0 ? "spin" : (mode == 1 ? "yield" : "block"), rc);
+        }
+    }
     fn_avail avail = (fn_avail)(void *)GetProcAddress(G.h, "wubu_cuda_available");
     fn_name name = (fn_name)(void *)GetProcAddress(G.h, "wubu_cuda_device_name");
     G.meminfo = (fn_meminfo)(void *)GetProcAddress(G.h, "wubu_cuda_meminfo");
@@ -477,12 +493,25 @@ int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_
  * into upload / quantise / launch+download / sync instead of guessed at. */
 double wubu_gpu_t_upload, wubu_gpu_t_q8, wubu_gpu_t_call;
 long wubu_gpu_n_matvec;
+/* Per-section attribution, so the section timers in the model can be checked against the
+ * calls they claim to be timing instead of taken on trust. */
+int wubu_gpu_tag;
+static double g_tag_ms[8];
+static long g_tag_n[8];
+static const char *const g_tag_name[8] = {
+    "none", "qkv", "o-proj", "ffn", "head", "other", "other2", "other3"
+};
 
 void wubu_gpu_stage_report(void)
 {
     if (wubu_gpu_n_matvec <= 0) return;
     printf("[GPU] %ld matvecs: upload %.1f ms, q8k %.1f ms, launch+download %.1f ms\n",
            wubu_gpu_n_matvec, wubu_gpu_t_upload, wubu_gpu_t_q8, wubu_gpu_t_call);
+    for (int t = 0; t < 8; ++t) {
+        if (g_tag_n[t] <= 0) continue;
+        printf("[GPU]   %-7s %5ld calls  %8.1f ms total  %7.3f ms/call\n",
+               g_tag_name[t], g_tag_n[t], g_tag_ms[t], g_tag_ms[t] / (double)g_tag_n[t]);
+    }
 }
 
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
@@ -505,6 +534,11 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
     if (lrc != 0) return lrc;
     wubu_gpu_t_call += gpu_now_ms() - _s2;
     ++wubu_gpu_n_matvec;
+    {
+        const int tg = (wubu_gpu_tag >= 0 && wubu_gpu_tag < 8) ? wubu_gpu_tag : 0;
+        g_tag_ms[tg] += gpu_now_ms() - _s0;
+        ++g_tag_n[tg];
+    }
     if (ggml_type >= 0 && ggml_type < 32) {
         S[ggml_type].calls++;
         S[ggml_type].ms += gpu_now_ms() - t0;

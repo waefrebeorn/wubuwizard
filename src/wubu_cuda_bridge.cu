@@ -41,6 +41,21 @@ __global__ static void sgemv_kernel(const float * __restrict__ w,
     if (threadIdx.x == 0) y[row] = sdata[0];
 }
 
+/* Host wait policy. Every sync in this engine (upload, q8k, download) blocks the calling
+ * thread until the device answers, and the default policy is cudaDeviceScheduleAuto, which
+ * on Windows sleeps the thread. Sleeping stretches each round trip, and the engine does
+ * ~200 of them per token. cudaDeviceScheduleSpin busy-waits instead: lower latency, one
+ * core held. Must run before the primary context exists, so the engine calls it first. */
+WUBU_EXPORT int wubu_cuda_set_wait_policy(int mode)
+{
+    unsigned int f = (mode == 1) ? cudaDeviceScheduleYield
+                   : (mode == 2) ? cudaDeviceScheduleBlockingSync
+                                 : cudaDeviceScheduleSpin;
+    const cudaError_t e = cudaSetDeviceFlags(f);
+    if (e == cudaSuccess) return 0;
+    return (e == cudaErrorSetOnActiveProcess) ? 1 : -1;
+}
+
 WUBU_EXPORT int wubu_cuda_available(void)
 {
     int count = 0;

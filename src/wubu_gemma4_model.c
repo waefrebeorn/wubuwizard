@@ -631,6 +631,7 @@ static double g4_now_ms(void)
 }
 
 void wubu_gpu_stage_report(void);
+extern int wubu_gpu_tag;   /* 1 qkv, 2 o-proj, 3 ffn, 4 head */
 
 static void g4_cpu_stats_dump(void)
 {
@@ -1393,6 +1394,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         }
     }
     if (!qkv_done) {
+        wubu_gpu_tag = 1;
         g4_batched_qmatmul(normed, &layer->attn_q, N, qd, G4_HIDDEN, q);
         if (!layer->share_kv) {
             g4_batched_qmatmul(normed, &layer->attn_k, N, kvd, G4_HIDDEN, k);
@@ -1469,7 +1471,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
 
     /* ===== Attention output projection ===== */
     const double _po0 = g4_now_ms();
+    wubu_gpu_tag = 2;
     g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
+    wubu_gpu_tag = 0;
     if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_OPROJ] += _t - _po0; _pk = _t; }
     }   /* end: !half_done */
 
@@ -1509,6 +1513,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                      G4_HIDDEN, G4_FFN, sg, su, sd, ffn_down_out) == 0);
     }
     if (!ffn_dev_done) {
+        wubu_gpu_tag = 3;
         g4_batched_qmatmul(normed, &layer->ffn_gate, N, G4_FFN, G4_HIDDEN, ffn_gate);
         g4_batched_qmatmul(normed, &layer->ffn_up,   N, G4_FFN, G4_HIDDEN, ffn_up);
     }
@@ -1528,6 +1533,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_GELU] += _t - _pk; _pk = _t; }
     if (!ffn_dev_done)
         g4_batched_qmatmul(ffn_up, &layer->ffn_down, N, G4_HIDDEN, G4_FFN, ffn_down_out);
+        wubu_gpu_tag = 0;
     if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_PROJ] += _t - _pk; _pk = _t; }
 
     /* Post-FFN norm + residual */
@@ -1629,7 +1635,9 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
             }
         }
     } else {
+        wubu_gpu_tag = 4;
         g4_batched_qmatmul(normed, &model->output, N, G4_VOCAB, G4_HIDDEN, logits);
+        wubu_gpu_tag = 0;
     }
 
     if (N == 1) G4_P[G4P_HEAD] += g4_now_ms();

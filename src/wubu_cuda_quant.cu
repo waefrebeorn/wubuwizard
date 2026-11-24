@@ -908,11 +908,13 @@ WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
     const int K = 2560, N = 3840;
     const int nb = K / QK_K;
     const size_t row = (size_t)nb * 82;
-    void *d_w[3] = {0, 0, 0};
+    enum { NBUF = 16 };   /* 16 x 3.1 MB = 50 MB, past the 32 MB L2 */
+    void *d_w[NBUF];
     float *h_x = NULL, *d_x = NULL, *d_y = NULL, *h_y = NULL;
     void *d_q8 = NULL;
     if (iters <= 0) iters = 20;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < NBUF; ++i) d_w[i] = NULL;
+    for (int i = 0; i < NBUF; ++i)
         if (cudaMalloc(&d_w[i], row * N) != cudaSuccess) return -1;
     if (cudaHostAlloc((void **)&h_x, sizeof(float) * K, cudaHostAllocDefault) != cudaSuccess) return -1;
     if (cudaHostAlloc((void **)&h_y, sizeof(float) * N, cudaHostAllocDefault) != cudaSuccess) return -1;
@@ -920,7 +922,7 @@ WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
     if (cudaMalloc(&d_y, sizeof(float) * N) != cudaSuccess) return -1;
     if (cudaMalloc(&d_q8, (size_t)(nb + 1) * sizeof(c_q8_k)) != cudaSuccess) return -1;
     for (int i = 0; i < K; ++i) h_x[i] = (float)i * 0.001f;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < NBUF; ++i) {
         uint8_t *blk = (uint8_t *)malloc(row * N);
         for (size_t b = 0; b < row * N; ++b) blk[b] = (uint8_t)(b * 2654435761u);
         cudaMemcpy(d_w[i], blk, row * N, cudaMemcpyHostToDevice);
@@ -938,7 +940,7 @@ WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
         cudaEventRecord(e1); cudaEventSynchronize(e1); q8t += ev_ms(e0, e1);
         cudaEventRecord(e0);
         const int wpb = 8, blocks = (N + wpb - 1) / wpb;
-        iq2s_matvec_v3_kernel<<<blocks, wpb * 32>>>((const uint8_t *)d_w[it % 3],
+        iq2s_matvec_v3_kernel<<<blocks, wpb * 32>>>((const uint8_t *)d_w[it % NBUF],
                                                     (const c_q8_k *)d_q8, d_y, (int64_t)row, nb, N);
         cudaEventRecord(e1); cudaEventSynchronize(e1); kern += ev_ms(e0, e1);
         cudaEventRecord(e0);
@@ -951,7 +953,7 @@ WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
            iters, K, N, up / iters, q8t / iters, kern / iters, down / iters, total / iters,
            ((double)row * N / (kern / iters)) / 1e6, total / iters * 48.0);
     cudaEventDestroy(e0); cudaEventDestroy(e1);
-    for (int i = 0; i < 3; ++i) cudaFree(d_w[i]);
+    for (int i = 0; i < NBUF; ++i) cudaFree(d_w[i]);
     cudaFreeHost(h_x); cudaFreeHost(h_y); cudaFree(d_x); cudaFree(d_y); cudaFree(d_q8);
     return 0;
 }

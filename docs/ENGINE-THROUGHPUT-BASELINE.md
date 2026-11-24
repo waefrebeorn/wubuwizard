@@ -75,11 +75,14 @@ Confirmed by measurement, not assumed:
   whole is bandwidth-bound and close to its floor; the section charges (o-proj 12.5 ms for
   48 x 3.8 MB) are inconsistent with their own isolated measurement and with this split,
   which is a profiler accounting problem to resolve before optimising anything inside it;
-- o-projection shape end to end (`wubu_cuda_bench_oproj`, K=2560 x N=3840, 30 iters):
-  upload 0.008 + q8k 0.035 + kernel 0.040 + download 0.026 = **0.110 ms/call**, so 48 calls
-  per token should cost **5.3 ms** — against the 12.6 ms the engine charges for the same
-  section. The kernel is 78 GB/s at that shape, so the shape is not the problem; ~0.15 ms
-  per call is unaccounted for and is the next thing to bisect;
+- **correction**: `wubu_cuda_bench_oproj` reports 0.110 ms/call for the o-projection shape
+  with three rotating weight buffers, but three copies of 3.1 MB fit in the 32 MB L2, so
+  that number is L2-resident and optimistic. Per-section attribution
+  (`wubu_gpu_tag`, printed by the same report) puts the real cost at **0.259 ms/call**
+  in situ, matching the 12.46 ms the section timer charges - the section accounting was
+  right and the isolated bench was wrong. The other sections agree the same way:
+  qkv 0.119 ms/call (14.3 ms/token), head 10.46 ms/call (10.5 ms/token), ffn fallback
+  0.339 ms/call;
 - pinned staging (`wubu_cuda_bench_xfer`): 0.030 ms -> 0.018 ms per call in isolation, i.e.
   6.8 -> 3.2 ms/token across 202 calls. Implemented end to end as a single DLL call
   (`upload + q8k + kernel + download` through pinned buffers): measured **11.2 tok/s
@@ -97,10 +100,14 @@ loop for subnormals) with `__half2float` took IQ2_S from 78 to 100 GB/s.
 `q,k,v -> per-head RMS norms -> RoPE -> KV append -> attention -> o-projection` in one
 submission, with a per-layer device KV cache (512 positions, primed from the CPU cache).
 
-| mode | decode, 65 tokens |
-|---|---|
-| default (CPU attention, per-tensor matvecs) | **11.4 tok/s** |
-| `G4_ATTN_DEV=1` | **13.5 tok/s** |
+| context | default | `G4_ATTN_DEV=1` |
+|---|---|---|
+| 65 tokens | 11.4 tok/s | **13.5 tok/s** |
+| 200 tokens | 9.8 tok/s | **13.0 tok/s** |
+
+The gap widens with context because it is the CPU-only attention stretch that both grows
+with kv_len and leaves the device idle between submissions - at 200 tokens the fused path
+is **33% faster**.
 
 It is opt-in because it does not hold the identical-token bar: the fused order changes the
 accumulation. EG-124 (synthetic weights, same inputs) measures the divergence explicitly -
