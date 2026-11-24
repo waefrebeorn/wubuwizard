@@ -157,12 +157,21 @@ It is the faster path: **14.1-14.3 tok/s** against 12.8-12.9 at 65 tokens of con
 place. Its arithmetic also tracks the CPU sequence closely (q/k/v/attention to 4e-07,
 o-projection to 1.5e-05, EG-124).
 
-It is still opt-in because of what it generates, not because of a bookkeeping rule. Same
-weights, same prompt, 40 tokens: the fused path collapses into a loop of control tokens
-(237542, 236779, 236756 repeating) and decodes to `_`, while the CPU-attention path reaches
-"This is a classic philosophical question". A 1.5e-05 per-layer deviation compounding over
-48 layers is enough to fall off the model's manifold at IQ2 quantisation. Speed that
-degrades the continuation is not a speedup.
+It is still opt-in because it is **wrong on real data, from the first token**, not because
+of a bookkeeping rule and not because of slow drift:
+
+- all 48 layers take the fused path (`share_kv=0`, `no_dev=0`), so there is no mixed-path
+  KV-cache explanation for it;
+- the *first* sampled token differs from the default path's (`236751` instead of `45518`),
+  and the continuation is a loop of control tokens (237542, 236779, 236756) decoding to
+  `_`, where the CPU-attention path reaches "This is a classic philosophical question".
+
+A first-token divergence is a correctness bug, not 1.5e-05 of compounding rounding: EG-124
+passes because it exercises one position with synthetic weights, and the composite has not
+been validated against the CPU sequence at a real position with real weights. Until that
+gate exists, the +11% is unavailable and the path is a measurement tool, not an option.
+
+Speed that produces a token the CPU path never would is not a speedup.
 
 ## Device attention half-layer (opt-in, `G4_ATTN_DEV=1`)
 
