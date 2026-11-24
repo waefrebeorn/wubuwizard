@@ -288,6 +288,14 @@ structural rather than fixable by tuning. M rows through an M==1 kernel is M syn
 round trips per tensor per layer; for a 1717-token prompt that is roughly 400k CUDA calls, and the
 weight read - the only cost that matters - is not amortised at all. Reverted.
 
+**The gain shrinks with prompt length, and that names the next wall.** 1717-token prompt: 7.3
+(per-token) → **8.8 tok/s** (batch, M-row kernels) = 235 s → **196 s** to first token. At 87 tokens
+the same change is 13.9 → 17.2. Twenty-odd percent either way, but the absolute rate collapses from
+17 to 8.8 as the prompt grows, which is the signature of a quadratic term taking over: attention is
+still a CPU causal pass over M x M positions while the projections are now on the card. The M-row
+kernels were necessary, not sufficient - batched attention on the device is the other half of
+prefill, and it is now the binding constraint.
+
 **Measured ladder, 87-token prompt, RTX 4050:** CPU batched 7.3 → IQ2_S M-row 14.3 → IQ2_S + IQ3_S
 M-row **17.2**, against the per-token loop's 13.9. That is a 24% win over the current default, with
 6 of 7 prompts producing an identical 24-token continuation and the seventh diverging at token 22 -
