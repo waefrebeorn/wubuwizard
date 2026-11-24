@@ -1317,13 +1317,27 @@ these are measured local tok/s, not proxy counters.
 
 | EG-106 | Reproducible benchmark statistics + regression gate | EG-100 probes layers but no repeat-statistics decision rule | arXiv 2610.09778 sequential isolation; FMwork 2508.10251 | `test_eg106_bench_stats` | S | **DONE (statistics gate)** — `src/wubu_bench_stats.c/.h` gates mean/sd/CV and two-SE regression; `tools/bench_llama.sh` + `docs/BENCHMARK-WORKFLOW.md` give the reusable loop. |
 
+**EG-107 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg107_virt_kv`
+gates the vAttention contract from the newly acquired study clone
+`microsoft/vattention` (MIT): reserve a contiguous virtual KV range up front,
+map physical pages only as sequence lengths grow, and keep per-request offsets
+contiguous so attention kernels do not need a paged rewrite. A 4x16 virtual
+range has 64 tokens; sequences 5 and 9 map 5 pages of size 4; offsets for
+batch 0/1 token 7 are 7 and 23. A 3-page physical budget accepts 3 pages then
+refuses overcommit. Bad batch/page sizes, duplicate request ids, NULL sequence
+arrays and out-of-range tokens are rejected. `test_eg107_virt_kv: PASS`, exit 0;
+30/30 stress runs clean. Pages and offsets are synthetic; no CUDA VMM call or
+1.23x upstream throughput is claimed.
+
+| EG-107 | Contiguous virtual KV with demand physical mapping (vAttention) | EG-08/EG-05 use paged layout and physical allocation | vAttention arXiv 2405.04437 / `microsoft/vattention` | `test_eg107_virt_kv` | L | **DONE (allocation-contract gate)** — `src/wubu_virt_kv.c/.h` reserves virtual range and maps pages on demand; upstream study clone is read-only. |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=115 FAIL=0`, no failed targets (EG-105/106 included). The
+was rebuilt and executed in one loop: `PASS=116 FAIL=0`, no failed targets (EG-105/106/107 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
