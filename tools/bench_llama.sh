@@ -66,6 +66,9 @@ for variant in "${VLIST[@]}"; do
   case "$variant" in
     baseline) VCMD=(-ngl 99 -ncmoe 12) ;;
     loopopt)  VCMD=(-ngl 99 -ncmoe 0 -ot 'blk\.(0|1|2|3|4|5|18|19|20|21|22|23)\.ffn_.*_exps=CPU') ;;
+    loopopt_fa) VCMD=(-ngl 99 -ncmoe 0 -ot 'blk\.(0|1|2|3|4|5|18|19|20|21|22|23)\.ffn_.*_exps=CPU' -fa 1) ;;
+    loopopt_q8kv) VCMD=(-ngl 99 -ncmoe 0 -ot 'blk\.(0|1|2|3|4|5|18|19|20|21|22|23)\.ffn_.*_exps=CPU' -ctk q8_0 -ctv q8_0) ;;
+    loopopt_ub) VCMD=(-ngl 99 -ncmoe 0 -ot 'blk\.(0|1|2|3|4|5|18|19|20|21|22|23)\.ffn_.*_exps=CPU' -b 2048 -ub 512) ;;
     *) echo "unknown variant $variant" >&2; exit 2 ;;
   esac
   for profile in "${PLIST[@]}"; do
