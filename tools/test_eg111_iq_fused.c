@@ -87,6 +87,11 @@ int main(void)
         if (rel > worst2) worst2 = rel;
         CHECK(close_enough(got, want));
 
+        /* Vector path must agree with the scalar port of the same kernel. */
+        float sc2 = 0.0f;
+        CHECK(wubu_vec_dot_iq2_s_q8_k_scalar(QK_K, &sc2, block_iq2[b], q8) == 0);
+        CHECK(close_enough(got, sc2));
+
         float got3 = 0.0f;
         const int rc3 = wubu_vec_dot_iq3_s_q8_k(QK_K, &got3, block_iq3[b], q8);
         CHECK(rc3 == 0);
@@ -95,6 +100,10 @@ int main(void)
         float rel3 = fabsf(got3 - want3) / (1.0f + fabsf(want3));
         if (rel3 > worst3) worst3 = rel3;
         CHECK(close_enough(got3, want3));
+
+        float sc3 = 0.0f;
+        CHECK(wubu_vec_dot_iq3_s_q8_k_scalar(QK_K, &sc3, block_iq3[b], q8) == 0);
+        CHECK(close_enough(got3, sc3));
     }
 
     /* Two-block run: exercises the cross-block accumulate, not just block 0. */

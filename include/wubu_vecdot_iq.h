@@ -23,9 +23,20 @@ extern "C" {
 #define WUBU_IQ2S_BLOCK_SIZE 82   /* fp16 d(2) + qs[64] + qh[8] + scales[8]  */
 #define WUBU_IQ3S_BLOCK_SIZE 110  /* fp16 d(2) + qs[64] + qh[8] + signs[32] + scales[4] */
 
-/* n must be a multiple of 256. Returns 0 on success, -1 on bad arguments. */
+/* n must be a multiple of 256. Returns 0 on success, -1 on bad arguments.
+ * The plain names dispatch to AVX2 when the translation unit is built with
+ * -mavx2, otherwise to the scalar port; both are always available for
+ * cross-checking. */
 int wubu_vec_dot_iq2_s_q8_k(int n, float *s, const void *w, const void *q8);
 int wubu_vec_dot_iq3_s_q8_k(int n, float *s, const void *w, const void *q8);
+
+int wubu_vec_dot_iq2_s_q8_k_scalar(int n, float *s, const void *w, const void *q8);
+int wubu_vec_dot_iq3_s_q8_k_scalar(int n, float *s, const void *w, const void *q8);
+
+#if defined(__AVX2__)
+int wubu_vec_dot_iq2_s_q8_k_avx2(int n, float *s, const void *w, const void *q8);
+int wubu_vec_dot_iq3_s_q8_k_avx2(int n, float *s, const void *w, const void *q8);
+#endif
 
 /* ggml-style vec_dot signature so these can sit in the existing dispatch table. */
 void wubu_vec_dot_iq2_s_q8_k_vd(int n, float *s, size_t bs, const void *vx,

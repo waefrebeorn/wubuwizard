@@ -56,17 +56,23 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | Run | Prefill | Decode |
 |---|---|---|
 | before (dequant to F32 per call) | 21 tok in 53.21 s (0.4 tok/s) | 13 tok in 183.15 s (0.1 tok/s) |
-| after (fused Q8_K vec_dot) | 21 tok in 31.56 s (0.7 tok/s) | 13 tok in 18.57 s (0.7 tok/s) |
+| scalar fused Q8_K vec_dot | 21 tok in 31.56 s (0.7 tok/s) | 13 tok in 18.57 s (0.7 tok/s) |
+| AVX2 fused Q8_K vec_dot | 21 tok in 20.12 s (1.0 tok/s) | 13 tok in 11.63 s (1.1 tok/s) |
+
+The AVX2 port (ggml's x86 kernel) keeps the integer accumulation, so it agrees with the
+scalar port and the F32 reference to 2.9e-06 / 7.4e-07 relative, and it produces the same
+greedy tokens as the scalar run on this prompt.
 
 Decode is 9.9x faster; prefill 1.7x. Correctness: the kernels agree with the
 `gguf_dequantize()` reference to 1e-7 relative on 64 synthetic blocks per type (gate
 `test_eg111_iq_fused`). Greedy output matches the old run for 9 samples and then
 diverges, because activations are Q8_K-quantised instead of F32 — expected, not a bug.
 
-Remaining gap to llama.cpp (~21 tok/s decode) is now *inside* the kernel: the ported
-kernels are scalar, the column loop is OpenMP-parallel but each dot is serial, and the
-embedding/output head still dequantises. Next: AVX2 IQ2_S/IQ3_S dots (llama.cpp uses
-`ggml_vec_dot_iq2_s_q8_K` AVX2 variants), then thread tuning per column count.
+Remaining gap to llama.cpp (~21 tok/s decode) is now the output head: the logits path
+dequantises the whole tied `token_embd` matrix (412 MB, Q4_0) to F32 every token
+(`src/wubu_gemma4_model.c:787`), which dominates at 1.1 tok/s. Next: run logits through
+`quantized_matmul_batched` (Q4_0/Q6_K vec_dot) instead of dequantising the head, then
+thread tuning.
 
 ## Next engine work (replaces further gate work)
 
