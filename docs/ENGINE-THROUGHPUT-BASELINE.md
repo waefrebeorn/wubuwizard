@@ -345,6 +345,16 @@ Every A/B in this document that was not interleaved on an idle card is suspect f
 
 `IQ3_S` stays at MT=4: MT=8 and MT=16 both measured 18.4-18.7 against 18.5, which is noise.
 
+Prefill to first token, measured across this stretch:
+
+    87 tokens     17.4 -> 18.5 tok/s        (4.88 s -> 4.69 s)
+    1717 tokens   15.5 -> 15.8 tok/s       (111.07 s -> 108.94 s)
+    TTFT at 1717  196.19 s at the start of this stretch -> 108.94 s
+
+The 1717 gain is smaller than the 87 gain because at long context the tiles are larger to begin with,
+so the per-tile decode is a smaller share of the whole - the same arithmetic that made the device
+attention kernel worth 43% there and 2% at 87 tokens.
+
 ### The decode setup is instruction throughput, not memory latency
 
 Fourth hypothesis, and the fourth measurement to kill one. If the warp stalls waiting on each 82-byte
