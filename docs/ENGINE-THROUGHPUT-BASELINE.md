@@ -103,7 +103,18 @@ real dimensions (`rms_norm_row_kernel`, `residual_add_kernel`, `rope_kernel` 2.1
 A first composite (`q,k,v -> norms -> RoPE -> KV append -> attention -> o-proj` in one
 submission, with a per-layer device KV cache primed from the CPU cache) was built and
 removed rather than shipped: after fixing two real RoPE bugs it reproduced q, k and v to
-1e-06 against the CPU sequence, but its attention output still differed by 1-3 max-abs
-while the attention kernel itself matches the CPU at those exact dimensions. The remaining
-suspect is the device KV contents (prime + append), so the next step is to dump the device
-KV for one layer and diff it against the CPU cache before rebuilding the composite.
+1e-06 against the CPU sequence, but its attention output still differed by 1-3 max-abs.
+
+Suspects eliminated by measurement since then:
+
+- **prime + append mechanics** (EG-123 `kv roundtrip`): 20 rows primed and one appended at
+  the engine's real stride (kvd = 2048) come back bit-exact, worst 0.000e+00;
+- **the attention kernel at the model's dimensions**: 2.1e-06 against the CPU routine
+  (16 heads, 8 kv heads, head_dim 256, kv_len 21);
+- **q, k, v**: 1.4e-06 / 2.7e-07 / 4.8e-07.
+
+So the KV data is right and the attention math is right, which leaves the *arguments or
+ordering* inside the composite. The next attempt should diff the device attention output
+against a CPU attention computed from the **device-downloaded KV**, not from the CPU cache;
+if those agree, the fault is in the device KV view (a stale row or an offset), and if they
+disagree the fault is in the call itself.

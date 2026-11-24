@@ -178,6 +178,39 @@ int main(int argc, char **argv)
         }
     }
 
+    /* ---- KV cache prime + append round trip (the mechanism, not the math) ---- */
+    {
+        typedef int (*fn_kv_t)(const void *, const void *, int, const void *, const void *,
+                               int, int, int, float *, float *);
+        fn_kv_t kv = (fn_kv_t)(void *)GetProcAddress(h, "wubu_cuda_kv_roundtrip_host");
+        CHECK(kv != NULL);
+        if (kv) {
+            /* The engine's real shape: kvd = kv_heads * head_dim = 8 * 256. */
+            enum { KVD = 2048, CAP = 64, NROWS = 20, POS = 20 };
+            static float hk[CAP][KVD], hv[CAP][KVD], ka[KVD], va[KVD];
+            static float ok[CAP][KVD], ov[CAP][KVD];
+            for (int r = 0; r < NROWS; ++r)
+                for (int i = 0; i < KVD; ++i) { hk[r][i] = rnd(); hv[r][i] = rnd(); }
+            for (int i = 0; i < KVD; ++i) { ka[i] = 100.0f + rnd(); va[i] = -100.0f + rnd(); }
+            CHECK(kv(hk, hv, NROWS, ka, va, POS, KVD, CAP, &ok[0][0], &ov[0][0]) == 0);
+            double wk = 0.0, wv = 0.0;
+            for (int r = 0; r < NROWS; ++r)
+                for (int i = 0; i < KVD; ++i) {
+                    if (fabs((double)ok[r][i] - (double)hk[r][i]) > wk) wk = fabs((double)ok[r][i] - (double)hk[r][i]);
+                    if (fabs((double)ov[r][i] - (double)hv[r][i]) > wv) wv = fabs((double)ov[r][i] - (double)hv[r][i]);
+                }
+            double ak = 0.0, av = 0.0;
+            for (int i = 0; i < KVD; ++i) {
+                if (fabs((double)ok[POS][i] - (double)ka[i]) > ak) ak = fabs((double)ok[POS][i] - (double)ka[i]);
+                if (fabs((double)ov[POS][i] - (double)va[i]) > av) av = fabs((double)ov[POS][i] - (double)va[i]);
+            }
+            printf("EG-123 kv roundtrip: primed_rows=%d worst=%.3e / %.3e, appended row %d worst=%.3e / %.3e\n",
+                   NROWS, wk, wv, POS, ak, av);
+            CHECK(wk == 0.0 && wv == 0.0);
+            CHECK(ak == 0.0 && av == 0.0);
+        }
+    }
+
     FreeLibrary(h);
     if (failures) { fprintf(stderr, "test_eg123_layer_kernels: FAIL (%d)\n", failures); return 1; }
     printf("test_eg123_layer_kernels: PASS\n");

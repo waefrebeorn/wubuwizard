@@ -1222,6 +1222,47 @@ WUBU_EXPORT int wubu_cuda_kv_append_dev(float *d_kc, float *d_vc, const float *d
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
+/* Host wrapper for the KV round trip: prime n rows, append one, download, so the
+ * prime+append mechanics can be checked independently of the engine. */
+WUBU_EXPORT int wubu_cuda_kv_roundtrip_host(const void *h_k, const void *h_v, int n,
+                                            const void *h_ka, const void *h_va, int pos,
+                                            int kvd, int cap, float *out_k, float *out_v)
+{
+    void *dk = NULL, *dv = NULL, *dka = NULL, *dva = NULL;
+    int rc = -1;
+    const size_t rowb = (size_t)kvd * sizeof(float);
+    if (n < 0 || pos < 0 || pos >= cap || kvd <= 0) return -1;
+    if (cudaMalloc(&dk, rowb * (size_t)cap) != cudaSuccess) goto done;
+    if (cudaMalloc(&dv, rowb * (size_t)cap) != cudaSuccess) goto done;
+    if (n > 0) {
+        if (cudaMalloc(&dka, rowb * (size_t)n) != cudaSuccess) goto done;
+        if (cudaMalloc(&dva, rowb * (size_t)n) != cudaSuccess) goto done;
+        if (cudaMemcpy(dka, h_k, rowb * (size_t)n, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+        if (cudaMemcpy(dva, h_v, rowb * (size_t)n, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+        if (cudaMemcpy(dk, dka, rowb * (size_t)n, cudaMemcpyDeviceToDevice) != cudaSuccess) goto done;
+        if (cudaMemcpy(dv, dva, rowb * (size_t)n, cudaMemcpyDeviceToDevice) != cudaSuccess) goto done;
+    }
+    {
+        void *dkt = NULL, *dvt = NULL;
+        if (cudaMalloc(&dkt, rowb) != cudaSuccess) goto done;
+        if (cudaMalloc(&dvt, rowb) != cudaSuccess) goto done;
+        if (cudaMemcpy(dkt, h_ka, rowb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+        if (cudaMemcpy(dvt, h_va, rowb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+        if (wubu_cuda_kv_append_dev((float *)dk, (float *)dv, (const float *)dkt,
+                                    (const float *)dvt, pos, kvd) != 0) { cudaFree(dkt); cudaFree(dvt); goto done; }
+        cudaFree(dkt); cudaFree(dvt);
+    }
+    if (cudaMemcpy(out_k, dk, rowb * (size_t)cap, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(out_v, dv, rowb * (size_t)cap, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dk) cudaFree(dk);
+    if (dv) cudaFree(dv);
+    if (dka) cudaFree(dka);
+    if (dva) cudaFree(dva);
+    return rc;
+}
+
 /* Host wrappers for the gate. */
 WUBU_EXPORT int wubu_cuda_attn_host(const void *h_q, const void *h_kc, const void *h_vc,
                                     float *h_out, int n_heads, int n_kv_heads, int hd,
