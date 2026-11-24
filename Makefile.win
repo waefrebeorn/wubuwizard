@@ -682,6 +682,10 @@ CUDA_LIB83 = C:/PROGRA~1/NVIDIA~2/CUDA/v13.5/lib/x64
 gen_text_gemma4_gpu: tools/gen_text_gemma4.c $(G4_GPU_OBJ)
 	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ tools/gen_text_gemma4.c $(G4_GPU_OBJ) -L$(CUDA_LIB83) -lcudart -lcublas -fopenmp -lm -lstdc++
 
+# EG-118: Inkling-2 GGUF probe and tensor map.
+test_eg118_inkling_meta: tools/test_eg118_inkling_meta.c src/wubu_inkling2_meta.c src/gguf_reader.c src/quantized_dot_generic.c src/wubu_win.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
 # EG-117: fused IQ2_XS x Q8_K dot.
 test_eg117_iq2xs: tools/test_eg117_iq2xs.c src/wubu_vecdot_iq2xs.c src/wubu_vecdot_iq4xs.c src/gguf_reader.c src/quantized_dot_generic.c src/wubu_win.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static

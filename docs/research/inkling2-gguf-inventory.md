@@ -29,6 +29,27 @@ architecture support, which `rg -i inkling src include` currently does not conta
 | final_logit_softcapping | 30.0 |
 | vocab_size / vocab_size_unpadded | 201024 / 200058 |
 
+## Physical blocks vs logical layers (the detail that changes the loader)
+
+`inkling2.block_count = 48` is the **logical** count. Only **24 blocks** carry tensors:
+indices 0-23. The 12-layer core (6..17) is stored once and executed `num_loops = 3`
+times, so
+
+```
+logical 0..5   -> physical 0..5      (front)
+logical 6..41  -> physical 6..17     (3 passes over the core)
+logical 42..47 -> physical 18..23    (back)
+```
+
+Mapping is implemented as `wubu_inkling2_phys_block()` and asserted by
+`test_eg118_inkling_meta`. A loader that assumes 48 blocks finds nothing past blk.23 and
+reports 312 missing tensors - exactly what the first version of the gate caught.
+
+Layer 0 also lacks `attn_res_query` (no previous block to attend to), and
+`attn_q_inp_norm` / `attn_k_inp_norm` / `attn_v_inp_norm` plus the dynamic-tap
+`*_conv_proj` tensors exist only on the full-attention layers (5, 11, 17, 23 - every 6th
+layer), not on the sliding-window ones.
+
 ## Tensor families (48 kinds, 734 tensors)
 
 | Tensor | Count | Dims | Note |
