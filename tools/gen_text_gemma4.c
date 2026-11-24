@@ -380,8 +380,10 @@ int main(int argc, char **argv) {
     t_start = wall_time();
     if (ttc) wubu_ttc_budget_begin(ttc);
     int batch_count = 0;
+    double dbg_t_fwd = 0.0, dbg_t_rest = 0.0;
 
     for (int i = 0; i < n_tokens; i++) {
+        const double _t_pre_fwd = wall_time();
 #ifdef GPU_SUPPORT
         if (gpu_ctx) {
             g4_model_decode_gpu(gpu_ctx, &model, token, logits);
@@ -391,10 +393,13 @@ int main(int argc, char **argv) {
 #else
         g4_model_decode(&model, token, logits);
 #endif
-
+        const double _t_fwd = wall_time();
         if (i < 2) dbg_logits(i == 0 ? "decode-0" : "decode-1", logits, G4_VOCAB);
         mask_unused(logits, tok_type, G4_VOCAB, have_types, suppress, n_suppress);
         token = sample_topk(logits, G4_VOCAB, top_k, 1.0f);
+        const double _t_post = wall_time();
+        dbg_t_fwd += _t_fwd - _t_pre_fwd;
+        dbg_t_rest += _t_post - _t_fwd;
         fprintf(stderr, "[SAMPLE %d] %d\n", i, token);
         if (ttc) {
             float top_score = -1e30f;
@@ -443,6 +448,10 @@ int main(int argc, char **argv) {
 
     printf("\n");
     fprintf(stderr, "\n--- Stats ---\n");
+    if (getenv("WUBU_GPU_STATS"))
+        fprintf(stderr, "[decode split] forward %.1f ms/tok, sample+mask %.1f ms/tok\n",
+                dbg_t_fwd * 1000.0 / (double)(generated > 0 ? generated : 1),
+                dbg_t_rest * 1000.0 / (double)(generated > 0 ? generated : 1));
     fprintf(stderr, "Prefill: %d tok in %.2fs (%.1f tok/s)\n", n_prompt, t_prefill, n_prompt / t_prefill);
     if (generated > 0 && t_decode > 0)
         fprintf(stderr, "Decode:  %d tok in %.2fs (%.1f tok/s)\n", generated, t_decode, generated / t_decode);

@@ -115,6 +115,29 @@ rounds differently.
 
 Until then the GPU path stays opt-in (`G4_GPU=1`) and the CPU path is the default.
 
+## Where the remaining decode time goes (measured)
+
+`WUBU_GPU_STATS=1` prints per-type matvec counts and milliseconds for both the device
+path and the CPU fallback, plus a forward-vs-sample split. One 21-token decode run on
+the 12B IQ2 GGUF with `G4_GPU=1`:
+
+```
+[decode split] forward 188.3 ms/tok, sample+mask 0.1 ms/tok
+[GPU stats]   11   20 calls   236 ms   (Q3_K head, 12 ms/call)
+[GPU stats]   21 1900 calls   501 ms   (IQ3_S, 0.26 ms/call)
+[GPU stats]   22 4080 calls  1253 ms   (IQ2_S, 0.31 ms/call)
+```
+
+193 IQ2_S/IQ3_S matvecs per token at 0.26-0.31 ms each = 96 ms, of which the kernel
+itself is ~0.02 ms: **the host round-trip (2 memcpys + 3 launches + sync) is 90% of every
+call**. The other ~92 ms/token is CPU work inside the forward (norms, attention, GELU,
+residuals) that has no device path yet.
+
+So the next step is not another kernel: it is to stop paying a round-trip per matvec —
+batch the 2-3 matvecs that share an input per layer into one call, then move the whole
+forward to the device. Until that lands, `G4_GPU=1` stays opt-in at 5.4 tok/s vs 4.2 on
+the CPU path.
+
 ## What not to do
 
 - Do not upload per matmul: PCIe at ~6 GB/s makes a 4 GB model 0.7 s/token.
