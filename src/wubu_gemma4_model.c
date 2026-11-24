@@ -1922,7 +1922,12 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     if (getenv("G4_FFNT")) fprintf(stderr, "[FFNT] %d g=%d u=%d d=%d dev=%d%d%d\n", il,
         layer->ffn_gate.ggml_type, layer->ffn_up.ggml_type, layer->ffn_down.ggml_type,
         layer->ffn_gate.dev != NULL, layer->ffn_up.dev != NULL, layer->ffn_down.dev != NULL);
-    if (N > 1 && !getenv("G4_FFN_NO_FUSE") &&
+    /* G4_FUSE_ONLY_XXS: fuse only the layers whose FFN weights are IQ3_XXS/IQ4_XS. With G4_FFN_NO_FUSE
+     * on everything else, both runs compute upstream layers identically, so a dump of the first XXS
+     * layer is a valid comparison - unlike the earlier cross-run dumps, whose inputs had diverged. */
+    const int fuse_only_xxs = getenv("G4_FUSE_ONLY_XXS") != NULL;
+    const int is_xxs_layer = (layer->ffn_gate.ggml_type == 18 || layer->ffn_gate.ggml_type == 23);
+    if (N > 1 && (!getenv("G4_FFN_NO_FUSE") || (fuse_only_xxs && is_xxs_layer)) &&
         layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
         (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
         extern int wubu_gpu_ffn_mrow(const float *, const void *, int, const void *, int,
@@ -1988,9 +1993,12 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     }
 
     { const char *dn = getenv("G4_DUMP_FFN");
-      if (dn && atoi(dn) == il) {
+      /* Prefill only: this hook used to fire for decode as well, so one token's worth of output
+       * silently replaced the prompt's. Layer 0 is the only layer where both paths are guaranteed
+       * identical input, so it is the only one that can arbitrate between them. */
+      if (N > 1 && dn && atoi(dn) == il) {
           char path[128];
-          snprintf(path, sizeof path, "ffn_l%d_%s.bin", il, getenv("G4_FFN_NO_FUSE") ? "host" : "fused");
+          snprintf(path, sizeof path, "ffn_l%d_%s.bin", il, ffn_dev_done ? "fused" : "host");
           FILE *df = fopen(path, "wb");
           if (df) { fwrite(ffn_down_out, sizeof(float), (size_t)N * G4_HIDDEN, df); fclose(df); }
       } }
