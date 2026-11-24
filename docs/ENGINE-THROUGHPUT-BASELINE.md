@@ -221,6 +221,25 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Attention kernel now mirrors the CPU's reduction order
+
+Rewrote `attn_decode_kernel` to reproduce `g4_dotf` exactly: 16 explicit accumulators with
+`__fmaf_rn` in the CPU's stride pattern, combined as `l[j] = a[j] + a[j+8]` then
+`((l0+l4)+(l1+l5)) + ((l2+l6)+(l3+l7))` - the add / add(lo,hi) / hadd / hadd tree - with the
+softmax sum done sequentially in one thread and the value loop accumulating `(e * inv) * v` in
+kp order.
+
+| measurement | before | after |
+|---|---|---|
+| attention row vs CPU (ADIFF) | 4.34e-07 rel | **3.47e-07 rel** |
+| sliding-layer fusion, first divergence | generated token 2 | **generated token 8** |
+| decode, full-layer fusion (default) | 13.3 tok/s | 13.3-13.4 tok/s |
+| decode, all-layer fusion | 14.6 | 14.2-14.4 |
+
+No speed cost on the default path, and the fused path now tracks the reference three times
+longer before parting. The residual 3.47e-07 is almost certainly `expf`: CUDA's and glibc's
+implementations differ in the last bit, so bit-exactness cannot be reached by ordering alone.
+
 ### Measured: the device attention row is correct to 4.3e-07
 
 `G4_ATTN_ADIFF=1` stages the attention on the device into a host buffer and lets the CPU path

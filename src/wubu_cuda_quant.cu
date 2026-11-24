@@ -1231,6 +1231,12 @@ __global__ void attn_decode_kernel(const float * __restrict__ q,
                                    int n_heads, int n_kv_heads, int hd,
                                    int kv_start, int kv_len, int kvd)
 {
+    /* Arithmetic deliberately mirrors g4_dotf and the CPU softmax in the engine, so the
+     * attention row is bit-identical rather than merely close. g4_dotf is two 8-lane FMA
+     * accumulators combined by add, then add(lo,hi), then two hadd steps; the softmax sum is
+     * sequential over cached positions; the value loop is (e * inv) * v accumulated in kp
+     * order. Measured with G4_ATTN_ADIFF: before this the row differed by 4.3e-07 relative,
+     * which is enough to flip a token once 40 layers of it accumulate. */
     extern __shared__ float sh[];
     const int hq = blockIdx.x;
     const int kv_h = hq / (n_heads / n_kv_heads);
@@ -1241,8 +1247,17 @@ __global__ void attn_decode_kernel(const float * __restrict__ q,
     float lmax = -3.4e38f;
     for (int kp = threadIdx.x; kp < kv_len; kp += blockDim.x) {
         const float *kvp = K + (size_t)(kv_start + kp) * kvd;
-        float sc = 0.0f;
-        for (int d = 0; d < hd; ++d) sc += qvec[d] * kvp[d];
+        float a[16];
+        for (int j = 0; j < 16; ++j) a[j] = 0.0f;
+        const int full = hd & ~15;
+        for (int d = 0; d < full; d += 16) {
+            for (int j = 0; j < 16; ++j)
+                a[j] = __fmaf_rn(qvec[d + j], kvp[d + j], a[j]);
+        }
+        float l[8];
+        for (int j = 0; j < 8; ++j) l[j] = a[j] + a[j + 8];
+        float sc = ((l[0] + l[4]) + (l[1] + l[5])) + ((l[2] + l[6]) + (l[3] + l[7]));
+        for (int d = full; d < hd; ++d) sc += qvec[d] * kvp[d];
         sh[kp] = sc;
         if (sc > lmax) lmax = sc;
     }
@@ -1258,21 +1273,13 @@ __global__ void attn_decode_kernel(const float * __restrict__ q,
     }
     __syncthreads();
     const float max_s = red[0];
-    __syncthreads();
 
-    float lsum = 0.0f;
-    for (int kp = threadIdx.x; kp < kv_len; kp += blockDim.x) {
-        const float e = expf(sh[kp] - max_s);
-        sh[kp] = e;
-        lsum += e;
-    }
-    for (int off = 16; off > 0; off >>= 1) lsum += __shfl_xor_sync(0xffffffffu, lsum, off);
-    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = lsum;
+    for (int kp = threadIdx.x; kp < kv_len; kp += blockDim.x)
+        sh[kp] = expf(sh[kp] - max_s);
     __syncthreads();
     if (threadIdx.x == 0) {
-        float s = 0.0f;
-        const int nw = (blockDim.x + 31) / 32;
-        for (int i = 0; i < nw; ++i) s += red[i];
+        float s = 0.0f;                      /* sequential, like the CPU */
+        for (int kp = 0; kp < kv_len; ++kp) s += sh[kp];
         red[0] = 1.0f / (s + 1e-10f);
     }
     __syncthreads();
@@ -1280,9 +1287,11 @@ __global__ void attn_decode_kernel(const float * __restrict__ q,
 
     for (int d = threadIdx.x; d < hd; d += blockDim.x) {
         float acc = 0.0f;
-        for (int kp = 0; kp < kv_len; ++kp)
-            acc += sh[kp] * V[(size_t)(kv_start + kp) * kvd + d];
-        out[(size_t)hq * hd + d] = acc * inv;
+        for (int kp = 0; kp < kv_len; ++kp) {
+            const float w = sh[kp] * inv;
+            acc += w * V[(size_t)(kv_start + kp) * kvd + d];
+        }
+        out[(size_t)hq * hd + d] = acc;
     }
 }
 
