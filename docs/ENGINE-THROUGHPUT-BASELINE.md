@@ -320,6 +320,23 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### Keeping q on the device: 30 tok/s, and wrong
+
+The obvious next saving was the q round trip: the QKV projection downloads q, then the attention kernel
+uploads it again - 5.6 MB per layer for a tensor that never needed to leave. Implemented as
+`wubu_cuda_attn_causal_devq` plus a projection that hands back the device pointer, it measured
+
+    87 tokens   28.0 -> 30.0 tok/s       1717 tokens  67.6 s -> 62.5 s
+
+and diverged on 5 of 5 prompts against the batched dp4a path. The reason is not subtle in hindsight:
+**RoPE and the per-head norms are applied to the host q buffer after the projection**, so the device
+copy going straight into attention was an un-rotated q. Reverted.
+
+That is the real content of "move the KV cache to the device": q cannot move first. The norms, RoPE and
+the KV store have to move together, because they are the reason the tensor is on the host at all. The
+speedup above is a fair estimate of what that refactor is worth - about 7% at 87 tokens and 8% at 1717 -
+and it is now recorded as a measured target rather than an assumption.
+
 ### Fusing the FFN: +6%, and why it is not more
 
 `wubu_cuda_ffn_mrow_dev3` keeps gate, GELU, the product and the down projection on the device, cutting
