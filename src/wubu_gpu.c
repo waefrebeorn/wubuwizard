@@ -544,6 +544,53 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
 
 /* Attention only: the same composite with the o-projection skipped (d_wo NULL), returning
  * the attention rows so a gate can compare that stage on its own. */
+typedef int (*fn_attn_block_t)(const void *, int, const void *, int, const void *, int,
+                               const float *, const int *, int, int, int, int, int, int, int,
+                               int, float, const float *, const float *, const float *,
+                               long long, long long, long long, float *, float *, float *);
+
+/* Whole attention block for a prompt, on the device: projections, head norms, RoPE, KV append,
+ * attention. The per-layer device weights (norm vectors, rope frequencies) follow the same upload
+ * discipline as wubu_gpu_attn_half above. */
+int wubu_gpu_attn_block_mrow(int layer_id, const void *d_wq, int tq, const void *d_wk, int tk,
+                             const void *d_wv, int tv, const float *x, const int *pos, int N,
+                             int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+                             long long sq, long long sk, long long sv,
+                             const float *qn, const float *kn, const float *freqs,
+                             int n_rot, float rope_base, float *out, float *k_out, float *v_out)
+{
+    if (!wubu_gpu_init() || layer_id < 0 || layer_id >= MAX_LAYERS_DEV || N <= 0) return -1;
+    static fn_attn_block_t f; static int looked;
+    if (!looked) { looked = 1; f = (fn_attn_block_t)(void *)GetProcAddress(G.h, "wubu_cuda_attn_block_mrow"); }
+    if (!f) return -2;
+
+    if (g_qn_src[layer_id] != qn || !g_qn_dev[layer_id]) {
+        if (g_qn_dev[layer_id]) G.free_dev(g_qn_dev[layer_id]);
+        g_qn_dev[layer_id] = G.alloc((unsigned long long)((size_t)hd * sizeof(float)));
+        if (!g_qn_dev[layer_id]) return -4;
+        if (G.upload(g_qn_dev[layer_id], qn, (unsigned long long)((size_t)hd * sizeof(float))) != 0) return -4;
+        g_qn_src[layer_id] = qn;
+    }
+    if (g_kn_src[layer_id] != kn || !g_kn_dev[layer_id]) {
+        if (g_kn_dev[layer_id]) G.free_dev(g_kn_dev[layer_id]);
+        g_kn_dev[layer_id] = G.alloc((unsigned long long)((size_t)hd * sizeof(float)));
+        if (!g_kn_dev[layer_id]) return -4;
+        if (G.upload(g_kn_dev[layer_id], kn, (unsigned long long)((size_t)hd * sizeof(float))) != 0) return -4;
+        g_kn_src[layer_id] = kn;
+    }
+    if (freqs && (g_freqs_src != freqs || !g_freqs_dev)) {
+        if (g_freqs_dev) G.free_dev(g_freqs_dev);
+        g_freqs_dev = G.alloc((unsigned long long)((size_t)(n_rot / 2) * sizeof(float)));
+        if (!g_freqs_dev) return -4;
+        if (G.upload(g_freqs_dev, freqs, (unsigned long long)((size_t)(n_rot / 2) * sizeof(float))) != 0) return -4;
+        g_freqs_src = freqs;
+    }
+    const float theta = (float)pow((double)rope_base, -2.0 / (double)n_rot);
+    return f(d_wq, tq, d_wk, tk, d_wv, tv, x, pos, N, hidden, qd, kvd, hd, n_heads, n_kv_heads,
+             n_rot, theta, g_qn_dev[layer_id], g_kn_dev[layer_id], g_freqs_dev,
+             sq, sk, sv, out, k_out, v_out);
+}
+
 int wubu_gpu_attn_only(int layer_id, const void *d_wq, const void *d_wk, const void *d_wv,
                        int tq, int tk, int tv, const float *x,
                        int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,

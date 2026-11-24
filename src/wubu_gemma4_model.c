@@ -1612,6 +1612,37 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * what the row difference does after projection - which is the question ADIFF cannot answer:
      * a layer with sharply peaked attention can show a 20% row difference and a tiny output one. */
     if (!half_done) {
+    /* Whole attention block on the device: projections, head norms, RoPE, KV append and attention,
+     * with only the attention rows and the KV rows coming back. Without it this layer downloads q
+     * and re-uploads q/k/v, 11 MB of PCIe for a block doing 5 MB of arithmetic, and runs the head
+     * norms and RoPE on the CPU. Off by default until it proves token-identical. */
+    if (N > 1 && getenv("G4_ATTN_BLOCK") && layer->attn_q.dev && layer->attn_k.dev &&
+        layer->attn_v.dev && !layer->share_kv && !layer->kv_eq) {
+        extern int wubu_gpu_attn_block_mrow(int, const void *, int, const void *, int, const void *, int,
+                                            const float *, const int *, int, int, int, int, int, int, int,
+                                            long long, long long, long long,
+                                            const float *, const float *, const float *, int, float,
+                                            float *, float *, float *);
+        g4_kv_cache_t *ckv = g4_kv_get(model, layer);
+        const long long sqb = (long long)(layer->attn_q.raw_bytes / qd);
+        const long long skb = (long long)(layer->attn_k.raw_bytes / kvd);
+        const long long svb = (long long)(layer->attn_v.raw_bytes / kvd);
+        if (wubu_gpu_attn_block_mrow(il, layer->attn_q.dev, layer->attn_q.ggml_type,
+                                     layer->attn_k.dev, layer->attn_k.ggml_type,
+                                     layer->attn_v.dev, layer->attn_v.ggml_type,
+                                     normed, positions, N, G4_HIDDEN, qd, kvd, layer->head_dim,
+                                     G4_HEADS, ckv->kv_heads, sqb, skb, svb,
+                                     layer->attn_q_norm_weight, layer->attn_k_norm_weight,
+                                     layer->rope_freqs, layer->n_rot, layer->rope_base,
+                                     attn_out, k, v) == 0) {
+            for (int t = 0; t < N; ++t)
+                g4_kv_store(ckv, positions[t], k + (size_t)t * kvd, v + (size_t)t * kvd);
+            wubu_gpu_tag = 2;
+            g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
+            wubu_gpu_tag = 0;
+            goto attn_block_done;
+        }
+    }
     /* ===== Q, K, V projections =====
      * All three read the same normalised input, so stage it on the device once and run
      * the three kernels against the staged Q8_K row (decode only). */
@@ -1787,6 +1818,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
     wubu_gpu_tag = 0;
     { const double _t = g4_now_ms(); g4p_acc(G4P_OPROJ, N, _t - _po0); _pk = _t; }
+    attn_block_done: ;
     }   /* end: !half_done */
 
     /* Is the attention-row difference visible after the o-projection? ADIFF says some layers'

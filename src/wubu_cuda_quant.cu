@@ -2693,3 +2693,138 @@ done:
     if (d_y) cudaFree(d_y);
     return rc;
 }
+
+/* ---------------- prefill attention block, entirely on the device ----------------
+ *
+ * wubu_cuda_attn_half_dev does the whole block for one row: q/k/v, head norms, RoPE, KV append,
+ * attention, o-projection. Prefill had no equivalent, so per layer it downloaded q (2.8 MB), uploaded
+ * q/k/v again for attention (5.6 MB) and uploaded the attention output (2.8 MB) - 11 MB of PCIe for
+ * a block whose arithmetic is 5 MB - and ran the head norms and RoPE on the CPU (162 ms of a 3.5 s
+ * prefill). This is that block for M rows, with the same norms and the same RoPE construction.
+ *
+ * Requires positions to start at 0, so the device KV slab indexes by absolute position; anything else
+ * returns non-zero and the caller keeps its host path. */
+__global__ void rope_kernel_mrow(float * __restrict__ q, float * __restrict__ k,
+                                 const int * __restrict__ positions, int d_head, int q_stride,
+                                 int k_stride, int n_rot, float theta_scale,
+                                 const float * __restrict__ freqs, int n_q_heads, int n_k_heads)
+{
+    const int half = n_rot / 2;
+    const size_t row = blockIdx.x;
+    const float pos = (float)positions[row];
+    if (blockIdx.z != 0) { }
+    else for (int h = blockIdx.y; h < n_q_heads; h += gridDim.y) {
+        float *qv = q + row * q_stride + (size_t)h * d_head;
+        for (int j = threadIdx.x; j < half; j += blockDim.x) {
+            const float ff = freqs ? freqs[j] : 1.0f;
+            if (ff > 1e20f) continue;
+            float tf = 1.0f;
+            for (int kk = 0; kk < j; kk++) tf *= theta_scale;
+            const float theta = pos * tf / ff;
+            float st, ct;
+            wubu_sincosf(theta, &st, &ct);
+            const float q0 = qv[j], q1 = qv[j + half];
+            qv[j] = q0 * ct - q1 * st;
+            qv[j + half] = q0 * st + q1 * ct;
+        }
+    }
+    if (!k || blockIdx.y != 0) return;
+    for (int h = blockIdx.z; h < n_k_heads; h += gridDim.z) {
+        float *kv = k + row * k_stride + (size_t)h * d_head;
+        for (int j = threadIdx.x; j < half; j += blockDim.x) {
+            const float ff = freqs ? freqs[j] : 1.0f;
+            if (ff > 1e20f) continue;
+            float tf = 1.0f;
+            for (int kk = 0; kk < j; kk++) tf *= theta_scale;
+            const float theta = pos * tf / ff;
+            float st, ct;
+            wubu_sincosf(theta, &st, &ct);
+            const float k0 = kv[j], k1 = kv[j + half];
+            kv[j] = k0 * ct - k1 * st;
+            kv[j + half] = k0 * st + k1 * ct;
+        }
+    }
+}
+
+__global__ void kv_append_mrow_kernel(float * __restrict__ kc, float * __restrict__ vc,
+                                      const float * __restrict__ k, const float * __restrict__ v,
+                                      const int * __restrict__ positions, int kvd, int M)
+{
+    const int t = blockIdx.y;
+    if (t >= M) return;
+    const int dst = positions[t];
+    for (int i = threadIdx.x + blockIdx.x * blockDim.x; i < kvd; i += blockDim.x * gridDim.x) {
+        kc[(size_t)dst * kvd + i] = k[(size_t)t * kvd + i];
+        vc[(size_t)dst * kvd + i] = v[(size_t)t * kvd + i];
+    }
+}
+
+WUBU_EXPORT int wubu_cuda_attn_block_mrow(const void *d_wq, int tq, const void *d_wk, int tk,
+                                          const void *d_wv, int tv,
+                                          const float *h_x, const int *h_pos, int N,
+                                          int hidden, int qd, int kvd, int hd,
+                                          int n_heads, int n_kv_heads, int n_rot, float theta_scale,
+                                          const float *d_qn, const float *d_kn, const float *d_freqs,
+                                          long long sq, long long sk, long long sv,
+                                          float *h_out, float *h_k, float *h_v)
+{
+    if (!d_wq || !d_wk || !d_wv || !h_x || !h_pos || !h_out || N <= 0) return -1;
+    if (h_pos[0] != 0) return -1;                       /* slab indexes by absolute position */
+    if ((hidden % QK_K) || (qd % QK_K) || (kvd % 256)) return -1;
+
+    const int nbx = hidden / QK_K, nbq = qd / QK_K;
+    float *dx = (float *)pool_get("attn.x", (size_t)hidden * N * sizeof(float));
+    float *dq = (float *)pool_get("attn.dq", (size_t)qd * N * sizeof(float));
+    float *dk = (float *)pool_get("attn.dk", (size_t)kvd * N * sizeof(float));
+    float *dv = (float *)pool_get("attn.dv", (size_t)kvd * N * sizeof(float));
+    float *dattn = (float *)pool_get("attn.dout", (size_t)qd * N * sizeof(float));
+    float *dout = (float *)pool_get("attn.dres", (size_t)hidden * N * sizeof(float));
+    float *kc = (float *)pool_get("attn.kc", (size_t)kvd * N * sizeof(float));
+    float *vc = (float *)pool_get("attn.vc", (size_t)kvd * N * sizeof(float));
+    c_q8_k *qx = (c_q8_k *)pool_get("attn.q8x", (size_t)nbx * N * sizeof(c_q8_k));
+    c_q8_k *qa = (c_q8_k *)pool_get("attn.q8a", (size_t)nbq * N * sizeof(c_q8_k));
+    int *dp = (int *)pool_get("attn.pos", (size_t)N * sizeof(int));
+    if (!dx || !dq || !dk || !dv || !dattn || !dout || !kc || !vc || !qx || !qa || !dp) return -2;
+
+    if (cudaMemcpy(dx, h_x, (size_t)hidden * N * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        return -3;
+    if (cudaMemcpy(dp, h_pos, (size_t)N * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess)
+        return -3;
+    quantize_q8k_kernel<<<dim3(nbx, N), 32>>>(dx, qx, hidden, hidden, nbx);
+    if (cudaGetLastError() != cudaSuccess) return -4;
+
+    if (mrow_into_dev(tq, d_wq, qx, dq, sq, nbx, qd, N) != 0) return -5;
+    if (mrow_into_dev(tk, d_wk, qx, dk, sk, nbx, kvd, N) != 0) return -6;
+    if (mrow_into_dev(tv, d_wv, qx, dv, sv, nbx, kvd, N) != 0) return -7;
+
+    /* head norms: rows are (token, head) pairs, head_dim innermost, so the row count is heads*N */
+    rms_norm_row_kernel<<<n_heads * N, 256>>>(dq, d_qn, dq, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads * N, 256>>>(dk, d_kn, dk, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads * N, 256>>>(dv, NULL, dv, hd, 1e-6f, 0);
+    if (cudaGetLastError() != cudaSuccess) return -8;
+
+    rope_kernel_mrow<<<dim3(N, n_heads, n_kv_heads), 128>>>(dq, dk, dp, hd, qd, kvd, n_rot,
+                                                            theta_scale, d_freqs, n_heads, n_kv_heads);
+    if (cudaGetLastError() != cudaSuccess) return -9;
+
+    kv_append_mrow_kernel<<<dim3((kvd + 255) / 256, N), 256>>>(kc, vc, dk, dv, dp, kvd, N);
+    if (cudaGetLastError() != cudaSuccess) return -10;
+
+    {
+        const size_t shmem = (size_t)(N < ATTN_MAXK ? N : ATTN_MAXK) * sizeof(float);
+        attn_causal_kernel<<<N * n_heads, 256, shmem>>>(dq, kc, vc, dattn, dp, N, n_heads, n_kv_heads,
+                                                        hd, qd, kvd, N, 0);
+        if (cudaGetLastError() != cudaSuccess) return -11;
+    }
+
+    quantize_q8k_kernel<<<dim3(nbq, N), 32>>>(dattn, qa, qd, qd, nbq);
+    if (cudaGetLastError() != cudaSuccess) return -12;
+    /* the o-projection is the caller's; hand back the normalised attention output and the KV rows */
+    if (cudaMemcpy(h_out, dattn, (size_t)qd * N * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+        return -13;
+    if (h_k && cudaMemcpy(h_k, dk, (size_t)kvd * N * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+        return -14;
+    if (h_v && cudaMemcpy(h_v, dv, (size_t)kvd * N * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+        return -15;
+    return 0;
+}
