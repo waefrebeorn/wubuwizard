@@ -2601,43 +2601,88 @@ static int mrow_into_dev(int type, const void *dw, const c_q8_k *q8m, float *d_y
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
-WUBU_EXPORT int wubu_cuda_ffn_mrow_dev3(const void *d_wg, int tg, const void *d_wu, int tu,
-                                        const void *d_wd, int td, const float *h_x, int M,
-                                        int hidden, int ff, long long sg, long long su, long long sd,
-                                        float *h_out)
+/* Stage accounting for the fused FFN. Every claim this session made about where the 36 ms per layer
+ * goes was arithmetic on transfer sizes; this measures the six stages directly and prints the average
+ * of one full layer sweep, so the next decision is made on numbers instead of on the same guess. */
+static int   g_ffn_stage_on = -1;
+static double g_ffn_acc[8];
+static int   g_ffn_calls;
+static cudaEvent_t g_ffn_ev[8];
+
+static void ffn_stage_mark(int slot)
+{
+    if (g_ffn_stage_on != 1 || slot < 0 || slot > 6) return;
+    cudaEventRecord(g_ffn_ev[slot], 0);
+}
+
+int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
+                                     const void *d_wd, int td, const float *h_x, int K, int M,
+                                     int hidden, int ff, long long sg, long long su, long long sd,
+                                     float *h_out)
 {
     if (!d_wg || !d_wu || !d_wd || !h_x || !h_out || M <= 0) return -1;
-    if ((hidden % QK_K) || (ff % QK_K) || (hidden % 256) || (ff % 256)) return -1;
-    if ((tg != 21 && tg != 22) || (tu != 21 && tu != 22) || (td != 21 && td != 22)) return -1;
+    if ((hidden % QK_K) || (K % QK_K)) return -2;
+    if (g_ffn_stage_on < 0) {
+        g_ffn_stage_on = getenv("G4_FFN_STAGE") ? 1 : 0;
+        if (g_ffn_stage_on) for (int i = 0; i < 8; ++i) cudaEventCreate(&g_ffn_ev[i]);
+    }
 
-    const int nbx = hidden / QK_K, nbf = ff / QK_K;
-    float *dx = (float *)pool_get("ffn.x", (size_t)hidden * M * sizeof(float));
+    const int nbx = K / QK_K, nbf = ff / QK_K;
+    float *dx = (float *)pool_get("ffn.x", (size_t)K * M * sizeof(float));
     float *dg = (float *)pool_get("ffn.gate", (size_t)ff * M * sizeof(float));
     float *du = (float *)pool_get("ffn.up", (size_t)ff * M * sizeof(float));
     float *dout = (float *)pool_get("ffn.out", (size_t)hidden * M * sizeof(float));
     c_q8_k *qx = (c_q8_k *)pool_get("ffn.q8x", (size_t)nbx * M * sizeof(c_q8_k));
     c_q8_k *qf = (c_q8_k *)pool_get("ffn.q8f", (size_t)nbf * M * sizeof(c_q8_k));
-    if (!dx || !dg || !du || !dout || !qx || !qf) return -2;
+    if (!dx || !dg || !du || !dout || !qx || !qf) return -3;
 
-    if (cudaMemcpy(dx, h_x, (size_t)hidden * M * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
-        return -3;
-    quantize_q8k_kernel<<<dim3(nbx, M), 32>>>(dx, qx, hidden, hidden, nbx);
-    if (cudaGetLastError() != cudaSuccess) return -4;
-
+    ffn_stage_mark(0);
+    if (cudaMemcpy(dx, h_x, (size_t)K * M * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        return -4;
+    ffn_stage_mark(1);
+    quantize_q8k_kernel<<<dim3(nbx, M), 32>>>(dx, qx, hidden == K ? K : K, K, nbx);
+    ffn_stage_mark(2);
     if (mrow_into_dev(tg, d_wg, qx, dg, sg, nbx, ff, M) != 0) return -5;
     if (mrow_into_dev(tu, d_wu, qx, du, su, nbx, ff, M) != 0) return -6;
-
-    const int elems = M * ff;
-    gelu_mul_kernel<<<(elems + 255) / 256, 256>>>(dg, du, elems);
-    if (cudaGetLastError() != cudaSuccess) return -7;
-
-    /* the down projection reads the GELU'd product, so quantise it in place on the device */
-    quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(du, qf, ff, ff, nbf);
-    if (cudaGetLastError() != cudaSuccess) return -8;
+    ffn_stage_mark(3);
+    const size_t elems = (size_t)ff * (size_t)M;
+    gelu_mul_kernel<<<(elems + 255) / 256, 256>>>(dg, du, (int)elems);
+    ffn_stage_mark(4);
+    quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(dg, qf, ff, ff, nbf);
+    ffn_stage_mark(5);
     if (mrow_into_dev(td, d_wd, qf, dout, sd, nbf, hidden, M) != 0) return -9;
+    ffn_stage_mark(6);
+    if (cudaMemcpy(h_out, dout, (size_t)hidden * M * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+        return -13;
+    ffn_stage_mark(7);
 
-    return cudaMemcpy(h_out, dout, (size_t)hidden * M * sizeof(float),
-                      cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -10;
+    if (g_ffn_stage_on == 1) {
+        cudaEventSynchronize(g_ffn_ev[7]);
+        static const char *nm[8] = {"upload","q8(x)","gate+up","gelu","q8(gu)","down","download","total"};
+        for (int i = 0; i < 7; ++i) {
+            float ms = 0.0f;
+            cudaEventElapsedTime(&ms, g_ffn_ev[i], g_ffn_ev[i + 1]);
+            g_ffn_acc[i] += (double)ms;
+        }
+        if (++g_ffn_calls % 43 == 0) {
+            double tot = 0.0;
+            for (int i = 0; i < 7; ++i) tot += g_ffn_acc[i];
+            fprintf(stderr, "[FFN-STAGE] per layer call, ms:");
+            for (int i = 0; i < 7; ++i)
+                fprintf(stderr, " %s %.2f", nm[i], g_ffn_acc[i] / (43.0 * (double)(g_ffn_calls / 43)));
+            fprintf(stderr, " | total %.2f\n", tot / (43.0 * (double)(g_ffn_calls / 43)));
+            for (int i = 0; i < 7; ++i) g_ffn_acc[i] = 0.0;
+        }
+    }
+    return 0;
+}
+
+WUBU_EXPORT int wubu_cuda_ffn_mrow_dev3(const void *d_wg, int tg, const void *d_wu, int tu,
+                                         const void *d_wd, int td, const float *h_x, int K, int M,
+                                         int hidden, int ff, long long sg, long long su, long long sd,
+                                         float *h_out)
+{
+    return ffn_mrow_impl(d_wg, tg, d_wu, tu, d_wd, td, h_x, K, M, hidden, ff, sg, su, sd, h_out);
 }
 
 WUBU_EXPORT int wubu_cuda_ffn_dev3(const void *d_wg, const void *d_wu, const void *d_wd,

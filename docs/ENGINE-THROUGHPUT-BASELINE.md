@@ -320,6 +320,36 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### CORRECTION: the FFN is not transfer-bound. It is 98% matvec.
+
+Two entries above claim the FFN's ~24 ms per layer was "pageable transfer and two Q8_K passes". Both
+are wrong, and the way they were wrong matters: they were arithmetic on transfer sizes, never measured.
+
+Two independent measurements refute them.
+
+1. Folding the o-projection and the residual add into the attention block - removing 2.6 MB per layer
+   of round trip - changed nothing: 31.4 against 31.5 tok/s, inside noise. There was no transfer to save.
+2. CUDA events inside the fused FFN, per layer:
+
+       upload 0.16   q8(x) 0.04   gate+up 8.07   gelu 0.05   q8(gu) 0.03   down 3.92   download 0.00
+       total 12.27 ms
+
+Transfer is 0.16 ms of 12.27, or 1.3%. The two matvecs are 11.99 ms. The 87-row Q8_K passes cost 0.07 ms
+between them. Every "fusing / pinning / fewer round trips" conclusion drawn from transfer arithmetic was
+chasing something that is not there.
+
+**And the matvec rate is not what the per-shape stats said either.** Each FFN matrix is 15360x3840 at
+2.7 bits, about 19.9 MB, so gate+up at 8.07 ms is ~4.9 GB/s and down at 3.92 ms is ~5.1 GB/s - not the
+11-13 GB/s those stats printed. On a card that delivers 143 GB/s for the identical access pattern, the
+FFN matvecs have 4-5x of headroom, and it is in the kernel, not in the copies.
+
+There is also an ABI bug to go with it: the bridge's function-pointer typedef for the fused FFN omitted
+the `ff` argument, so `M`, `hidden` and `ff` arrived shifted by one slot, every layer failed the
+`K % 256` check, and the fused path had been silently dead - visible only as `fused=0` in the counter
+that was added for exactly this reason. Fixed; the path is now genuinely exercised, and with the
+attention block in place it measures neutral (28.8 against 29.1 tok/s), so the +6% recorded earlier no
+longer reproduces.
+
 ### The attention block moved to the device, and the profile shows what it fixed
 
     before    norm+qkv 1153.3   qk norm+rope 171.2   attention 55.4   ffn 1964.3   total 3513.6
