@@ -320,6 +320,27 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### Fusing the FFN: +6%, and why it is not more
+
+`wubu_cuda_ffn_mrow_dev3` keeps gate, GELU, the product and the down projection on the device, cutting
+the FFN from three round trips to one upload and one download:
+
+    87 tokens   26.4 -> 28.0 tok/s       1717 tokens  72.72 s -> 67.59 s
+    coverage: 43 of 48 layers fused; 5 still fall back because their weights are not device-resident
+
+But the phase moved only 2073 -> 1964 ms, and the profile says why. Of ~41 ms per layer, the kernels
+are ~17 ms; the other ~24 ms is the upload, the download and **two Q8_K passes over 87 rows**, at
+roughly 700 MB/s. Fusing removed round trips but not the copy rate.
+
+**Pinning those buffers was tried and made things worse** (24.3 against 28.0 tok/s): the same buffers
+are read and written by the CPU for the norms and the GELU, and pinned memory is uncached on the host,
+so every CPU pass got slower than the copies got faster. Reverted.
+
+That leaves the real conclusion, now measured three ways: the round trips cannot be fixed by moving
+buffers faster, only by moving fewer of them. The next change is norms, RoPE and the KV cache on the
+device, so that q/k/v and the FFN input never leave the card - after which the only thing crossing PCIe
+per layer is the residual stream.
+
 ### The kernel is now at parity; 71% of prefill is transfer and glue
 
 Fresh `G4_MV_STATS=1` on the tensor-core build, 87 tokens, 3.37 s total:

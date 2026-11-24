@@ -1912,6 +1912,12 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                       layer->ffn_down.ggml_type,
                                       G4_HIDDEN, G4_FFN, sg, su, sd, ffn_down_out) == 0);
     }
+    if (N > 1 && getenv("G4_FFN_COUNT")) {
+        static int fused, back;
+        if (ffn_dev_done) ++fused; else ++back;
+        if ((fused + back) % 48 == 0)
+            fprintf(stderr, "[FFN] layers=%d fused=%d fallback=%d\n", fused + back, fused, back);
+    }
     if (!ffn_dev_done) {
         wubu_gpu_tag = 3;
         g4_batched_qmatmul(normed, &layer->ffn_gate, N, G4_FFN, G4_HIDDEN, ffn_gate);
