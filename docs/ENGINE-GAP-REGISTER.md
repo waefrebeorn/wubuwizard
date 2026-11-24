@@ -1440,7 +1440,8 @@ the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate nam
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=123 FAIL=0`, no failed targets (EG-105..115 included). The
+was rebuilt and executed in one loop: `PASS=125 FAIL=0`, no failed targets (EG-105..117 included). The two
+CUDA gates report SKIP when `wubu_cuda.dll` is absent and hard-fail when it is present but unusable. The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
