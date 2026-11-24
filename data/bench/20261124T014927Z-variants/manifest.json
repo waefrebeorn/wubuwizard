@@ -1,0 +1,11 @@
+{
+  "utc": "20261124T014927Z",
+  "model": "C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf",
+  "bench": "C:/Users/eman5/models/llama/unsloth-b12651-vulkan/llama-bench.exe",
+  "git_rev": "no-git",
+  "repetitions": 3,
+  "device": "Vulkan1",
+  "threads": 4,
+  "profiles": "coding",
+  "variants": "loopopt,loopopt_fa,loopopt_q8kv,loopopt_ub"
+}

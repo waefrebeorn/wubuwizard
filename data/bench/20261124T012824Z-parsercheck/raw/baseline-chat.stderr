@@ -1,0 +1,6 @@
+load_backend: loaded RPC backend from C:\Users\eman5\models\llama\unsloth-b12651-vulkan\ggml-rpc.dll
+ggml_vulkan: Found 2 Vulkan devices:
+ggml_vulkan: 0 = AMD Radeon(TM) Graphics (AMD proprietary driver) | uma: 1 | rebar: 1 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 64 | shared memory: 32768 | int dot: 1 | matrix cores: KHR_coopmat
+ggml_vulkan: 1 = NVIDIA GeForce RTX 4050 Laptop GPU (NVIDIA) | uma: 0 | rebar: 1 | fp16: 1 | bf16: 1 | fp4: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: NV_coopmat2
+load_backend: loaded Vulkan backend from C:\Users\eman5\models\llama\unsloth-b12651-vulkan\ggml-vulkan.dll
+load_backend: loaded CPU backend from C:\Users\eman5\models\llama\unsloth-b12651-vulkan\ggml-cpu-cascadelake.dll

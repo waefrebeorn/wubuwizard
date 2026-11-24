@@ -1,0 +1,9 @@
+variant,profile,prompt,gen,rep_count,avg_ts,stddev_ts,cv,device,threads,git_rev,notes
+loopopt,coding,512,0,3,359.4054,0.5485,0.00153,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt,coding,0,64,3,21.2862,0.6516,0.03061,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt_fa,coding,512,0,3,357.8613,0.5072,0.00142,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt_fa,coding,0,64,3,21.3514,0.5855,0.02742,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt_q8kv,coding,512,0,3,353.0998,0.1219,0.00035,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt_q8kv,coding,0,64,3,21.1831,0.3679,0.01737,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt_ub,coding,512,0,3,353.9917,0.2346,0.00066,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt_ub,coding,0,64,3,21.4974,0.1514,0.00704,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw

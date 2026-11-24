@@ -1,0 +1,5 @@
+variant,profile,prompt,gen,rep_count,avg_ts,stddev_ts,cv,device,threads,git_rev,notes
+baseline,chat,128,0,1,126.1479,0.0000,0.00000,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+baseline,chat,0,32,1,16.1663,0.0000,0.00000,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt,chat,128,0,1,194.9201,0.0000,0.00000,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw
+loopopt,chat,0,32,1,21.6092,0.0000,0.00000,"AMD Radeon(TM) Graphics, NVIDIA GeForce RTX 4050 Laptop GPU",4,no-git,inkling2_loop ?B IQ2_XXS - 2.0625 bpw

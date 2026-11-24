@@ -1,0 +1,2 @@
++ C:/Users/eman5/models/llama/unsloth-b12651-vulkan/llama-bench.exe -m C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf -o json -r 1 -dev Vulkan1 -t 4 -ngl 99 -ncmoe 12 -p 128 -n 32
++ C:/Users/eman5/models/llama/unsloth-b12651-vulkan/llama-bench.exe -m C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf -o json -r 1 -dev Vulkan1 -t 4 -ngl 99 -ncmoe 0 -ot blk\.(0|1|2|3|4|5|18|19|20|21|22|23)\.ffn_.*_exps=CPU -p 128 -n 32
