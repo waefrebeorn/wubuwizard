@@ -31,6 +31,7 @@ typedef int (*fn_free)(void *);
 typedef int (*fn_download)(void *, const void *, unsigned long long);
 typedef int (*fn_q8k)(const float *, void *, int);
 typedef int (*fn_mv_dev)(const void *, int, const void *, float *, int, int, long long);
+typedef int (*fn_mv2)(const void *, const void *, float *, int, int, long long);
 
 static struct {
     int ready;
@@ -46,6 +47,7 @@ static struct {
     fn_download download;
     fn_q8k q8k;
     fn_mv_dev mv;
+    fn_mv2 mv2;   /* lane-per-grid-entry IQ2_S kernel */
 } G;
 
 int wubu_gpu_init(void)
@@ -68,6 +70,7 @@ int wubu_gpu_init(void)
     G.download = (fn_download)(void *)GetProcAddress(G.h, "wubu_cuda_download");
     G.q8k = (fn_q8k)(void *)GetProcAddress(G.h, "wubu_cuda_quantize_q8k_dev");
     G.mv = (fn_mv_dev)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_dev");
+    G.mv2 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_v2");
     if (!avail || !G.alloc || !G.upload || !G.free_dev || !G.download || !G.q8k || !G.mv) return 0;
     if (!avail()) return 0;
     if (tables) {
@@ -149,7 +152,13 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
 
     if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
     if (G.q8k(d_x, d_q8, K) != 0) return -5;
-    if (G.mv(d_w, ggml_type, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
+    /* IQ2_S has the dp4a lane-per-grid-entry kernel: 0.35 ms for a 15360x3840
+     * matvec device-resident, vs 0.9 ms for the generic warp-per-column one. */
+    if (ggml_type == 22 && G.mv2) {
+        if (G.mv2(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
+    } else if (G.mv(d_w, ggml_type, d_q8, d_y, K, n_cols, col_stride) != 0) {
+        return -6;
+    }
     if (G.download(y, d_y, (unsigned long long)((size_t)n_cols * sizeof(float))) != 0) return -7;
     return 0;
 }

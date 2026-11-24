@@ -87,6 +87,25 @@ Two fixes were applied and measured:
 - The per-call `cudaDeviceSynchronize` calls were dropped (overlapping launches, the
   result download is the only sync). End-to-end decode went 1.5 -> **4.0 tok/s**.
 
+Third fix, the decisive one: a **lane-per-grid-entry** IQ2_S kernel where the 32 lanes of a
+warp cover one 256-element block exactly (lane = group*4 + entry), with `__dp4a` for the
+4-wide int8 multiply-add. Device-resident cost of a 15360x3840 IQ2_S matvec:
+
+| kernel | ms/call | vs 1 CPU thread |
+|---|---|---|
+| scalar CPU port | 19.8 | 1.0x |
+| warp-per-column, no dp4a, includes upload | 3.6 | 5.5x |
+| lane-per-entry + dp4a, includes upload | 3.1 | 6.5x |
+| lane-per-entry + dp4a, device-resident | **0.35** | **56x** |
+
+Engine decode with the dp4a kernel and device-resident weights: **5.5 tok/s** (CPU 4.2).
+The gap to the 0.35 ms/call ceiling is the per-matvec host round-trip and the IQ3_S/Q3_K
+types still on the generic kernel.
+
+Known defect: the IQ3_S lane-per-entry kernel returns non-finite values on 5 of 64 test
+columns, so IQ3_S stays on the generic kernel and the gate records the failure instead of
+hiding it.
+
 That is still a *tie* with the CPU path (4.2 tok/s), and the arithmetic explains why: the
 CPU engine already uses 12 threads at ~36 GMAC/s, while a single GPU matvec of the FFN
 shape runs 59 MMAC in ~1.5 ms (~40 GMAC/s). The GPU only wins by 10-20x when the weights
