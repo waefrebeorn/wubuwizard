@@ -1649,18 +1649,34 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     /* Prefill: one staged activation, one Q8_K pass, three kernels. Without this the same rows are
      * uploaded and quantised three times per layer, which is why the qkv projection measured
      * 6.8 GB/s against the FFN's 20. */
-    if (!qkv_done && N > 1 && qkv_all_dev) {
+    /* kv_eq layers have no V projection - v is a copy of k - so hand k's weights in as the V
+     * projection and the fused path covers them too instead of falling back to three separate
+     * upload-quantise-projection cycles. There are 8 such layers in this model. */
+    const int qkv_mrow_ok = (N > 1) && layer->attn_q.dev && layer->attn_k.dev && !layer->share_kv &&
+                            (layer->kv_eq || layer->attn_v.dev);
+    if (!qkv_done && qkv_mrow_ok) {
         extern int wubu_gpu_qkv_mrow(const void *, int, const void *, int, const void *, int,
                                      const float *, int, int, int, int, int,
                                      long long, long long, long long, float *, float *, float *);
         const long long sq = (long long)(layer->attn_q.raw_bytes / qd);
         const long long sk = (long long)(layer->attn_k.raw_bytes / kvd);
         const long long sv = (long long)(layer->attn_v.raw_bytes / kvd);
+        const void *dv_w = layer->kv_eq ? layer->attn_k.dev : layer->attn_v.dev;
+        const int    tv_w = layer->kv_eq ? layer->attn_k.ggml_type : layer->attn_v.ggml_type;
+        const long long sv_w = layer->kv_eq ? sk : sv;
         if (wubu_gpu_qkv_mrow(layer->attn_q.dev, layer->attn_q.ggml_type,
                               layer->attn_k.dev, layer->attn_k.ggml_type,
-                              layer->attn_v.dev, layer->attn_v.ggml_type,
-                              normed, G4_HIDDEN, N, qd, kvd, kvd, sq, sk, sv, q, k, v) == 0)
+                              dv_w, tv_w,
+                              normed, G4_HIDDEN, N, qd, kvd, kvd, sq, sk, sv_w, q, k, v) == 0)
             qkv_done = 1;
+    }
+    if (N > 1 && getenv("G4_QKV_COUNT")) {
+        static int fused, fell_back, kv_eqd, shared;
+        if (qkv_done) ++fused;
+        else { ++fell_back; if (layer->kv_eq) ++kv_eqd; if (layer->share_kv) ++shared; }
+        if ((fused + fell_back) % 48 == 0)
+            fprintf(stderr, "[QKV] layers=%d device=%d fallback=%d (kv_eq=%d share_kv=%d)\n",
+                    fused + fell_back, fused, fell_back, kv_eqd, shared);
     }
     if (!qkv_done) {
         wubu_gpu_tag = 1;
