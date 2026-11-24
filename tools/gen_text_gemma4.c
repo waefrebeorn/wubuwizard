@@ -341,7 +341,10 @@ int main(int argc, char **argv) {
         /* One forward over all M prompt rows. The comment above records this losing to the
          * per-token loop at 21/54/321 tokens (6.5-6.8 vs 12.0-13.6 tok/s) - measured before the
          * fused kernels landed, so it is re-measured here rather than assumed. */
-        g4_model_forward_from_tokens(&model, prompt_tokens, (int)n_prompt, (int)n_prompt, logits);
+        /* B=1, T=n_prompt: N = B*T rows. Passing n_prompt for both makes N = n_prompt^2,
+         * which is what the first attempt at this toggle did - 87 tokens became 7569 rows
+         * and died, which looked like the engine's batched path segfaulting. It was the call. */
+        g4_model_forward_from_tokens(&model, prompt_tokens, 1, (int)n_prompt, logits);
     } else {
         for (int i = 0; i < n_prompt; i++)
             g4_model_forward_from_tokens(&model, prompt_tokens + i, 1, 1,

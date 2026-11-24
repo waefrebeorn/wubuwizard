@@ -270,11 +270,17 @@ Measured on this machine with a 1717-token prompt: prefill **7.3 tok/s**, i.e. *
 the first output token**. On a 21-token prompt it is 14.6 tok/s, so the cost grows with prompt
 length exactly as an unbatched attention pass does.
 
-The batched forward that should fix this is present and wired, and it **segfaults** (exit 139) at 37
-and 87 prompt tokens; its own comment records it as slower than the per-token loop as well
-(6.5-6.8 vs 12.0-13.6 tok/s) from a measurement taken before the fused kernels landed. So there is
-currently no working batched prefill path at all, and that - not another percent of decode - is
-the top of the queue.
+The batched forward is present and wired, and it **works** - 6.8 tok/s at 87 tokens, so the old note
+in the source (6.5-6.8 vs 12.0-13.6) was right. The segfault I first reported was my own bug in the
+toggle that enables it: `g4_model_forward_from_tokens(model, tok, B, T, ...)` takes N = B*T rows, and
+passing `n_prompt` for both made 87 tokens into 7569 rows. The engine's batched path was never
+broken; the call was.
+
+That measurement is the interesting one. The per-token loop wins (14 vs 6.8) *because* a single token
+runs the FFN and attention on the GPU, while the batched path drops to pure CPU - and a Ryzen 5
+feeding 4 GB of weights loses to a 4050 that already has them in VRAM. So batching on the CPU cannot
+win here by construction, no matter how good the matmul is: the win has to be a **device** GEMM,
+where M activation rows consume a weight block that is read once.
 
 First attempt was the cheapest structure: reuse the gated decode kernel, M times, with the weights
 already resident. Measured: **3.4 tok/s** - four times *slower* than the CPU path, and the reason is
