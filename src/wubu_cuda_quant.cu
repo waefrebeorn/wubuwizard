@@ -12,6 +12,7 @@
  *   src/wubu_vecdot_q4_0.c    (Q4_0)
  */
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -54,6 +55,18 @@ typedef struct { uint16_t d; uint8_t qs[64]; uint8_t qh[8]; uint8_t signs[32]; u
 typedef struct { uint8_t hmask[32]; uint8_t qs[64]; uint8_t scales[12]; uint16_t d; } c_q3_k;
 typedef struct { uint16_t d; uint8_t qs[16]; } c_q4_0;
 typedef struct { float d; int8_t qs[256]; int16_t bsums[16]; } c_q8_k;
+
+/* Hardware fp16 -> fp32 when the toolkit exposes it: the hand-written version below
+ * has a normalise loop for subnormals, and at one conversion per lane per block it is
+ * a measurable share of the kernel's instructions. */
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+__device__ __forceinline__ float f16_fast(uint16_t h)
+{
+    return __half2float(__ushort_as_half(h));
+}
+#else
+__device__ __forceinline__ float f16_fast(uint16_t h);
+#endif
 
 __device__ __forceinline__ float f16_to_f32_dev(uint16_t h)
 {
@@ -289,7 +302,7 @@ __global__ void iq2s_matvec_v2_kernel(const uint8_t * __restrict__ w, int type,
         contrib += __shfl_down_sync(0xffffffffu, contrib, off);
 
     if (lane == 0)
-        atomicAdd(&y[col], 0.125f * f16_to_f32_dev(d_bits) * q8b->d * (float)contrib);
+        atomicAdd(&y[col], 0.125f * f16_fast(d_bits) * q8b->d * (float)contrib);
 }
 
 /* Same for one whole column at once: y must be zeroed by the caller. */
@@ -353,7 +366,7 @@ __global__ void iq2s_matvec_v3_kernel(const uint8_t * __restrict__ w,
         const int sumi = __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
         const int ls = (entry < 2) ? (1 + 2 * (scales[group] & 0x0f))
                                    : (1 + 2 * (scales[group] >> 4));
-        sum += 0.125f * f16_to_f32_dev(d_bits) * q8b->d * (float)(sumi * ls);
+        sum += 0.125f * f16_fast(d_bits) * q8b->d * (float)(sumi * ls);
     }
 
     for (int off = 16; off > 0; off >>= 1)
@@ -461,7 +474,7 @@ __global__ void iq3xxs_matvec_kernel(const uint8_t * __restrict__ w,
         memcpy(&b0, q8 + 0, 4);
         memcpy(&b1, q8 + 4, 4);
         const int sumi = __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
-        sum += 0.25f * f16_to_f32_dev(d_bits) * q8b->d * (float)(sumi * (int)ls);
+        sum += 0.25f * f16_fast(d_bits) * q8b->d * (float)(sumi * (int)ls);
     }
 
     for (int off = 16; off > 0; off >>= 1)
@@ -523,7 +536,7 @@ __global__ void iq4xs_matvec_kernel(const uint8_t * __restrict__ w,
 
         const int sl = __dp4a(al, ql, 0);
         const int sh = __dp4a(ah, qh, 0);
-        const float d4d8 = f16_to_f32_dev(d_bits) * q8b->d;
+        const float d4d8 = f16_fast(d_bits) * q8b->d;
         sum += d4d8 * (float)(ls - 32) * (float)(sl + sh);
     }
 
@@ -679,10 +692,66 @@ done:
     return rc;
 }
 
-/* Host wrapper for gates: takes F32 activations, quantizes on the host, uploads. */
-/* Per-stage timing for the decode matvec shape, so optimisation targets the real
- * cost instead of assumptions. Prints ms for upload / q8k / kernel / download over
- * `iters` calls of a 15360 x 3840 IQ2_S matvec. */
+/* Launch-shape sweep for the IQ2_S warp-per-column kernel: the same matvec at
+ * different warps-per-block, to see whether the 76 GB/s streaming rate is a
+ * concurrency limit (fixable by launch shape) or a per-warp read pattern limit
+ * (needs a different kernel). */
+WUBU_EXPORT int wubu_cuda_bench_wpb(void)
+{
+    const int K = 3840, N = 15360;
+    const int cbytes = 82 * (K / QK_K);
+    const size_t wb = (size_t)N * cbytes;
+    uint8_t *h_w = (uint8_t *)malloc(wb);
+    float *h_x = (float *)malloc(sizeof(float) * K);
+    float *h_y = (float *)malloc(sizeof(float) * N);
+    if (!h_w || !h_x || !h_y) return -1;
+    memset(h_w, 0x33, wb);
+    for (int i = 0; i < K; ++i) h_x[i] = (float)(i % 11) * 0.02f;
+
+    void *d_w[3] = { NULL, NULL, NULL };
+    void *d_x = NULL, *d_q8 = NULL;
+    float *d_y = NULL;
+    for (int b = 0; b < 3; ++b) {
+        if (cudaMalloc(&d_w[b], wb) != cudaSuccess) return -2;
+        cudaMemcpy(d_w[b], h_w, wb, cudaMemcpyHostToDevice);
+    }
+    if (cudaMalloc((void **)&d_x, sizeof(float) * K) != cudaSuccess) return -2;
+    if (cudaMalloc(&d_q8, (size_t)(K / QK_K + 1) * 292) != cudaSuccess) return -2;
+    if (cudaMalloc((void **)&d_y, sizeof(float) * N) != cudaSuccess) return -2;
+    cudaMemcpy(d_x, (const void *)h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
+    quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+
+
+    const int wpbs[4] = { 2, 4, 8, 16 };
+    for (int c = 0; c < 4; ++c) {
+        const int wpb = wpbs[c];
+        const int blocks = (N + wpb - 1) / wpb;
+        iq2s_matvec_v3_kernel<<<blocks, wpb * 32>>>((const uint8_t *)d_w[0], (const c_q8_k *)d_q8,
+                                                    d_y, cbytes, K / QK_K, N);
+        cudaDeviceSynchronize();
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0); cudaEventCreate(&e1);
+        const int iters = 30;
+        cudaEventRecord(e0);
+        for (int it = 0; it < iters; ++it)
+            iq2s_matvec_v3_kernel<<<blocks, wpb * 32>>>((const uint8_t *)d_w[it % 3], (const c_q8_k *)d_q8,
+                                                        d_y, cbytes, K / QK_K, N);
+        cudaEventRecord(e1);
+        cudaEventSynchronize(e1);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, e0, e1);
+        const double per = ms / iters;
+        printf("[WPB] warps/block=%2d blocks=%5d  %.3f ms/call  %.1f GB/s\n",
+               wpb, blocks, per, (double)wb / per / 1e6);
+        cudaEventDestroy(e0); cudaEventDestroy(e1);
+    }
+
+    for (int b = 0; b < 3; ++b) cudaFree(d_w[b]);
+    cudaFree(d_x); cudaFree(d_q8); cudaFree(d_y);
+    free(h_w); free(h_x); free(h_y);
+    return 0;
+}
+
 WUBU_EXPORT int wubu_cuda_bench_stages(int iters)
 {
     const int K = 3840, N = 15360;
@@ -723,7 +792,9 @@ WUBU_EXPORT int wubu_cuda_bench_stages(int iters)
         float ms = 0; cudaEventElapsedTime(&ms, e0, e1); t_up += ms;
 
         cudaEventRecord(e0);
-        quantize_q8k_kernel<<<(K / QK_K + 1 + 255) / 256, 256>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+        /* Same shape the engine uses (one warp per K-block); the earlier 1-block
+         * launch made q8k look 10x more expensive than it is. */
+        quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K);
         cudaEventRecord(e1); cudaEventSynchronize(e1);
         cudaEventElapsedTime(&ms, e0, e1); t_q8 += ms;
 

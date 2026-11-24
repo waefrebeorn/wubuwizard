@@ -204,6 +204,8 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
 
     if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
     if (G.q8k(d_x, d_q8, K) != 0) return -5;
+    /* Quantising on the CPU and uploading the 292-byte blocks instead measures neutral
+     * (10.7 tok/s either way, 93.5 vs 93.7 ms/token), so the device quantiser stays. */
     /* IQ2_S has the dp4a lane-per-grid-entry kernel: 0.35 ms for a 15360x3840
      * matvec device-resident, vs 0.9 ms for the generic warp-per-column one. */
     if (ggml_type == 22 && G.mv2) {

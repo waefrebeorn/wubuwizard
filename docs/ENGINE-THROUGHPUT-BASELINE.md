@@ -65,7 +65,8 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | + v3 warp-per-column IQ2_S kernel (no atomics) | - | 8.3 tok/s |
 | clean rebuild, `G4_GPU=1` (all kernels, no stale objects) | 6.8 tok/s | 8.8 tok/s |
 | + device IQ3_XXS kernel (EG-120/122) | 6.8 tok/s | 9.8 tok/s |
-| + device IQ4_XS kernel (EG-121/122) | 6.8 tok/s | **10.3 tok/s** |
+| + device IQ4_XS kernel (EG-121/122) | 6.8 tok/s | 10.3 tok/s |
+| + hardware fp16 decode in the device kernels | 6.7 tok/s | **10.7 tok/s** |
 | clean rebuild, CPU only | 6.6 tok/s | 5.7 tok/s |
 
 Note on rebuilding: the Makefile does not track header dependencies, so editing a
@@ -113,7 +114,24 @@ the real tensor sizes at load: one plan entry per layer for the attention group 
 and one for the FFN group (streamed), with the remaining budget handed to the streamed
 weight cache as its cap. Measured, 8-token decode, same prompt:
 
-|Where the decode time goes now (`G4_PROF=1`, per decode token, 12B IQ2 model):
+|## What actually limited the device matvec (measured, three hypotheses falsified)
+
+The warp-per-column IQ2_S kernel streams 18.9 MB per FFN matvec at 78 GB/s - 38% of the
+card's 204 GB/s. Three candidate causes were tested on isolated buffers with no L2 reuse:
+
+| hypothesis | test | result |
+|---|---|---|
+| launch shape / occupancy | 2, 4, 8, 16 warps per block | 76.7-78.8 GB/s, flat -> **rejected** |
+| per-lane work per byte | two columns per warp (v4) | 83 GB/s, +6%, then slower than v3 after the f16 fix -> **rejected** |
+| fetch amplification (5 sectors per 82-byte block) | coalesced 3x32B read + shuffles (v5) | 77.5 GB/s, **worse** -> **rejected** |
+
+The real limit was ALU: the hand-written `f16_to_f32_dev` (branch plus a normalise loop
+for subnormals) runs once per lane per block. Replacing it with `__half2float` took the
+kernel from **78 to 100 GB/s** (+28%) with no other change. v4 and v5 were removed rather
+than left in the tree, and the CPU-side q8_K quantiser swap measured neutral (93.5 vs
+93.7 ms/token) so it was reverted too.
+
+Where the decode time goes now (`G4_PROF=1`, per decode token, 12B IQ2 model):
 
 ```
 [PROF] layer total       99.5 ms      (48 layers)
