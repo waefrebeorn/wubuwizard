@@ -320,6 +320,25 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### Where the divergence actually is: the FFN output, not the matvec
+
+`G4_DUMP_FFN=<layer>` writes that layer's FFN output, so the two paths can be compared as numbers
+instead of as text. For layer 1 - one of the five - fused against host:
+
+    n = 3840   max abs diff 125.5 on a scale of 85.6   elements differing: 3837 of 3840
+    idx 2071  fused -49.84   host 75.70
+    idx  267  fused -83.63   host 24.69
+    idx 1371  fused -35.16   host 67.64
+
+So the FFN genuinely diverges, while the gate matvec agrees with the per-row GPU kernel. Both of those
+are true, which means **the per-row GPU kernel is not the reference** - the host path is, and it is the
+one the model ran for these layers before fusion. My kernel was A/B'd against the wrong baseline; that
+is the mistake to correct next, and it explains why a kernel that matches its "reference" can still
+produce wrong text.
+
+Next step is now precise: A/B the new kernel against the **host** gate/up/down for these layers (dump
+`ffn_gate`, `ffn_up` and `ffn_down_out` from the host path), not against the per-row GPU kernel.
+
 ### The M-row kernels are numerically sound; the divergence is somewhere else
 
 Two independent implementations of the M-row path for IQ3_XXS and IQ4_XS (an mma version and a simpler

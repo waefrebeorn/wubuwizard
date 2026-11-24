@@ -1987,6 +1987,13 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             x[(size_t)t * G4_HIDDEN + d] += ffn_down_out[(size_t)t * G4_HIDDEN + d];
     }
 
+    { const char *dn = getenv("G4_DUMP_FFN");
+      if (dn && atoi(dn) == il) {
+          char path[128];
+          snprintf(path, sizeof path, "ffn_l%d_%s.bin", il, getenv("G4_FFN_NO_FUSE") ? "host" : "fused");
+          FILE *df = fopen(path, "wb");
+          if (df) { fwrite(ffn_down_out, sizeof(float), (size_t)N * G4_HIDDEN, df); fclose(df); }
+      } }
     { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_NORM, N, _t - _pk); g4p_acc(G4P_FFN, N, _t - _pf0); _pk = _t;
       if (getenv("G4_FFN_PERLAYER")) fprintf(stderr, "[FFNL] %d %.2f fused=%d\n", il, _t - _pf0, ffn_dev_done); }
     g4p_acc(G4P_LAYER, N, g4_now_ms() - _pt0);
