@@ -320,6 +320,32 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The 5 fallback layers are 43% of prefill, and now we know why
+
+The FFN phase measured 1693 ms while the fused block accounted for 43 x 12.27 = 528 ms. Per-layer wall
+times explain the rest immediately:
+
+    layer  0  15.4    1 205.1    2  14.6    3  14.6    4  14.6    5 233.8    6  14.6
+    layer  7  14.5    8 230.5    9  13.2   10  13.2   11 230.6   12  13.3  ...  47 252.6
+
+Five layers - 1, 5, 8, 11 and 47 - take 205 to 253 ms each instead of 11 to 15. **They are 1170 ms of a
+2720 ms prefill.** This is the "5 of 48 layers fall back" that has been listed as unverified since the
+fusion work; it is now measured, and it is the single largest item left.
+
+The types say why. Dumping `ggml_type` per layer:
+
+    gate/up = 18 (IQ3_XXS)   down = 21 (IQ3_S) or 23 (IQ4_XS)
+    every other layer: gate/up = 22 (IQ2_S), down = 22 or 21
+
+The GPU matvec dispatch implements IQ2_S (22) and IQ3_S (21) only. IQ3_XXS and IQ4_XS fall through to a
+scalar path at roughly 0.8 GMAC/s, which is what 230 ms per layer is. The fix is the dispatch, not the
+tiling: an IQ3_XXS kernel (grid codebook, 3.06 bpw, 98-byte blocks) plus IQ4_XS (4.6 bpw, plain 4-bit
+with packed 6-bit scales) covers all five, and at the rate the existing kernels run it should return
+about 40% of prefill.
+
+Diagnostics added for this: `G4_FFN_PERLAYER` prints the per-layer FFN wall time, `G4_FFNT` prints the
+three FFN quant types per layer.
+
 ### The row-group count was splitting the weight matrix
 
 The stage accounting pointed at the matvec, and the matvec stats showed ~3.3 GB/s of packed weight

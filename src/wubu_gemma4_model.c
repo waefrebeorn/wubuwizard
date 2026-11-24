@@ -1918,6 +1918,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     /* Prefill: the same fusion for M rows. Without it gate and up come back to the host to be
      * GELU'd and multiplied and go back up for the down projection - 16 MB per layer across PCIe
      * for 5.3 MB of arithmetic, and 2.4 s of a 3.37 s prefill lives in that traffic. */
+    if (getenv("G4_FFN_PERLAYER")) { static double acc[64]; static int n; acc[il % 64] += 0.0; ++n; }
+    if (getenv("G4_FFNT")) fprintf(stderr, "[FFNT] %d g=%d u=%d d=%d dev=%d%d%d\n", il,
+        layer->ffn_gate.ggml_type, layer->ffn_up.ggml_type, layer->ffn_down.ggml_type,
+        layer->ffn_gate.dev != NULL, layer->ffn_up.dev != NULL, layer->ffn_down.dev != NULL);
     if (N > 1 && !getenv("G4_FFN_NO_FUSE") &&
         layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
         (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
@@ -1983,7 +1987,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             x[(size_t)t * G4_HIDDEN + d] += ffn_down_out[(size_t)t * G4_HIDDEN + d];
     }
 
-    { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_NORM, N, _t - _pk); g4p_acc(G4P_FFN, N, _t - _pf0); _pk = _t; }
+    { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_NORM, N, _t - _pk); g4p_acc(G4P_FFN, N, _t - _pf0); _pk = _t;
+      if (getenv("G4_FFN_PERLAYER")) fprintf(stderr, "[FFNL] %d %.2f fused=%d\n", il, _t - _pf0, ffn_dev_done); }
     g4p_acc(G4P_LAYER, N, g4_now_ms() - _pt0);
     #undef G4P_ADD
 
