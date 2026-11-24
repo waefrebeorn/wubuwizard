@@ -320,6 +320,24 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### Where the remaining prefill time is, after the tensor-core work
+
+    layer total   3425.9 ms
+    ffn all       2072.9   61%     ffn gate/up/down
+    norm+qkv       973.3   28%     fused q/k/v
+    qk norm+rope   162.4    4.7%
+    attention       54.7    1.6%
+    head            10.1    0.3%
+
+89% is the projections, and they move the 4 GB of weights at **1.3 GB/s** against llama.cpp's 21.7 on
+the same card. Everything that is not a matvec is now four percent of prefill, which closes the
+question this document opened with: there is nothing left to win outside the kernel.
+
+The kernel itself is a hybrid - mma on a tile decoded per column - where upstream is a different
+shape entirely: one thread per (output column, batch row) walking padded shared tiles with dp4a and
+int32 accumulation, applying one scale multiply per 32 values. That is the structure to port, and it is
+the last structural difference between 25 tok/s and 477.
+
 ### The tensor-core prefill ladder, and the 8-warp lesson
 
     dp4a, MT=16 (baseline)        87 tok 18.4    1717 tok 16.3  (105.2 s)
