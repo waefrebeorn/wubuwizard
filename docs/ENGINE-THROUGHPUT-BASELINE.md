@@ -320,6 +320,29 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The kernel is now at parity; 71% of prefill is transfer and glue
+
+Fresh `G4_MV_STATS=1` on the tensor-core build, 87 tokens, 3.37 s total:
+
+    shape             calls   ms total   ms/call    rate
+    21 3840x4096        40      112.0     2.800    49.4 GB/s    o-projection
+    22 15360x3840       86      496.0     5.767    19.2 GB/s    ffn gate/up
+    21 3840x15360        7       50.0     7.143    72.7 GB/s    ffn down
+    21 2048x3840         7       15.0     2.143    32.3 GB/s    attn k/v
+    21 3840x8192         8       43.0     5.375    51.5 GB/s    attn q
+    22 3840x15360       37      205.0     5.541    20.0 GB/s    o/ffn mix
+    22 4096x3840         5       12.0     2.400    12.3 GB/s
+
+**933 ms of the 3370 ms is kernel time.** The large tensors run at 19-20 GB/s, which is llama.cpp's
+21.7 on the same card - the kernel has reached parity. The other **2.4 s is what happens around the 190
+matvec calls**: each uploads its input, runs the Q8_K quantiser, launches the kernel and blocks on a
+download of its output, and that costs about 12.6 ms per call.
+
+This is the arithmetic the staging model in this document predicted from the beginning and it is now
+measured rather than asserted: 71% of prefill is moving activations on and off the card. The fix is not
+another kernel change - it is keeping the activation chain resident, which removes the FFN's 16 MB per
+layer of gate/up-out and down-in entirely.
+
 ### Where the remaining prefill time is, after the tensor-core work
 
     layer total   3425.9 ms
