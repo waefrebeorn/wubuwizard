@@ -110,6 +110,25 @@ and every submission after that gap pays to resume. `nvidia-smi -pm 1` reports `
 this GeForce part, so there is no driver-side persistence mode to hold it up - the fix is
 to stop going idle, which is precisely what the fused half-layer does.
 
+## Open: prefill costs exactly twice decode per token
+
+Prefill is one `N = n_prompt` forward that quantises activations for M rows and runs the
+CPU matvecs, so it was worth testing whether feeding the prompt one token at a time through
+the fast single-row device path is cheaper. It is not:
+
+| prompt | batch prefill | one-token-at-a-time |
+|---|---|---|
+| 21 tokens | 3.09 s (6.8 tok/s) | 3.12 s (6.7 tok/s) |
+| 54 tokens | 7.90 s (6.8 tok/s) | 7.94 s (6.8 tok/s) |
+
+Both give identical greedy tokens. Fitting the two prompt lengths gives a slope of
+0.146 s/token and essentially **zero fixed cost**, so prefill is not paying a one-off
+upload - every prompt token genuinely costs 146 ms while a decode token costs 78 ms. The
+same single-row code path therefore runs twice as slow during prefill as it does during
+generation, which points at model state that differs between the two (KV span, buffer
+shapes, or the harness's batch sync-up) rather than at the matvec itself. That is the next
+thing to bisect; the incremental variant was removed because it measured neutral.
+
 ## Tried and removed: IQ3_S kernel micro-optimisation
 
 After the fusions, decode issues only **49 matvec calls per token** (48 x IQ3_S, 1 x Q3_K),
