@@ -268,8 +268,18 @@ per tile of four rows, so:
 
 Two conclusions follow, and both cut against the obvious next move. First, prefill is not
 bandwidth-bound: raising the tile from four rows to eight rows should halve the traffic, and it
-measured *slower* (16.1 against 17.2 tok/s) because the accumulators push the kernel over its
-register budget. Second, the cost per weight block is dominated by the decode itself - grid index,
+measured *slower* (16.1 against 17.2 tok/s).
+
+**Correction, from `ptxas -v` rather than from reasoning:** I wrote that MT=8 lost because the
+accumulators blew the register budget. That is wrong. `iq2s_matvec_mrow_kernel` uses 38 registers at
+MT=4 and reports **zero spill stores and zero spill loads at MT=8**, and `iq3s_matvec_mrow_kernel`
+uses 56 - both far under the cap. The MT=8 regression has some other cause (eight concurrent q8 row
+streams per warp is the standing candidate) and is currently unexplained. It is recorded that way.
+
+The one genuinely register-starved kernel in the file is the generic `matvec_kernel` at **127
+registers**, which is what every type without a specialised kernel falls through to - including the
+Q3_K LM head, the single largest matvec in the model at 262144 columns. That is a separate,
+unexplored lead. Second, the cost per weight block is dominated by the decode itself - grid index,
 eight sign tests, byte extraction, the scale nibble - roughly fifty instructions to feed two `dp4a`
 per lane. Decoding a block for four rows barely amortises fifty instructions of setup.
 
