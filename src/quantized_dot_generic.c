@@ -8,7 +8,6 @@
 #include <assert.h>
 #ifdef __AVX2__
 #include <immintrin.h>
-#include "wubu_vecdot_iq4xs.h"
 #endif
 
 #include "gguf_reader.h"
@@ -1173,14 +1172,7 @@ void iq4_xs_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx, const
      * per-element F32 materialization. With the Theory/08 aligned geometry
      * (input dim always div-256), the generic path is still correct and
      * branch-free; a dedicated IQ4_XS AVX2 kernel is future work. */
-    /* EG-116: fused AVX2 IQ4_XS x Q8_K (gate test_eg116_iq4xs, 3.9e-06 vs the
-     * gguf_dequantize reference). The generic path stays as the fallback. */
-#if defined(__AVX2__)
-    wubu_vec_dot_iq4_xs_q8_k_avx2((int)n, s, vx, vy);
-    (void)bs; (void)bx; (void)by; (void)nrc;
-#else
     ggml_vec_dot_iq4_xs_q8_K_generic(n, s, bs, vx, bx, vy, by, nrc);
-#endif
 }
 
 // ========================================================================

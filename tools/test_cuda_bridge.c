@@ -27,6 +27,10 @@ int main(int argc, char **argv)
     const char *dll = argc > 1 ? argv[1] : "wubu_cuda.dll";
     HMODULE h = LoadLibraryA(dll);
     if (!h) {
+        if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES) {
+            printf("test_cuda_bridge: SKIP (no %s)\n", dll);
+            return 0;
+        }
         fprintf(stderr, "test_cuda_bridge: could not load %s (err %lu)\n", dll, GetLastError());
         return 2;
     }

@@ -1418,6 +1418,18 @@ layout is uncoalesced; numbers and the tile-repack plan are in `docs/GPU-LANE-PL
 
 | EG-115 | Device (CUDA) quantized matvec for IQ2_S/IQ3_S/Q3_K/Q4_0 | no GPU path existed at all (MSVC-ABI link wall) | ggml CUDA `dequantize_mul_mat_vec` structure | `test_eg115_cuda_matvec` | L | **DONE, opt-in (`G4_GPU=1`)** — correct against the CPU kernels; not yet faster end-to-end. |
 
+**EG-116/EG-117 evidence (2026-11-23):** per-type timing (`WUBU_GPU_STATS=1`) showed the
+worst remaining call sites were the types with no vec_dot at all: IQ2_XS at 7.2 ms per
+3840x3840 matvec (whole tensor dequantised per call) and IQ4_XS at 4.8 ms.
+`test_eg116_iq4xs` gates the AVX2 IQ4_XS x Q8_K dot (3.9e-06 vs the reference) and
+`test_eg117_iq2xs` gates the IQ2_XS one (1.2e-07); both are wired. Porting traps
+recorded: four grid entries per 32-element group, and the IQ2 family's
+`0.125 * (1 + 2*scale)` dequant factor. Decode 4.2 -> 5.2 tok/s CPU, 5.4 -> 7.6 tok/s with
+`G4_GPU=1`; greedy tokens unchanged.
+
+| EG-116 | Fused IQ4_XS x Q8_K dot (AVX2 + scalar) | type had no vec_dot; 4.8 ms per matvec | ggml `ggml_vec_dot_iq4_xs_q8_K` | `test_eg116_iq4xs` | S | **DONE and wired**. |
+| EG-117 | Fused IQ2_XS x Q8_K dot | type had no vec_dot; 7.2 ms per matvec | ggml `block_iq2_xs` + `iq2xs_grid`/`ksigns_iq2xs` | `test_eg117_iq2xs` | S | **DONE and wired**. |
+
 Wiring status: every row above is a *contract* gate. `docs/ENGINE-WIRING-AUDIT.md`
 (2026-11-23) measures that 117 of 123 gate modules have zero engine call sites and only
 6 are called from non-test source, so the next work item is wiring, not another gate.

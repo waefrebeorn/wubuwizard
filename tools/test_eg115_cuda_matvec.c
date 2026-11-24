@@ -101,7 +101,17 @@ int main(int argc, char **argv)
 {
     const char *dll = argc > 1 ? argv[1] : "wubu_cuda.dll";
     HMODULE h = LoadLibraryA(dll);
-    if (!h) { fprintf(stderr, "test_eg115: cannot load %s (%lu)\n", dll, GetLastError()); return 2; }
+    if (!h) {
+        /* Absent DLL = hardware/toolchain gate not built: skip, so the CPU suite
+         * stays green in environments without CUDA runtime on PATH. A present but
+         * unloadable DLL is a real failure. */
+        if (GetFileAttributesA(dll) == INVALID_FILE_ATTRIBUTES) {
+            printf("test_eg115: SKIP (no %s)\n", dll);
+            return 0;
+        }
+        fprintf(stderr, "test_eg115: cannot load %s (%lu)\n", dll, GetLastError());
+        return 2;
+    }
 
     fn_tab_t tab = (fn_tab_t)(void *)GetProcAddress(h, "wubu_cuda_upload_tables");
     fn_mv_t mv = (fn_mv_t)(void *)GetProcAddress(h, "wubu_cuda_quant_matvec_host");
