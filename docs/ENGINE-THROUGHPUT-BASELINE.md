@@ -258,6 +258,25 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### The decode setup is instruction throughput, not memory latency
+
+Fourth hypothesis, and the fourth measurement to kill one. If the warp stalls waiting on each 82-byte
+weight block before its dependent `dp4a` chain, then decoding two blocks per iteration - two
+independent chains in flight - should hide that latency. Implemented, built, measured:
+
+    unroll x2, 87 tokens:  17.3 tok/s     unroll x1: 17.3 tok/s     tokens identical
+
+Neutral, so it was reverted rather than kept (`git checkout`), because a change that neither moves the
+number nor explains something is a change that has to be maintained for nothing.
+
+That kills the memory-latency explanation and leaves instruction throughput: the decode of one block
+costs a grid lookup, eight sign tests, a scale nibble, and the byte extraction - on the order of forty
+to fifty instructions to feed two `dp4a` per lane per row. Overlap cannot help a warp that is issuing
+work rather than waiting for it. The only thing that helps is fewer instructions per weight value, and
+the sign-mask step - eight predicated negations per block - is the obvious target, replaceable with a
+byte-wise `__vsub4` on a mask built from the sign nibble. That is the next change, and it is the first
+one in this document aimed at an instruction count rather than at a stall.
+
 ### Decode, measured per phase (G4_PROF=1, 85 tokens, RTX 4050)
 
     layer total        61.48 ms
