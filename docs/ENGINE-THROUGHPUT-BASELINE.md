@@ -221,6 +221,27 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Three attempts at the residual, one result: guessing the compiler does not work
+
+After sharing the trig (which did help: fused divergence moved from token 2 to token 8) the
+attention row still differs by ~2.6-3.0e-07, so three more emulations were tried and measured:
+
+| attempt | result |
+|---|---|
+| shared `wubu_expf` in both attention paths | expf is bit-identical across toolchains (EG-128: 0/4096) but **ADIFF unchanged at 2.60e-07**, and it moves the reference to divergence at token 10 |
+| non-FMA value-loop accumulation (`__fadd_rn`) | 2.82e-07 -> 2.60e-07, marginal |
+| rms-norm reduction emulated as 16 FMA accumulators + the add/add-hi/hadd/hadd tree | EG-123 rms stays **3.576e-07 - no match**, ADIFF unchanged |
+
+All three reverted. The conclusion is the useful part: the CPU side is auto-vectorised by GCC
+with `-ffast-math`, and its reduction order cannot be inferred from the source - the 16-lane
+guess matched for `g4_dotf` (where the source spells the intrinsics out) and did not match for
+`g4_rms_norm` (where it is a plain loop the compiler rewrote). Closing the remaining 2.6e-07
+means reading the CPU's actual instruction sequence with objdump and reproducing it op by op,
+not testing hypotheses about what the vectoriser probably did.
+
+Given that, the fused path stays at +8.5% with a divergent continuation (`G4_ATTN_DEV=all`) and
+the default stays exact at 13.4-13.5 tok/s with full-attention-layer fusion on.
+
 ### Quantiser exonerated on real data; one instrument removed for lying
 
 EG-127 was extended to take a file so it can compare the device and host Q8_K quantisers on a
