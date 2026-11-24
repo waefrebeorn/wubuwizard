@@ -221,6 +221,20 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### All reciprocal-sqrt approximations removed; the early stutter is structural, not numeric
+
+After the double-sqrt fix the object file contains **zero** `vrsqrtss`/`vrcpss` (was 3): the
+inlined V-norm in the layer loop was the last one, and it now uses the same double form. ADIFF
+went 2.82e-07 -> **1.63e-07**, and the value loop is better with FMA than without (1.63e-07 vs
+1.74e-07), so `__fmaf_rn` is what stays.
+
+At 1.63e-07 - roughly 1-2 ulp of the attention row - all-layer fusion still emits three extra
+tokens at generated positions 2-4 (`100, 45518, 107`) before tracking the reference for the
+next 21. That pattern is not what noise does: a 3-token replay of the answer start is what a
+context that is 3 tokens short looks like. So there is a *structural* early-position problem in
+the fused sliding path, separate from the numeric one, and it is the next thing to look at -
+not more precision work.
+
 ### Found it: `1.0f/sqrtf` becomes vrsqrtss under -ffast-math
 
 Continuing the objdump pass past the sum showed the rest of `g4_rms_norm`:

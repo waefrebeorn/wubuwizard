@@ -1575,7 +1575,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 for (int d = 0; d < hd; d++)
                     ss += v[(size_t)t * kvd + (size_t)h * hd + d]
                         * v[(size_t)t * kvd + (size_t)h * hd + d];
-                const float inv_rms = 1.0f / sqrtf(ss / (float)hd + G4_RMS_EPS);
+                /* double sqrt + divide, same reason as g4_rms_norm: -ffast-math compiles
+                 * the float form to vrsqrtss + Newton, which the device cannot match. */
+                const float inv_rms = (float)(1.0 / sqrt((double)(ss / (float)hd + G4_RMS_EPS)));
                 for (int d = 0; d < hd; d++)
                     v[(size_t)t * kvd + (size_t)h * hd + d] *= inv_rms;
             }
