@@ -258,6 +258,25 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### The remaining ADIFF outliers are row amplification that the o-projection cancels
+
+ADIFF reports 2.0-2.4 (17-20% of scale) on layers 14, 18, 31, 32, 33, 39 while the other 42
+measure 1e-06. Those six have byte-identical tensor type sets to their neighbours, so it is not a
+type issue. A new instrument (`G4_ATTN_DUMP`, which projects both the device and the CPU attention
+row through the *same* CPU matvec) shows what happens next:
+
+| layer | attention row | after o-projection |
+|---|---|---|
+| 18 | 2.053 (scale 7.4) | **0.713 (scale 11.1)** |
+| 31 | 2.408 (scale 12.2) | **0.486 (scale 10.3)** |
+| 30 | 1.622 (scale 8.3) | 0.785 (scale 10.3) |
+| 14 | 2.003 (scale 14.4) | 2.144 (scale 116) |
+
+A 20% row difference collapsing to 5% after projection is what a sharply peaked attention
+distribution does: the weights move between keys that carry similar values, so the weighted sum
+barely moves. That is consistent with the token stream being identical over 24 tokens on six
+prompts, and it means the outliers are amplification in the row, not an error in it.
+
 ### One dispatch function, not three
 
 There were **three** hand-written type chains in the CUDA file - the composite's q/k/v, its

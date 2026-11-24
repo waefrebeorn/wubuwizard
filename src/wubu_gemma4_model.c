@@ -1545,26 +1545,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         }
     }
 
-    if (getenv("G4_ATTN_DUMP") && half_done && il == 0 && positions[0] == 21) {
-        static float *cmp_attn, *cmp_out;
-        if (!cmp_attn) {
-            cmp_attn = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
-            cmp_out = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
-        }
-        extern int wubu_gpu_get_attn_dump(float *out, int n);
-        if (cmp_attn && cmp_out && wubu_gpu_get_attn_dump(cmp_attn, qd) == 0) {
-            g4_batched_qmatmul(cmp_attn, &layer->attn_out, 1, G4_HIDDEN, qd, cmp_out);
-            double w = 0.0, sc = 0.0; int wi = -1;
-            for (int i = 0; i < G4_HIDDEN; ++i) {
-                const double dd = fabs((double)cmp_out[i] - (double)normed[i]);
-                if (dd > w) { w = dd; wi = i; }
-                if (fabs((double)cmp_out[i]) > sc) sc = fabs((double)cmp_out[i]);
-            }
-            fprintf(stderr, "[OPROJ] layer%d pos%d dev-vs-cpu=%.3e rel=%.3e at %d (scale %.3e)\n",
-                    il, positions[0], w, sc > 0 ? w / sc : w, wi, sc);
-        }
-    }
-
+    /* Compare the o-projection of the DEVICE attention row against the o-projection of the CPU
+     * row for the same layer/position. Both go through the same CPU matvec, so the difference is
+     * what the row difference does after projection - which is the question ADIFF cannot answer:
+     * a layer with sharply peaked attention can show a 20% row difference and a tiny output one. */
     if (!half_done) {
     /* ===== Q, K, V projections =====
      * All three read the same normalised input, so stage it on the device once and run
@@ -1710,6 +1694,36 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     wubu_gpu_tag = 0;
     if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_OPROJ] += _t - _po0; _pk = _t; }
     }   /* end: !half_done */
+
+    /* Is the attention-row difference visible after the o-projection? ADIFF says some layers'
+     * rows differ by 20%, which would be alarming unless their attention is sharply peaked: the
+     * row can move a lot while projecting to nearly the same vector. Both sides here go through
+     * the same CPU matvec, so only the input row differs. */
+    {
+        static int oproj_at = -1;
+        if (oproj_at < 0) { const char *e = getenv("G4_ADIFF_AT"); oproj_at = e ? atoi(e) : 23; }
+        if (getenv("G4_ATTN_DUMP") && g_dev_attn && il == g_adiff_layer && positions[0] == oproj_at) {
+            static float *cmp_attn, *cmp_out;
+            if (!cmp_attn) {
+                cmp_attn = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
+                cmp_out = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
+            }
+            /* g_dev_attn is filled by the ADIFF stage_only call itself; the separate
+             * G4_ATTN_DUMP capture belongs to the fused path, which does not run in ADIFF mode. */
+            if (cmp_attn && cmp_out) {
+                memcpy(cmp_attn, g_dev_attn, (size_t)qd * sizeof(float));
+                g4_batched_qmatmul(cmp_attn, &layer->attn_out, 1, G4_HIDDEN, qd, cmp_out);
+                double w = 0.0, sc = 0.0; int wi = -1;
+                for (int i = 0; i < G4_HIDDEN; ++i) {
+                    const double dd = fabs((double)cmp_out[i] - (double)normed[i]);
+                    if (dd > w) { w = dd; wi = i; }
+                    if (fabs((double)cmp_out[i]) > sc) sc = fabs((double)cmp_out[i]);
+                }
+                fprintf(stderr, "[OPROJ] layer%d pos%d devrow-vs-cpurow after o-proj=%.3e rel=%.3e at %d (scale %.3e)\n",
+                        il, positions[0], w, sc > 0 ? w / sc : w, wi, sc);
+            }
+        }
+    }
 
     /* ===== Post-attention norm + residual ===== */
     #pragma omp parallel for if(N > 1)
