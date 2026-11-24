@@ -320,6 +320,34 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The tensor-core path, built and validated: bit-exact, 1.67x, and what it must become
+
+`mma.sync.aligned.m16n8k32.s32.s8.s8` does 4096 MACs per instruction against dp4a's 4. Before any
+IQ2_S decode is wired in, the instruction path was proved on its own: int8 weights and int8
+activations in memory, fragments built to the PTX layout, output checked against a scalar int32
+reference.
+
+    mma, fragments from global   :  6.630 ms   8.9 GB/s    774.0 GMAC/s   correctness 0 of 44544 differ
+    mma, shared stage, 32-k slab :  7.692 ms   7.7 GB/s    667.1 GMAC/s   correctness exact
+    mma, shared stage, 128-k slab:  8.507 ms   6.9 GB/s    603.2 GMAC/s   correctness exact
+
+**Bit-exact on the first try** - 44544 of 44544 outputs identical to the scalar reference, so the
+fragment layout is right and the arithmetic is not in question. 6.63 ms against the current dp4a
+kernel's 11.08 ms on the same 15360x3840 tensor at 87 rows is **1.67x**, from a version deliberately
+left unoptimised.
+
+The two shared-staging variants both lose, which is worth recording because it inverts the usual
+instinct: coalescing the weight loads does not pay for two `__syncthreads()` per k-chunk (240 of them)
+or for byte-wise staging. Direct global fragment loads win at this size, and the barriers only start
+to pay with asynchronous copy and double buffering.
+
+**What the integration has to be.** 1.67x is the floor, not the target. With the dp4a maths replaced,
+the IQ2_S decode - measured at 18% of the current kernel - becomes the whole cost, and the design that
+follows is: decode each column's IQ2_S block into shared as int8 (same lane mapping the current kernel
+already uses, so the decode code carries over), then feed `mma` from shared. That is decode-limited
+rather than dp4a-limited, which is the 4-5x band rather than 1.67x. Beyond that, `cp.async` staging
+with double buffering and `ldmatrix` are what separate this from llama.cpp's 477 tok/s.
+
 ### The shared-accumulator GEMM, measured, and why the answer is tensor cores
 
 The obvious way to get one weight pass per prompt: keep the accumulators in shared memory instead of
