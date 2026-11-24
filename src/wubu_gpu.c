@@ -72,7 +72,7 @@ int wubu_gpu_init(void)
     G.download = (fn_download)(void *)GetProcAddress(G.h, "wubu_cuda_download");
     G.q8k = (fn_q8k)(void *)GetProcAddress(G.h, "wubu_cuda_quantize_q8k_dev");
     G.mv = (fn_mv_dev)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_dev");
-    G.mv2 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_v3");  /* v3: warp-per-column, no atomics */
+    G.mv2 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_v3");
     G.mv3 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq3xxs");
     G.mv4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq4xs");
     if (!avail || !G.alloc || !G.upload || !G.free_dev || !G.download || !G.q8k || !G.mv) return 0;

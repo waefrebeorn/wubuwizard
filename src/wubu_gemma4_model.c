@@ -1212,11 +1212,37 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
 
 /* ============ Single layer forward (CPU, fused matmuls in one parallel region) ============ */
 
+/* ---- section profiler (G4_PROF=1) -------------------------------------
+ * The decode path spends ~97 ms/token while GPU matvec is only ~23 ms of it, so the
+ * interesting number is what the CPU does between the matvecs. Accumulated over every
+ * N == 1 forward and reported per token, because that is the case being optimised. */
+enum { G4P_LAYER, G4P_NORM_QKV, G4P_QKNORM_ROPE, G4P_KVSTORE, G4P_ATTN,
+       G4P_ATTNOUT, G4P_FFN, G4P_HEAD, G4P_COUNT };
+static double G4_P[G4P_COUNT];
+static long G4_P_TOKENS;
+static int G4_P_hooked;
+
+static void g4_prof_dump(void)
+{
+    if (!getenv("G4_PROF") || G4_P_TOKENS <= 0) return;
+    static const char *names[G4P_COUNT] = {
+        "layer total", "norm+qkv", "qk norm+rope", "kv store", "attention",
+        "attn out+resid", "ffn all", "head"
+    };
+    fprintf(stderr, "[PROF] per decode token over %ld tokens (ms):\n", G4_P_TOKENS);
+    for (int i = 0; i < G4P_COUNT; ++i)
+        fprintf(stderr, "[PROF] %-14s %8.2f\n", names[i], G4_P[i] / (double)G4_P_TOKENS);
+}
+
 void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                  float *normed, float *attn_out,
                                  float *q, float *k, float *v,
                                  float *ffn_gate, float *ffn_up, float *ffn_down_out,
                                  float *scores, float *row, int N, const int *positions) {
+    if (!G4_P_hooked) { G4_P_hooked = 1; atexit(g4_prof_dump); }
+    const double _pt0 = g4_now_ms();
+    double _pk = _pt0;
+    #define G4P_ADD(slot, from) do { if (N == 1) { const double _n = g4_now_ms(); G4_P[slot] += _n - (from); } } while (0)
     g4_layer_t *layer = &model->layers[il];
     int hd = layer->head_dim;
     int qd = layer->q_dim;
@@ -1242,6 +1268,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             g4_batched_qmatmul(normed, &layer->attn_v, N, kvd, G4_HIDDEN, v);
         }
     }
+
+    G4P_ADD(G4P_NORM_QKV, _pk); _pk = g4_now_ms();
 
     /* ===== Q/K head norms ===== */
     #pragma omp parallel for if(N > 1)
@@ -1287,6 +1315,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         }
     }
 
+    G4P_ADD(G4P_QKNORM_ROPE, _pk); _pk = g4_now_ms();
+
     g4_kv_cache_t *cache = g4_kv_get(model, layer);
 
     /* ===== Attention ===== */
@@ -1295,6 +1325,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     } else {
         g4_sliding_attn_cpu(model, layer, cache, q, attn_out, N, positions, scores, row);
     }
+
+    G4P_ADD(G4P_ATTN, _pk); _pk = g4_now_ms();
 
     /* ===== Attention output projection ===== */
     g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
@@ -1307,6 +1339,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         for (int d = 0; d < G4_HIDDEN; d++)
             x[(size_t)t * G4_HIDDEN + d] += normed[(size_t)t * G4_HIDDEN + d];
     }
+
+    G4P_ADD(G4P_ATTNOUT, _pk); _pk = g4_now_ms();
 
     /* ===== FFN ===== */
     #pragma omp parallel for if(N > 1)
@@ -1337,6 +1371,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         for (int d = 0; d < G4_HIDDEN; d++)
             x[(size_t)t * G4_HIDDEN + d] += ffn_down_out[(size_t)t * G4_HIDDEN + d];
     }
+
+    G4P_ADD(G4P_FFN, _pk);
+    if (N == 1) G4_P[G4P_LAYER] += g4_now_ms() - _pt0;
+    #undef G4P_ADD
 
     if (layer->has_out_scale) {
         float s = layer->layer_out_scale;
@@ -1409,6 +1447,8 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
         g4_rms_norm(x + (size_t)t * G4_HIDDEN, model->output_norm_weight,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
 
+    if (N == 1) { ++G4_P_TOKENS; G4_P[G4P_HEAD] -= g4_now_ms(); }
+
     /* ===== LM head (Q3_K tied embedding, or cached F32 matvec) ===== */
     if (model->lm_head_f32) {
         #pragma omp parallel for collapse(2) if(N * G4_VOCAB > 65536)
@@ -1424,6 +1464,8 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
     } else {
         g4_batched_qmatmul(normed, &model->output, N, G4_VOCAB, G4_HIDDEN, logits);
     }
+
+    if (N == 1) G4_P[G4P_HEAD] += g4_now_ms();
 
     /* ===== Softcap ===== */
     g4_softcap(logits, N * G4_VOCAB, G4_SOFTCAP);

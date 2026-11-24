@@ -361,6 +361,13 @@ __global__ void iq2s_matvec_v3_kernel(const uint8_t * __restrict__ w,
     if (lane == 0) y[col] = sum;
 }
 
+/* Narrow matvecs are occupancy-limited (a 3072-column projection is 3072 warps for
+ * 20 SMs, each still walking K), so split K four ways below this width. The FFN
+ * shapes (15360 columns) stay on the warp-per-column v3 kernel. */
+WUBU_EXPORT int wubu_cuda_matvec_iq2s_v3(const void *d_w, const void *d_q8, float *d_y,
+                                         int K, int n_cols, long long col_stride);
+
+
 WUBU_EXPORT int wubu_cuda_matvec_iq2s_v3(const void *d_w, const void *d_q8, float *d_y,
                                          int K, int n_cols, long long col_stride)
 {
@@ -673,6 +680,79 @@ done:
 }
 
 /* Host wrapper for gates: takes F32 activations, quantizes on the host, uploads. */
+/* Per-stage timing for the decode matvec shape, so optimisation targets the real
+ * cost instead of assumptions. Prints ms for upload / q8k / kernel / download over
+ * `iters` calls of a 15360 x 3840 IQ2_S matvec. */
+WUBU_EXPORT int wubu_cuda_bench_stages(int iters)
+{
+    const int K = 3840, N = 15360;
+    const int cbytes = 82 * (K / QK_K);
+    const size_t wb = (size_t)N * cbytes;
+    uint8_t *h_w = (uint8_t *)malloc(wb);
+    float *h_x = (float *)malloc(sizeof(float) * K);
+    float *h_y = (float *)malloc(sizeof(float) * N);
+    if (!h_w || !h_x || !h_y) { free(h_w); free(h_x); free(h_y); return -1; }
+    memset(h_w, 0x21, wb);
+    for (int i = 0; i < K; ++i) h_x[i] = (float)(i % 13) * 0.01f;
+
+    /* Three distinct weight buffers, rotated, so consecutive iterations never hit
+     * L2: a single buffer re-read 20 times reports ~240 GB/s and hides the real
+     * streaming rate (which is what the engine actually gets). */
+    void *d_w3[3] = { NULL, NULL, NULL };
+    void *d_w = NULL, *d_x = NULL, *d_q8 = NULL;
+    float *d_y = NULL;
+    for (int b = 0; b < 3; ++b) {
+        if (cudaMalloc(&d_w3[b], wb) != cudaSuccess) return -2;
+        cudaMemcpy(d_w3[b], h_w, wb, cudaMemcpyHostToDevice);
+    }
+    if (cudaMalloc(&d_w, wb) != cudaSuccess) { free(h_w); free(h_x); free(h_y); return -2; }
+    if (cudaMalloc((void **)&d_x, sizeof(float) * K) != cudaSuccess) return -2;
+    if (cudaMalloc(&d_q8, (size_t)(K / QK_K + 1) * 292) != cudaSuccess) return -2;
+    if (cudaMalloc(&d_y, sizeof(float) * N) != cudaSuccess) return -2;
+    cudaMemcpy(d_w, h_w, wb, cudaMemcpyHostToDevice);
+    cudaDeviceSynchronize();
+
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0); cudaEventCreate(&e1);
+    double t_up = 0, t_q8 = 0, t_k = 0, t_dn = 0;
+
+    for (int it = 0; it < iters; ++it) {
+        cudaEventRecord(e0);
+        cudaMemcpy(d_x, (const void *)h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
+        cudaEventRecord(e1); cudaEventSynchronize(e1);
+        float ms = 0; cudaEventElapsedTime(&ms, e0, e1); t_up += ms;
+
+        cudaEventRecord(e0);
+        quantize_q8k_kernel<<<(K / QK_K + 1 + 255) / 256, 256>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+        cudaEventRecord(e1); cudaEventSynchronize(e1);
+        cudaEventElapsedTime(&ms, e0, e1); t_q8 += ms;
+
+        cudaEventRecord(e0);
+        iq2s_matvec_v3_kernel<<<(N + 7) / 8, 8 * 32>>>((const uint8_t *)d_w3[it % 3], (const c_q8_k *)d_q8,
+                                                       d_y, cbytes, K / QK_K, N);
+        cudaEventRecord(e1); cudaEventSynchronize(e1);
+        cudaEventElapsedTime(&ms, e0, e1); t_k += ms;
+
+        cudaEventRecord(e0);
+        cudaMemcpy(h_y, d_y, sizeof(float) * N, cudaMemcpyDeviceToHost);
+        cudaEventRecord(e1); cudaEventSynchronize(e1);
+        cudaEventElapsedTime(&ms, e0, e1); t_dn += ms;
+    }
+    printf("[BENCH] %d iters of %dx%d IQ2_S: upload %.3f ms, q8k %.3f ms, kernel %.3f ms, download %.3f ms\n",
+           iters, N, K, t_up / iters, t_q8 / iters, t_k / iters, t_dn / iters);
+    {
+        const double per = (t_up + t_q8 + t_k + t_dn) / iters;
+        printf("[BENCH] total %.3f ms/call; at 336 calls/token that is %.1f ms\n", per, per * 336.0);
+        printf("[BENCH] effective streaming rate %.1f GB/s (%.1f MB per call)\n",
+               (double)wb / (t_k / iters) / 1e6, (double)wb / 1e6);
+    }
+
+    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    cudaFree(d_w); cudaFree(d_x); cudaFree(d_q8); cudaFree(d_y);
+    free(h_w); free(h_x); free(h_y);
+    return 0;
+}
+
 WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type,
                                             const void *h_xq8, float *h_y,
                                             int K, int n_cols, int64_t col_stride_bytes)

@@ -113,7 +113,29 @@ the real tensor sizes at load: one plan entry per layer for the attention group 
 and one for the FFN group (streamed), with the remaining budget handed to the streamed
 weight cache as its cap. Measured, 8-token decode, same prompt:
 
-|Where the decode time goes now (WUBU_GPU_STATS=1, 9 decode tokens):
+|Where the decode time goes now (`G4_PROF=1`, per decode token, 12B IQ2 model):
+
+```
+[PROF] layer total       99.5 ms      (48 layers)
+[PROF] norm+qkv          22.0 ms      q/k/v projections + pre-attn norm
+[PROF] qk norm+rope       3.5 ms
+[PROF] attention          8.4 ms
+[PROF] attn out+resid    13.0 ms      o-proj + post-attn norm + residual
+[PROF] ffn all           52.5 ms      gate/up/down + gelu + norms
+[PROF] head              10.6 ms      262k-vocab Q3_K tied head
+```
+
+FFN is 2.7 GB of weights per token, so 52.5 ms means **51 GB/s effective** - about a
+quarter of the card's 204 GB/s. `wubu_cuda_bench_stages(20)` on the FFN shape with three
+rotating weight buffers (no L2 reuse) reports the same: 0.247 ms per 18.9 MB matvec =
+**76.5 GB/s**, versus 240 GB/s when the same buffer is re-read (L2 hits).
+
+The cause is the access pattern, not occupancy: the warp-per-column kernel walks one
+column's 82-byte blocks while the eight warps of a block read columns 15 KB apart, so
+DRAM sees 82-byte scattered reads instead of 128-byte lines. Split-K was tried and
+measured neutral (21.9 vs 21.5 ms for qkv), which rules out occupancy.
+
+Where the decode time goes now (WUBU_GPU_STATS=1, 9 decode tokens):
 
 ```
 [GPU stats] type  calls   ms_total  MiB(touched)     [CPU stats] decode_calls  decode_ms

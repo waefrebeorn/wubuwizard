@@ -61,6 +61,15 @@ int main(int argc, char **argv)
 
     CHECK(tab3(wubu_vecdot_iq3_xxs_grid(), wubu_vecdot_iq3_xxs_signs()) == 0);
     CHECK(tab4(wubu_vecdot_iq4_xs_table()) == 0);
+    /* IQ2_S/IQ3_S grids too: without them c_iq2s_grid is all zeros and every dot
+     * silently returns 0, which looks like a kernel that "ran fine". */
+    {
+        extern const void *wubu_vecdot_iq2s_grid(void);
+        extern const void *wubu_vecdot_iq3s_grid(void);
+        fn_tab2_t tab = (fn_tab2_t)(void *)GetProcAddress(h, "wubu_cuda_upload_tables");
+        CHECK(tab != NULL);
+        if (tab) CHECK(tab(wubu_vecdot_iq2s_grid(), wubu_vecdot_iq3s_grid()) == 0);
+    }
 
     enum { K = 1024, NCOL = 96 };
     static uint8_t w18[NCOL * 4 * 98];
@@ -110,6 +119,37 @@ int main(int argc, char **argv)
     }
     printf("EG-122 iq4_xs columns=%d mismatches=%d\n", NCOL, bad23);
     CHECK(bad23 == 0);
+
+    /* IQ2_S narrow-width path (the q/k/v shapes): the warp-per-column kernel must
+     * match the CPU port at 2048 columns too, not only at FFN widths. */
+    {
+        extern int wubu_vec_dot_iq2_s_q8_k_scalar(int n, float *s, const void *vx, const void *vy);
+        enum { KW = 2048, NCW = 96 };
+        static uint8_t w22[NCW * (KW / QK_K) * 82];
+        static float xw[KW];
+        static block_q8_K q8w;
+        static float gw[NCW], cw[NCW];
+        unsigned s3 = 777u;
+        for (int c = 0; c < NCW; ++c)
+            for (int b = 0; b < KW / QK_K; ++b) {
+                uint8_t *blk = w22 + ((size_t)c * (KW / QK_K) + b) * 82;
+                for (int i = 0; i < 82; ++i) blk[i] = (uint8_t)(s3 = s3 * 1103515245u + 12345u) >> 16;
+                const uint16_t d16 = (uint16_t)(0x2C00u + (s3 & 0x3FFu));
+                memcpy(blk, &d16, 2);
+            }
+        for (int j = 0; j < KW; ++j) xw[j] = (float)((int)((s3 = s3 * 1103515245u + 12345u) >> 16 & 0x3FF) - 512) / 250.0f;
+        quantize_row_q8_K(xw, &q8w, KW);
+        for (int c = 0; c < NCW; ++c)
+            CHECK(wubu_vec_dot_iq2_s_q8_k_scalar(KW, &cw[c], w22 + (size_t)c * (KW / QK_K) * 82, &q8w) == 0);
+        CHECK(mv18(w22, 22, &q8w, gw, KW, NCW, (KW / QK_K) * 82) == 0);
+        int bad = 0;
+        for (int c = 0; c < NCW; ++c) if (!close_enough(gw[c], cw[c])) {
+            if (bad < 3) printf("EG-122 iq2_s narrow col %d gpu=%g cpu=%g\n", c, gw[c], cw[c]);
+            ++bad;
+        }
+        printf("EG-122 iq2_s narrow columns=%d mismatches=%d\n", NCW, bad);
+        CHECK(bad == 0);
+    }
 
     FreeLibrary(h);
     if (failures) { fprintf(stderr, "test_eg122_cuda_iq_new: FAIL (%d)\n", failures); return 1; }
