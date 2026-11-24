@@ -1192,7 +1192,11 @@ __global__ void rms_norm_row_kernel(const float * __restrict__ x, const float * 
         float tot = 0.0f;
         const int nw = (blockDim.x + 31) / 32;
         for (int i = 0; i < nw; ++i) tot += red[i];
-        red[0] = rsqrtf(tot / (float)n + eps);
+        {
+            /* same expression as the CPU: double sqrt + divide, not rsqrtf */
+            const double msv = (double)(tot / (float)n + eps);
+            red[0] = (float)(1.0 / sqrt(msv));
+        }
     }
     __syncthreads();
     const float inv = red[0];

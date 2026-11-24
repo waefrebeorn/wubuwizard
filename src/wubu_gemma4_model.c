@@ -839,7 +839,12 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
 void g4_rms_norm(const float *x, const float *weight, int n, float eps, float *out) {
     float ss = 0.0f;
     for (int i = 0; i < n; i++) ss += x[i] * x[i];
-    float inv = 1.0f / sqrtf(ss / (float)n + eps);
+    /* double sqrt and divide: -ffast-math rewrites the float form into vrsqrtss plus one
+     * Newton step (confirmed with objdump), and CUDA has no vrsqrtss, so the device cannot
+     * reproduce it. The double form is not transformed and is identical on both sides.
+     * Measured as 3.576e-07 in this norm and 2.8e-07 in the fused attention row. */
+    const double msv = (double)(ss / (float)n + eps);
+    float inv = (float)(1.0 / sqrt(msv));
     for (int i = 0; i < n; i++)
         out[i] = x[i] * inv * weight[i];
 }

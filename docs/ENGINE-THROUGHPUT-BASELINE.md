@@ -221,6 +221,31 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Found it: `1.0f/sqrtf` becomes vrsqrtss under -ffast-math
+
+Continuing the objdump pass past the sum showed the rest of `g4_rms_norm`:
+
+    vdivss  %xmm2,%xmm6,%xmm9      ; ss / n
+    vaddss  %xmm3,%xmm9,%xmm3      ; + eps
+    vrsqrtss %xmm3,%xmm3,%xmm7     ; hardware reciprocal-sqrt *approximation*
+    vmulss  ...                    ; Newton-Raphson refinement
+
+GCC rewrites `1.0f / sqrtf(x)` into `vrsqrtss` plus one Newton step, which is an approximation
+CUDA has no equivalent for. That - not the reduction - was the 3.576e-07.
+
+Fix: compute the reciprocal square root through double on both sides
+(`(float)(1.0 / sqrt((double)(ss / n + eps)))`), which -ffast-math does not transform and CUDA
+evaluates identically.
+
+| | before | after |
+|---|---|---|
+| ADIFF (fused attention row vs CPU) | 2.82e-07 | **1.63e-07** |
+| default tokens | exact | exact |
+| decode | 13.4-13.5 tok/s | 13.4-13.5 tok/s |
+
+Also measured while doing this: wiring the shared `wubu_expf` in instead made ADIFF *worse*
+(1.63e-07 -> 2.60e-07), so it stays out. Counterintuitive, recorded so it is not re-tried.
+
 ### Disassembled GCC, reproduced it op for op, still no match
 
 The rms-norm sum was read out of the object file rather than guessed. `objdump` on
