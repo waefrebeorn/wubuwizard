@@ -550,17 +550,20 @@ __global__ void iq2xs_matvec_kernel(const uint8_t * __restrict__ w,
         const uint8_t signs = c_ksigns_iq2xs[(q >> 9) & 127];
         const int8_t *q8 = xq8[b].qs + g * 32 + l * 8;
 
-        int32_t a0, a1;
-        memcpy(&a0, grid, 4);
-        memcpy(&a1, grid + 4, 4);
-        for (int j = 0; j < 4; ++j) {
-            if ((signs >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
-            if ((signs >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
+        /* The grid holds UNSIGNED magnitudes (ggml: y = db * grid value, sign from ksigns),
+         * so casting those bytes to int8 flipped every magnitude >= 128. This is the only
+         * type-17 consumer that was wrong: the fused FFN's type-17 path uses the same kernel
+         * with n_cols=15360 and measured correct, while the composite's attn_k (n_cols=2048,
+         * same K and stride) produced 9.7e+00 - 1.7e+01 absolute error on exactly the five
+         * layers whose attn_k is IQ2_XS (16, 21, 22, 24, 25). Scalar rather than dp4a because
+         * a 255 magnitude does not fit int8. */
+        int sumi = 0;
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int qv = (int)q8[j];
+            const int gv = (int)grid[j];
+            sumi += ((signs >> j) & 1) ? -(qv * gv) : (qv * gv);
         }
-        int32_t b0, b1;
-        memcpy(&b0, q8 + 0, 4);
-        memcpy(&b1, q8 + 4, 4);
-        const int sumi = __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
         const int ls = (l < 2) ? (1 + 2 * (scales[g] & 0x0f)) : (1 + 2 * (scales[g] >> 4));
         sum += 0.125f * f16_fast(d_bits) * xq8[b].d * (float)(sumi * ls);
     }

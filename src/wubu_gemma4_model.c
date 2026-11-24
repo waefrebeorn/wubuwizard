@@ -1312,7 +1312,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
 
 /* G4_ATTN_ADIFF scratch: device attention row for the comparison below */
 static float *g_dev_attn;
-static int g_adiff;
+static int g_adiff, g_adiff_layer;
 
 /* ============ Single layer forward (CPU, fused matmuls in one parallel region) ============ */
 
@@ -1433,6 +1433,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 kv_start_h = (pos_h >= G4_SLIDING_WINDOW) ? pos_h - G4_SLIDING_WINDOW + 1 : 0;
                 kv_len_h = pos_h - kv_start_h + 1;
             }
+            if (getenv("G4_SPAN") && pos_h >= 21 && pos_h <= 25)
+                fprintf(stderr, "[SPAN2] il=%d full=%d size=%d pos=%d kv_len=%d kv_start=%d\n",
+                        il, (int)layer->is_full, cache_h->size, pos_h, kv_len_h, kv_start_h);
             static int primed[128];
             /* Compare the composite against the CPU sequence for layer 0 at position 0,
              * where the device KV is trivially consistent: run the composite into a scratch
@@ -1467,7 +1470,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                  * let the CPU path run too, so the two attention rows for the same layer and
                  * position can be compared directly. */
                 int rc_h = -1;
-                if (getenv("G4_ATTN_ADIFF") && pos_h == 23 && il == 0) {
+                const char *adiff_env = getenv("G4_ATTN_ADIFF");
+                if (adiff_env && pos_h == 23 && (il == 0 || strcmp(adiff_env, "all") == 0)) {
+                    g_adiff_layer = il;
                     if (!g_dev_attn) g_dev_attn = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
                     if (g_dev_attn) {
                         extern int wubu_gpu_attn_stage_only(int, const void *, const void *, const void *,
@@ -1621,10 +1626,11 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * is enough to explain its degenerate output. */
     {
         static double jit = -1.0;
-        static int jit_seeded;
+        static int jit_seeded, jit_abs;
         if (jit < 0.0) {
-            const char *e = getenv("G4_ATTN_JITTER");
-            jit = e ? atof(e) : 0.0;
+            const char *e = getenv("G4_ATTN_JITTER_ABS");
+            if (e) { jit_abs = 1; jit = atof(e); }
+            else { e = getenv("G4_ATTN_JITTER"); jit = e ? atof(e) : 0.0; }
         }
         if (jit > 0.0) {
             unsigned int s = jit_seeded ? 12345u : 12345u;
@@ -1633,7 +1639,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             for (int i = 0; i < n; ++i) {
                 s = s * 1103515245u + 12345u;
                 const float u = ((float)((s >> 16) & 0x7FFF) / 16384.0f) - 1.0f;
-                attn_out[i] *= (1.0f + (float)jit * u);
+                if (jit_abs) attn_out[i] += (float)jit * u;   /* absolute, same units as ADIFF */
+                else           attn_out[i] *= (1.0f + (float)jit * u);
             }
         }
     }
@@ -1663,12 +1670,19 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             if (d > w) { w = d; wi = i; }
             if (fabs((double)attn_out[i]) > sc) sc = fabs((double)attn_out[i]);
         }
-        fprintf(stderr, "[ADIFF] layer0 pos23 attention dev-vs-cpu=%.3e rel=%.3e at %d (scale %.3e)\n",
-                w, sc > 0 ? w / sc : w, wi, sc);
+        fprintf(stderr, "[ADIFF] layer%d pos23 attention dev-vs-cpu=%.3e rel=%.3e at %d (scale %.3e)\n",
+                g_adiff_layer, w, sc > 0 ? w / sc : w, wi, sc);
     }
     /* G4_HSTATE=<path> dumps the hidden state after this layer, so the same position can be
      * compared between the fused and the CPU path without reading the token stream. */
     {
+        const char *ha = getenv("G4_HSTATE_ALL");
+        if (ha && positions[0] == 23) {
+            char pbuf[512];
+            snprintf(pbuf, sizeof pbuf, "%s/l%02d.bin", ha, il);
+            FILE *f = fopen(pbuf, "wb");
+            if (f) { fwrite(x, sizeof(float), (size_t)N * G4_HIDDEN, f); fclose(f); }
+        }
         const char *hp = getenv("G4_HSTATE");
         if (hp && il == 0 && positions[0] == 23) {
             FILE *f = fopen(hp, "wb");

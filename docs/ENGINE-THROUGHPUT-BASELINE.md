@@ -221,6 +221,54 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Per-layer ADIFF found a real type-17 bug: the IQ2_XS grid is unsigned
+
+Comparing the composite against the CPU sequence at **every** layer (`G4_ATTN_ADIFF=all`) gave
+a distribution, not a single number, and it was bimodal:
+
+| layers | dev-vs-cpu (absolute) |
+|---|---|
+| most sliding layers | 1e-07 - 9e-06 |
+| 16, 21, 22, 24, 25 | **9.7 - 16.7** |
+
+Those five are exactly the layers whose `attn_k` is IQ2_XS (verified against the GGUF tensor
+table) - the only IQ2_XS K tensors in the model, and therefore the only ones the composite ever
+ran type 17 on. The specialised kernel cast the grid bytes to `int8`:
+
+    if ((signs >> j) & 1) ((int8_t *)&a0)[j] = -((int8_t *)&a0)[j];
+
+The grid holds **unsigned** magnitudes (upstream: `y = db * grid_value` with the sign applied
+from `ksigns`), so every magnitude >= 128 became a negative int8 and flipped its product. Fixed
+to an unsigned scalar loop; the five layers drop to 1e-06.
+
+The fused FFN uses the same kernel with `n_cols=15360` and was never wrong, which is why the
+default path measured exact throughout - the bug only ever ran on the composite's K.
+
+### The token divergence is coherent accumulation, not sensitivity to noise
+
+The jitter probe settles a question the numbers alone could not:
+
+| injected into every layer's attention output | continuation |
+|---|---|
+| i.i.d. +-3e-5 absolute | **unchanged for 14 tokens** |
+| i.i.d. +-1.0 (sanity check) | scrambled, so the probe is live |
+
+Yet the fused path's residual, ~1e-07 per layer, flips tokens from the third one. Random noise
+of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers apply the same
+rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
+That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
+
+### Open lead, unresolved
+
+Excluding the five type-17 layers from fusion (`G4_SKIP_T17`, since removed) made the token
+stream match the reference **exactly** in both slide and all modes - before the kernel fix, when
+those layers were wrong by 10-17. After the fix they measure 1e-06 and the stutter is unchanged,
+so the mechanism that made exclusion work is not the kernel and is not yet explained. The hidden
+state dumps say something inconsistent as well: fusing **only layer 0** differs from the default
+by 5.7e-06, while fusing **all** layers differs at layer 0 by 4.3e-01 - and layer 0 cannot be
+affected by later layers. That is the next thing to chase, and it needs the single-layer mode's
+guarantee that fusion actually happened verified first.
+
 ### Softmax exp through double as well: 1.63e-07 -> 1.52e-07
 
 Same trick as the sqrt: `(float)exp((double)(score - max))` on both sides, so the two paths
