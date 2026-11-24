@@ -98,9 +98,18 @@ warp cover one 256-element block exactly (lane = group*4 + entry), with `__dp4a`
 | lane-per-entry + dp4a, includes upload | 3.1 | 6.5x |
 | lane-per-entry + dp4a, device-resident | **0.35** | **56x** |
 
-Engine decode with the dp4a kernel and device-resident weights: **5.5 tok/s** (CPU 4.2).
-The gap to the 0.35 ms/call ceiling is the per-matvec host round-trip and the IQ3_S/Q3_K
-types still on the generic kernel.
+Then v3: one warp owns a whole column and loops its blocks in registers (no atomics,
+one write). 0.25 ms/call for 15360x3840 device-resident, and engine decode
+**5.5 -> 8.3 tok/s** (CPU path at the same time went 4.2 -> 5.3 after the IQ2_XS/IQ4_XS
+kernels landed).
+
+Where the remaining factor sits, measured: the IQ2_S matvec moves 18.9 MB in 0.25 ms
+= 75 GB/s against ~192 GB/s of VRAM bandwidth, i.e. ~40% efficiency. Staging the 8 KiB
+IQ2_S grid in shared memory changed nothing (0.26 vs 0.25 ms), so the limit is the
+one-column-per-warp access pattern, not the table lookups. Closing it needs a GEMM-style
+kernel: a block stages a Q8_K row tile and a weight tile in shared memory and reuses them
+across 32+ columns, which is what ggml's `mmq`/`mmvq` do and what this engine still
+lacks.
 
 Known defect: the IQ3_S lane-per-entry kernel returns non-finite values on 5 of 64 test
 columns, so IQ3_S stays on the generic kernel and the gate records the failure instead of
