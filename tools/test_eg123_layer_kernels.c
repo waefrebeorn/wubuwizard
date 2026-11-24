@@ -138,7 +138,7 @@ int main(int argc, char **argv)
         fn_attn_t attn = (fn_attn_t)(void *)GetProcAddress(h, "wubu_cuda_attn_host");
         CHECK(attn != NULL);
         if (attn) {
-            enum { HEADS = 8, KVH = 4, HD = 64, KVD = KVH * HD, KCAP = 32, KVLEN = 20 };
+            enum { HEADS = 16, KVH = 8, HD = 256, KVD = KVH * HD, KCAP = 64, KVLEN = 21 };
             static float q[HEADS * HD], kc[KCAP * KVD], vc[KCAP * KVD];
             static float ref[HEADS * HD], got[HEADS * HD];
             for (int i = 0; i < HEADS * HD; ++i) q[i] = rnd();

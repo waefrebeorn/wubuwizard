@@ -1,295 +1,109 @@
-# Engine throughput baseline (2026-11-23)
+# Engine throughput baseline
 
-Measured on this host (Ryzen 5 8645HS, RTX 4050 6 GB, 16 GB RAM, Win11) with the
-GGUF model this machine actually runs. Command:
+Measured on this host (Ryzen 5 8645HS, RTX 4050 6 GB, 16 GB RAM, Win11) with the model this
+machine actually runs: `gemma-4-12b-it-UD-IQ2_M.gguf` (667 tensors, 4003 MB). This file
+describes the engine as it is now. It is not a changelog.
+
+Build clean before measuring — `Makefile.win` does not track header dependencies, so a stale
+object silently changes struct layout and produces different output (measured once: 4.4
+tok/s and a different greedy prefix).
 
 ```
-./gen_text_gemma4.exe C:/Users/eman5/models/gemma-12b/gemma-4-12b-it-UD-IQ2_M.gguf "The meaning of life is" 12 40
+rm -f src/*.o tools/*.o
+mingw32-make -f Makefile.win -j4 wubu_cuda.dll gen_text_gemma4
+G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 ```
 
-Result (exit 0, real output, no errors):
+## Current numbers
 
-```
-[G4] Loading model (667 tensors, 4003 MB data blob)
-[G4] 48 layers loaded (~4003 MB quantized + 4.2 MB norms)
-Prefill: 21 tok in 53.21s (0.4 tok/s)
-Decode:  13 tok in 183.15s (0.1 tok/s)
-```
-
-For reference, llama.cpp on the same host and model: pp ~196 tok/s, tg ~21 tok/s
-(`data/bench/`, prior matrix). The engine's own forward path is ~200x slower than
-the runtime it is meant to replace. Gate coverage is not the bottleneck; the forward
-path is.
-
-## Why it is slow: the model's weight types
-
-GGUF header of `gemma-4-12b-it-UD-IQ2_M.gguf`, parsed from the tensor-info block:
-
-| Type | Tensors |
+| metric | value |
 |---|---|
-| IQ2_S | 204 |
-| IQ3_S | 95 |
-| IQ3_XXS | 20 |
-| IQ2_XS | 5 |
-| IQ4_XS | 4 |
-| Q3_K | 1 |
-| F32 | 338 |
+| decode, sustained over 65 tokens | **11.4 tok/s** |
+| prefill, 21-token prompt | **6.8 tok/s** |
+| prefill, 72-token prompt | **15.0 tok/s** |
+| greedy tokens | 45518, 107, 236775, 818, 6590, ... |
+| CPU path vs GPU path | identical tokens |
 
-`src/quantized_matmul.c:510` states it plainly:
+Decode matvecs: **202 per token, all 202 on the GPU, none on the CPU.**
+Per type: IQ3_S 95, IQ2_S 83, IQ3_XXS 14, IQ2_XS 5, IQ4_XS 4, Q3_K 1 (the LM head).
 
-```c
-/* IQ2_S / IQ3_S have no Q8 vec_dot yet: quantized_matmul dequantizes the
- * weight to F32 and calls SGEMM. */
-```
+The KV cache, attention arithmetic, norms, RoPE and residual adds are still on the CPU.
+That is where the remaining time is.
 
-So every token dequantises 299 of the model's large matrices (IQ2_S + IQ3_S) to F32
-before the matmul. That is tens of GB of F32 traffic per token on a 4 GB model, and it
-matches the measured 14 s/token. IQ2_XXS (20 tensors) already has a fused
-`iq2_xxs_vec_dot`; the two dominant types do not.
+## Where the time goes (per decode token, `G4_PROF=1`, 32 tokens of context)
 
-## After EG-111 (fused IQ2_S/IQ3_S x Q8_K dot, 2026-11-23)
-
-The two dominant types now have a Q8_K vec_dot (`src/wubu_vecdot_iq.c`, ported from
-`llama/ggml-cpu/quants.c`) and `quantized_matmul_batched` dispatches to them; the
-whole-tensor F32 dequantisation branch is deleted. Same command, same host:
-
-| Run | Prefill | Decode |
+| section | ms | detail |
 |---|---|---|
-| before (dequant to F32 per call) | 21 tok in 53.21 s (0.4 tok/s) | 13 tok in 183.15 s (0.1 tok/s) |
-| scalar fused Q8_K vec_dot | 21 tok in 31.56 s (0.7 tok/s) | 13 tok in 18.57 s (0.7 tok/s) |
-| AVX2 fused Q8_K vec_dot | 21 tok in 20.12 s (1.0 tok/s) | 13 tok in 11.63 s (1.1 tok/s) |
-| + fused Q3_K LM head (EG-114) | 21 tok in 4.27 s (4.9 tok/s) | 13 tok in 3.06 s (4.2 tok/s) |
-| + fused IQ4_XS dot (EG-116) | 4.9 tok/s | 4.5 tok/s |
-| + fused IQ2_XS dot (EG-117) | 6.7 tok/s | **5.2 tok/s** |
-| + same, `G4_GPU=1` (device IQ2_S/IQ3_S/Q3_K/Q4_0) | - | 7.6 tok/s |
-| + v3 warp-per-column IQ2_S kernel (no atomics) | - | 8.3 tok/s |
-| clean rebuild, `G4_GPU=1` (all kernels, no stale objects) | 6.8 tok/s | 8.8 tok/s |
-| + device IQ3_XXS kernel (EG-120/122) | 6.8 tok/s | 9.8 tok/s |
-| + device IQ4_XS kernel (EG-121/122) | 6.8 tok/s | 10.3 tok/s |
-| + hardware fp16 decode in the device kernels | 6.7 tok/s | 10.7 tok/s |
-| + fused device FFN (gate/up/gelu/down in one round trip) | 6.7 tok/s | 11.6 tok/s |
-| + attention parallel over heads, device IQ2_XS kernel | 6.7 tok/s | **12.5 tok/s** |
+| ffn all | 35.2 | proj 33.1 / gelu+mul 1.7 / norm+resid 0.4 |
+| norm+qkv | 16.6 | pre-attention norm + q,k,v projections |
+| attn out | 13.0 | o-projection 12.6 / norm+resid 0.5 |
+| head | 10.5 | 262k-vocab Q3_K tied head |
+| attention | 7.3 | CPU, grows with context |
+| qk norm+rope | 3.6 | CPU |
+| layer total | **76.0** | 48 layers |
 
-Sustained numbers over a 65-token generation (the 12.5 above is a 9-token sample, where
-the first tokens are cheaper): **decode 11.4 tok/s**, prefill 6.7 tok/s (21-token prompt),
-15.0 tok/s prefill on a 72-token prompt.
+## Kernel rates in isolation (`wubu_cuda_bench_shapes`, three rotating buffers, no L2 reuse)
 
-### Prefill: measured 2.3x available, blocked on an unexplained failure
-
-A batched device path (`M` rows per call, one upload/download for the batch) measured
-prefill **6.8 -> 15.4 tok/s** with identical greedy tokens on the real model, but its
-synthetic gate returns garbage for 3-9 of 64 columns at K=512. Switching the matvec
-kernel, and switching the dispatch to the generic kernel, both changed *which* columns
-fail, so the fault is inside the batched q8_K staging rather than the dot. An
-unexplained data-dependent failure is not shippable, so the path was removed (exports,
-bridge and gate) and prefill stays on the CPU path. The next attempt should build the
-batched path with its per-column gate first and treat a single wrong column as a stop
-condition.
-
-Decode is now **GPU-only for matvecs**: 202 matvecs per token, 202 on the device, 0 on the
-CPU (the last holdout was the 11 MB of IQ2_XS, 5 calls/token). Per-type/token: IQ3_S 95,
-IQ2_S 83, IQ3_XXS 14, IQ2_XS 5, IQ4_XS 4, Q3_K 1 (the head).
-| clean rebuild, CPU only | 6.6 tok/s | 5.7 tok/s |
-
-Note on rebuilding: the Makefile does not track header dependencies, so editing a
-header without `rm -f src/*.o` leaves objects of different struct layouts linked
-together. That produced 4.4 tok/s decode and a different greedy prefix once; after
-a clean rebuild the same source gives 5.7 (CPU) / 8.8 (GPU) and **CPU and GPU now
-agree on every greedy token** (45518, 107, 236775, ...), where the earlier GPU run
-diverged from step 10.
-
-The AVX2 port (ggml's x86 kernel) keeps the integer accumulation, so it agrees with the
-scalar port and the F32 reference to 2.9e-06 / 7.4e-07 relative, and it produces the same
-greedy tokens as the scalar run on this prompt.
-
-Decode is 9.9x faster; prefill 1.7x. Correctness: the kernels agree with the
-`gguf_dequantize()` reference to 1e-7 relative on 64 synthetic blocks per type (gate
-`test_eg111_iq_fused`). Greedy output matches the old run for 9 samples and then
-diverges, because activations are Q8_K-quantised instead of F32 — expected, not a bug.
-
-The head was the real bottleneck, and it is **Q3_K**, not Q4_0: the GGUF carries a single
-Q3_K `token_embd` (412 MB) and no code path had a Q3_K vec_dot, so every token
-dequantised the whole head to F32. EG-114 adds the fused Q3_K x Q8_K kernel; decode went
-1.1 -> 4.2 tok/s and prefill 1.0 -> 4.9 tok/s with identical greedy tokens.
-
-Remaining cost is now the layer weights themselves: 2.6 GB of IQ2_S/IQ3_S per token at
-~11 GB/s effective. Thread scaling is flat (4/8/12 threads: 0.9 / 1.0 / 1.1 tok/s before
-the head fix), so this is a bandwidth wall on the CPU path — the next real step is GPU
-residency with repacked tile layouts, not another kernel tweak.
-
-## Next engine work (replaces further gate work)
-
-1. Port `ggml_vec_dot_iq2_s_q8_K` and `ggml_vec_dot_iq3_s_q8_K` from the in-repo
-   reference `llama/ggml-cpu/quants.c` (plus `llama/ggml-common.h` block layouts and the
-   IQ2_S/IQ3_S grids already present as `src/iq2s_grid.inc`) to C11 in `src/`.
-2. Fuse them into `quantized_matmul_batched` for decode (M small): quantise the
-   activation row to Q8_K once, then dot per output column. No F32 weight buffer.
-3. Gate: identical logits vs the dequant+SGEMM path on 64 fixed random rows (max abs
-   diff under 1e-4 for F32 accumulate), then measure tok/s on the same command above.
-   Acceptance: decode > 1 tok/s with identical greedy token sequence on 20 prompts;
-   a speedup claim requires the measured number in this file, not a PASS line.
-
-## Residency plan wired into the GGUF loader (EG-110 integration)
-
-`WUBU_RESIDENCY_MB=N` (with `G4_STREAM_WEIGHTS=1`) now runs `wubu_residency_plan` over
-the real tensor sizes at load: one plan entry per layer for the attention group (hot)
-and one for the FFN group (streamed), with the remaining budget handed to the streamed
-weight cache as its cap. Measured, 8-token decode, same prompt:
-
-|Attention also had to be fixed for decode: its loop was `#pragma omp parallel for if(N>1)`
-over tokens, so with N == 1 all 48 layers ran on one core (8.4 ms/token for ~60k MACs per
-layer). Parallelising over (token, head) instead brought it to 5.2 ms. The same treatment
-applied to the Q/K head norms made things **worse** (3.5 -> 9.5 ms) because 96 OpenMP
-fork/join pairs per token cost more than the work they distribute, so that block stays
-serial and the reason is recorded in the code.
-
-Section split at 32 tokens of context (`G4_PROF=1`, per decode token):
-
-```
-layer total     76.0     ffn all       35.2   (proj 33.1, gelu 1.7, norm 0.4)
-norm+qkv        16.6     attn out      13.0   (o proj 12.6, norm+resid 0.5)
-attention        7.3     head          10.5
-qk norm+rope     3.6
-```
-
-Efficiency per section, against the 100 GB/s the IQ2_S kernel reaches in isolation:
-
-| section | bytes/token | ms | GB/s |
-|---|---|---|---|
-| ffn proj (2.7 GB) | 2700 MB | 33.1 | 82 |
-| norm+qkv (q,k,v) | 940 MB | 16.6 | 57 |
-| o proj (3072->3840) | 226 MB | 12.6 | **18** |
-| head (Q3_K, 1 GB) | 1030 MB | 10.5 | 98 |
-
-The o-projection moves 4.7 MB per layer in 0.26 ms, about 18 GB/s. Two candidate
-explanations were measured rather than assumed:
-
-- **transfer setup** (`wubu_cuda_bench_xfer`, 12 KB up + 15 KB down): 0.030 ms pageable
-  versus 0.018 ms pinned+async. At 202 matvecs/token that is 6.2 ms vs 3.7 ms, so pointer
-  setup is real but small - **not** the 0.21 ms gap. Pinned staging would buy ~2.5 ms/token
-  and is not worth the extra code yet.
-- **serialisation**: each call is upload -> q8k launch -> matvec launch -> synchronising
-  download, so the GPU drains between kernels and the host waits 202 times per token. The
-  o-projection's own kernel is ~0.05 ms of its 0.26 ms.
-
-Isolated kernel rates (`wubu_cuda_bench_shapes`, three rotating buffers, no L2 reuse):
-
-```
-ffn gate/up/down  N=15360 K=3840  0.190 ms   99.4 GB/s
-attn out (o proj) N= 3840 K=3072  0.040 ms   94.0 GB/s
-attn q            N= 3072 K=3840  0.042 ms   90.1 GB/s
-attn k/v          N= 1024 K=3840  0.019 ms   67.4 GB/s
-```
-
-So the o-projection kernel is **94 GB/s in isolation** and appears as 18 GB/s in the engine:
-the section's 0.26 ms per layer is ~0.04 ms of kernel, ~0.03 ms of transfer and ~0.19 ms of
-per-call sequencing (q8k launch, matvec launch, synchronising download, WDDM submit).
-Fusing q, k and v into one submission (one upload, one quantisation, one download of q|k|v)
-changed the qkv section by 0.2 ms/token - i.e. the cost is not the number of *transfers*
-either, it is the serialisation of ~200 small submissions per token.
-
-### Device KV cache: the memory arithmetic before the assembly
-
-A device-resident attention half-layer needs the KV cache on the card: `kvd` floats per
-position per layer, twice (K and V). For this model `kvd` is 2048 floats (8 KB), so a full
-4096-position context would need **3.2 GB** across 48 layers - impossible next to 4 GB of
-resident weights on a 6 GB card. At 256 positions it is ~192 MB, so the plan is a
-budgeted device KV (256-512 positions) with a CPU-attention fallback once the context
-outgrows it, rather than silently failing or evicting weights.
-
-Conclusion: the remaining cost is the sync-per-call structure, which only a device-resident
-layer (one submission per layer, one download) removes. That is the next unit; kernel
-tuning has plateaued at 67-99 GB/s for these block sizes.
-
-FFN breakdown after the fusion (`G4_PROF=1`, per decode token): proj 35.4 ms,
-gelu+mul 1.8 ms (was 7.5 with the tanh on one CPU core), norm+resid 0.4 ms. The fused
-path does one upload of the 3840-float input and one download of the 3840-float output
-per layer instead of three round trips.
-
-## What actually limited the device matvec (measured, three hypotheses falsified)
-
-The warp-per-column IQ2_S kernel streams 18.9 MB per FFN matvec at 78 GB/s - 38% of the
-card's 204 GB/s. Three candidate causes were tested on isolated buffers with no L2 reuse:
-
-| hypothesis | test | result |
+| shape | ms | GB/s |
 |---|---|---|
-| launch shape / occupancy | 2, 4, 8, 16 warps per block | 76.7-78.8 GB/s, flat -> **rejected** |
-| per-lane work per byte | two columns per warp (v4) | 83 GB/s, +6%, then slower than v3 after the f16 fix -> **rejected** |
-| fetch amplification (5 sectors per 82-byte block) | coalesced 3x32B read + shuffles (v5) | 77.5 GB/s, **worse** -> **rejected** |
+| ffn gate/up/down N=15360 K=3840 | 0.190 | 99.4 |
+| attn out (o proj) N=3840 K=3072 | 0.040 | 94.0 |
+| attn q N=3072 K=3840 | 0.042 | 90.1 |
+| attn k/v N=1024 K=3840 | 0.019 | 67.4 |
 
-The real limit was ALU: the hand-written `f16_to_f32_dev` (branch plus a normalise loop
-for subnormals) runs once per lane per block. Replacing it with `__half2float` took the
-kernel from **78 to 100 GB/s** (+28%) with no other change. v4 and v5 were removed rather
-than left in the tree, and the CPU-side q8_K quantiser swap measured neutral (93.5 vs
-93.7 ms/token) so it was reverted too.
+The kernels are not the limit. The same o-projection that runs at 94 GB/s alone appears as
+18 GB/s in the engine: its 0.26 ms per layer is ~0.04 ms kernel, ~0.03 ms transfer and
+~0.19 ms of per-call sequencing (q8_K launch, matvec launch, synchronising download, WDDM
+submit). ~200 such submissions per token is the dominant cost.
 
-Where the decode time goes now (`G4_PROF=1`, per decode token, 12B IQ2 model):
+Confirmed by measurement, not assumed:
 
-```
-[PROF] layer total       99.5 ms      (48 layers)
-[PROF] norm+qkv          22.0 ms      q/k/v projections + pre-attn norm
-[PROF] qk norm+rope       3.5 ms
-[PROF] attention          8.4 ms
-[PROF] attn out+resid    13.0 ms      o-proj + post-attn norm + residual
-[PROF] ffn all           52.5 ms      gate/up/down + gelu + norms
-[PROF] head              10.6 ms      262k-vocab Q3_K tied head
-```
+- fusing q/k/v into one submission (one upload, one quantisation, one download of q|k|v)
+  changed the qkv section by 0.2 ms/token — the number of *transfers* is not the limit;
+- pinned staging (`wubu_cuda_bench_xfer`): 0.030 ms -> 0.018 ms per call, i.e. 6.8 -> 3.2
+  ms/token across 202 calls — real, small, not the gap;
+- launch shape is flat (2/4/8/16 warps per block: 76-79 GB/s);
+- two columns per warp: +6%, and slower than one column once the fp16 fix landed;
+- coalesced 3x32 B block reads with shuffles: 8% worse.
 
-FFN is 2.7 GB of weights per token, so 52.5 ms means **51 GB/s effective** - about a
-quarter of the card's 204 GB/s. `wubu_cuda_bench_stages(20)` on the FFN shape with three
-rotating weight buffers (no L2 reuse) reports the same: 0.247 ms per 18.9 MB matvec =
-**76.5 GB/s**, versus 240 GB/s when the same buffer is re-read (L2 hits).
+What did move a kernel: replacing the hand-written fp16 decoder (branch plus a normalise
+loop for subnormals) with `__half2float` took IQ2_S from 78 to 100 GB/s.
 
-The cause is the access pattern, not occupancy: the warp-per-column kernel walks one
-column's 82-byte blocks while the eight warps of a block read columns 15 KB apart, so
-DRAM sees 82-byte scattered reads instead of 128-byte lines. Split-K was tried and
-measured neutral (21.9 vs 21.5 ms for qkv), which rules out occupancy.
+## Constraint: device KV memory
 
-Where the decode time goes now (WUBU_GPU_STATS=1, 9 decode tokens):
+`kvd` is 2048 floats (8 KB) per position per layer, twice (K and V). A 4096-position context
+needs **3.2 GB** of device KV across 48 layers, which does not fit beside 4.0 GB of resident
+weights on a 6 GB card. A budgeted device KV of 256-512 positions costs 192-384 MB, which
+does, with CPU attention as the fallback past that.
 
-```
-[GPU stats] type  calls   ms_total  MiB(touched)     [CPU stats] decode_calls  decode_ms
-           11       8       85.7     (Q3_K head)      11      0        0.0
-           18     160       33.3     (IQ3_XXS)        18      0        0.0
-           21     760      181.1     (IQ3_S)          21      0        0.0
-           22    1632      360.4     (IQ2_S)          22      0        0.0
-           23      32       11.1     (IQ4_XS)         23      0        0.0
-                                                      17     40       37.6  (IQ2_XS, 4.2 ms/tok)
-```
+## Correctness bar
 
-Every matvec except the 5 IQ2_XS tensors (11 MB) is device-resident during decode. GPU
-time is ~23 ms of the 97 ms forward, so the remaining ~70 ms/token is not matvec work at
-all: it is the rest of the forward (norms, attention, MoE routing, head quantisation).
-That is the next thing to instrument, not another kernel.
-|---|---|---|---|---|---|
-| mmap, no streaming | - | - | 1.0 tok/s | **1.1 tok/s** | - |
-| streamed | 3072 MiB | 2199 MiB | **3.4 tok/s** | 0.4 tok/s | 217 / 2744 |
-| streamed | 6144 MiB | 5271 MiB | 3.3 tok/s | 0.9 tok/s | 2850 / 111 |
-| streamed | 8192 MiB | 7319 MiB | 3.4 tok/s | 0.9 tok/s | 2850 / 111 |
+An engine change is accepted only if the greedy token sequence is unchanged
+(45518, 107, 236775, 818, 6590, ...) and the relevant gate passes. Kernel gates compare
+against `gguf_dequantize`, never against another port of unknown provenance:
 
-Streaming is **3.4x faster on prefill** (sequential reads + the one-layer-lookahead
-prefetch thread) and slightly slower on decode (0.9 vs 1.1 tok/s) even when the whole
-streamed set is cached, because every matmul copies bytes out of the cache instead of
-reading the mmap directly. Below ~4.4 GiB of cache the streamed set (2720 MiB) does not
-stay resident and decode collapses to 0.4 tok/s.
+| gate | what it proves |
+|---|---|
+| EG-111 / 113 / 114 / 120 / 121 | fused IQ2_S, Q4_0, Q3_K, IQ3_XXS, IQ4_XS dots vs the dequantiser |
+| EG-119 | fp4 layouts (NVFP4 40, Q2_0 42, MXFP4 39) vs the file's own offsets and the E2M1 lattice |
+| EG-122 | device kernels per column vs the CPU ports, and M-row batching |
+| EG-123 | device RMS norm / residual / RoPE / attention vs transcripts of the CPU routines |
 
-## Windows GPU lane (blocked, documented)
+Prefill note: a batched M-row device path measured prefill 6.8 -> 15.4 tok/s with identical
+tokens, but its synthetic gate returns garbage for a few columns at K=512 and the cause is
+unidentified, so it is not shipped — prefill stays on the CPU path.
 
-`Makefile.win` now has a `%.o: %.cu` rule, a `gpu-probe` target and a
-`gen_text_gemma4_gpu` target. Status:
+## Next
 
-- Compile clean with nvcc 13.5 / sm_89: `gpu_gemma4_forward.cu`, `gpu_quant_matmul.cu`
-  (needed a `__builtin_memcpy` -> `memcpy` shim for the MSVC host compiler),
-  `gpu_quant_matmul_row_major.cu`, `flash_attn_q4_0_opt.cu`,
-  `flash_attn_q4_0_prefill_opt.cu`.
-- Do not compile on Windows: `src/gpu_gemma4.cu` (passes `cudaStream_t*` where a
-  `cudaStream_t` is expected; the Linux GPU target never linked it either) and
-  `src/cuda_kernels.cu` (SSM kernels use runtime `__constant__` dims as template
-  arguments; tracked separately).
-- Link fails by design: nvcc and `cudart.lib` emit MSVC-ABI objects;
-  `ld.exe` (MinGW) cannot resolve `__security_cookie`, `__GSHandlerCheck`,
-  `_Init_thread_epoch`. A Windows GPU engine needs an MSVC/cl.exe link lane
-  (host objects built with cl, or a link.exe step), not a MinGW link. The recipe is
-  kept in `Makefile.win` as the starting point for that lane.
-- The `gen_text_gemma4_gpu` binary at the repo root is a stale Linux ELF and cannot run
-  here (`Exec format error`).
+Assemble the device attention half-layer. The primitives exist and are gated at the model's
+real dimensions (`rms_norm_row_kernel`, `residual_add_kernel`, `rope_kernel` 2.1e-06,
+`attn_decode_kernel` 2.1e-06 with 16 heads / 8 kv heads / head_dim 256 / kv_len 21,
+`kv_append_kernel`).
+
+A first composite (`q,k,v -> norms -> RoPE -> KV append -> attention -> o-proj` in one
+submission, with a per-layer device KV cache primed from the CPU cache) was built and
+removed rather than shipped: after fixing two real RoPE bugs it reproduced q, k and v to
+1e-06 against the CPU sequence, but its attention output still differed by 1-3 max-abs
+while the attention kernel itself matches the CPU at those exact dimensions. The remaining
+suspect is the device KV contents (prime + append), so the next step is to dump the device
+KV for one layer and diff it against the CPU cache before rebuilding the composite.

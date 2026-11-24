@@ -1091,7 +1091,12 @@ __global__ void rope_kernel(float * __restrict__ q, float * __restrict__ k,
                             int n_q_heads, int n_k_heads)
 {
     const int half = n_rot / 2;
-    for (int h = blockIdx.y; h < n_q_heads; h += gridDim.y) {
+    /* The grid is dim3(1, n_q_heads, n_k_heads), so a Q head must be rotated once, not
+     * once per (y,z) block: guard on z == 0. (K takes the symmetric guard on y == 0 below.)
+     * Without these two guards the same head is rotated n_k_heads or n_q_heads times, which
+     * measures as a max-abs error of ~12 on q while k and v stay exact. */
+    if (blockIdx.z != 0) { }
+    else for (int h = blockIdx.y; h < n_q_heads; h += gridDim.y) {
         float *qv = q + (size_t)blockIdx.x * q_stride + (size_t)h * d_head;
         for (int j = threadIdx.x; j < half; j += blockDim.x) {
             const float ff = freqs ? freqs[j] : 1.0f;
@@ -1103,7 +1108,10 @@ __global__ void rope_kernel(float * __restrict__ q, float * __restrict__ k,
             qv[j + half] = q0 * st + q1 * ct;
         }
     }
-    if (!k) return;
+    /* K must be rotated ONCE per head, not once per (q head x k head) block: the grid is
+     * dim3(1, n_q_heads, n_k_heads), so without this guard every block with the same z
+     * re-rotated the same K head - measured as a 1.4 max-abs error on k. */
+    if (!k || blockIdx.y != 0) return;
     for (int h = blockIdx.z; h < n_k_heads; h += gridDim.z) {
         float *kv = k + (size_t)blockIdx.x * k_stride + (size_t)h * d_head;
         for (int j = threadIdx.x; j < half; j += blockDim.x) {
@@ -1193,73 +1201,6 @@ WUBU_EXPORT int wubu_cuda_attn_dev(const float *d_q, const float *d_kc, const fl
     attn_decode_kernel<<<n_heads, 128, (size_t)kv_len * sizeof(float)>>>(
         d_q, d_kc, d_vc, d_out, n_heads, n_kv_heads, hd, kv_start, kv_len, kvd);
     return cudaGetLastError() == cudaSuccess ? 0 : -3;
-}
-
-__global__ void kv_append_kernel(float * __restrict__ kc, float * __restrict__ vc,
-                                 const float * __restrict__ ksrc, const float * __restrict__ vsrc,
-                                 int pos, int kvd);
-
-/* Whole attention half of a layer for one decode position, in ONE submission:
- * q8k(x) -> q,k,v matvecs -> per-head RMS norms -> RoPE -> KV append -> attention ->
- * o-projection. Everything stays in device memory; the caller uploads the normalised
- * hidden state and downloads the projected attention output.
- * kq_scale is 1.0 for Gemma 4, so the scores are unscaled dot products. */
-WUBU_EXPORT int wubu_cuda_attn_half_dev(
-        const void *d_wq, const void *d_wk, const void *d_wv, const void *d_wo, int type,
-        const float *d_x, float *d_q, float *d_k, float *d_v,
-        float *d_kc, float *d_vc, float *d_attn, float *d_out,
-        const float *d_qn, const float *d_kn,
-        int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
-        int pos, int kv_start, int kv_len,
-        long long sq, long long sk, long long sv, long long so,
-        float pos_f, int n_rot, float theta_scale, const float *d_freqs)
-{
-    if (!d_wq || !d_wk || !d_wv || !d_wo || !d_x || !d_out) return -1;
-    if (ensure_q8_scratch(hidden) != 0) return -2;
-
-    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
-    int rc;
-    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else                 rc = wubu_cuda_quant_matvec(d_wq, type, g_q8_scratch, d_q, hidden, qd, sq);
-    if (rc != 0) return -3;
-    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else                 rc = wubu_cuda_quant_matvec(d_wk, type, g_q8_scratch, d_k, hidden, kvd, sk);
-    if (rc != 0) return -4;
-    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else                 rc = wubu_cuda_quant_matvec(d_wv, type, g_q8_scratch, d_v, hidden, kvd, sv);
-    if (rc != 0) return -5;
-
-    /* Per-head norms: Q and K with their learned weights, V with none (Gemma 4). */
-    rms_norm_row_kernel<<<n_heads, 256>>>(d_q, d_qn, d_q, hd, 1e-6f, 1);
-    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_k, d_kn, d_k, hd, 1e-6f, 1);
-    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_v, NULL, d_v, hd, 1e-6f, 0);
-
-    rope_kernel<<<dim3(1, n_heads, n_kv_heads), 128>>>(
-        d_q, d_k, pos_f, hd, qd, kvd, n_rot, theta_scale, d_freqs, n_heads, n_kv_heads);
-
-    kv_append_kernel<<<(kvd + 255) / 256, 256>>>(d_kc, d_vc, d_k, d_v, pos, kvd);
-
-    if (wubu_cuda_attn_dev(d_q, d_kc, d_vc, d_attn, n_heads, n_kv_heads, hd,
-                           kv_start, kv_len, kvd) != 0) return -6;
-
-    if (ensure_q8_scratch(qd) != 0) return -2;
-    quantize_q8k_kernel<<<qd / QK_K, 32>>>(d_attn, g_q8_scratch, qd);
-    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else                 rc = wubu_cuda_quant_matvec(d_wo, type, g_q8_scratch, d_out, qd, hidden, so);
-    if (rc != 0) return -7;
-    return cudaGetLastError() == cudaSuccess ? 0 : -8;
 }
 
 /* Append one token's k/v into the device KV cache (kvd floats each). */
