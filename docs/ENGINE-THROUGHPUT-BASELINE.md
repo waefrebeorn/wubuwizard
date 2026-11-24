@@ -344,6 +344,25 @@ M-row kernels agree with each other to float precision while disagreeing with th
 unproven stays gated behind `G4_XXS_MMA`, and the next step is a harness that computes both paths into
 separate buffers within one process and compares them **before** any other code touches those buffers.
 
+### Rule: an instrument must be checked against a known answer before it is believed
+
+Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
+looked plausible:
+
+- per-layer FFN dumps reporting 3% differences between two builds whose **end-to-end output is
+  bit-identical** - impossible, so the dumps were measuring the wrong buffer;
+- a logits dump whose **argmax does not equal the token the engine printed** - so it is not the row that
+  gets sampled;
+- a cross-process comparison whose two runs had already diverged upstream;
+- an in-process A/B that flagged a known-good layer as 6x wrong.
+
+The rule that catches all four, and now governs anything added here: **an instrument must first
+reproduce something already known.** A logits dump must have `argmax == printed token`. A per-layer dump
+must show zero difference between two builds that produce identical text. Until it does, its numbers are
+not evidence. This file has learned that from the benchmark side twice and from the per-layer side twice
+more; it is written down so it is not relearned a fifth time.
+
+
 ### WITHDRAWN: the bisect, because mixing the two FFN paths breaks the model on its own
 
 Before trusting the layer-by-layer bisect, a control that should have come first: fuse **one** layer whose
@@ -367,28 +386,6 @@ The only comparisons trusted from here on are **end-to-end, all-one-path** runs:
 both reproduce the reference tokens exactly, and all-fused-with-the-XXS-kernels does not. Finding why
 mixing breaks is now the blocker for every per-layer experiment in this file, and it is where the next
 work goes.
-
-### WITHDRAWN: the bisect, because mixing the two FFN paths breaks the model on its own
-
-`G4_FUSE_LAYER=<n>` fuses exactly one layer with everything else on the host path:
-
-    only layer  1 fused   236779 236779 236779 236779 236779 236779 236779 236761
-    only layer  5 fused    366 236761 650 236761 236767 236750 236761 236750
-    only layer  8 fused   236761 236772 236772 236772 236772 236772 236772 236772
-    only layer 11 fused   236779 22291 22291 22291 22291 22291 22291 22291
-    only layer 47 fused   45518 107 236775 818 6590 529 1972 563        <- baseline, correct
-
-Layers 1, 5, 8 and 11 all break it; layer 47 - the last layer - is exactly right, and the counter confirms
-it really did fuse (`fused=1`). The five layers have the same quant types (18/18/21 for layer 1, 18/18/23
-for the rest) and the same dimensions, so the types do not explain the split, and layer 47 proves the
-kernel can produce correct output on this data.
-
-What separates 47 from the others is **depth**: an error injected at layer 47 reaches the logits through
-one layer, an error at layer 1 reaches them through 46. So the working hypothesis is now that the XXS
-path carries a small but non-trivial error - ~7% of elements differ from the host by more than 10% of
-scale - which the network amplifies over the remaining layers, while the same magnitude at the last
-layer is absorbed. That would mean the kernel is not exact in a way that matters even though it is not
-"wrong" in a way any single-layer comparison detects.
 
 ### The valid experiment: the kernels match the host, and fusing those layers still breaks the model
 
