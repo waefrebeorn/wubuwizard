@@ -58,7 +58,10 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | before (dequant to F32 per call) | 21 tok in 53.21 s (0.4 tok/s) | 13 tok in 183.15 s (0.1 tok/s) |
 | scalar fused Q8_K vec_dot | 21 tok in 31.56 s (0.7 tok/s) | 13 tok in 18.57 s (0.7 tok/s) |
 | AVX2 fused Q8_K vec_dot | 21 tok in 20.12 s (1.0 tok/s) | 13 tok in 11.63 s (1.1 tok/s) |
-| + fused Q3_K LM head (EG-114) | 21 tok in 4.27 s (4.9 tok/s) | 13 tok in 3.06 s (**4.2 tok/s**) |
+| + fused Q3_K LM head (EG-114) | 21 tok in 4.27 s (4.9 tok/s) | 13 tok in 3.06 s (4.2 tok/s) |
+| + fused IQ4_XS dot (EG-116) | 4.9 tok/s | 4.5 tok/s |
+| + fused IQ2_XS dot (EG-117) | 6.7 tok/s | **5.2 tok/s** |
+| + same, `G4_GPU=1` (device IQ2_S/IQ3_S/Q3_K/Q4_0) | - | **7.6 tok/s** |
 
 The AVX2 port (ggml's x86 kernel) keeps the integer accumulation, so it agrees with the
 scalar port and the F32 reference to 2.9e-06 / 7.4e-07 relative, and it produces the same

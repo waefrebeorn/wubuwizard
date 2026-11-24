@@ -613,6 +613,7 @@ static int g4_qweight_stream_f32(const g4_qweight_t *w, float **out)
 }
 
 static struct { double ms; long calls; } G4_CPU_STATS[64];
+static struct { double ms; long calls; } G4_CPU_DEC_STATS[64];  /* M == 1 only */
 static int G4_CPU_STATS_hooked;
 
 static double g4_now_ms(void)
@@ -632,11 +633,12 @@ static double g4_now_ms(void)
 static void g4_cpu_stats_dump(void)
 {
     if (!getenv("WUBU_GPU_STATS")) return;
-    fprintf(stderr, "[CPU stats] type  calls   ms_total\n");
+    fprintf(stderr, "[CPU stats] type  calls   ms_total   decode_calls  decode_ms\n");
     for (int t = 0; t < 64; ++t)
         if (G4_CPU_STATS[t].calls)
-            fprintf(stderr, "[CPU stats] %4d %7ld %9.1f\n", t,
-                    G4_CPU_STATS[t].calls, G4_CPU_STATS[t].ms);
+            fprintf(stderr, "[CPU stats] %4d %7ld %9.1f   %7ld %9.1f\n", t,
+                    G4_CPU_STATS[t].calls, G4_CPU_STATS[t].ms,
+                    G4_CPU_DEC_STATS[t].calls, G4_CPU_DEC_STATS[t].ms);
 }
 
 void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
@@ -739,8 +741,13 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
     quantized_matmul_batched(x, w->data, w->ggml_type,
                              (int64_t)K, (int64_t)N, col_stride, M, c);
     if (w->ggml_type >= 0 && w->ggml_type < 64) {
+        const double dt = g4_now_ms() - t_cpu0;
         G4_CPU_STATS[w->ggml_type].calls++;
-        G4_CPU_STATS[w->ggml_type].ms += g4_now_ms() - t_cpu0;
+        G4_CPU_STATS[w->ggml_type].ms += dt;
+        if (M == 1) {
+            G4_CPU_DEC_STATS[w->ggml_type].calls++;
+            G4_CPU_DEC_STATS[w->ggml_type].ms += dt;
+        }
     }
 }
 

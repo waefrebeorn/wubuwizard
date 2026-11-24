@@ -25,6 +25,7 @@
 #include "wubu_vecdot_iq.h"
 #include "wubu_vecdot_q4_0.h"
 #include "wubu_vecdot_q3_k.h"
+#include "wubu_vecdot_iq2xs.h"
 
 // ========================================================================
 // Block sizes (from ggml-common.h)
@@ -290,6 +291,7 @@ void quantized_matmul(const float *x,
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
         case GGML_TYPE_Q4_0:    dot_fn = (vec_dot_fn)wubu_vec_dot_q4_0_q8_k_vd; break;
         case GGML_TYPE_Q3_K:    dot_fn = (vec_dot_fn)wubu_vec_dot_q3_k_q8_k_vd; break;
+        case GGML_TYPE_IQ2_XS:  dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_xs_q8_k_vd; break;
         case GGML_TYPE_IQ2_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
         case GGML_TYPE_IQ3_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
@@ -463,6 +465,7 @@ void quantized_matmul_from_q8(const void *q8_x,
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
         case GGML_TYPE_Q4_0:    dot_fn = (vec_dot_fn)wubu_vec_dot_q4_0_q8_k_vd; break;
         case GGML_TYPE_Q3_K:    dot_fn = (vec_dot_fn)wubu_vec_dot_q3_k_q8_k_vd; break;
+        case GGML_TYPE_IQ2_XS:  dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_xs_q8_k_vd; break;
         case GGML_TYPE_IQ2_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
         case GGML_TYPE_IQ3_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
@@ -531,7 +534,6 @@ void quantized_matmul_batched(const float *x,
 
     if (weight_type == GGML_TYPE_F16 || weight_type == GGML_TYPE_BF16 || weight_type == 30 ||
         weight_type == GGML_TYPE_IQ1_M || weight_type == GGML_TYPE_IQ1_S ||
-        weight_type == GGML_TYPE_IQ2_XS ||
         weight_type == GGML_TYPE_Q2_K ||
         weight_type == GGML_TYPE_Q8_0) {
         for (int i = 0; i < N; i++)
@@ -573,6 +575,7 @@ void quantized_matmul_batched(const float *x,
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
         case GGML_TYPE_Q4_0:    dot_fn = (vec_dot_fn)wubu_vec_dot_q4_0_q8_k_vd; break;
         case GGML_TYPE_Q3_K:    dot_fn = (vec_dot_fn)wubu_vec_dot_q3_k_q8_k_vd; break;
+        case GGML_TYPE_IQ2_XS:  dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_xs_q8_k_vd; break;
         case GGML_TYPE_IQ2_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
         case GGML_TYPE_IQ3_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;

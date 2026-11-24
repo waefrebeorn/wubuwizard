@@ -90,6 +90,8 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
 CORE_OBJ += src/wubu_vecdot_iq.o
 CORE_OBJ += src/wubu_vecdot_q4_0.o
 CORE_OBJ += src/wubu_vecdot_q3_k.o
+CORE_OBJ += src/wubu_vecdot_iq4xs.o
+CORE_OBJ += src/wubu_vecdot_iq2xs.o
 CORE_OBJ += src/wubu_gpu.o
 CORE_OBJ += src/wubu_residency.o
 CORE_OBJ += src/wubu_ev_depth.o
@@ -679,6 +681,14 @@ CUDA_LIB83 = C:/PROGRA~1/NVIDIA~2/CUDA/v13.5/lib/x64
 
 gen_text_gemma4_gpu: tools/gen_text_gemma4.c $(G4_GPU_OBJ)
 	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ tools/gen_text_gemma4.c $(G4_GPU_OBJ) -L$(CUDA_LIB83) -lcudart -lcublas -fopenmp -lm -lstdc++
+
+# EG-117: fused IQ2_XS x Q8_K dot.
+test_eg117_iq2xs: tools/test_eg117_iq2xs.c src/wubu_vecdot_iq2xs.c src/wubu_vecdot_iq4xs.c src/gguf_reader.c src/quantized_dot_generic.c src/wubu_win.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-116: fused IQ4_XS x Q8_K dot.
+test_eg116_iq4xs: tools/test_eg116_iq4xs.c src/wubu_vecdot_iq4xs.c src/gguf_reader.c src/quantized_dot_generic.c src/wubu_win.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-114: fused Q3_K x Q8_K dot (the 12B Gemma-4 GGUF's LM head).
 test_eg114_q3_k: tools/test_eg114_q3_k.c src/wubu_vecdot_q3_k.c src/gguf_reader.c src/quantized_dot_generic.c src/wubu_win.c

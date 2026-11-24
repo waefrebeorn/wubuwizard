@@ -228,6 +228,68 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Microbenchmark: 3 matvecs sharing one input, separate calls vs one batch.
+     * This decides whether batching per layer is worth the engine surgery. */
+    {
+        typedef void *(*fa_t)(unsigned long long);
+        typedef int (*fu_t)(void *, const void *, unsigned long long);
+        typedef int (*fdn_t)(void *, const void *, unsigned long long);
+        typedef int (*ffr_t)(void *);
+        typedef int (*fmv2_t)(const void *, const void *, float *, int, int, long long);
+        typedef int (*fq8_t)(const void *, void *, int);
+        fa_t fa = (fa_t)(void *)GetProcAddress(h, "wubu_cuda_alloc");
+        fu_t fu = (fu_t)(void *)GetProcAddress(h, "wubu_cuda_upload");
+        fdn_t fd = (fdn_t)(void *)GetProcAddress(h, "wubu_cuda_download");
+        ffr_t ff = (ffr_t)(void *)GetProcAddress(h, "wubu_cuda_free_dev");
+        fmv2_t fm = (fmv2_t)(void *)GetProcAddress(h, "wubu_cuda_matvec_iq2s_v2");
+        fq8_t fq = (fq8_t)(void *)GetProcAddress(h, "wubu_cuda_quantize_q8k_dev");
+        if (fa && fu && fd && ff && fm && fq) {
+            enum { BK2 = 3840, BN2 = 3840 };           /* attention-shaped matvec */
+            const int cb = WUBU_IQ2S_BLOCK_SIZE * (BK2 / QK_K);
+            uint8_t *w3 = (uint8_t *)malloc((size_t)BN2 * cb * 3);
+            float *x3 = (float *)malloc(sizeof(float) * BK2);
+            float *o3 = (float *)malloc(sizeof(float) * BN2 * 3);
+            if (w3 && x3 && o3) {
+                memset(w3, 0x5A, (size_t)BN2 * cb * 3);
+                for (int j = 0; j < BK2; ++j) x3[j] = (float)(j % 7) * 0.01f;
+                void *dw = fa((unsigned long long)((size_t)BN2 * cb * 3));
+                void *dq = fa(8192);
+                float *dy = (float *)fa((unsigned long long)((size_t)BN2 * sizeof(float)));
+                float *dx = (float *)fa((unsigned long long)((size_t)BK2 * sizeof(float)));
+                if (dw && dq && dy && dx && fu(dw, w3, (unsigned long long)((size_t)BN2 * cb * 3)) == 0) {
+                    const int REPS = 20;
+                    double t0 = now_s();
+                    for (int r = 0; r < REPS; ++r) {
+                        for (int m = 0; m < 3; ++m) {
+                            fu(dx, x3, (unsigned long long)(BK2 * sizeof(float)));
+                            fq(dx, dq, BK2);
+                            fm((uint8_t *)dw + (size_t)m * BN2 * cb, dq, dy, BK2, BN2, cb);
+                            fd(o3 + (size_t)m * BN2, dy, (unsigned long long)(BN2 * sizeof(float)));
+                        }
+                    }
+                    const double per_call = (now_s() - t0) / REPS;
+                    /* batched: one upload, one quantize, 3 kernels, one sync via last download */
+                    t0 = now_s();
+                    for (int r = 0; r < REPS; ++r) {
+                        fu(dx, x3, (unsigned long long)(BK2 * sizeof(float)));
+                        fq(dx, dq, BK2);
+                        for (int m = 0; m < 3; ++m)
+                            fm((uint8_t *)dw + (size_t)m * BN2 * cb, dq, dy, BK2, BN2, cb);
+                        fd(o3, dy, (unsigned long long)(BN2 * sizeof(float)));
+                    }
+                    const double per_batch = (now_s() - t0) / REPS;
+                    printf("EG-115 bench 3x(3840x3840): separate %.2f ms  shared-upload %.2f ms  gain %.2fx\n",
+                           per_call * 1000.0, per_batch * 1000.0, per_call / (per_batch > 1e-9 ? per_batch : 1e-9));
+                }
+                if (dw) ff(dw);
+                if (dq) ff(dq);
+                if (dy) ff(dy);
+                if (dx) ff(dx);
+            }
+            free(w3); free(x3); free(o3);
+        }
+    }
+
     /* Bench: FFN-shaped IQ2_S matvec (15360 columns x 3840). */
     {
         enum { BK = 3840, BN = 15360 };
