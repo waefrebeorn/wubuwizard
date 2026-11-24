@@ -320,6 +320,35 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The memory system is not the limit, and neither is the codebook
+
+Two direct measurements, both negative, both worth more than the guesses they replace.
+
+**Bandwidth.** 1 GiB read with the kernel's own pattern - 110 bytes per lane, byte loads, no vector
+types - runs at **143.1 GB/s**. The matvecs move weight bytes at ~21 GB/s. A 7x gap with the memory
+system doing exactly what the kernels ask of it, so layout, alignment, sector straddling and vector
+width are all innocent.
+
+**Codebook staging.** The gather is one divergent lookup per four weights, and the theory was that a
+4 GB stream thrashes the 8 KiB table out of L1/L2 so every lookup misses. Staged in shared memory,
+once per long-lived block that strides over many columns rather than owning one:
+
+    baseline   17.6 tok/s      17.6
+    staged     17.6 tok/s      17.6      tokens exact
+
+Neutral. Shared memory is no faster than the L1 the gathers were already hitting, which also says the
+gathers were hitting cache all along.
+
+Together these bound what is left inside these kernels: the decomposition put the entire decode at
+18%, and both ways of attacking it - fewer lookups per weight, and cheaper lookups - come back neutral.
+What remains is the row count, and that is capped by registers (see the MT table below), not by
+anything the kernel can restructure locally.
+
+**Measurement discipline, learned the hard way twice:** every A/B in this document has to be
+interleaved on an idle card. The same binary measures 16.0-16.1 tok/s with a test suite running and
+17.6-19.0 alone - a larger spread than three of the changes I was trying to measure. Both wrong
+verdicts recorded here (MT=16 "worse", then "better") came from ignoring that.
+
 ### IQ3_S reads its weights better than it looks, which is why fixing it changed nothing
 
 `iq3s_matvec_mrow_kernel` walks `for (b = lane; b < nblocks; b += 32)`, so every lane takes a
