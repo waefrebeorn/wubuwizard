@@ -1368,17 +1368,33 @@ static double G4_P[G4P_COUNT];
 static long G4_P_TOKENS;
 static int G4_P_hooked;
 
+static double G4_PP[G4P_COUNT];   /* prefill totals, absolute ms over one prefill */
+static int    G4_PP_ON = -1;
+
+/* One accumulator for both shapes: N==1 goes to the decode table, N>1 to the prefill table when
+ * G4_PROF_PREFILL is set. Before this, every phase accumulator was gated on N==1, so prefill had
+ * no attribution at all and "where the time goes" was guesswork four times over. */
+static void g4p_acc(int slot, int N, double ms)
+{
+    if (N == 1) { G4_P[slot] += ms; return; }
+    if (G4_PP_ON < 0) G4_PP_ON = getenv("G4_PROF_PREFILL") ? 1 : 0;
+    if (G4_PP_ON) G4_PP[slot] += ms;
+}
+
 static void g4_prof_dump(void)
 {
-    if (!getenv("G4_PROF") || G4_P_TOKENS <= 0) return;
+    const int want_dec = getenv("G4_PROF") && G4_P_TOKENS > 0;
+    if (!want_dec && G4_PP_ON != 1) return;
     static const char *names[G4P_COUNT] = {
         "layer total", "norm+qkv", "qk norm+rope", "kv store", "attention",
         "attn out+resid", "ffn all", "head", "  ffn proj", "  ffn gelu+mul", "  ffn norm+resid",
         "  o proj", "  attn norm+resid"
     };
-    fprintf(stderr, "[PROF] per decode token over %ld tokens (ms):\n", G4_P_TOKENS);
-    for (int i = 0; i < G4P_COUNT; ++i)
-        fprintf(stderr, "[PROF] %-14s %8.2f\n", names[i], G4_P[i] / (double)G4_P_TOKENS);
+    if (want_dec) {
+        fprintf(stderr, "[PROF] per decode token over %ld tokens (ms):\n", G4_P_TOKENS);
+        for (int i = 0; i < G4P_COUNT; ++i)
+            fprintf(stderr, "[PROF] %-14s %8.2f\n", names[i], G4_P[i] / (double)G4_P_TOKENS);
+    }
     {
         long total = 0;
         for (int t = 0; t < 64; ++t) total += G4_DEC_TYPE_CALLS[t];
@@ -1392,6 +1408,11 @@ static void g4_prof_dump(void)
             fprintf(stderr, "[PROF]   type %2d: %.1f calls/token, %.1f on GPU\n", t,
                     (double)G4_DEC_TYPE_CALLS[t] / (double)G4_P_TOKENS,
                     (double)G4_DEC_TYPE_GPU[t] / (double)G4_P_TOKENS);
+    if (G4_PP_ON == 1) {
+        fprintf(stderr, "[PROF] prefill totals (ms, whole prompt):\n");
+        for (int i = 0; i < G4P_COUNT; ++i)
+            if (G4_PP[i] != 0.0) fprintf(stderr, "[PROF] %-14s %9.1f\n", names[i], G4_PP[i]);
+    }
     wubu_gpu_stage_report();
 }
 
@@ -1403,7 +1424,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     if (!G4_P_hooked) { G4_P_hooked = 1; atexit(g4_prof_dump); }
     const double _pt0 = g4_now_ms();
     double _pk = _pt0;
-    #define G4P_ADD(slot, from) do { if (N == 1) { const double _n = g4_now_ms(); G4_P[slot] += _n - (from); } } while (0)
+    #define G4P_ADD(slot, from) do { const double _n = g4_now_ms(); g4p_acc(slot, N, _n - (from)); } while (0)
     g4_layer_t *layer = &model->layers[il];
     /* G4_XIN: capture this layer's input, so a dump can distinguish "different input" from
      * "same input, different output" instead of assuming which one it is. */
@@ -1733,7 +1754,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     wubu_gpu_tag = 2;
     g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
     wubu_gpu_tag = 0;
-    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_OPROJ] += _t - _po0; _pk = _t; }
+    { const double _t = g4_now_ms(); g4p_acc(G4P_OPROJ, N, _t - _po0); _pk = _t; }
     }   /* end: !half_done */
 
     /* Is the attention-row difference visible after the o-projection? ADIFF says some layers'
@@ -1811,7 +1832,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         }
     }
 
-    if (N == 1) G4_P[G4P_ATTN_NORM] += g4_now_ms() - _pk;
+    g4p_acc(G4P_ATTN_NORM, N, g4_now_ms() - _pk);
     G4P_ADD(G4P_ATTNOUT, _pk); _pk = g4_now_ms();
 
     /* ===== FFN ===== */
@@ -1847,7 +1868,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         g4_batched_qmatmul(normed, &layer->ffn_gate, N, G4_FFN, G4_HIDDEN, ffn_gate);
         g4_batched_qmatmul(normed, &layer->ffn_up,   N, G4_FFN, G4_HIDDEN, ffn_up);
     }
-    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_PROJ] += _t - _pf0; _pk = _t; }
+    { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_PROJ, N, _t - _pf0); _pk = _t; }
 
     /* GELU + element-wise multiply (OpenMP parallel) */
     if (!ffn_dev_done) {
@@ -1860,11 +1881,11 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             ffn_up[i] *= ffn_gate[i];
     }
 
-    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_GELU] += _t - _pk; _pk = _t; }
+    { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_GELU, N, _t - _pk); _pk = _t; }
     if (!ffn_dev_done)
         g4_batched_qmatmul(ffn_up, &layer->ffn_down, N, G4_HIDDEN, G4_FFN, ffn_down_out);
         wubu_gpu_tag = 0;
-    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_PROJ] += _t - _pk; _pk = _t; }
+    { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_PROJ, N, _t - _pk); _pk = _t; }
 
     /* Post-FFN norm + residual */
     #pragma omp parallel for if(N > 1)
@@ -1875,8 +1896,8 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             x[(size_t)t * G4_HIDDEN + d] += ffn_down_out[(size_t)t * G4_HIDDEN + d];
     }
 
-    if (N == 1) { G4_P[G4P_FFN_NORM] += g4_now_ms() - _pk; G4_P[G4P_FFN] += g4_now_ms() - _pf0; }
-    if (N == 1) G4_P[G4P_LAYER] += g4_now_ms() - _pt0;
+    { const double _t = g4_now_ms(); g4p_acc(G4P_FFN_NORM, N, _t - _pk); g4p_acc(G4P_FFN, N, _t - _pf0); _pk = _t; }
+    g4p_acc(G4P_LAYER, N, g4_now_ms() - _pt0);
     #undef G4P_ADD
 
     if (layer->has_out_scale) {
@@ -1950,7 +1971,7 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
         g4_rms_norm(x + (size_t)t * G4_HIDDEN, model->output_norm_weight,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
 
-    if (N == 1) { ++G4_P_TOKENS; G4_P[G4P_HEAD] -= g4_now_ms(); }
+    { if (N == 1) ++G4_P_TOKENS; g4p_acc(G4P_HEAD, N, -g4_now_ms()); }
 
     /* ===== LM head (Q3_K tied embedding, or cached F32 matvec) ===== */
     /* Prefill only ever consumes the LAST row's logits - generation samples from the final
@@ -1982,7 +2003,7 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
         wubu_gpu_tag = 0;
     }
 
-    if (N == 1) G4_P[G4P_HEAD] += g4_now_ms();
+    g4p_acc(G4P_HEAD, N, g4_now_ms());
 
     /* ===== Softcap ===== */
     g4_softcap(logits, N * G4_VOCAB, G4_SOFTCAP);

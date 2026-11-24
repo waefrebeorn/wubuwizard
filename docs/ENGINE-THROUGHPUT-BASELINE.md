@@ -258,6 +258,33 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Prefill attribution, at last (G4_PROF_PREFILL=1, 87 tokens, 4972.7 ms)
+
+Every phase accumulator in this file was gated on `N == 1`, so prefill had no attribution at all - which
+is why four separate guesses about where its time went were wrong. `g4p_acc(slot, N, ms)` now routes
+`N > 1` into a second table and the run prints it:
+
+    norm+qkv        1146.6 ms   23.1%
+    ffn all         2947.9 ms   59.3%
+      ffn proj      2881.6 ms   58.0%
+      ffn gelu+mul    59.4 ms    1.2%
+      ffn norm+resid   6.9 ms
+    o proj           652.3 ms   13.1%
+    qk norm+rope     161.8 ms    3.3%
+    attention         53.2 ms    1.1%
+    attn out+resid     6.6 ms
+    head              10.4 ms    0.2%
+
+**The three projections are 94% of prefill.** Attention is 1.1% - the device attention kernel did its
+job and took the quadratic term off the table. RoPE and the per-head norms are 3.3%, gelu 1.2%, the LM
+head 0.2%. Everything that is not a matmul is now six percent of the time.
+
+That closes the question this document opened several sections ago ("where does the 196 s go") with a
+measurement instead of a hypothesis, and it changes what the next change should be: prefill is a matmul
+problem and nothing else. The levers are the number of times the weight bytes are read (rows per
+decoded block - 22 passes at MT=4 for an 87-token prompt) and per-launch fixed cost, not attention, not
+the head, not the decode, not the scheduling of either kernel.
+
 ### Decomposing the kernel by removing stages, and the benchmark bug that fooled it
 
 `ncu` is not installed and `nsys` is not either, so the decomposition was done by hand: a standalone
