@@ -671,6 +671,12 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
             return;
         }
     }
+    /* The M-row device prefill path (wubu_gpu_matvec_mrow) is present but NOT used yet:
+     * it measured prefill 6.8 -> 15.4 tok/s with identical greedy tokens on real model
+     * data, but a synthetic gate (EG-122, random legal blocks, K=512) returns garbage
+     * for 3-9 of 64 columns and the cause is not yet identified. An unexplained
+     * data-dependent failure is not shippable, so prefill stays on the CPU path until
+     * the mrow kernel has its own passing per-column gate. */
     if (!w->data && w->stream_ctx) {
         if (g4_type_native_supported(w->ggml_type) && N > 0) {
             /* Feed quantized bytes straight to the SIMD matmul: no 4x F32

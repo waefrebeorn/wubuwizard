@@ -70,6 +70,22 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | + fused device FFN (gate/up/gelu/down in one round trip) | 6.7 tok/s | 11.6 tok/s |
 | + attention parallel over heads, device IQ2_XS kernel | 6.7 tok/s | **12.5 tok/s** |
 
+Sustained numbers over a 65-token generation (the 12.5 above is a 9-token sample, where
+the first tokens are cheaper): **decode 11.4 tok/s**, prefill 6.7 tok/s (21-token prompt),
+15.0 tok/s prefill on a 72-token prompt.
+
+### Prefill: measured 2.3x available, blocked on an unexplained failure
+
+A batched device path (`M` rows per call, one upload/download for the batch) measured
+prefill **6.8 -> 15.4 tok/s** with identical greedy tokens on the real model, but its
+synthetic gate returns garbage for 3-9 of 64 columns at K=512. Switching the matvec
+kernel, and switching the dispatch to the generic kernel, both changed *which* columns
+fail, so the fault is inside the batched q8_K staging rather than the dot. An
+unexplained data-dependent failure is not shippable, so the path was removed (exports,
+bridge and gate) and prefill stays on the CPU path. The next attempt should build the
+batched path with its per-column gate first and treat a single wrong column as a stop
+condition.
+
 Decode is now **GPU-only for matvecs**: 202 matvecs per token, 202 on the device, 0 on the
 CPU (the last holdout was the 11 MB of IQ2_XS, 5 calls/token). Per-type/token: IQ3_S 95,
 IQ2_S 83, IQ3_XXS 14, IQ2_XS 5, IQ4_XS 4, Q3_K 1 (the head).
