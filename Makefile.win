@@ -692,6 +692,10 @@ test_eg122_cuda_iq_new: tools/test_eg122_cuda_iq_new.c src/wubu_vecdot_iq3_xxs.c
 test_eg127_q8k: tools/test_eg127_q8k.c src/quantized_dot_generic.c src/wubu_win.c
 	$(CC) $(CFLAGS) -o $@ tools/test_eg127_q8k.c src/quantized_dot_generic.c src/wubu_win.c -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
+# EG-128: device expf vs libc, bit for bit (measurement, always exits 0).
+test_eg128_expf: tools/test_eg128_expf.c
+	$(CC) $(CFLAGS) -o $@ tools/test_eg128_expf.c -static
+
 # EG-126: device attention over a populated KV cache at the model's real dimensions.
 test_eg126_attn_dev: tools/test_eg126_attn_dev.c
 	$(CC) $(CFLAGS) -o $@ tools/test_eg126_attn_dev.c -static

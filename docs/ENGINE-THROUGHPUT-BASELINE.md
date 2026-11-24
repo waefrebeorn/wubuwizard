@@ -221,6 +221,21 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### The residual is `expf`, measured (EG-128)
+
+`test_eg128_expf` compares the device `expf` against the C library's over the range the
+softmax actually feeds it:
+
+    EG-128 expf dev-vs-libc: 1255/4096 differ, max 2 ulp (worst at x=-10.725595)
+
+So ~30% of the softmax exponentials differ by 1-2 ulp between the two toolchains. That is the
+floor: no amount of reduction-order matching can close it, because the operation itself is
+implemented differently on each side. Closing it means shipping one shared `expf` - a
+reduction, a polynomial and a scale-by-power-of-two, written with explicit
+`__fmul_rn`/`__fadd_rn` on the device and no fast-math contraction on the CPU - and using it
+in both attention paths. That would make the attention row bit-identical; nothing else in the
+path is left to differ.
+
 ### Attention kernel now mirrors the CPU's reduction order
 
 Rewrote `attn_decode_kernel` to reproduce `g4_dotf` exactly: 16 explicit accumulators with

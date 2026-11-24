@@ -39,6 +39,32 @@ __device__ int8_t   c_iq4nl[16];
 /* IQ2_XS: 512 grid entries of 8 unsigned bytes each. */
 __device__ uint64_t c_iq2xs_grid[512];
 
+__global__ void expf_probe_kernel(const float * __restrict__ x, float * __restrict__ y, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = expf(x[i]);
+}
+
+/* Gate hook: does the device expf agree with the CPU's bit for bit? The fused attention
+ * path's residual 3.5e-07 is either this or the value loop, and guessing has cost enough. */
+WUBU_EXPORT int wubu_cuda_expf_probe(const float *h_x, float *h_y, int n)
+{
+    if (!h_x || !h_y || n <= 0) return -1;
+    float *dx = NULL, *dy = NULL;
+    int rc = -2;
+    if (cudaMalloc(&dx, (size_t)n * sizeof(float)) != cudaSuccess) goto done;
+    if (cudaMalloc(&dy, (size_t)n * sizeof(float)) != cudaSuccess) goto done;
+    if (cudaMemcpy(dx, h_x, (size_t)n * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    expf_probe_kernel<<<(n + 255) / 256, 256>>>(dx, dy, n);
+    if (cudaGetLastError() != cudaSuccess) goto done;
+    if (cudaMemcpy(h_y, dy, (size_t)n * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dx) cudaFree(dx);
+    if (dy) cudaFree(dy);
+    return rc;
+}
+
 WUBU_EXPORT int wubu_cuda_upload_tables(const void *iq2s_1024_u64, const void *iq3s_512_u32)
 {
     if (iq2s_1024_u64 &&
