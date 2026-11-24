@@ -730,12 +730,14 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
             return;
         }
     }
-    /* The M-row device prefill path (wubu_gpu_matvec_mrow) is present but NOT used yet:
-     * it measured prefill 6.8 -> 15.4 tok/s with identical greedy tokens on real model
-     * data, but a synthetic gate (EG-122, random legal blocks, K=512) returns garbage
-     * for 3-9 of 64 columns and the cause is not yet identified. An unexplained
-     * data-dependent failure is not shippable, so prefill stays on the CPU path until
-     * the mrow kernel has its own passing per-column gate. */
+    /* Prefill does NOT use the per-row device kernel. Measured on a 1717-token prompt:
+     * 3.4 tok/s, against 14.4 for the CPU batched path below - 4x slower. The reason is
+     * structural: M rows through the M==1 kernel is M synchronised H2D/D2H round trips per
+     * tensor per layer (about 400k CUDA calls for that prompt), not a GEMM. A batched device
+     * prefill needs a real kernel that reads each weight block once and multiplies it against
+     * M activation rows, so that the weight read - the actual cost - is amortised over M.
+     * A dedicated M-row kernel was tried before and deleted in 85ae63f for failing its
+     * synthetic gate at K=512 (3-9 of 64 columns garbage); that gate has to be rebuilt too. */
     if (!w->data && w->stream_ctx) {
         if (g4_type_native_supported(w->ggml_type) && N > 0) {
             /* Feed quantized bytes straight to the SIMD matmul: no 4x F32

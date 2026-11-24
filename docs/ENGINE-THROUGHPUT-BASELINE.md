@@ -258,6 +258,37 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Prefill is the real gap, and the device path has to be a GEMM
+
+Everything above tunes decode, one token at a time, and the numbers look respectable in isolation:
+14.5 tok/s. The engines that ship this year are not measured there. Strata reports 11,306 tok/s
+prefill on an RTX 5090, Maya reports drafting taking a 3090 from 140 to 200 tok/s at 262K context,
+Atomic Engine reports SSD-streamed experts with a TurboQuant KV cache. Our prefill on a 1717-token
+prompt is **14.4 tok/s** - about 800x below that class, and it dominates time-to-first-token.
+
+Measured on this machine with a 1717-token prompt: prefill **7.3 tok/s**, i.e. **235 seconds before
+the first output token**. On a 21-token prompt it is 14.6 tok/s, so the cost grows with prompt
+length exactly as an unbatched attention pass does.
+
+The batched forward that should fix this is present and wired, and it **segfaults** (exit 139) at 37
+and 87 prompt tokens; its own comment records it as slower than the per-token loop as well
+(6.5-6.8 vs 12.0-13.6 tok/s) from a measurement taken before the fused kernels landed. So there is
+currently no working batched prefill path at all, and that - not another percent of decode - is
+the top of the queue.
+
+First attempt was the cheapest structure: reuse the gated decode kernel, M times, with the weights
+already resident. Measured: **3.4 tok/s** - four times *slower* than the CPU path, and the reason is
+structural rather than fixable by tuning. M rows through an M==1 kernel is M synchronised H2D/D2H
+round trips per tensor per layer; for a 1717-token prompt that is roughly 400k CUDA calls, and the
+weight read - the only cost that matters - is not amortised at all. Reverted.
+
+So a batched device prefill needs a genuine kernel: read each quantized weight block **once**,
+multiply it against M activation rows, write M partial sums, with M held in registers or shared
+memory. That is the same shape as the existing decode kernel with the inner loop moved outward, and
+it is what turns a weight-bound GEMV into a compute-bound GEMM. It also needs the per-column gate
+that the old M-row kernel lacked - that kernel was deleted in `85ae63f` because a synthetic test at
+K=512 returned garbage in 3-9 of 64 columns and nobody found out why.
+
 ### Where the last token divergence comes from: it is a three-way tie, not a defect
 
 `G4_FFN_CPU` was added to separate the two halves of the device path. Three configurations, same

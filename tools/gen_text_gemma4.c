@@ -337,6 +337,11 @@ int main(int argc, char **argv) {
                                          logits + (size_t)i * G4_VOCAB);
             fprintf(stderr, "[PSTEP %d] %.1f ms\n", i, (wall_time() - t0) * 1000.0);
         }
+    } else if (getenv("G4_PREFILL_BATCH")) {
+        /* One forward over all M prompt rows. The comment above records this losing to the
+         * per-token loop at 21/54/321 tokens (6.5-6.8 vs 12.0-13.6 tok/s) - measured before the
+         * fused kernels landed, so it is re-measured here rather than assumed. */
+        g4_model_forward_from_tokens(&model, prompt_tokens, (int)n_prompt, (int)n_prompt, logits);
     } else {
         for (int i = 0; i < n_prompt; i++)
             g4_model_forward_from_tokens(&model, prompt_tokens + i, 1, 1,
