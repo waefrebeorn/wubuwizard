@@ -320,6 +320,31 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### RETRACTED: the "FFN output differs" evidence was a broken harness
+
+The entry below claims layer 1's FFN output differs by up to 1.5x between the fused and host paths. That
+number came from a harness that was wrong three times over, and it is withdrawn rather than left standing:
+
+1. The two dumps came from **separate processes**, and the model state had already diverged between them,
+   so the inputs were not the same. Comparing `normed` for that layer across the two runs showed it
+   differing by 76% - the inputs, not the output, were the first thing to differ.
+2. The dump files were **overwritten by decode steps**: both paths fired for N=1 as well as N=87, so the
+   file held one token's worth (3840 floats) while the other held 87x15360, and the "difference" was
+   between a gate output and a down output.
+3. After restricting the dumps to prefill and comparing like-for-like, an **in-process** A/B was built
+   instead (compute the same layer both ways, in one process, same inputs). It reported the fused and
+   per-tensor paths disagreeing by up to 6x on layer 0 - **a type-22 layer that is known-good and whose
+   two paths produce identical tokens**. A measurement that says a correct thing is wrong is itself
+   wrong, so the harness is at fault and nothing can be concluded from it.
+
+What stands: the decode is verified exact against both ggml's reference and this repo's own CPU
+dequantiser, which are identical; the device copy of the failing tensor is byte-identical to the host
+copy; the block sizes and dimensions are exact (15,360 columns, 22,579,200 bytes); and two independent
+M-row kernels agree with each other to float precision while disagreeing with the host. Everything
+unproven stays gated behind `G4_XXS_MMA`, and the next step is a harness that computes both paths into
+separate buffers within one process and compares them **before** any other code touches those buffers.
+
+### RETRACTED: the "FFN output differs" evidence was a broken harness
 ### Where the divergence actually is: the FFN output, not the matvec
 
 `G4_DUMP_FFN=<layer>` writes that layer's FFN output, so the two paths can be compared as numbers
