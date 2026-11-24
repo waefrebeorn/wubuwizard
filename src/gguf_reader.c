@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "gguf_reader.h"
 #include "wubu_alloc.h"
+#include "wubu_dequant_fp4.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1526,6 +1527,10 @@ void gguf_dequantize(const uint8_t *data, int ggml_type, int64_t n_elems, float 
         case GGML_TYPE_F32:
             memcpy(output, data, n_elems * sizeof(float));
             break;
+        /* 4-bit-float and 2-bit microscaling types (ggml ids 39/40/42). */
+        case 39: dequantize_row_mxfp4(data, output, (long)n_elems); break;
+        case 40: dequantize_row_nvfp4(data, output, (long)n_elems); break;
+        case 42: dequantize_row_q2_0(data, output, (long)n_elems); break;
         case GGML_TYPE_F16: {
             for (int64_t i = 0; i < n_elems; i++) {
                 uint16_t h;
@@ -1618,6 +1623,9 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_Q4_K:  return n_blocks * 144;  // d[2] + dmin[2] + scales[12] + qs[128]
         case GGML_TYPE_Q2_K:  return n_blocks * 84;   // scales[16] + qs[64] + d[2] + dmin[2]
         case GGML_TYPE_Q3_K:  return n_blocks * 110;  // hmask[32] + qs[64] + scales[12] + d[2]
+        case 39:              return wubu_fp4_raw_size(39, (long)n_elems);  // MXFP4 17/32
+        case 40:              return wubu_fp4_raw_size(40, (long)n_elems);  // NVFP4 36/64
+        case 42:              return wubu_fp4_raw_size(42, (long)n_elems);  // Q2_0  18/64
         case 30:              return n_elems * 2;     // BF16 (bfloat16)
         default: return -1;
     }

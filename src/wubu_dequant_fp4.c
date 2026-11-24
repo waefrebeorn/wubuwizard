@@ -1,136 +1,138 @@
 /*
- * wubu_dequant_fp4.c — C11 row-level dequantization for OCP MXFP4 and
- * NVFP4 microscaling 4-bit formats.  Self-contained: only stdlib, math,
- * string.  No third-party deps.
+ * wubu_dequant_fp4.c -- C11 dequantization for ggml types 39 (MXFP4), 40 (NVFP4)
+ * and 42 (Q2_0). Strict C11, no dependencies beyond libm.
  *
- * MXFP4 (ggml type 39, QK_MXFP4 = 32):
- *   struct { uint8_t e; uint8_t qs[16]; }
- *   e  = E8M0 shared exponent byte (bias 127)
- *   qs = 16 bytes, each holding 2 × E2M1 nibbles
+ * Why this file was rewritten: the previous version decoded each nibble through a
+ * four-entry magnitude table {0, 0.5, 1, 2}, which is the NVIDIA FP4 *code* set for
+ * 2-bit values, not ggml's 16-entry E2M1 table. Any nibble >= 4 read past the end of
+ * that table, the nibble order was even-element/high-nibble instead of
+ * low-nibble/high-half, and UE4M3 was decoded with a 5-bit exponent and no 0.5
+ * factor. Nothing in the GGUF path called it, so no measurement had caught it.
  *
- * NVFP4 (ggml type 40, QK_NVFP4 = 64, sub = 16):
- *   struct { uint8_t d[4]; uint8_t qs[32]; }
- *   d  = 4 × UE4M3 scale bytes (one per 16-element sub-block)
- *   qs = 32 bytes, each holding 2 × E2M1 nibbles
- *
- * E2M1 codeword → value:
- *   0 → 0, 1 → 0.5, 2 → 1.0, 3 → 2.0
- *
- * E8M0 (8-bit, bias 127): scale = 2^(e - 127)
- *
- * UE4M3 (unsigned 8-bit, 5 exp + 3 mant, bias 7):
- *   e == 0 && m == 0  → 0
- *   e == 0 && m != 0  → subnormal m * 2^(-6)
- *   0 < e < 31        → (1 + m/8) * 2^(e-7)
- *   e == 31           → Inf (treated as 0 here — shouldn't occur in practice)
+ * Layouts and constants are taken verbatim from ggml (MIT):
+ *   kvalues_fp4[16]        = 0,1,2,3,4,6,8,12, 0,-1,-2,-3,-4,-6,-8,-12
+ *   ggml_ue4m3_to_fp32()   = 4-bit exponent (bias 7), 3-bit mantissa, x0.5
+ *   GGML_E8M0_TO_FP32_HALF = 2^(e - 128)
  */
-
 #include "wubu_dequant_fp4.h"
 
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
-#include <math.h>
 
-/* ------------------------------------------------------------------ */
-/* E2M1 lookup table                                                  */
-/* ------------------------------------------------------------------ */
-static const float e2m1_val[4] = { 0.0f, 0.5f, 1.0f, 2.0f };
+/* E2M1 magnitudes doubled: exactly ggml's kvalues_fp4. Index by 4-bit code. */
+static const int8_t kvalues_fp4[16] = {
+    0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12
+};
 
-/* ------------------------------------------------------------------ */
-/* E8M0 shared-scale decode (OCP MX standard)                          */
-/* ------------------------------------------------------------------ */
-static inline float e8m0_to_scale(uint8_t byte)
+/* fp16 -> fp32 without libm (d is a ggml_half in Q2_0 blocks). */
+static float f16_to_f32(uint16_t h)
 {
-    /* bias = 127, range: 2^(-127) to 2^(128) */
-    return powf(2.0f, (float)byte - 127.0f);
-}
-
-/* ------------------------------------------------------------------ */
-/* UE4M3 shared-scale decode (NVFP4 / NVIDIA variant)                  */
-/*  Unsigned E4M3: 5 exp bits (bias 7) + 3 mant bits, no sign.         */
-/* ------------------------------------------------------------------ */
-static inline float ue4m3_to_scale(uint8_t byte)
-{
-    int exp = (byte >> 3) & 0x1F;
-    int mant = byte & 0x07;
-
+    const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp = (h >> 10) & 0x1Fu;
+    uint32_t man = h & 0x3FFu;
+    uint32_t bits;
     if (exp == 0) {
-        if (mant == 0) return 0.0f;
-        /* subnormal: m * 2^(-6) */
-        return (float)mant * (1.0f / 64.0f);
+        if (man == 0) return 0.0f;
+        /* subnormal: normalise */
+        int e = -1;
+        do { ++e; man <<= 1; } while ((man & 0x400u) == 0);
+        man &= 0x3FFu;
+        bits = sign | ((uint32_t)(127 - 15 - e) << 23) | (man << 13);
+    } else if (exp == 31) {
+        bits = sign | 0x7F800000u | (man << 13);
+    } else {
+        bits = sign | ((exp + 127 - 15) << 23) | (man << 13);
     }
-    if (exp == 31) {
-        /* Inf/NaN — shouldn't happen in NVFP4, treat as 0 */
-        return 0.0f;
-    }
-    /* normal: (1 + m/8) * 2^(exp-7) */
-    return (1.0f + (float)mant * (1.0f / 8.0f)) * powf(2.0f, (float)exp - 7.0f);
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
 }
 
-/* ------------------------------------------------------------------ */
-/* Raw byte size                                                      */
-/* ------------------------------------------------------------------ */
+/* Unsigned E4M3 scale, identical to ggml_ue4m3_to_fp32(). */
+static float ue4m3_to_f32(uint8_t x)
+{
+    if (x == 0 || x == 0x7F) return 0.0f;
+    const int exp = (x >> 3) & 0xF;
+    const int man = x & 0x7;
+    float raw;
+    if (exp == 0) {
+        raw = (float)man / 512.0f;                  /* ldexpf(man, -9) */
+    } else {
+        const int e = exp - 7;
+        const float base = 1.0f + (float)man / 8.0f;
+        raw = (e >= 0) ? base * (float)(1u << e) : base / (float)(1u << -e);
+    }
+    return raw * 0.5f;
+}
+
+/* E8M0 shared exponent, identical to GGML_E8M0_TO_FP32_HALF. */
+static float e8m0_to_f32(uint8_t e)
+{
+    const int ex = (int)e - 128;
+    if (ex >= 0) return (float)(1u << (ex > 30 ? 30 : ex));
+    return 1.0f / (float)(1u << (ex < -30 ? 30 : -ex));
+}
+
 long wubu_fp4_raw_size(int ggml_type, long n_elems)
 {
-    const long BLK = (ggml_type == 39) ? 32 : 64;   /* 39=MXFP4, 40=NVFP4 */
-    const long BPB = (ggml_type == 39) ? 17 : 36;   /* bytes per block  */
-    long nblocks = (n_elems + BLK - 1) / BLK;
-    return nblocks * BPB;
-}
-
-/* ------------------------------------------------------------------ */
-/* MXFP4 row dequant                                                   */
-/* ------------------------------------------------------------------ */
-void dequantize_row_mxfp4(const unsigned char *data, float *output, long n_elems)
-{
-    long i = 0;
-    while (i < n_elems) {
-        float scale = e8m0_to_scale(data[0]);
-        const unsigned char *qs = data + 1;
-        long remaining = n_elems - i;
-        long to_do = remaining < 32 ? remaining : 32;
-
-        for (long j = 0; j < to_do; j++) {
-            unsigned char byte = qs[j >> 1];
-            int nibble;
-            if (j & 1)
-                nibble = byte & 0x0F;
-            else
-                nibble = byte >> 4;
-            output[i + j] = scale * e2m1_val[nibble];
-        }
-
-        data += 17;  /* 1 scale + 16 data bytes */
-        i += 32;
+    if (n_elems <= 0) return -1;
+    switch (ggml_type) {
+    case 39: return ((n_elems + 31) / 32) * 17;   /* MXFP4: 1 scale + 16 data   */
+    case 40: return ((n_elems + 63) / 64) * 36;   /* NVFP4: 4 scales + 32 data  */
+    case 42: return ((n_elems + 63) / 64) * 18;   /* Q2_0:  fp16 d + 16 data    */
+    default: return -1;
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* NVFP4 row dequant                                                   */
-/* ------------------------------------------------------------------ */
+void dequantize_row_mxfp4(const unsigned char *data, float *output, long n_elems)
+{
+    const long nb = (n_elems + 31) / 32;
+    for (long b = 0; b < nb; ++b) {
+        const unsigned char *blk = data + b * 17;
+        const float d = e8m0_to_f32(blk[0]);
+        const unsigned char *qs = blk + 1;
+        float *y = output + b * 32;
+        for (long j = 0; j < 16; ++j) {
+            if (b * 32 + j < n_elems) y[j] = (float)kvalues_fp4[qs[j] & 0x0F] * d;
+            if (b * 32 + j + 16 < n_elems) y[j + 16] = (float)kvalues_fp4[qs[j] >> 4] * d;
+        }
+    }
+}
+
 void dequantize_row_nvfp4(const unsigned char *data, float *output, long n_elems)
 {
-    long i = 0;
-    while (i < n_elems) {
-        const unsigned char *ds = data;          /* 4 UE4M3 scale bytes */
-        const unsigned char *qs = data + 4;      /* 32 bytes: 64 × E2M1 */
-        long remaining = n_elems - i;
-        long to_do = remaining < 64 ? remaining : 64;
-
-        for (long j = 0; j < to_do; j++) {
-            long sub_idx = j / 16;                /* which 16-element sub-block */
-            float scale = ue4m3_to_scale(ds[sub_idx]);
-            unsigned char byte = qs[j >> 1];
-            int nibble;
-            if (j & 1)
-                nibble = byte & 0x0F;
-            else
-                nibble = byte >> 4;
-            output[i + j] = scale * e2m1_val[nibble];
+    const long nb = (n_elems + 63) / 64;
+    for (long b = 0; b < nb; ++b) {
+        const unsigned char *blk = data + b * 36;
+        const unsigned char *scales = blk;       /* 4 UE4M3, one per 16 elements */
+        const unsigned char *qs = blk + 4;       /* 32 bytes = 64 codes          */
+        for (int s = 0; s < 4; ++s) {
+            const float d = ue4m3_to_f32(scales[s]);
+            const unsigned char *sub = qs + s * 8;
+            float *y = output + b * 64 + s * 16;
+            for (long j = 0; j < 8; ++j) {
+                const long i0 = b * 64 + s * 16 + j;
+                const long i1 = i0 + 8;
+                if (i0 < n_elems) y[j] = (float)kvalues_fp4[sub[j] & 0x0F] * d;
+                if (i1 < n_elems) y[j + 8] = (float)kvalues_fp4[sub[j] >> 4] * d;
+            }
         }
+    }
+}
 
-        data += 36;  /* 4 scales + 32 data bytes */
-        i += 64;
+void dequantize_row_q2_0(const unsigned char *data, float *output, long n_elems)
+{
+    const long nb = (n_elems + 63) / 64;
+    for (long b = 0; b < nb; ++b) {
+        const unsigned char *blk = data + b * 18;
+        uint16_t d_bits = 0;
+        memcpy(&d_bits, blk, 2);
+        const float d = f16_to_f32(d_bits);
+        const unsigned char *qs = blk + 2;
+        for (long j = 0; j < 64; ++j) {
+            if (b * 64 + j >= n_elems) break;
+            const unsigned char q = (unsigned char)((qs[j >> 2] >> ((j & 3) * 2)) & 0x03u);
+            output[b * 64 + j] = (float)((int)q - 1) * d;   /* 00=-1 01=0 10=+1 11=+2 */
+        }
     }
 }

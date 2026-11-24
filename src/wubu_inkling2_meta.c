@@ -134,6 +134,10 @@ static int inkling2_type_supported(int ggml_type)
     case GGML_TYPE_IQ1_S: case GGML_TYPE_IQ1_M: case GGML_TYPE_IQ2_XXS: case GGML_TYPE_IQ2_XS:
     case GGML_TYPE_IQ2_S: case GGML_TYPE_IQ3_XXS: case GGML_TYPE_IQ3_S: case GGML_TYPE_IQ4_XS:
     case GGML_TYPE_IQ4_NL:
+    /* 4-bit-float / 2-bit microscaling: NVFP4 (40) and Q2_0 (42) are what this
+     * file's routed experts use; MXFP4 (39) is the same family. Decoders in
+     * src/wubu_dequant_fp4.c, gated by test_eg119_fp4_upstream. */
+    case 39: case 40: case 42:
         return 1;
     default:
         return 0;

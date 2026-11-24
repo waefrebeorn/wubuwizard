@@ -62,7 +62,16 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | + fused IQ4_XS dot (EG-116) | 4.9 tok/s | 4.5 tok/s |
 | + fused IQ2_XS dot (EG-117) | 6.7 tok/s | **5.2 tok/s** |
 | + same, `G4_GPU=1` (device IQ2_S/IQ3_S/Q3_K/Q4_0) | - | 7.6 tok/s |
-| + v3 warp-per-column IQ2_S kernel (no atomics) | - | **8.3 tok/s** |
+| + v3 warp-per-column IQ2_S kernel (no atomics) | - | 8.3 tok/s |
+| clean rebuild, `G4_GPU=1` (all kernels, no stale objects) | 6.8 tok/s | **8.8 tok/s** |
+| clean rebuild, CPU only | 6.6 tok/s | 5.7 tok/s |
+
+Note on rebuilding: the Makefile does not track header dependencies, so editing a
+header without `rm -f src/*.o` leaves objects of different struct layouts linked
+together. That produced 4.4 tok/s decode and a different greedy prefix once; after
+a clean rebuild the same source gives 5.7 (CPU) / 8.8 (GPU) and **CPU and GPU now
+agree on every greedy token** (45518, 107, 236775, ...), where the earlier GPU run
+diverged from step 10.
 
 The AVX2 port (ggml's x86 kernel) keeps the integer accumulation, so it agrees with the
 scalar port and the F32 reference to 2.9e-06 / 7.4e-07 relative, and it produces the same

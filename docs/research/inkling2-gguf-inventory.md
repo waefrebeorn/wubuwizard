@@ -104,9 +104,20 @@ correctness gate each before anything is wired.
 5. Attention-residual queries every 6 layers.
 6. New quant types 40/42 (NVFP4/MXFP4 family) if the IQ2_XXS file is not used.
 
-Steps 1-5 are the engine work. **Step 6 is not optional for this file**: the dequant walk
-in `test_eg118_inkling_meta` decodes 564 tensors and hits 24 of unknown type — the file's
-17 tensors of type 42 plus 7 of type 40, i.e. **every routed expert block**
-(`blk.N.ffn_down_exps.weight`, first one at `blk.0`). Without an NVFP4/MXFP4 decoder for
-those two ids the expert weights cannot be read at all, so a second file with IQ2_XXS
-experts (or a real NVFP4 dequant) is a prerequisite for running this model.
+Steps 1-5 are the engine work. **Step 6 is done** (EG-119): the two unknown ids are
+
+| id | name | block | bytes |
+|---|---|---|---|
+| 40 | NVFP4 | 64 elements, 4 x UE4M3 sub-block scales + 32 bytes of E2M1 codes | 36 |
+| 42 | **Q2_0** (not MXFP4) | 64 elements, fp16 d + 16 bytes of 2-bit codes | 18 |
+| 39 | MXFP4 | 32 elements, E8M0 + 16 bytes | 17 |
+
+The 17 type-42 tensors are the routed experts' down/gate_up projections and the 7 type-40
+ones complete the expert set, so the expert weights could not be read at all before this.
+After `src/wubu_dequant_fp4.c` was rewritten to ggml's layout (the previous version used a
+four-entry magnitude table, so any code >= 4 read out of bounds, and it was wired into
+nothing), EG-118 now reports **unknown_type = 0** over all 734 tensors.
+
+The `ffn_down_exps.scale` / `ffn_gate_up_exps.scale` tensors are per-expert floats applied
+on top of the block scales; the forward must multiply them in (`expert_weights_scale` is a
+separate global 8.0 router weight multiplier).
