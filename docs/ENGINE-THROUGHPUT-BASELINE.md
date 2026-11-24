@@ -258,6 +258,27 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Prefill is at 9% of the card's bandwidth, so the limit is the decode, not the memory
+
+Arithmetic on the measured numbers, not a profile - the M-row kernel re-reads the whole weight set once
+per tile of four rows, so:
+
+    87 tokens   (22 tiles)  92 GB of weight traffic in 5.0 s   = 18.3 GB/s  (10% of 192 GB/s)
+  1717 tokens  (430 tiles) 1806 GB of weight traffic in 111 s  = 16.3 GB/s  ( 8% of 192 GB/s)
+
+Two conclusions follow, and both cut against the obvious next move. First, prefill is not
+bandwidth-bound: raising the tile from four rows to eight rows should halve the traffic, and it
+measured *slower* (16.1 against 17.2 tok/s) because the accumulators push the kernel over its
+register budget. Second, the cost per weight block is dominated by the decode itself - grid index,
+eight sign tests, byte extraction, the scale nibble - roughly fifty instructions to feed two `dp4a`
+per lane. Decoding a block for four rows barely amortises fifty instructions of setup.
+
+So the lever is not a bigger accumulator array, it is decoding a block once per *thread block* into
+shared memory and letting all eight warps consume it for their own columns and rows. That is the same
+move as the workspace pool one level down: the tile is declared, written once, recycled, and the
+decode setup stops being paid per tile. It is also the only way the tile can grow past four rows
+without the register pressure that MT=8 already demonstrated.
+
 ### Replay is only free if the key is the exact token sequence
 
 An independent rebuild of NVIDIA's CPU-ARC idea (a CPU replaying a large model's reasoning from a
