@@ -1221,7 +1221,7 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
 
             float sum_e = 0.0f;
             for (int kp = kv_start; kp <= kv_end; kp++) {
-                float e = expf(s[kp - kv_start] - max_s);
+                float e = (float)exp((double)(s[kp - kv_start] - max_s));
                 s[kp - kv_start] = e;
                 sum_e += e;
             }
@@ -1287,7 +1287,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
 
             float sum_e = 0.0f;
             for (int kp = 0; kp <= kv_end; kp++) {
-                float e = expf(s[kp] - max_s);
+                float e = (float)exp((double)(s[kp] - max_s));
                 s[kp] = e;
                 sum_e += e;
             }

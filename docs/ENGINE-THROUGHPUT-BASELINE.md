@@ -221,6 +221,18 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Softmax exp through double as well: 1.63e-07 -> 1.52e-07
+
+Same trick as the sqrt: `(float)exp((double)(score - max))` on both sides, so the two paths
+call the same function with the same precision instead of libm's `expf` against CUDA's. ADIFF
+moved 1.63e-07 -> 1.52e-07 and all-layer fusion now tracks three tokens further
+(`... 149681, 1174, 563, 496, 9760, 52491` instead of stopping at `623`), though the 3-token
+stutter at generated positions 2-4 is unchanged.
+
+Note this is the *third* variable where matching the two implementations mattered more than
+making either one more accurate: sharing the engine's own `wubu_expf` made things worse
+(2.60e-07) because it is 2 ulp from libm, while double `exp` is 0 ulp from itself.
+
 ### Every hyperparameter cross-checked against the GGUF and against upstream
 
 The GGUF's own metadata (parsed directly, 58 KV pairs) against the engine's constants:

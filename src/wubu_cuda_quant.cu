@@ -1315,7 +1315,7 @@ __global__ void attn_decode_kernel(const float * __restrict__ q,
     const float max_s = red[0];
 
     for (int kp = threadIdx.x; kp < kv_len; kp += blockDim.x)
-        sh[kp] = expf(sh[kp] - max_s);
+        sh[kp] = (float)exp((double)(sh[kp] - max_s));
     __syncthreads();
     if (threadIdx.x == 0) {
         float s = 0.0f;                      /* sequential, like the CPU */
