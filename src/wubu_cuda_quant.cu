@@ -720,6 +720,116 @@ WUBU_EXPORT int wubu_cuda_matvec_iq3s_mrow(const void *d_w, const float *h_x, in
     return cudaMemcpy(h_y, g_mrow_y, yneed, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
 }
 
+
+/* ---------------- batched causal attention ----------------
+ *
+ * At 1717 tokens the CPU pass is ~60% of prefill: 48 layers x 1717^2/2 x 16 heads x 512 dims is
+ * 1.2 TFLOP of MACs, and it is the only quadratic term left after the projections moved to the
+ * M-row kernels. This is the same arithmetic, one block per (query token, q head):
+ *
+ *   scores  - warp per key, lane-strided dot then shuffle reduce
+ *   softmax - max and exp in double, exactly as the CPU does, then 1/sum
+ *   output  - one thread per output dim, sequential over keys, so the per-element accumulation
+ *             order is the CPU's order and not a tree that happens to be nearby
+ *
+ * cfg: N rows, n_heads q heads, kv_heads with GQA grouping, head_dim, q row stride (qd),
+ * kv row stride (kvd), cache size, sliding window (0 = full), and the position of each row. */
+#define ATTN_MAXK 8192
+#ifndef FLT_MAX
+#define FLT_MAX 3.402823466e+38F
+#endif
+__global__ void attn_causal_kernel(const float * __restrict__ q, const float * __restrict__ k,
+                                   const float * __restrict__ v, float * __restrict__ out,
+                                   const int * __restrict__ positions,
+                                   int N, int n_heads, int kv_heads, int hd, int qd, int kvd,
+                                   int kv_size, int window)
+{
+    extern __shared__ float sc[];   /* one score per cached position */
+    const int th = blockIdx.x;
+    const int t = th / n_heads;
+    const int hq = th % n_heads;
+    if (t >= N) return;
+
+    const int pos = positions[t];
+    int kv_start = 0;
+    if (window > 0 && pos >= window) kv_start = pos - window + 1;
+    int kv_end = kv_size - 1;
+    if (kv_end > pos) kv_end = pos;
+    const int len = kv_end - kv_start + 1;
+    if (len <= 0) return;
+
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const int nwarps = blockDim.x >> 5;
+    /* GQA: consecutive q heads share a kv head. */
+    const int kv_h = hq / (n_heads / kv_heads);
+    const float *q_vec = q + (size_t)t * qd + (size_t)hq * hd;
+
+    /* scores: warp per key, lane-strided over the head dim */
+    for (int kp = kv_start + warp; kp <= kv_end; kp += nwarps) {
+        const float *kv = k + (size_t)kp * kvd + (size_t)kv_h * hd;
+        float a = 0.0f;
+        for (int d = lane; d < hd; d += 32) a += q_vec[d] * kv[d];
+        for (int off = 16; off > 0; off >>= 1) a += __shfl_down_sync(0xffffffffu, a, off);
+        if (lane == 0) sc[kp - kv_start] = a;
+    }
+    __syncthreads();
+
+    /* softmax: double exp, as the CPU does, single thread (len <= 8192) */
+    __shared__ float s_inv;
+    if (tid == 0) {
+        float max_s = -FLT_MAX;
+        for (int i = 0; i < len; ++i) if (sc[i] > max_s) max_s = sc[i];
+        float sum_e = 0.0f;
+        for (int i = 0; i < len; ++i) {
+            float e = (float)exp((double)(sc[i] - max_s));
+            sc[i] = e;
+            sum_e += e;
+        }
+        s_inv = 1.0f / (sum_e + 1e-10f);
+    }
+    __syncthreads();
+
+    /* output: one thread per dim, sequential over keys in the CPU's order */
+    const float inv = s_inv;
+    float *o_vec = out + (size_t)t * qd + (size_t)hq * hd;
+    for (int d = tid; d < hd; d += blockDim.x) {
+        float val = 0.0f;
+        for (int i = 0; i < len; ++i)
+            val += sc[i] * v[(size_t)(kv_start + i) * kvd + (size_t)kv_h * hd + d];
+        o_vec[d] = val * inv;
+    }
+}
+
+WUBU_EXPORT int wubu_cuda_attn_causal(const float *h_q, const float *h_k, const float *h_v,
+                                      float *h_out, const int *h_pos, int N, int n_heads,
+                                      int kv_heads, int hd, int qd, int kvd, int kv_size,
+                                      int window)
+{
+    if (!h_q || !h_k || !h_v || !h_out || !h_pos || N <= 0 || n_heads <= 0 || kv_heads <= 0) return -1;
+    if (hd > 1024 || window > ATTN_MAXK) return -1;
+    const size_t qn = (size_t)N * qd * sizeof(float);
+    const size_t kvn = (size_t)kv_size * kvd * sizeof(float);
+    const size_t on = (size_t)N * qd * sizeof(float);
+    float *dq = (float *)pool_get("attn.q", qn);
+    float *dk = (float *)pool_get("attn.k", kvn);
+    float *dv = (float *)pool_get("attn.v", kvn);
+    float *do_ = (float *)pool_get("attn.out", on);
+    int *dp = (int *)pool_get("attn.pos", (size_t)N * sizeof(int));
+    if (!dq || !dk || !dv || !do_ || !dp) return -2;
+    if (cudaMemcpy(dq, h_q, qn, cudaMemcpyHostToDevice) != cudaSuccess) return -3;
+    if (cudaMemcpy(dk, h_k, kvn, cudaMemcpyHostToDevice) != cudaSuccess) return -3;
+    if (cudaMemcpy(dv, h_v, kvn, cudaMemcpyHostToDevice) != cudaSuccess) return -3;
+    if (cudaMemcpy(dp, h_pos, (size_t)N * sizeof(int), cudaMemcpyHostToDevice) != cudaSuccess) return -3;
+    const size_t shmem = (size_t)(window > 0 ? window : (kv_size < ATTN_MAXK ? kv_size : ATTN_MAXK)) *
+                         sizeof(float);
+    attn_causal_kernel<<<N * n_heads, 256, shmem>>>(dq, dk, dv, do_, dp, N, n_heads, kv_heads,
+                                                   hd, qd, kvd, kv_size, window);
+    if (cudaGetLastError() != cudaSuccess) return -4;
+    return cudaMemcpy(h_out, do_, on, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -5;
+}
+
 /* Narrow matvecs are occupancy-limited (a 3072-column projection is 3072 warps for
  * 20 SMs, each still walking K), so split K four ways below this width. The FFN
  * shapes (15360 columns) stay on the warp-per-column v3 kernel. */

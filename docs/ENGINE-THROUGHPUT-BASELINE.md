@@ -320,7 +320,26 @@ structural rather than fixable by tuning. M rows through an M==1 kernel is M syn
 round trips per tensor per layer; for a 1717-token prompt that is roughly 400k CUDA calls, and the
 weight read - the only cost that matters - is not amortised at all. Reverted.
 
-**What is NOT established:** where the remaining 196 s goes. The profiler (`G4_PROF`) is gated on
+**Batched device attention: 196 s -> 111 s to first token.** With the M-row projections in place the
+CPU attention pass was the only quadratic term left, and it is where prefill went at length:
+48 layers x 1717^2/2 x 16 heads x 512 dims is 1.2 TFLOP of MACs for one prompt. `attn_causal_kernel`
+puts one block on each (query token, q head): warp-per-key for the score dot, the same double-precision
+max-and-exp softmax the CPU uses, then one thread per output dim accumulating sequentially over keys
+so the per-element order matches the CPU instead of being an adjacent tree.
+
+    1717 tokens, RTX 4050:   CPU attention 8.8 tok/s (196 s)  ->  device attention 15.5 tok/s (111 s)
+      87 tokens, RTX 4050:   CPU attention 17.0 tok/s        ->  device attention 17.3 tok/s
+
+The 1717-token gain is 43%, which is the size the arithmetic predicted for attention's share - the
+first time in this document that a predicted share and a measured share have agreed. At 87 tokens
+attention is ~12% and the gain is 2%, which is the same arithmetic from the other end.
+
+Token identity across 7 prompts x 24 tokens with device attention: identical on 6, one diverges at
+token 13 - the same sub-ulp class as every other path here, and a different prompt than the CPU
+attention version diverges on, which is what a rounding tie looks like rather than a defect. It stays
+behind `G4_ATTN_GPU_BATCH=1` for that reason.
+
+**What is NOT established (pre-attention numbers):** where the remaining 196 s went. The profiler (`G4_PROF`) is gated on
 `N == 1` throughout - every `G4P_ADD` and every phase accumulator is `if (N == 1)` - so there is no
 phase attribution for prefill at all, and two guesses at it were wrong: the LM head is ~6% of the
 87-token case, not the 70% assumed, and covering the projection types with M-row kernels bought 24%
