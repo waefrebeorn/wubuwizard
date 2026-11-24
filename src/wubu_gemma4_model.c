@@ -1318,15 +1318,17 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         const long long sq = (long long)(layer->attn_q.raw_bytes / qd);
         const long long sk = (long long)(layer->attn_k.raw_bytes / kvd);
         const long long sv = (long long)(layer->attn_v.raw_bytes / kvd);
-        if (wubu_gpu_stage_input(normed, G4_HIDDEN) == 0 &&
-            wubu_gpu_matvec_cached(layer->attn_q.dev, t, G4_HIDDEN, qd, sq, q) == 0 &&
-            wubu_gpu_matvec_cached(layer->attn_k.dev, t, G4_HIDDEN, kvd, sk, k) == 0) {
-            if (layer->kv_eq) {
+        if (layer->kv_eq) {
+            /* No separate V projection: q and k only, k copied into v on the host. */
+            if (wubu_gpu_stage_input(normed, G4_HIDDEN) == 0 &&
+                wubu_gpu_matvec_cached(layer->attn_q.dev, t, G4_HIDDEN, qd, sq, q) == 0 &&
+                wubu_gpu_matvec_cached(layer->attn_k.dev, t, G4_HIDDEN, kvd, sk, k) == 0) {
                 memcpy(v, k, (size_t)N * kvd * sizeof(float));
                 qkv_done = 1;
-            } else if (layer->attn_v.dev && layer->attn_v.ggml_type == t) {
-                qkv_done = (wubu_gpu_matvec_cached(layer->attn_v.dev, t, G4_HIDDEN, kvd, sv, v) == 0);
             }
+        } else if (wubu_gpu_qkv(layer->attn_q.dev, layer->attn_k.dev, layer->attn_v.dev, t,
+                                normed, G4_HIDDEN, qd, kvd, sq, sk, sv, q, k, v) == 0) {
+            qkv_done = 1;
         }
     }
     if (!qkv_done) {

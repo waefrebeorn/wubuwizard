@@ -161,11 +161,36 @@ Efficiency per section, against the 100 GB/s the IQ2_S kernel reaches in isolati
 | o proj (3072->3840) | 226 MB | 12.6 | **18** |
 | head (Q3_K, 1 GB) | 1030 MB | 10.5 | 98 |
 
-The o-projection moves 4.7 MB per layer in 0.26 ms: about 0.05 ms of kernel and 0.21 ms
-of host/device round trip (upload, q8k, submit, download). With 202 matvecs per token at
-~0.2-0.3 ms each, roughly 60% of the matvec time is round-trip cost, not arithmetic. That
-is the next structural target: a device-resident layer (one round trip per layer instead
-of seven) rather than more kernel tuning.
+The o-projection moves 4.7 MB per layer in 0.26 ms, about 18 GB/s. Two candidate
+explanations were measured rather than assumed:
+
+- **transfer setup** (`wubu_cuda_bench_xfer`, 12 KB up + 15 KB down): 0.030 ms pageable
+  versus 0.018 ms pinned+async. At 202 matvecs/token that is 6.2 ms vs 3.7 ms, so pointer
+  setup is real but small - **not** the 0.21 ms gap. Pinned staging would buy ~2.5 ms/token
+  and is not worth the extra code yet.
+- **serialisation**: each call is upload -> q8k launch -> matvec launch -> synchronising
+  download, so the GPU drains between kernels and the host waits 202 times per token. The
+  o-projection's own kernel is ~0.05 ms of its 0.26 ms.
+
+Isolated kernel rates (`wubu_cuda_bench_shapes`, three rotating buffers, no L2 reuse):
+
+```
+ffn gate/up/down  N=15360 K=3840  0.190 ms   99.4 GB/s
+attn out (o proj) N= 3840 K=3072  0.040 ms   94.0 GB/s
+attn q            N= 3072 K=3840  0.042 ms   90.1 GB/s
+attn k/v          N= 1024 K=3840  0.019 ms   67.4 GB/s
+```
+
+So the o-projection kernel is **94 GB/s in isolation** and appears as 18 GB/s in the engine:
+the section's 0.26 ms per layer is ~0.04 ms of kernel, ~0.03 ms of transfer and ~0.19 ms of
+per-call sequencing (q8k launch, matvec launch, synchronising download, WDDM submit).
+Fusing q, k and v into one submission (one upload, one quantisation, one download of q|k|v)
+changed the qkv section by 0.2 ms/token - i.e. the cost is not the number of *transfers*
+either, it is the serialisation of ~200 small submissions per token.
+
+Conclusion: the remaining cost is the sync-per-call structure, which only a device-resident
+layer (one submission per layer, one download) removes. That is the next unit; kernel
+tuning has plateaued at 67-99 GB/s for these block sizes.
 
 FFN breakdown after the fusion (`G4_PROF=1`, per decode token): proj 35.4 ms,
 gelu+mul 1.8 ms (was 7.5 with the tanh on one CPU core), norm+resid 0.4 ms. The fused

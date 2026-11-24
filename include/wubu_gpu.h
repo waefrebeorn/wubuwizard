@@ -31,6 +31,11 @@ int wubu_gpu_stage_input(const float *x, int K);
 int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
                            long long col_stride, float *y);
 
+/* Fused decode q/k/v: one upload, one quantisation, one download of q|k|v. */
+int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_type,
+                 const float *x, int K, int qd, int kvd,
+                 long long sq, long long sk, long long sv, float *q, float *k, float *v);
+
 /* Fused decode FFN: out = down(gelu(gate(x)) * up(x)), gate/up/down all device-resident
  * and of the same ggml_type. One upload and one download per layer; the tanh GELU runs
  * on the device. Returns 0 on success so callers can fall back to wubu_gpu_matvec. */

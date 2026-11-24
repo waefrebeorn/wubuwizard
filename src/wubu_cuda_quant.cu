@@ -763,6 +763,126 @@ done:
     return rc;
 }
 
+/* Shape sweep: the engine's o-projection (3840 columns, K=3072) reaches only 18 GB/s
+ * while the FFN shape reaches 82-100. Measure the kernel alone at each shape used by the
+ * 12B model, so "shape" and "serialisation" stop being guesses. */
+WUBU_EXPORT int wubu_cuda_bench_shapes(void)
+{
+    static const struct { int n_cols, K; const char *name; } shapes[] = {
+        { 15360, 3840, "ffn gate/up/down" },
+        {  3840, 3072, "attn out (o proj)" },
+        {  3072, 3840, "attn q" },
+        {  1024, 3840, "attn k/v" },
+    };
+    for (int s = 0; s < 4; ++s) {
+        const int N = shapes[s].n_cols, K = shapes[s].K;
+        const int cbytes = 82 * (K / QK_K);
+        const size_t wb = (size_t)N * cbytes;
+        uint8_t *h_w = (uint8_t *)malloc(wb);
+        float *h_x = (float *)malloc(sizeof(float) * K);
+        float *h_y = (float *)malloc(sizeof(float) * N);
+        if (!h_w || !h_x || !h_y) return -1;
+        memset(h_w, 0x44, wb);
+        for (int i = 0; i < K; ++i) h_x[i] = (float)(i % 9) * 0.02f;
+        void *d_w[3] = { NULL, NULL, NULL }, *d_x = NULL, *d_q8 = NULL;
+        float *d_y = NULL;
+        int ok = 1;
+        for (int b = 0; b < 3; ++b) {
+            if (cudaMalloc(&d_w[b], wb) != cudaSuccess) { ok = 0; break; }
+            cudaMemcpy(d_w[b], h_w, wb, cudaMemcpyHostToDevice);
+        }
+        if (ok && cudaMalloc((void **)&d_x, sizeof(float) * K) != cudaSuccess) ok = 0;
+        if (ok && cudaMalloc(&d_q8, (size_t)(K / QK_K + 1) * 292) != cudaSuccess) ok = 0;
+        if (ok && cudaMalloc((void **)&d_y, sizeof(float) * N) != cudaSuccess) ok = 0;
+        if (ok) {
+            cudaMemcpy(d_x, (const void *)h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
+            quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+            const int wpb = 8;
+            const int blocks = (N + wpb - 1) / wpb;
+            cudaDeviceSynchronize();
+            cudaEvent_t e0, e1;
+            cudaEventCreate(&e0); cudaEventCreate(&e1);
+            const int iters = 50;
+            cudaEventRecord(e0);
+            for (int it = 0; it < iters; ++it)
+                iq2s_matvec_v3_kernel<<<blocks, wpb * 32>>>((const uint8_t *)d_w[it % 3],
+                    (const c_q8_k *)d_q8, d_y, cbytes, K / QK_K, N);
+            cudaEventRecord(e1); cudaEventSynchronize(e1);
+            float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
+            const double per = ms / iters;
+            printf("[SHAPE] %-18s N=%5d K=%4d  %.3f ms  %.1f GB/s  (%.1f MB)\n",
+                   shapes[s].name, N, K, per, (double)wb / per / 1e6, (double)wb / 1e6);
+            cudaEventDestroy(e0); cudaEventDestroy(e1);
+        }
+        for (int b = 0; b < 3; ++b) if (d_w[b]) cudaFree(d_w[b]);
+        if (d_x) cudaFree(d_x);
+        if (d_q8) cudaFree(d_q8);
+        if (d_y) cudaFree(d_y);
+        free(h_w); free(h_x); free(h_y);
+    }
+    return 0;
+}
+
+/* Host<->device transfer cost for the per-matvec vectors (12 KB up, 15 KB down), pageable
+ * versus pinned. The o-projection spends ~0.21 ms per layer in upload + q8k + submit +
+ * download, so the fraction that is transfer setup decides whether pinned staging is
+ * worth the extra code. */
+WUBU_EXPORT int wubu_cuda_bench_xfer(int iters)
+{
+    const int nu = 3072;   /* floats uploaded per matvec (hidden)      */
+    const int nd = 3840;   /* floats downloaded per matvec (out cols)  */
+    float *h_u = (float *)malloc(sizeof(float) * nu);
+    float *h_d = (float *)malloc(sizeof(float) * nd);
+    float *h_u_pin = NULL, *h_d_pin = NULL;
+    void *d_u = NULL, *d_d = NULL;
+    if (!h_u || !h_d) return -1;
+    for (int i = 0; i < nu; ++i) h_u[i] = (float)i;
+    if (cudaMalloc(&d_u, sizeof(float) * nu) != cudaSuccess) return -2;
+    if (cudaMalloc(&d_d, sizeof(float) * nd) != cudaSuccess) return -2;
+    cudaHostAlloc((void **)&h_u_pin, sizeof(float) * nu, cudaHostAllocDefault);
+    cudaHostAlloc((void **)&h_d_pin, sizeof(float) * nd, cudaHostAllocDefault);
+
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0); cudaEventCreate(&e1);
+
+    /* pageable, one upload + one download, as the engine does it today */
+    cudaEventRecord(e0);
+    for (int it = 0; it < iters; ++it) {
+        cudaMemcpy(d_u, h_u, sizeof(float) * nu, cudaMemcpyHostToDevice);
+        cudaMemcpy(h_d, d_d, sizeof(float) * nd, cudaMemcpyDeviceToHost);
+    }
+    cudaEventRecord(e1); cudaEventSynchronize(e1);
+    float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
+    const double pageable = ms / iters;
+
+    /* pinned + async on one stream, single sync at the end of the pair */
+    cudaStream_t st;
+    cudaStreamCreate(&st);
+    cudaEventRecord(e0);
+    for (int it = 0; it < iters; ++it) {
+        memcpy(h_u_pin, h_u, sizeof(float) * nu);
+        cudaMemcpyAsync(d_u, h_u_pin, sizeof(float) * nu, cudaMemcpyHostToDevice, st);
+        cudaMemcpyAsync(h_d_pin, d_d, sizeof(float) * nd, cudaMemcpyDeviceToHost, st);
+        cudaStreamSynchronize(st);
+        memcpy(h_d, h_d_pin, sizeof(float) * nd);
+    }
+    cudaEventRecord(e1); cudaEventSynchronize(e1);
+    cudaEventElapsedTime(&ms, e0, e1);
+    const double pinned = ms / iters;
+
+    printf("[XFER] up %d B + down %d B: pageable %.3f ms, pinned+async %.3f ms (%.1fx)\n",
+           nu * 4, nd * 4, pageable, pinned, pageable / (pinned > 0 ? pinned : 1e-9));
+    printf("[XFER] at 202 matvecs/token that is %.1f ms vs %.1f ms\n",
+           pageable * 202.0, pinned * 202.0);
+
+    cudaStreamDestroy(st);
+    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    cudaFreeHost(h_u_pin); cudaFreeHost(h_d_pin);
+    cudaFree(d_u); cudaFree(d_d);
+    free(h_u); free(h_d);
+    return 0;
+}
+
 /* Launch-shape sweep for the IQ2_S warp-per-column kernel: the same matvec at
  * different warps-per-block, to see whether the 76 GB/s streaming rate is a
  * concurrency limit (fixable by launch shape) or a per-warp read pattern limit
@@ -939,6 +1059,76 @@ static int matvec_devbuf(const void *d_w, int type, const float *d_x, float *d_y
     else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_w, g_q8_scratch, d_y, K, n_cols, stride);
     else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_w, g_q8_scratch, d_y, K, n_cols, stride);
     else                 rc = wubu_cuda_quant_matvec(d_w, type, g_q8_scratch, d_y, K, n_cols, stride);
+    return rc;
+}
+
+/* q, k and v share one input, so run all three against a single staged Q8_K row and let
+ * the caller download q|k|v in one copy. Removes two uploads, two quantisations and two
+ * synchronising downloads per layer; the three kernels still run one after another. */
+WUBU_EXPORT int wubu_cuda_qkv_dev(const void *d_wq, const void *d_wk, const void *d_wv, int type,
+                                  const float *d_x, float *d_q, float *d_k, float *d_v,
+                                  int K, int qd, int kvd,
+                                  long long sq, long long sk, long long sv)
+{
+    if (!d_wq || !d_wk || !d_wv || !d_x || !d_q || !d_k || !d_v) return -1;
+    if ((K % QK_K) != 0) return -1;
+    if (ensure_q8_scratch(K) != 0) return -2;
+    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, g_q8_scratch, K);
+    int rc;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, K, qd, sq);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, K, qd, sq);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, K, qd, sq);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wq, g_q8_scratch, d_q, K, qd, sq);
+    else                 rc = wubu_cuda_quant_matvec(d_wq, type, g_q8_scratch, d_q, K, qd, sq);
+    if (rc != 0) return -3;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, K, kvd, sk);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, K, kvd, sk);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, K, kvd, sk);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wk, g_q8_scratch, d_k, K, kvd, sk);
+    else                 rc = wubu_cuda_quant_matvec(d_wk, type, g_q8_scratch, d_k, K, kvd, sk);
+    if (rc != 0) return -4;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, K, kvd, sv);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, K, kvd, sv);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, K, kvd, sv);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wv, g_q8_scratch, d_v, K, kvd, sv);
+    else                 rc = wubu_cuda_quant_matvec(d_wv, type, g_q8_scratch, d_v, K, kvd, sv);
+    if (rc != 0) return -5;
+    return cudaGetLastError() == cudaSuccess ? 0 : -6;
+}
+
+/* Host wrapper so the gate can compare the fused qkv path against the CPU ports. */
+WUBU_EXPORT int wubu_cuda_qkv_host(const void *h_wq, const void *h_wk, const void *h_wv, int type,
+                                   const void *h_x, float *h_q, float *h_k, float *h_v,
+                                   int K, int qd, int kvd,
+                                   long long sq, long long sk, long long sv)
+{
+    void *dwq = NULL, *dwk = NULL, *dwv = NULL, *dx = NULL;
+    float *dq = NULL, *dk = NULL, *dv = NULL;
+    int rc = -1;
+    if (cudaMalloc(&dwq, (size_t)qd * sq) != cudaSuccess) goto done;
+    if (cudaMalloc(&dwk, (size_t)kvd * sk) != cudaSuccess) goto done;
+    if (cudaMalloc(&dwv, (size_t)kvd * sv) != cudaSuccess) goto done;
+    if (cudaMalloc(&dx, sizeof(float) * K) != cudaSuccess) goto done;
+    if (cudaMalloc((void **)&dq, sizeof(float) * qd) != cudaSuccess) goto done;
+    if (cudaMalloc((void **)&dk, sizeof(float) * kvd) != cudaSuccess) goto done;
+    if (cudaMalloc((void **)&dv, sizeof(float) * kvd) != cudaSuccess) goto done;
+    if (cudaMemcpy(dwq, h_wq, (size_t)qd * sq, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dwk, h_wk, (size_t)kvd * sk, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dwv, h_wv, (size_t)kvd * sv, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dx, h_x, sizeof(float) * K, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (wubu_cuda_qkv_dev(dwq, dwk, dwv, type, (const float *)dx, dq, dk, dv, K, qd, kvd, sq, sk, sv) != 0) goto done;
+    if (cudaMemcpy(h_q, dq, sizeof(float) * qd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(h_k, dk, sizeof(float) * kvd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(h_v, dv, sizeof(float) * kvd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dwq) cudaFree(dwq);
+    if (dwk) cudaFree(dwk);
+    if (dwv) cudaFree(dwv);
+    if (dx) cudaFree(dx);
+    if (dq) cudaFree(dq);
+    if (dk) cudaFree(dk);
+    if (dv) cudaFree(dv);
     return rc;
 }
 

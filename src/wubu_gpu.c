@@ -313,6 +313,45 @@ int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
     return 0;
 }
 
+/* Fused q/k/v: one upload, one quantisation, three kernels, one download of q|k|v. */
+int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_type,
+                 const float *x, int K, int qd, int kvd,
+                 long long sq, long long sk, long long sv, float *q, float *k, float *v)
+{
+    if (!wubu_gpu_init() || !x || !d_wq || !d_wk || !d_wv || !q || !k || !v) return -1;
+    typedef int (*fn_qkv_t)(const void *, const void *, const void *, int, const float *,
+                            float *, float *, float *, int, int, int,
+                            long long, long long, long long);
+    static fn_qkv_t qkv_fn;
+    static int looked;
+    if (!looked) { looked = 1; qkv_fn = (fn_qkv_t)(void *)GetProcAddress(G.h, "wubu_cuda_qkv_dev"); }
+    if (!qkv_fn) return -2;
+
+    static float *dqkv, *dx;
+    static int cap_qkv, cap_x;
+    const int total = qd + 2 * kvd;
+    if (cap_qkv < total) {
+        if (dqkv) G.free_dev(dqkv);
+        dqkv = (float *)G.alloc((unsigned long long)((size_t)total * sizeof(float)));
+        if (!dqkv) { cap_qkv = 0; return -3; }
+        cap_qkv = total;
+    }
+    if (cap_x < K) {
+        if (dx) G.free_dev(dx);
+        dx = (float *)G.alloc((unsigned long long)((size_t)K * sizeof(float)));
+        if (!dx) { cap_x = 0; return -3; }
+        cap_x = K;
+    }
+    if (G.upload(dx, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
+    if (qkv_fn(d_wq, d_wk, d_wv, ggml_type, dx, dqkv, dqkv + qd, dqkv + qd + kvd,
+               K, qd, kvd, sq, sk, sv) != 0) return -5;
+    if (G.download(q, dqkv, (unsigned long long)((size_t)total * sizeof(float))) != 0) return -6;
+    /* q|k|v arrived contiguously; split into the caller's three buffers. */
+    memcpy(k, q + qd, (size_t)kvd * sizeof(float));
+    memcpy(v, q + qd + kvd, (size_t)kvd * sizeof(float));
+    return 0;
+}
+
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
                     int K, int n_cols, long long col_stride, float *y)
 {
