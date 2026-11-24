@@ -79,6 +79,7 @@ CORE_OBJ += src/wubu_spectr_select.o
 CORE_OBJ += src/wubu_loop_place.o
 CORE_OBJ += src/wubu_bench_stats.o
 CORE_OBJ += src/wubu_virt_kv.o
+CORE_OBJ += src/wubu_kv_connector.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -420,6 +421,9 @@ src/wubu_bench_stats.o: src/wubu_bench_stats.c include/wubu_bench_stats.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_virt_kv.o: src/wubu_virt_kv.c include/wubu_virt_kv.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_kv_connector.o: src/wubu_kv_connector.c include/wubu_kv_connector.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1289,6 +1293,10 @@ test_eg106_bench_stats: tools/test_eg106_bench_stats.c src/wubu_bench_stats.c
 
 # EG-107: contiguous virtual KV + demand physical mapping gate.
 test_eg107_virt_kv: tools/test_eg107_virt_kv.c src/wubu_virt_kv.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-108: LMCache-style KV connector gate.
+test_eg108_kv_connector: tools/test_eg108_kv_connector.c src/wubu_kv_connector.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.

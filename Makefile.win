@@ -133,6 +133,7 @@ CORE_OBJ += src/wubu_spectr_select.o
 CORE_OBJ += src/wubu_loop_place.o
 CORE_OBJ += src/wubu_bench_stats.o
 CORE_OBJ += src/wubu_virt_kv.o
+CORE_OBJ += src/wubu_kv_connector.o
 
 .PHONY: all cpu-build clean
 
@@ -630,6 +631,10 @@ test_eg106_bench_stats: tools/test_eg106_bench_stats.c src/wubu_bench_stats.c
 
 # EG-107: contiguous virtual KV + demand physical mapping gate.
 test_eg107_virt_kv: tools/test_eg107_virt_kv.c src/wubu_virt_kv.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-108: LMCache-style KV connector gate.
+test_eg108_kv_connector: tools/test_eg108_kv_connector.c src/wubu_kv_connector.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

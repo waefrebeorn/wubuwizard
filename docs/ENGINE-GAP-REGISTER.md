@@ -1331,13 +1331,24 @@ arrays and out-of-range tokens are rejected. `test_eg107_virt_kv: PASS`, exit 0;
 
 | EG-107 | Contiguous virtual KV with demand physical mapping (vAttention) | EG-08/EG-05 use paged layout and physical allocation | vAttention arXiv 2405.04437 / `microsoft/vattention` | `test_eg107_virt_kv` | L | **DONE (allocation-contract gate)** — `src/wubu_virt_kv.c/.h` reserves virtual range and maps pages on demand; upstream study clone is read-only. |
 
+**EG-108 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg108_kv_connector`
+gates the LMCache-style connector from the acquired study clone `LMCache/LMCache`
+(Apache-2.0): a 256-token chunk is 16 native 16-token blocks, two stored chunks
+for a 600-token prompt are found by lookup, and pin + compress marks survive an
+unpinned eviction pass. Non-multiple chunk/block sizes, negative hashes and NULL
+buffers are rejected. `test_eg108_kv_connector: PASS`, exit 0; 30/30 stress runs
+clean. Chunks and hashes are synthetic; no transfer bandwidth or compression
+ratio is claimed.
+
+| EG-108 | Engine-agnostic chunked KV connector with pin/lookup/compress control | EG-18 tiers exist but no chunk-vs-page connector boundary | LMCache arXiv 2510.09665 / `LMCache/LMCache` | `test_eg108_kv_connector` | L | **DONE (connector-contract gate)** — `src/wubu_kv_connector.c/.h` gates chunk/block granularity and control ops; study clone is read-only. |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=116 FAIL=0`, no failed targets (EG-105/106/107 included). The
+was rebuilt and executed in one loop: `PASS=117 FAIL=0`, no failed targets (EG-105/106/107/108 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
