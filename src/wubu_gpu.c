@@ -123,7 +123,11 @@ int wubu_gpu_init(void)
         fn_mv2 up4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_upload_table_iq4nl");
         extern const void *wubu_vecdot_iq4_xs_table(void);
         if (!(up4 && up4(wubu_vecdot_iq4_xs_table(), 0, 0, 0, 0, 0) == 0)) G.mv4 = NULL;
-    }
+        }
+        if (getenv("G4_TBL")) {
+            int (*dump)(void) = (int (*)(void))(void *)GetProcAddress(G.h, "wubu_cuda_dump_tables");
+            if (dump) dump();
+        }
     /* IQ2_XS 512-entry grid for the type-17 device kernel. Without this upload the kernel
      * returns 0 for every column, which reads as an attention error of exactly the output
      * scale rather than as a missing table. */

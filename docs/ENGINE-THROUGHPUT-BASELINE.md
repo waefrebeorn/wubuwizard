@@ -320,6 +320,30 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### An M-row kernel for IQ3_XXS / IQ4_XS measures 2x prefill - and is not correct yet
+
+The per-row kernels for types 18 and 23 already exist and are correct, but the prefill path calls them
+once per row, and each row re-reads the whole weight matrix. Writing the M-row version - same block
+shape and same mma tail as the IQ2_S kernel, only the decode differing - changed all 48 layers to
+`fused=48 fallback=0` and took the five slow layers from 205-253 ms to ~15 ms:
+
+    87 tokens, whole prefill:   2.70 s  ->  1.39 s       32.2 -> 62.5 tok/s
+
+**It is numerically wrong** - every prompt diverges, with degenerate repeated tokens - and the path is
+therefore gated behind `G4_XXS_MMA` and off by default. What has been confirmed and what has not:
+
+  confirmed   the codebooks reach the device: `[TBL] iq3xxs 04040404 04040414 04040424 04040c0c |
+              iq4nl -127 -104 -83 -65`, exactly ggml's first entries. A missing table would have
+              produced this same symptom, so it was the first thing ruled out.
+  confirmed   the block sizes (98 and 136 bytes), the 32-group structure, the scale construction
+              `d*(0.5+q)*0.5` and the low/high sign split match the ggml dequantisers and the existing
+              per-row kernels.
+  not confirmed  where the disagreement is. Forcing one row-group per block changed nothing, so it is
+              in the decode, not the row indexing.
+
+This needs a numeric harness - synthetic block, CPU dequantiser, compare - exactly as the nibble
+straddle bug was found and fixed. It is the largest single item left: 2x on prefill for one kernel.
+
 ### The 5 fallback layers are 43% of prefill, and now we know why
 
 The FFN phase measured 1693 ms while the fused block accounted for 43 x 12.27 = 528 ms. Per-layer wall
