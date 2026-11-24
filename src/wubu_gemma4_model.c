@@ -1386,7 +1386,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         }
         const int mode_ok = (half_mode == 0) || (half_mode == 1 && layer->is_full) ||
                             (half_mode == 2 && !layer->is_full);
-        if (half_enabled && mode_ok && N == 1 && !layer->share_kv && layer->attn_q.dev &&
+        static int warm = -1;
+        if (warm < 0) { const char *w = getenv("G4_ATTN_WARM"); warm = w ? atoi(w) : 0; }
+        const int warm_ok = positions[0] >= warm;
+        if (half_enabled && mode_ok && warm_ok && N == 1 && !layer->share_kv && layer->attn_q.dev &&
             layer->attn_k.dev && layer->attn_v.dev && layer->attn_out.dev) {
             g4_kv_cache_t *cache_h = g4_kv_get(model, layer);
             const int pos_h = positions[0];
@@ -1424,6 +1427,14 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 const long long sk_h = (long long)(layer->attn_k.raw_bytes / kvd);
                 const long long sv_h = (long long)(layer->attn_v.raw_bytes / kvd);
                 const long long so_h = (long long)(layer->attn_out.raw_bytes / G4_HIDDEN);
+                /* the composite writes its o-projection into the same buffer it reads, so
+                 * the input has to be copied out before the call for any comparison */
+                static float *qdump_x;
+                const int qdump_now = getenv("G4_QDUMP") && il == 0 && pos_h == 21;
+                if (qdump_now) {
+                    if (!qdump_x) qdump_x = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
+                    if (qdump_x) memcpy(qdump_x, normed, (size_t)G4_HIDDEN * sizeof(float));
+                }
                 const int rc_h = wubu_gpu_attn_half(il, layer->attn_q.dev, layer->attn_k.dev,
                                        layer->attn_v.dev, layer->attn_out.dev,
                                        layer->attn_q.ggml_type, layer->attn_k.ggml_type,
@@ -1434,13 +1445,42 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                        layer->attn_q_norm_weight, layer->attn_k_norm_weight,
                                        layer->rope_freqs, layer->n_rot, layer->rope_base,
                                        normed, k, v);
-                if (rc_h != 0 && getenv("G4_ATTN_RC") && il == 0 && pos_h <= 2)
-                    fprintf(stderr, "[RC] il0 pos%d rc=%d\n", pos_h, rc_h);
                 if (rc_h == 0) {
                     g4_kv_store(cache_h, pos_h, k, v);
-                    { static int shown; if (!shown && getenv("G4_ATTN_RC")) { shown = 1;
-                        fprintf(stderr, "[RC] first fused success: pos=%d il=%d kv_len=%d full=%d cache_size=%d kv_start=%d\n",
-                                pos_h, il, kv_len_h, (int)layer->is_full, cache_h->size, kv_start_h); } }
+                    /* G4_QDUMP: compare the composite's q against the same matvec + q-norm +
+                     * rope done on the CPU from the same input. k, v and the KV rows already
+                     * match exactly, so q is the last stage that can differ. */
+                    if (qdump_now && qdump_x) {
+                        static float *qref, *qdev;
+                        if (!qref) {
+                            qref = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
+                            qdev = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
+                        }
+                        memcpy(qref, qdump_x, (size_t)G4_HIDDEN * sizeof(float));
+                        g4_batched_qmatmul(qref, &layer->attn_q, 1, qd, G4_HIDDEN, qref);
+                        for (int hh = 0; hh < G4_HEADS; ++hh)
+                            g4_rms_norm(qref + (size_t)hh * hd, layer->attn_q_norm_weight, hd,
+                                        G4_RMS_EPS, qref + (size_t)hh * hd);
+                        g4_rope_apply(qref, NULL, 1, hd, qd, 0, positions,
+                                      layer->n_rot, layer->rope_base, layer->rope_freqs, layer->is_full);
+                        { extern int wubu_gpu_get_qdump(float *, int);
+                          wubu_gpu_get_qdump(qdev, qd); }
+                        double wq4 = 0.0; int wi4 = -1;
+                        for (int i = 0; i < qd; ++i) {
+                            const double d = fabs((double)qdev[i] - (double)qref[i]);
+                            if (d > wq4) { wq4 = d; wi4 = i; }
+                        }
+                        fprintf(stderr, "[QDUMP] layer0 pos21 q dev-vs-cpu=%.3e at %d: dev %.6f cpu %.6f\n",
+                                wq4, wi4, wi4 >= 0 ? qdev[wi4] : 0.0f, wi4 >= 0 ? qref[wi4] : 0.0f);
+                        for (int hh = 0; hh < G4_HEADS; ++hh) {
+                            double wh = 0.0;
+                            for (int d = 0; d < hd; ++d) {
+                                const double dd = fabs((double)qdev[hh * hd + d] - (double)qref[hh * hd + d]);
+                                if (dd > wh) wh = dd;
+                            }
+                            if (wh > 1e-2) fprintf(stderr, "[QDUMP] head %d worst %.3e\n", hh, wh);
+                        }
+                    }
                     primed[il] = 1;
                     half_done = 1;
                 }

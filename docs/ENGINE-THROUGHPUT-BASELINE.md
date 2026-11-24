@@ -192,7 +192,16 @@ the fused continuation go from a permanent control-token loop to one that tracks
 for most of 24 tokens, with a two-token stutter at positions 2-4 and one divergence at
 position 11.
 
-### Still open: the composite's attention over its own cache
+### Debug hooks in the fused path
+
+All env-gated, all off by default: `G4_ATTN_WARM=<pos>` (start fusing only at that position,
+for bisecting), `G4_QDUMP=1` (compare the composite's staged q against the same
+matvec + q-norm + rope on the CPU), `G4_ATTN_KVCHK=1` (read device KV rows back and diff them
+against the CPU cache). They exist because every one of the bugs above was invisible from the
+token stream alone - the failure looked like "the fused path is numerically worse" in all
+three cases.
+
+### Still open: what the residual divergence actually is
 
 With k and v from the composite matching the CPU to 1e-07 at the same position, its
 attention output still differed by 1.3 relative. The attention kernel itself is gated

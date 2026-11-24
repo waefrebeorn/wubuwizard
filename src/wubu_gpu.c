@@ -372,6 +372,15 @@ int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
     return 0;
 }
 
+/* staged q, exposed for the G4_QDUMP comparison */
+static float g_qdump[8192];
+int wubu_gpu_get_qdump(float *out, int n)
+{
+    if (!out || n <= 0 || n > 8192) return -1;
+    memcpy(out, g_qdump, (size_t)n * sizeof(float));
+    return 0;
+}
+
 /* ---- device attention half-layer -----------------------------------------------
  * One submission: q,k,v matvecs -> per-head RMS norms -> RoPE -> KV append -> attention
  * -> o-projection. Owns a per-layer device KV cache of MAX_KV_POS positions; the caller
@@ -508,6 +517,8 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
                   hidden, qd, kvd, hd, n_heads, n_kv_heads, pos, kv_start, kv_len,
                   sq, sk, sv, so, (float)pos, n_rot, (float)theta_scale,
                   (const float *)g_freqs_dev) != 0) return -6;
+    if (getenv("G4_QDUMP") && qd <= 8192)
+        G.download(g_qdump, d_q, (unsigned long long)((size_t)qd * sizeof(float)));
     if (G.download(out, d_out, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -7;
     if (k_out && G.download(k_out, d_k, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -8;
     if (v_out && G.download(v_out, d_v, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -8;
