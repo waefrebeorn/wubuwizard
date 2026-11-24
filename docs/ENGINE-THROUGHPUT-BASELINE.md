@@ -258,6 +258,30 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Replay is only free if the key is the exact token sequence
+
+An independent rebuild of NVIDIA's CPU-ARC idea (a CPU replaying a large model's reasoning from a
+cache) on one RTX 5090 reports the shape of the trap:
+
+    new maths questions      cache 83%   27B from scratch 96%   stock 1B alone 48%
+    near-miss questions      cache answered 186/200, 185 of them wrong   27B 94.5%
+    speed                    1.8 s/question on 6 CPU threads                27B ~17 s
+
+The speed is real and the accuracy collapses exactly on questions that look familiar. That is a
+property of the *key*, not of the idea: that cache is found by similarity to a stored transcript, so
+a one-clause difference retrieves a trajectory that starts right and diverges silently. The paper
+builds each entry from the test question's own transcript and reports no miss rate, which is the
+measurement that hides the failure.
+
+The engine-level version of the same idea is only safe when the key is exact: `wubu_prefix_cache`
+walks a trie of token ids and hashes the token range, so a hit means the prefix is byte-identical and
+the KV it returns is the KV the model would have computed. A near-miss cannot hit, by construction.
+That is the distinction worth keeping: **exact-prefix reuse is free and indistinguishable; semantic
+replay is a different product with a different failure mode**, and it should never be sold as the
+same speedup. For a 1717-token prompt this engine spends 111 s computing a KV that an exact-prefix
+hit would return immediately - that is the honest ceiling of the technique, and it applies only when
+the prompt repeats.
+
 ### Staging, not arithmetic: one workspace pool declared by role
 
 The speed in an engine like this is not in the kernel maths, it is in the memory ladder - SSD, then
