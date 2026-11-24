@@ -320,6 +320,29 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### IQ3_S reads its weights better than it looks, which is why fixing it changed nothing
+
+`iq3s_matvec_mrow_kernel` walks `for (b = lane; b < nblocks; b += 32)`, so every lane takes a
+different 110-byte block. At K = 3840 that is nblocks = 15, and 17 of 32 lanes never execute at all -
+it looked like an obvious 2x staring back at me. An IQ3_S block is 8 sub-blocks x 4 grid entries,
+exactly 32, so the natural remap is lane -> (sub-block, entry) inside one block: every lane busy, all
+lane reads inside one 110-byte window. Written, gated, measured:
+
+    lane-per-block (old)   19.0 tok/s   tokens exact
+    lane-per-block (old)   18.9
+    sub-block-per-lane     19.0 tok/s   tokens exact
+    sub-block-per-lane     18.8
+
+Neutral, reverted. The reason is worth keeping: the two layouts trade one resource for the other.
+Lane-per-block is *good* for memory - 32 lanes walk 15 consecutive 110-byte blocks, one contiguous
+1650-byte run - and *bad* for ALU, running the 64-lookup inner loop with 47% of lanes predicated off.
+Sub-block-per-lane is the reverse. They cancel exactly, which is what a memory-bound kernel does when
+you fix its ALU.
+
+So IQ3_S is not starved of lanes, instructions, or rows-per-block. It reads its weights as well as
+this layout allows, and the ceiling it shares with IQ2_S is the layout itself: 82 and 110 bytes per
+block, fetched as 3-5 memory sectors per warp instruction for a few dozen useful bytes each.
+
 ### MT=16, and why MT is a fight against occupancy
 
 `acc[MT]` costs one register per row, so rows-per-decoded-block and occupancy trade against each
