@@ -288,6 +288,14 @@ structural rather than fixable by tuning. M rows through an M==1 kernel is M syn
 round trips per tensor per layer; for a 1717-token prompt that is roughly 400k CUDA calls, and the
 weight read - the only cost that matters - is not amortised at all. Reverted.
 
+**What is NOT established:** where the remaining 196 s goes. The profiler (`G4_PROF`) is gated on
+`N == 1` throughout - every `G4P_ADD` and every phase accumulator is `if (N == 1)` - so there is no
+phase attribution for prefill at all, and two guesses at it were wrong: the LM head is ~6% of the
+87-token case, not the 70% assumed, and covering the projection types with M-row kernels bought 24%
+rather than the multiple implied. The quadratic CPU attention is a plausible remaining cost at 1717
+tokens but it is a hypothesis, not a measurement. Generalising the profiler to N > 1 is the next
+thing to do, before any further prefill optimisation - guessing twice is enough.
+
 **The gain shrinks with prompt length, and that names the next wall.** 1717-token prompt: 7.3
 (per-token) → **8.8 tok/s** (batch, M-row kernels) = 235 s → **196 s** to first token. At 87 tokens
 the same change is 13.9 → 17.2. Twenty-odd percent either way, but the absolute rate collapses from
