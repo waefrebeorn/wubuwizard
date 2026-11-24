@@ -56,6 +56,33 @@ grid-gather bound (4 scalar grid lookups per 32 elements), so more threads do no
    that split).
 4. **KV on device**, grow on demand, and a host fallback when a request exceeds the plan.
 
+## First end-to-end attempt: measured, slower than the CPU path
+
+`G4_GPU=1` now uploads all 337 quantized tensors (4005 MiB) at load and routes decode
+matvecs through `wubu_cuda_matvec_dev`, with the activation quantized on the device.
+
+| Run (12-token prompt) | prefill | decode |
+|---|---|---|
+| CPU, fused kernels (EG-111/113/114) | 4.9 tok/s | **4.2 tok/s** |
+| GPU resident, per-matmul host round-trip | 5.1 tok/s | 1.5 tok/s |
+
+Two findings, both real:
+
+1. **The kernel is not the problem, the interface is.** Each matvec uploads the row,
+   quantizes, launches and downloads, so every one of ~340 matvecs per token pays a
+   host round-trip. Measured per-matmul speedup of the kernel itself is 2.6x
+   (`test_eg115_cuda_matvec`: 15360x3840 IQ2_S, 19.9 ms CPU vs 7.8 ms GPU), which the
+   round-trips throw away.
+2. **The GPU path is not bit-identical.** Greedy tokens match for 9 steps and then
+   diverge (818 vs 140 at step 10), because the device Q8_K quantizer rounds through a
+   different code path. Any promotion of this path needs a token-agreement gate, not a
+   tolerance check.
+
+Fixes, in order: keep activations and the Q8_K row device-resident across a layer (one
+upload per token, not per matvec), remove the per-call `cudaDeviceSynchronize`, then
+repack weights to tiles. Until then the GPU path stays opt-in (`G4_GPU=1`) and the CPU
+path is the default.
+
 ## What not to do
 
 - Do not upload per matmul: PCIe at ~6 GB/s makes a 4 GB model 0.7 s/token.

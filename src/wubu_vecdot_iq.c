@@ -364,6 +364,10 @@ int wubu_vec_dot_iq3_s_q8_k_avx2(int n, float *s, const void *w, const void *q8v
 
 /* ---------------------------------------------------------------- dispatch */
 
+/* Table accessors: the CUDA kernels need the same grids on the device. */
+const void *wubu_vecdot_iq2s_grid(void) { return (const void *)iq2s_grid; }
+const void *wubu_vecdot_iq3s_grid(void) { return (const void *)iq3s_grid; }
+
 int wubu_vec_dot_iq2_s_q8_k(int n, float *s, const void *w, const void *q8)
 {
     if (!s || !w || !q8 || n <= 0 || (n % QK_K) != 0) return -1;

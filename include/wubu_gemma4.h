@@ -114,6 +114,8 @@ typedef struct {
     uint8_t *raw_cache; /* quantized bytes held in the RAM tier (LRU) */
     uint64_t last_use; /* LRU stamp */
     void *cache_prev, *cache_next;
+    int pinned;        /* 1 = residency hot set: never evicted from the RAM tier */
+    void *dev;         /* device copy of the quantized bytes (CUDA path), or NULL */
 } g4_qweight_t;
 
 /* ---- KV cache entry (per-layer) ---- */

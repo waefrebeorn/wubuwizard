@@ -14,6 +14,7 @@
 #include "wubu_gemma4.h"
 #include "gguf_reader.h"
 #include "wubu_residency.h"
+#include "wubu_gpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -258,6 +259,56 @@ static DWORD WINAPI g4_pf_thread(LPVOID arg)
 }
 
 static const uint8_t *g4_qweight_stream_raw(const g4_qweight_t *w, int *owned);
+
+/* ---- GPU residency (optional, G4_GPU=1) ----
+ * Uploads every quantized weight that the device can hold after a reserve, so
+ * decode matvecs run device-resident (docs/GPU-LANE-PLAN.md). Weights that do
+ * not fit keep dev == NULL and stay on the CPU path. */
+static void g4_apply_gpu_plan(g4_model_t *m)
+{
+    const char *env = getenv("G4_GPU");
+    if (!env || !strcmp(env, "0")) return;
+    if (!wubu_gpu_available()) {
+        fprintf(stderr, "[GPU] requested but no CUDA device/DLL; staying on CPU\n");
+        return;
+    }
+
+    unsigned long long total = 0, freeb = 0;
+    wubu_gpu_stats(&total, &freeb);
+    const unsigned long long reserve = 768ULL * 1024ULL * 1024ULL;  /* KV + scratch + logits */
+    fprintf(stderr, "[GPU] device %llu MiB free, reserve %llu MiB\n",
+            freeb >> 20, reserve >> 20);
+
+    unsigned long long used = 0;
+    int uploaded = 0, skipped = 0;
+
+    /* Tied head first: it is the largest single tensor and pure decode cost. */
+    g4_qweight_t *head = &m->output;
+    if (head->data && head->raw_bytes > 0) {
+        if (freeb > reserve && (unsigned long long)head->raw_bytes <= freeb - reserve) {
+            head->dev = wubu_gpu_upload(head->data, (size_t)head->raw_bytes);
+            if (head->dev) { used += (unsigned long long)head->raw_bytes; ++uploaded; }
+        }
+    }
+
+    for (int il = 0; il < m->n_layers; ++il) {
+        g4_layer_t *l = &m->layers[il];
+        g4_qweight_t *w[7] = { &l->attn_q, &l->attn_k, &l->attn_v, &l->attn_out,
+                               &l->ffn_gate, &l->ffn_up, &l->ffn_down };
+        for (int k = 0; k < 7; ++k) {
+            g4_qweight_t *q = w[k];
+            if (!q->data || q->raw_bytes <= 0) continue;
+            const unsigned long long bytes = (unsigned long long)q->raw_bytes;
+            if (freeb <= reserve || used + bytes > freeb - reserve) { ++skipped; continue; }
+            q->dev = wubu_gpu_upload(q->data, (size_t)q->raw_bytes);
+            if (q->dev) { used += bytes; ++uploaded; } else { ++skipped; }
+        }
+    }
+    fprintf(stderr, "[GPU] uploaded %d tensors (%.0f MiB), %d left on CPU\n",
+            uploaded, (double)(used >> 20), skipped);
+}
+
+
 
 /* ---- EG-110 residency plan -> RAM tier cap ----
  * WUBU_RESIDENCY_MB turns the ad-hoc G4_WEIGHT_CACHE_MB cap into a plan: attention
@@ -564,6 +615,13 @@ static int g4_qweight_stream_f32(const g4_qweight_t *w, float **out)
 void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
                                int M, int N, int K, float *c) {
     if (!w) return;
+    /* Device-resident weights: decode (M == 1) runs entirely on the GPU. */
+    if (w->dev && M == 1 && (K % 256) == 0 &&
+        (w->ggml_type == GGML_TYPE_IQ2_S || w->ggml_type == GGML_TYPE_IQ3_S ||
+         w->ggml_type == GGML_TYPE_Q3_K || w->ggml_type == GGML_TYPE_Q4_0)) {
+        const long long stride = (long long)(w->raw_bytes / N);
+        if (wubu_gpu_matvec(w->dev, w->ggml_type, x, K, N, stride, c) == 0) return;
+    }
     if (!w->data && w->stream_ctx) {
         if (g4_type_native_supported(w->ggml_type) && N > 0) {
             /* Feed quantized bytes straight to the SIMD matmul: no 4x F32
@@ -900,6 +958,7 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
     model->gguf_tensor_info = ctx->tensors;
     strncpy(model->gguf_path, gguf_path, sizeof(model->gguf_path) - 1);
     g4_apply_residency_plan(model);
+    g4_apply_gpu_plan(model);
     g4_prefetch_init(model, model->gguf_path);
     if (getenv("G4_CACHE_LM_HEAD")) {
         int64_t head_elems = (int64_t)G4_VOCAB * G4_HIDDEN;
