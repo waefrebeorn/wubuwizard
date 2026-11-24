@@ -180,6 +180,18 @@ anyway, so the one-time device prime never ran and every later token attended ov
 uninitialised device row 0. Marking a layer primed only after it has actually appended fixes
 it; the fused continuation moved from wrong-at-token-0 to matching the first two tokens.
 
+### Second real bug: the attention span was clamped by the allocated cache size
+
+The fused branch derived its window as `min(cache->size - 1, pos) + 1`, but `cache->size` is
+how many rows have been *allocated* so far - at position p that is p - so the clamp dropped
+the current token from the window. Measured at position 1: the composite attended **1 row**
+where the CPU sequence attends **2**. That is why k, v and the KV rows all matched exactly
+while the attention output did not: the composite was computing a different attention, over
+the wrong span. Deriving the span from the position (`pos + 1`, or the sliding window) makes
+the fused continuation go from a permanent control-token loop to one that tracks the default
+for most of 24 tokens, with a two-token stutter at positions 2-4 and one divergence at
+position 11.
+
 ### Still open: the composite's attention over its own cache
 
 With k and v from the composite matching the CPU to 1e-07 at the same position, its

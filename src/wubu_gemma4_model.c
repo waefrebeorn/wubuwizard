@@ -1391,14 +1391,17 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             g4_kv_cache_t *cache_h = g4_kv_get(model, layer);
             const int pos_h = positions[0];
             int kv_start_h = 0, kv_len_h = 0;
+            /* The span must be derived from the position, not from cache_h->size: size is
+             * how many rows have been allocated so far, which at position p is p - so
+             * clamping with it dropped the current token from the window (measured: at
+             * position 1 the composite attended 1 row where the CPU sequence attends 2).
+             * That is a different attention than the reference, which is why k, v and the
+             * KV rows all matched while the attention output did not. */
             if (layer->is_full) {
-                int kv_end_h = cache_h->size - 1;
-                if (kv_end_h > pos_h) kv_end_h = pos_h;
-                kv_len_h = kv_end_h + 1;
+                kv_len_h = pos_h + 1;
             } else {
                 kv_start_h = (pos_h >= G4_SLIDING_WINDOW) ? pos_h - G4_SLIDING_WINDOW + 1 : 0;
                 kv_len_h = pos_h - kv_start_h + 1;
-                if (kv_len_h > cache_h->size) kv_len_h = cache_h->size;
             }
             static int primed[128];
             /* Compare the composite against the CPU sequence for layer 0 at position 0,
@@ -1421,7 +1424,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 const long long sk_h = (long long)(layer->attn_k.raw_bytes / kvd);
                 const long long sv_h = (long long)(layer->attn_v.raw_bytes / kvd);
                 const long long so_h = (long long)(layer->attn_out.raw_bytes / G4_HIDDEN);
-                if (wubu_gpu_attn_half(il, layer->attn_q.dev, layer->attn_k.dev,
+                const int rc_h = wubu_gpu_attn_half(il, layer->attn_q.dev, layer->attn_k.dev,
                                        layer->attn_v.dev, layer->attn_out.dev,
                                        layer->attn_q.ggml_type, layer->attn_k.ggml_type,
                                        layer->attn_v.ggml_type, layer->attn_out.ggml_type,
@@ -1430,8 +1433,14 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                        sq_h, sk_h, sv_h, so_h,
                                        layer->attn_q_norm_weight, layer->attn_k_norm_weight,
                                        layer->rope_freqs, layer->n_rot, layer->rope_base,
-                                       normed, k, v) == 0) {
+                                       normed, k, v);
+                if (rc_h != 0 && getenv("G4_ATTN_RC") && il == 0 && pos_h <= 2)
+                    fprintf(stderr, "[RC] il0 pos%d rc=%d\n", pos_h, rc_h);
+                if (rc_h == 0) {
                     g4_kv_store(cache_h, pos_h, k, v);
+                    { static int shown; if (!shown && getenv("G4_ATTN_RC")) { shown = 1;
+                        fprintf(stderr, "[RC] first fused success: pos=%d il=%d kv_len=%d full=%d cache_size=%d kv_start=%d\n",
+                                pos_h, il, kv_len_h, (int)layer->is_full, cache_h->size, kv_start_h); } }
                     primed[il] = 1;
                     half_done = 1;
                 }
