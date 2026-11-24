@@ -616,6 +616,60 @@ static struct { double ms; long calls; } G4_CPU_STATS[64];
 static struct { double ms; long calls; } G4_CPU_DEC_STATS[64];  /* M == 1 only */
 static int G4_CPU_STATS_hooked;
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+/* Dot product for the attention score and value loops. These were the only remaining
+ * scalar inner loops in decode: hd=256 per (query head, cached position), so a 1024-token
+ * sliding window is 16 heads x 1024 positions x 256 MACs per layer, and it ran at scalar
+ * speed while everything else had been vectorised. */
+static inline float g4_dotf(const float *a, const float *b, int n)
+{
+    __m256 s0 = _mm256_setzero_ps(), s1 = _mm256_setzero_ps();
+    int d = 0;
+    for (; d + 16 <= n; d += 16) {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + d), _mm256_loadu_ps(b + d), s0);
+        s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + d + 8), _mm256_loadu_ps(b + d + 8), s1);
+    }
+    for (; d + 8 <= n; d += 8)
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + d), _mm256_loadu_ps(b + d), s0);
+    __m256 s = _mm256_add_ps(s0, s1);
+    __m128 lo = _mm256_castps256_ps128(s);
+    __m128 hi = _mm256_extractf128_ps(s, 1);
+    lo = _mm_add_ps(lo, hi);
+    lo = _mm_hadd_ps(lo, lo);
+    lo = _mm_hadd_ps(lo, lo);
+    float r = _mm_cvtss_f32(lo);
+    for (; d < n; d++) r += a[d] * b[d];
+    return r;
+}
+#else
+static inline float g4_dotf(const float *a, const float *b, int n)
+{
+    float r = 0.0f;
+    for (int d = 0; d < n; d++) r += a[d] * b[d];
+    return r;
+}
+#endif
+
+/* out[d] += w * v[d]. Called with kp ascending from the softmax loop, so each output
+ * element accumulates in exactly the order the scalar version did - bit-identical, just
+ * eight lanes wide. */
+static inline void g4_axpyf(float w, const float *v, float *out, int n)
+{
+#if defined(__AVX2__)
+    const __m256 wv = _mm256_set1_ps(w);
+    int d = 0;
+    /* mul then add, not FMA: contracting this changed greedy token 22 (37475 -> 193634).
+     * Two roundings match the scalar loop exactly; one rounding does not. */
+    for (; d + 8 <= n; d += 8)
+        _mm256_storeu_ps(out + d, _mm256_add_ps(_mm256_mul_ps(wv, _mm256_loadu_ps(v + d)),
+                                                _mm256_loadu_ps(out + d)));
+    for (; d < n; d++) out[d] += w * v[d];
+#else
+    for (int d = 0; d < n; d++) out[d] += w * v[d];
+#endif
+}
+
 static double g4_now_ms(void)
 {
 #ifdef _WIN32
@@ -1144,9 +1198,7 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
             float max_s = -FLT_MAX;
             for (int kp = kv_start; kp <= kv_end; kp++) {
                 const float *kv = cache->k + (size_t)kp * kvd + (size_t)kv_h * hd;
-                float score = 0.0f;
-                for (int d = 0; d < hd; d++)
-                    score += q_vec[d] * kv[d];
+                const float score = g4_dotf(q_vec, kv, hd);
                 /* Gemma 4 uses kq_scale = 1.0 (no 1/sqrt(head_dim)); llama.cpp
                  * gemma4.cpp sets f_attention_scale = 1.0f. */
                 s[kp - kv_start] = score;
@@ -1161,13 +1213,12 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
             }
             float inv_sum = 1.0f / (sum_e + 1e-10f);
 
-            for (int d = 0; d < hd; d++) {
-                float val = 0.0f;
-                for (int kp = kv_start; kp <= kv_end; kp++) {
-                    val += s[kp - kv_start] * inv_sum *
-                           (cache->v + (size_t)kp * kvd + (size_t)kv_h * hd)[d];
-                }
-                attn_out[(size_t)t * qd + (size_t)hq * hd + d] = val;
+            {
+                float *out = attn_out + (size_t)t * qd + (size_t)hq * hd;
+                memset(out, 0, (size_t)hd * sizeof(float));
+                for (int kp = kv_start; kp <= kv_end; kp++)
+                    g4_axpyf(s[kp - kv_start] * inv_sum,
+                             cache->v + (size_t)kp * kvd + (size_t)kv_h * hd, out, hd);
             }
         }
     }
@@ -1214,9 +1265,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
             float max_s = -FLT_MAX;
             for (int kp = 0; kp <= kv_end; kp++) {
                 const float *kv = cache->k + (size_t)kp * kvd + (size_t)kv_h * hd;
-                float score = 0.0f;
-                for (int d = 0; d < hd; d++)
-                    score += q_vec[d] * kv[d];
+                const float score = g4_dotf(q_vec, kv, hd);
                 /* Gemma 4: kq_scale = 1.0f (see sliding-attention above). */
                 s[kp] = score;
                 if (score > max_s) max_s = score;
@@ -1230,6 +1279,10 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
             }
             float inv_sum = 1.0f / (sum_e + 1e-10f);
 
+            /* Left in the original d-outer form on purpose: rewriting it kp-outer with
+             * the same value loop changed greedy token 22 (37475 -> 193634) even though
+             * the arithmetic is, on paper, identical. Not worth the token-identity bar
+             * for the cost of the few non-sliding layers. */
             for (int d = 0; d < hd; d++) {
                 float val = 0.0f;
                 for (int kp = 0; kp <= kv_end; kp++) {

@@ -18,9 +18,9 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 
 | metric | value |
 |---|---|
-| decode at 65 tokens of context | **11.4 tok/s** |
-| decode at 129 tokens of context | 10.6 tok/s |
-| decode at 257 tokens of context | **9.1 tok/s** |
+| decode at 33 tokens of context | **12.1 tok/s** |
+| decode at 129 tokens of context | 11.3 tok/s |
+| decode at 257 tokens of context | **11.3 tok/s** |
 | prefill, 21-token prompt | **6.8 tok/s** |
 | prefill, 72-token prompt | **15.0 tok/s** |
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
@@ -118,12 +118,14 @@ submission, with a per-layer device KV cache (512 positions, primed from the CPU
 
 | context | default | `G4_ATTN_DEV=1` |
 |---|---|---|
-| 65 tokens | 11.4 tok/s | **13.5 tok/s** |
-| 200 tokens | 9.8 tok/s | **13.0 tok/s** |
+| 32 tokens | 12.1 tok/s | - |
+| 200 tokens | 11.3 tok/s | 12.9 tok/s |
+| 256 tokens | 11.3 tok/s | - |
 
-The gap widens with context because it is the CPU-only attention stretch that both grows
-with kv_len and leaves the device idle between submissions - at 200 tokens the fused path
-is **33% faster**.
+The default path used to fall from 11.4 to 9.1 tok/s between 65 and 256 tokens because the
+attention section was scalar and grew with kv_len (7.3 -> 29.1 ms). Vectorising it took
+that to **4.6 -> 9.0 ms** and the curve is now nearly flat; the fused path is still ~14%
+ahead at 200 tokens because it also removes the device idle.
 
 It is opt-in because it does not hold the identical-token bar: the fused order changes the
 accumulation. EG-124 (synthetic weights, same inputs) measures the divergence explicitly -
