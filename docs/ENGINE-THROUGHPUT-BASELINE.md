@@ -258,6 +258,14 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### One dispatch function, not three
+
+There were **three** hand-written type chains in the CUDA file - the composite's q/k/v, its
+o-projection, and `matvec_devbuf` - each listing 22/18/23 and falling through to the generic
+kernel. Only the first two were reachable with an IQ2_XS tensor on this model, which is why the
+bug appeared exactly five times. All three now call `mv_any()`, and the duplicate `mv_dispatch`
+copy is deleted rather than kept alongside it.
+
 ### All-layer fusion is now the default: 14.3 tok/s at 65, 13.4-13.6 at 257
 
 With `mv_any()` in place the sliding layers are correct, so fusing them is no longer a

@@ -1543,18 +1543,27 @@ WUBU_EXPORT int wubu_cuda_rope_dev(float *d_q, float *d_k, float pos, int d_head
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
+/* One place that maps a ggml type to a kernel. Three separate hand-written if-chains used to do
+ * this, each listing 22/18/23 and falling through to the generic kernel for everything else -
+ * which does not implement 17 (IQ2_XS) and answers with a zero buffer and rc=0. That is why the
+ * five layers with an IQ2_XS attn_k attended on an all-zero K: no error, no fallback, max|k|=0. */
+static int mv_any(const void *d_w, int type, const void *d_q8, float *d_y,
+                  int K, int n_cols, long long col_stride)
+{
+    if (type == 22) return wubu_cuda_matvec_iq2s_v3(d_w, d_q8, d_y, K, n_cols, col_stride);
+    if (type == 18) return wubu_cuda_matvec_iq3xxs(d_w, d_q8, d_y, K, n_cols, col_stride);
+    if (type == 23) return wubu_cuda_matvec_iq4xs(d_w, d_q8, d_y, K, n_cols, col_stride);
+    if (type == 17) return wubu_cuda_matvec_iq2xs(d_w, d_q8, d_y, K, n_cols, col_stride);
+    return wubu_cuda_quant_matvec(d_w, type, d_q8, d_y, K, n_cols, col_stride);
+}
+
 /* q8k + matvec with everything already on the device (no download). */
 static int matvec_devbuf(const void *d_w, int type, const float *d_x, float *d_y,
                          int K, int n_cols, long long stride)
 {
     if (ensure_q8_scratch(K) != 0) return -1;
     quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, g_q8_scratch, K);
-    int rc;
-    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_w, g_q8_scratch, d_y, K, n_cols, stride);
-    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_w, g_q8_scratch, d_y, K, n_cols, stride);
-    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_w, g_q8_scratch, d_y, K, n_cols, stride);
-    else                 rc = wubu_cuda_quant_matvec(d_w, type, g_q8_scratch, d_y, K, n_cols, stride);
-    return rc;
+    return mv_any(d_w, type, g_q8_scratch, d_y, K, n_cols, stride);
 }
 
 /* q, k and v share one input, so run all three against a single staged Q8_K row and let
@@ -1569,29 +1578,6 @@ static int matvec_devbuf(const void *d_w, int type, const float *d_x, float *d_y
  * everything else - including 17 (IQ2_XS), which the generic kernel does not implement and
  * answers with a zero buffer and rc=0. That is why exactly the five layers whose attn_k is
  * IQ2_XS attended on an all-zero K: no error, no fallback, max|k| = 0.0. */
-static int mv_any(const void *d_w, int type, const void *d_q8, float *d_y,
-                  int K, int n_cols, long long col_stride);
-
-static int mv_any(const void *d_w, int type, const void *d_q8, float *d_y,
-                  int K, int n_cols, long long col_stride)
-{
-    if (type == 22) return wubu_cuda_matvec_iq2s_v3(d_w, d_q8, d_y, K, n_cols, col_stride);
-    if (type == 18) return wubu_cuda_matvec_iq3xxs(d_w, d_q8, d_y, K, n_cols, col_stride);
-    if (type == 23) return wubu_cuda_matvec_iq4xs(d_w, d_q8, d_y, K, n_cols, col_stride);
-    if (type == 17) return wubu_cuda_matvec_iq2xs(d_w, d_q8, d_y, K, n_cols, col_stride);
-    return wubu_cuda_quant_matvec(d_w, type, d_q8, d_y, K, n_cols, col_stride);
-}
-
-static int mv_dispatch(const void *d_w, int type, const void *d_q8, float *d_y,
-                       int K, int n_cols, long long col_stride)
-{
-    if (type == 22) return wubu_cuda_matvec_iq2s_v3(d_w, d_q8, d_y, K, n_cols, col_stride);
-    if (type == 18) return wubu_cuda_matvec_iq3xxs(d_w, d_q8, d_y, K, n_cols, col_stride);
-    if (type == 23) return wubu_cuda_matvec_iq4xs(d_w, d_q8, d_y, K, n_cols, col_stride);
-    if (type == 17) return wubu_cuda_matvec_iq2xs(d_w, d_q8, d_y, K, n_cols, col_stride);
-    return wubu_cuda_quant_matvec(d_w, type, d_q8, d_y, K, n_cols, col_stride);
-}
-
 WUBU_EXPORT int wubu_cuda_qkv_dev3(const void *d_wq, const void *d_wk, const void *d_wv,
                                    int tq, int tk, int tv,
                                    const float *d_x, float *d_q, float *d_k, float *d_v,
@@ -1617,9 +1603,9 @@ WUBU_EXPORT int wubu_cuda_qkv_dev3(const void *d_wq, const void *d_wk, const voi
     if ((K % QK_K) != 0) return -1;
     if (ensure_q8_scratch(K) != 0) return -2;
     quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, (c_q8_k *)g_q8_scratch, K);
-    if (mv_dispatch(d_wq, tq, g_q8_scratch, d_q, K, qd, sq) != 0) return -3;
-    if (mv_dispatch(d_wk, tk, g_q8_scratch, d_k, K, kvd, sk) != 0) return -4;
-    if (mv_dispatch(d_wv, tv, g_q8_scratch, d_v, K, kvd, sv) != 0) return -5;
+    if (mv_any(d_wq, tq, g_q8_scratch, d_q, K, qd, sq) != 0) return -3;
+    if (mv_any(d_wk, tk, g_q8_scratch, d_k, K, kvd, sk) != 0) return -4;
+    if (mv_any(d_wv, tv, g_q8_scratch, d_v, K, kvd, sv) != 0) return -5;
     return cudaGetLastError() == cudaSuccess ? 0 : -6;
 }
 
