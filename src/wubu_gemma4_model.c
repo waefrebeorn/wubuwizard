@@ -1422,27 +1422,31 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     int qkv_done = 0;
     /* Eligibility first: a partial attempt would run the projections twice, which is
      * exactly what the first version of this did (qkv 22.4 -> 28.4 ms). */
-    const int qkv_same_type =
-        layer->attn_q.dev && layer->attn_k.dev &&
-        (layer->share_kv || layer->kv_eq || layer->attn_v.dev) &&
-        layer->attn_q.ggml_type == layer->attn_k.ggml_type &&
-        (layer->share_kv || layer->kv_eq ||
-         layer->attn_v.ggml_type == layer->attn_q.ggml_type);
-    if (N == 1 && (G4_HIDDEN % 256) == 0 && qkv_same_type && !layer->share_kv) {
-        const int t = layer->attn_q.ggml_type;
+    /* The 12B model mixes quant types across the three projections (attn_q IQ2_S,
+     * attn_k IQ3_S, ...), so requiring one type for all three left most layers on three
+     * separate round trips - 2.5 device calls per layer, measured. wubu_gpu_qkv3 takes a
+     * type per projection: one upload, one Q8_K quantisation, three kernels, one call. */
+    const int qkv_all_dev = layer->attn_q.dev && layer->attn_k.dev &&
+                            !layer->share_kv && !layer->kv_eq && layer->attn_v.dev;
+    const int qkv_kv_eq = layer->attn_q.dev && layer->attn_k.dev && layer->kv_eq;
+    if (N == 1 && (G4_HIDDEN % 256) == 0 && (qkv_all_dev || qkv_kv_eq) && !layer->share_kv) {
+        const int tq = layer->attn_q.ggml_type;
+        const int tk = layer->attn_k.ggml_type;
+        const int tv = layer->attn_v.ggml_type;
         const long long sq = (long long)(layer->attn_q.raw_bytes / qd);
         const long long sk = (long long)(layer->attn_k.raw_bytes / kvd);
         const long long sv = (long long)(layer->attn_v.raw_bytes / kvd);
         if (layer->kv_eq) {
             /* No separate V projection: q and k only, k copied into v on the host. */
             if (wubu_gpu_stage_input(normed, G4_HIDDEN) == 0 &&
-                wubu_gpu_matvec_cached(layer->attn_q.dev, t, G4_HIDDEN, qd, sq, q) == 0 &&
-                wubu_gpu_matvec_cached(layer->attn_k.dev, t, G4_HIDDEN, kvd, sk, k) == 0) {
+                wubu_gpu_matvec_cached(layer->attn_q.dev, tq, G4_HIDDEN, qd, sq, q) == 0 &&
+                wubu_gpu_matvec_cached(layer->attn_k.dev, tk, G4_HIDDEN, kvd, sk, k) == 0) {
                 memcpy(v, k, (size_t)N * kvd * sizeof(float));
                 qkv_done = 1;
             }
-        } else if (wubu_gpu_qkv(layer->attn_q.dev, layer->attn_k.dev, layer->attn_v.dev, t,
-                                normed, G4_HIDDEN, qd, kvd, sq, sk, sv, q, k, v) == 0) {
+        } else if (wubu_gpu_qkv3(layer->attn_q.dev, layer->attn_k.dev, layer->attn_v.dev,
+                                 tq, tk, tv, normed, G4_HIDDEN, qd, kvd,
+                                 sq, sk, sv, q, k, v) == 0) {
             qkv_done = 1;
         }
     }

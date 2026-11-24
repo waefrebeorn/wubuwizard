@@ -450,6 +450,50 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
     return 0;
 }
 
+/* Fused q/k/v with a type per projection. On the 12B model attn_q is IQ2_S and attn_k is
+ * IQ3_S, so the single-type fused path only covered part of the layers and the rest fell
+ * back to three separate round trips (2.5 device calls per layer, measured). One
+ * quantisation of the shared input, three kernels, one submission. */
+int wubu_gpu_qkv3(const void *d_wq, const void *d_wk, const void *d_wv,
+                  int tq, int tk, int tv, const float *x,
+                  int K, int qd, int kvd, long long sq, long long sk, long long sv,
+                  float *q, float *k, float *v)
+{
+    typedef int (*fn_qkv3_t)(const void *, const void *, const void *, int, int, int,
+                             const float *, float *, float *, float *, int, int, int,
+                             long long, long long, long long);
+    static fn_qkv3_t dev3;
+    static int looked;
+    if (!wubu_gpu_init() || !x || !q || !k || !v) return -1;
+    if (!looked) { looked = 1; dev3 = (fn_qkv3_t)(void *)GetProcAddress(G.h, "wubu_cuda_qkv_dev3"); }
+    if (!dev3) return -2;
+
+    static float *scratch;
+    static int cap;
+    const int total = qd + kvd + kvd;
+    if (cap < total) {
+        if (scratch) G.free_dev(scratch);
+        scratch = (float *)G.alloc((unsigned long long)((size_t)total * sizeof(float)));
+        if (!scratch) { cap = 0; return -3; }
+        cap = total;
+    }
+    float *d_q = scratch, *d_k = scratch + qd, *d_v = scratch + qd + kvd;
+    static float *dx;
+    static int cap_x;
+    if (cap_x < K) {
+        if (dx) G.free_dev(dx);
+        dx = (float *)G.alloc((unsigned long long)((size_t)K * sizeof(float)));
+        if (!dx) { cap_x = 0; return -3; }
+        cap_x = K;
+    }
+    if (G.upload(dx, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
+    if (dev3(d_wq, d_wk, d_wv, tq, tk, tv, dx, d_q, d_k, d_v, K, qd, kvd, sq, sk, sv) != 0) return -5;
+    if (G.download(q, d_q, (unsigned long long)((size_t)qd * sizeof(float))) != 0) return -6;
+    if (G.download(k, d_k, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -6;
+    if (G.download(v, d_v, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -6;
+    return 0;
+}
+
 /* Fused q/k/v: one upload, one quantisation, three kernels, one download of q|k|v. */
 int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_type,
                  const float *x, int K, int qd, int kvd,
