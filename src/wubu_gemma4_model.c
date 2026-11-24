@@ -146,8 +146,12 @@ static void g4_cache_insert(g4_qweight_t *w, uint8_t *raw, size_t bytes)
     g4_cache_touch(w);
     w->raw_cache = raw;
     g_cache_bytes += bytes;
-    while (g_cache_bytes > g_cache_cap && g_cache_tail) {
+    while (g_cache_bytes > g_cache_cap) {
+        /* Evict the least-recently-used unpinned entry; the residency hot set
+         * stays resident by construction (EG-110). */
         g4_qweight_t *old = g_cache_tail;
+        while (old && old->pinned) old = (g4_qweight_t *)old->cache_prev;
+        if (!old) break;
         uint8_t *victim = old->raw_cache;
         size_t vb = (size_t)old->raw_bytes;
         g4_cache_unlink(old);
@@ -253,6 +257,8 @@ static DWORD WINAPI g4_pf_thread(LPVOID arg)
     return 0;
 }
 
+static const uint8_t *g4_qweight_stream_raw(const g4_qweight_t *w, int *owned);
+
 /* ---- EG-110 residency plan -> RAM tier cap ----
  * WUBU_RESIDENCY_MB turns the ad-hoc G4_WEIGHT_CACHE_MB cap into a plan: attention
  * and the tied embedding/output stay resident, FFN tensors stream from the GGUF,
@@ -261,7 +267,22 @@ static DWORD WINAPI g4_pf_thread(LPVOID arg)
 static void g4_apply_residency_plan(g4_model_t *m)
 {
     const char *env = getenv("WUBU_RESIDENCY_MB");
-    if (!env) return;
+    char auto_buf[32];
+    if (!env) {
+        /* No explicit budget but streamed weights: derive one from physical RAM,
+         * leaving a quarter for the OS, KV cache and scratch. */
+#ifdef _WIN32
+        MEMORYSTATUSEX ms;
+        memset(&ms, 0, sizeof(ms));
+        ms.dwLength = sizeof(ms);
+        if (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys > 0) {
+            unsigned long long mb = (ms.ullTotalPhys >> 20) * 3 / 4;
+            snprintf(auto_buf, sizeof(auto_buf), "%llu", mb);
+            env = auto_buf;
+        }
+#endif
+        if (!env) return;
+    }
     if (!getenv("G4_STREAM_WEIGHTS")) {
         fprintf(stderr, "[RESIDENCY] ignored: weights are mmap'd (set G4_STREAM_WEIGHTS=1)\n");
         return;
@@ -279,6 +300,10 @@ static void g4_apply_residency_plan(g4_model_t *m)
     int *plan = (int *)calloc(MAXT, sizeof(*plan));
     if (!layers || !plan) { free(layers); free(plan); return; }
 
+    int *ent_layer = (int *)calloc(MAXT, sizeof(int));
+    int *ent_attn  = (int *)calloc(MAXT, sizeof(int));
+    if (!ent_layer || !ent_attn) { free(ent_layer); free(ent_attn); free(layers); free(plan); return; }
+
     int n = 0;
     for (int il = 0; il < m->n_layers && n + 2 <= MAXT; ++il) {
         g4_layer_t *l = &m->layers[il];
@@ -291,8 +316,14 @@ static void g4_apply_residency_plan(g4_model_t *m)
         for (int k = 0; k < 3; ++k)
             if (ffn[k]->stream_ctx && ffn[k]->raw_bytes > 0)
                 fbytes += (uint64_t)ffn[k]->raw_bytes;
-        if (abytes) { layers[n].bytes = abytes; layers[n].hot = 1; ++n; }
-        if (fbytes) { layers[n].bytes = fbytes; layers[n].hot = 0; ++n; }
+        if (abytes) {
+            layers[n].bytes = abytes; layers[n].hot = 1;
+            ent_layer[n] = il; ent_attn[n] = 1; ++n;
+        }
+        if (fbytes) {
+            layers[n].bytes = fbytes; layers[n].hot = 0;
+            ent_layer[n] = il; ent_attn[n] = 0; ++n;
+        }
     }
     if (n == 0) { free(layers); free(plan); return; }
 
@@ -310,6 +341,22 @@ static void g4_apply_residency_plan(g4_model_t *m)
         return;
     }
 
+    /* Make the hot set real: read it once and pin it so the LRU can never
+     * evict attention weights for streamed FFN traffic. */
+    g_cache_cap = (size_t)budget;   /* allow the hot load before trimming to staging */
+    int pinned_groups = 0;
+    for (int i = 0; i < n && i < MAXT; ++i) {
+        if (!plan[i] || !ent_attn[i]) continue;
+        g4_layer_t *l = &m->layers[ent_layer[i]];
+        g4_qweight_t *attn[4] = { &l->attn_q, &l->attn_k, &l->attn_v, &l->attn_out };
+        for (int k = 0; k < 4; ++k) {
+            if (!attn[k]->stream_ctx || attn[k]->raw_bytes <= 0 || attn[k]->raw_cache) continue;
+            int owned = 0;
+            const uint8_t *raw = g4_qweight_stream_raw(attn[k], &owned);
+            if (raw && !owned) { attn[k]->pinned = 1; ++pinned_groups; }
+        }
+    }
+
     uint64_t dram = wubu_residency_dram_bytes(layers, plan, n);
     uint64_t flash = wubu_residency_flash_bytes(layers, plan, n);
     uint64_t staging = budget > dram ? budget - dram : 0;
@@ -317,6 +364,10 @@ static void g4_apply_residency_plan(g4_model_t *m)
     fprintf(stderr, "[RESIDENCY] budget=%lld MiB hot=%llu MiB streamed=%llu MiB cache_cap=%llu MiB\n",
             budget_mb, (unsigned long long)(dram >> 20), (unsigned long long)(flash >> 20),
             (unsigned long long)(staging >> 20));
+    fprintf(stderr, "[RESIDENCY] pinned %d attention tensors (%.0f MiB) in the RAM tier\n",
+            pinned_groups, (double)(dram >> 20));
+    free(ent_layer);
+    free(ent_attn);
     free(layers);
     free(plan);
 }
@@ -447,7 +498,7 @@ static float *g4_qweight_stream_buffer(const g4_qweight_t *w, int *owned)
                                   (gguf_tensor_info *)w->stream_info, raw)) {
             free(raw); return NULL;
         }
-        if (g_cache_cap && w->raw_bytes <= (int64_t)g_cache_cap) {
+        if (g_cache_cap && g_cache_bytes + (size_t)w->raw_bytes <= g_cache_cap) {
             g4_cache_insert((g4_qweight_t *)w, raw, (size_t)w->raw_bytes);
             src = raw;
         } else {
@@ -479,7 +530,7 @@ static const uint8_t *g4_qweight_stream_raw(const g4_qweight_t *w, int *owned)
                               (gguf_tensor_info *)w->stream_info, raw)) {
         free(raw); return NULL;
     }
-    if (g_cache_cap && w->raw_bytes <= (int64_t)g_cache_cap) {
+    if (g_cache_cap && g_cache_bytes + (size_t)w->raw_bytes <= g_cache_cap) {
         g4_cache_insert((g4_qweight_t *)w, raw, (size_t)w->raw_bytes);
         return raw;
     }
@@ -543,10 +594,11 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
         memset(c, 0, (size_t)M * N * sizeof(float));
         return;
     }
-    if (w->ggml_type == GGML_TYPE_Q4_0) {
-        /* Q4_0: on-the-fly dequant + dot — no F32 buffer (was 13s bottleneck).
-         * Each column: 18 bytes/32 elems, dequant to register, dot with x.
-         * OpenMP parallel over output columns. */
+    if (w->ggml_type == GGML_TYPE_Q4_0 && (K % 256) != 0) {
+        /* Q4_0 with a K that is not a Q8_K multiple: scalar per-column fallback.
+         * The normal path (K % 256 == 0) uses the fused AVX2 Q4_0 x Q8_K dot in
+         * quantized_matmul_batched — that is the LM head, 262144 columns.
+         * Here: 18 bytes/32 elems per column, dequant to register, dot with x. */
         int row_bytes = (int)(w->raw_bytes / N);
         #pragma omp parallel for if(N > 256)
         for (int n = 0; n < N; n++) {

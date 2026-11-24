@@ -1304,6 +1304,12 @@ test_eg108_kv_connector: tools/test_eg108_kv_connector.c src/wubu_kv_connector.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-109: table-free E4M3 arithmetic decode gate.
+test_eg114_q3_k: tools/test_eg114_q3_k.c src/wubu_vecdot_q3_k.c src/gguf_reader.c src/quantized_dot_generic.c
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+test_eg113_q4_0: tools/test_eg113_q4_0.c src/wubu_vecdot_q4_0.c src/gguf_reader.c src/quantized_dot_generic.c
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
 test_eg111_iq_fused: tools/test_eg111_iq_fused.c src/wubu_vecdot_iq.c src/gguf_reader.c src/quantized_dot_generic.c
 	$(CC) $(CFLAGS) -o $@ $^ -lm
 

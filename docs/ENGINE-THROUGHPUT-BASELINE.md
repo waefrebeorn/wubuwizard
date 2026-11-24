@@ -58,6 +58,7 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | before (dequant to F32 per call) | 21 tok in 53.21 s (0.4 tok/s) | 13 tok in 183.15 s (0.1 tok/s) |
 | scalar fused Q8_K vec_dot | 21 tok in 31.56 s (0.7 tok/s) | 13 tok in 18.57 s (0.7 tok/s) |
 | AVX2 fused Q8_K vec_dot | 21 tok in 20.12 s (1.0 tok/s) | 13 tok in 11.63 s (1.1 tok/s) |
+| + fused Q3_K LM head (EG-114) | 21 tok in 4.27 s (4.9 tok/s) | 13 tok in 3.06 s (**4.2 tok/s**) |
 
 The AVX2 port (ggml's x86 kernel) keeps the integer accumulation, so it agrees with the
 scalar port and the F32 reference to 2.9e-06 / 7.4e-07 relative, and it produces the same
@@ -68,11 +69,15 @@ Decode is 9.9x faster; prefill 1.7x. Correctness: the kernels agree with the
 `test_eg111_iq_fused`). Greedy output matches the old run for 9 samples and then
 diverges, because activations are Q8_K-quantised instead of F32 — expected, not a bug.
 
-Remaining gap to llama.cpp (~21 tok/s decode) is now the output head: the logits path
-dequantises the whole tied `token_embd` matrix (412 MB, Q4_0) to F32 every token
-(`src/wubu_gemma4_model.c:787`), which dominates at 1.1 tok/s. Next: run logits through
-`quantized_matmul_batched` (Q4_0/Q6_K vec_dot) instead of dequantising the head, then
-thread tuning.
+The head was the real bottleneck, and it is **Q3_K**, not Q4_0: the GGUF carries a single
+Q3_K `token_embd` (412 MB) and no code path had a Q3_K vec_dot, so every token
+dequantised the whole head to F32. EG-114 adds the fused Q3_K x Q8_K kernel; decode went
+1.1 -> 4.2 tok/s and prefill 1.0 -> 4.9 tok/s with identical greedy tokens.
+
+Remaining cost is now the layer weights themselves: 2.6 GB of IQ2_S/IQ3_S per token at
+~11 GB/s effective. Thread scaling is flat (4/8/12 threads: 0.9 / 1.0 / 1.1 tok/s before
+the head fix), so this is a bandwidth wall on the CPU path — the next real step is GPU
+residency with repacked tile layouts, not another kernel tweak.
 
 ## Next engine work (replaces further gate work)
 
