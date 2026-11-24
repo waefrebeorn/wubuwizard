@@ -1217,7 +1217,8 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
  * interesting number is what the CPU does between the matvecs. Accumulated over every
  * N == 1 forward and reported per token, because that is the case being optimised. */
 enum { G4P_LAYER, G4P_NORM_QKV, G4P_QKNORM_ROPE, G4P_KVSTORE, G4P_ATTN,
-       G4P_ATTNOUT, G4P_FFN, G4P_HEAD, G4P_COUNT };
+       G4P_ATTNOUT, G4P_FFN, G4P_HEAD, G4P_FFN_PROJ, G4P_FFN_GELU, G4P_FFN_NORM,
+       G4P_COUNT };
 static double G4_P[G4P_COUNT];
 static long G4_P_TOKENS;
 static int G4_P_hooked;
@@ -1227,7 +1228,7 @@ static void g4_prof_dump(void)
     if (!getenv("G4_PROF") || G4_P_TOKENS <= 0) return;
     static const char *names[G4P_COUNT] = {
         "layer total", "norm+qkv", "qk norm+rope", "kv store", "attention",
-        "attn out+resid", "ffn all", "head"
+        "attn out+resid", "ffn all", "head", "  ffn proj", "  ffn gelu+mul", "  ffn norm+resid"
     };
     fprintf(stderr, "[PROF] per decode token over %ld tokens (ms):\n", G4_P_TOKENS);
     for (int i = 0; i < G4P_COUNT; ++i)
@@ -1256,16 +1257,43 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         g4_rms_norm(x + (size_t)t * G4_HIDDEN, layer->attn_norm_weight,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
 
-    /* ===== Q projection (batched quantized matmul) ===== */
-    g4_batched_qmatmul(normed, &layer->attn_q, N, qd, G4_HIDDEN, q);
-
-    /* ===== K, V projections ===== */
-    if (!layer->share_kv) {
-        g4_batched_qmatmul(normed, &layer->attn_k, N, kvd, G4_HIDDEN, k);
-        if (layer->kv_eq) {
-            memcpy(v, k, (size_t)N * kvd * sizeof(float));
-        } else {
-            g4_batched_qmatmul(normed, &layer->attn_v, N, kvd, G4_HIDDEN, v);
+    /* ===== Q, K, V projections =====
+     * All three read the same normalised input, so stage it on the device once and run
+     * the three kernels against the staged Q8_K row (decode only). */
+    int qkv_done = 0;
+    /* Eligibility first: a partial attempt would run the projections twice, which is
+     * exactly what the first version of this did (qkv 22.4 -> 28.4 ms). */
+    const int qkv_same_type =
+        layer->attn_q.dev && layer->attn_k.dev &&
+        (layer->share_kv || layer->kv_eq || layer->attn_v.dev) &&
+        layer->attn_q.ggml_type == layer->attn_k.ggml_type &&
+        (layer->share_kv || layer->kv_eq ||
+         layer->attn_v.ggml_type == layer->attn_q.ggml_type);
+    if (N == 1 && (G4_HIDDEN % 256) == 0 && qkv_same_type && !layer->share_kv) {
+        const int t = layer->attn_q.ggml_type;
+        const long long sq = (long long)(layer->attn_q.raw_bytes / qd);
+        const long long sk = (long long)(layer->attn_k.raw_bytes / kvd);
+        const long long sv = (long long)(layer->attn_v.raw_bytes / kvd);
+        if (wubu_gpu_stage_input(normed, G4_HIDDEN) == 0 &&
+            wubu_gpu_matvec_cached(layer->attn_q.dev, t, G4_HIDDEN, qd, sq, q) == 0 &&
+            wubu_gpu_matvec_cached(layer->attn_k.dev, t, G4_HIDDEN, kvd, sk, k) == 0) {
+            if (layer->kv_eq) {
+                memcpy(v, k, (size_t)N * kvd * sizeof(float));
+                qkv_done = 1;
+            } else if (layer->attn_v.dev && layer->attn_v.ggml_type == t) {
+                qkv_done = (wubu_gpu_matvec_cached(layer->attn_v.dev, t, G4_HIDDEN, kvd, sv, v) == 0);
+            }
+        }
+    }
+    if (!qkv_done) {
+        g4_batched_qmatmul(normed, &layer->attn_q, N, qd, G4_HIDDEN, q);
+        if (!layer->share_kv) {
+            g4_batched_qmatmul(normed, &layer->attn_k, N, kvd, G4_HIDDEN, k);
+            if (layer->kv_eq) {
+                memcpy(v, k, (size_t)N * kvd * sizeof(float));
+            } else {
+                g4_batched_qmatmul(normed, &layer->attn_v, N, kvd, G4_HIDDEN, v);
+            }
         }
     }
 
@@ -1349,19 +1377,43 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
 
     /* Quantize input to Q8_K once, reuse across gate/up/down */
-    g4_batched_qmatmul(normed, &layer->ffn_gate, N, G4_FFN, G4_HIDDEN, ffn_gate);
-    g4_batched_qmatmul(normed, &layer->ffn_up,   N, G4_FFN, G4_HIDDEN, ffn_up);
+    const double _pf0 = g4_now_ms();
+    /* Decode: if all three FFN tensors are device-resident and share a type, run the
+     * whole FFN on the device (one upload + one download instead of three round trips,
+     * and the tanh GELU off the CPU). Falls through to the per-tensor path otherwise. */
+    int ffn_dev_done = 0;
+    if (N == 1 && layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
+        layer->ffn_gate.ggml_type == layer->ffn_up.ggml_type &&
+        layer->ffn_gate.ggml_type == layer->ffn_down.ggml_type &&
+        (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
+        const long long sg = (long long)(layer->ffn_gate.raw_bytes / G4_FFN);
+        const long long su = (long long)(layer->ffn_up.raw_bytes / G4_FFN);
+        const long long sd = (long long)(layer->ffn_down.raw_bytes / G4_HIDDEN);
+        ffn_dev_done = (wubu_gpu_ffn(normed, layer->ffn_gate.dev, layer->ffn_up.dev,
+                                     layer->ffn_down.dev, layer->ffn_gate.ggml_type,
+                                     G4_HIDDEN, G4_FFN, sg, su, sd, ffn_down_out) == 0);
+    }
+    if (!ffn_dev_done) {
+        g4_batched_qmatmul(normed, &layer->ffn_gate, N, G4_FFN, G4_HIDDEN, ffn_gate);
+        g4_batched_qmatmul(normed, &layer->ffn_up,   N, G4_FFN, G4_HIDDEN, ffn_up);
+    }
+    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_PROJ] += _t - _pf0; _pk = _t; }
 
     /* GELU + element-wise multiply (OpenMP parallel) */
-    int ffn_elems = N * G4_FFN;
-    #pragma omp parallel for if(ffn_elems > 4096)
-    for (int i = 0; i < ffn_elems; i++)
-        ffn_gate[i] = g4_gelu_tanh(ffn_gate[i]);
-    #pragma omp parallel for if(ffn_elems > 4096)
-    for (int i = 0; i < ffn_elems; i++)
-        ffn_up[i] *= ffn_gate[i];
+    if (!ffn_dev_done) {
+        int ffn_elems = N * G4_FFN;
+        #pragma omp parallel for if(ffn_elems > 4096)
+        for (int i = 0; i < ffn_elems; i++)
+            ffn_gate[i] = g4_gelu_tanh(ffn_gate[i]);
+        #pragma omp parallel for if(ffn_elems > 4096)
+        for (int i = 0; i < ffn_elems; i++)
+            ffn_up[i] *= ffn_gate[i];
+    }
 
-    g4_batched_qmatmul(ffn_up, &layer->ffn_down, N, G4_HIDDEN, G4_FFN, ffn_down_out);
+    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_GELU] += _t - _pk; _pk = _t; }
+    if (!ffn_dev_done)
+        g4_batched_qmatmul(ffn_up, &layer->ffn_down, N, G4_HIDDEN, G4_FFN, ffn_down_out);
+    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_FFN_PROJ] += _t - _pk; _pk = _t; }
 
     /* Post-FFN norm + residual */
     #pragma omp parallel for if(N > 1)
@@ -1372,7 +1424,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             x[(size_t)t * G4_HIDDEN + d] += ffn_down_out[(size_t)t * G4_HIDDEN + d];
     }
 
-    G4P_ADD(G4P_FFN, _pk);
+    if (N == 1) { G4_P[G4P_FFN_NORM] += g4_now_ms() - _pk; G4_P[G4P_FFN] += g4_now_ms() - _pf0; }
     if (N == 1) G4_P[G4P_LAYER] += g4_now_ms() - _pt0;
     #undef G4P_ADD
 

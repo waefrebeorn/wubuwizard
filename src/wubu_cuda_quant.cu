@@ -824,6 +824,66 @@ WUBU_EXPORT int wubu_cuda_bench_stages(int iters)
     return 0;
 }
 
+/* ---- fused FFN for decode (M == 1) -------------------------------------------
+ * The CPU path costs three device round trips per layer (upload x, q8k, kernel,
+ * download; twice for gate/up; then again for down) plus 7.5 ms/token of tanh GELU on
+ * one core. Keeping gate, up, gelu and down on the device leaves one upload of the
+ * 3840-float input and one download of the 3840-float output per layer. */
+
+static c_q8_k *g_q8_scratch;
+static int g_q8_cap;
+
+static int ensure_q8_scratch(int k)
+{
+    const int need = k / QK_K + 1;
+    if (g_q8_cap >= need) return 0;
+    if (g_q8_scratch) cudaFree(g_q8_scratch);
+    g_q8_scratch = NULL;
+    if (cudaMalloc((void **)&g_q8_scratch, (size_t)need * sizeof(c_q8_k)) != cudaSuccess) {
+        g_q8_cap = 0;
+        return -1;
+    }
+    g_q8_cap = need;
+    return 0;
+}
+
+__global__ void gelu_mul_kernel(const float * __restrict__ g, float * __restrict__ u, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float x = g[i];
+    /* 0.5x(1+tanh(sqrt(2/pi)(x+0.044715x^3))), the same expression the CPU uses. */
+    const float t = tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x));
+    u[i] = u[i] * (0.5f * x * (1.0f + t));
+}
+
+/* q8k + matvec with everything already on the device (no download). */
+static int matvec_devbuf(const void *d_w, int type, const float *d_x, float *d_y,
+                         int K, int n_cols, long long stride)
+{
+    if (ensure_q8_scratch(K) != 0) return -1;
+    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, g_q8_scratch, K);
+    int rc;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_w, g_q8_scratch, d_y, K, n_cols, stride);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_w, g_q8_scratch, d_y, K, n_cols, stride);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_w, g_q8_scratch, d_y, K, n_cols, stride);
+    else                 rc = wubu_cuda_quant_matvec(d_w, type, g_q8_scratch, d_y, K, n_cols, stride);
+    return rc;
+}
+
+WUBU_EXPORT int wubu_cuda_ffn_dev(const void *d_wg, const void *d_wu, const void *d_wd, int type,
+                                  const float *d_x, float *d_gate, float *d_up, float *d_out,
+                                  int hidden, int ff, long long sg, long long su, long long sd)
+{
+    if (!d_wg || !d_wu || !d_wd || !d_x || !d_gate || !d_up || !d_out) return -1;
+    if ((hidden % QK_K) != 0 || (ff % QK_K) != 0) return -1;
+    if (matvec_devbuf(d_wg, type, d_x, d_gate, hidden, ff, sg) != 0) return -2;
+    if (matvec_devbuf(d_wu, type, d_x, d_up, hidden, ff, su) != 0) return -3;
+    gelu_mul_kernel<<<(ff + 255) / 256, 256>>>(d_gate, d_up, ff);
+    if (matvec_devbuf(d_wd, type, d_up, d_out, ff, hidden, sd) != 0) return -4;
+    return cudaGetLastError() == cudaSuccess ? 0 : -5;
+}
+
 WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type,
                                             const void *h_xq8, float *h_y,
                                             int K, int n_cols, int64_t col_stride_bytes)

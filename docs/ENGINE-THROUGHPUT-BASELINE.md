@@ -66,7 +66,8 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | clean rebuild, `G4_GPU=1` (all kernels, no stale objects) | 6.8 tok/s | 8.8 tok/s |
 | + device IQ3_XXS kernel (EG-120/122) | 6.8 tok/s | 9.8 tok/s |
 | + device IQ4_XS kernel (EG-121/122) | 6.8 tok/s | 10.3 tok/s |
-| + hardware fp16 decode in the device kernels | 6.7 tok/s | **10.7 tok/s** |
+| + hardware fp16 decode in the device kernels | 6.7 tok/s | 10.7 tok/s |
+| + fused device FFN (gate/up/gelu/down in one round trip) | 6.7 tok/s | **11.6 tok/s** |
 | clean rebuild, CPU only | 6.6 tok/s | 5.7 tok/s |
 
 Note on rebuilding: the Makefile does not track header dependencies, so editing a
@@ -114,7 +115,12 @@ the real tensor sizes at load: one plan entry per layer for the attention group 
 and one for the FFN group (streamed), with the remaining budget handed to the streamed
 weight cache as its cap. Measured, 8-token decode, same prompt:
 
-|## What actually limited the device matvec (measured, three hypotheses falsified)
+|FFN breakdown after the fusion (`G4_PROF=1`, per decode token): proj 35.4 ms,
+gelu+mul 1.8 ms (was 7.5 with the tanh on one CPU core), norm+resid 0.4 ms. The fused
+path does one upload of the 3840-float input and one download of the 3840-float output
+per layer instead of three round trips.
+
+## What actually limited the device matvec (measured, three hypotheses falsified)
 
 The warp-per-column IQ2_S kernel streams 18.9 MB per FFN matvec at 78 GB/s - 38% of the
 card's 204 GB/s. Three candidate causes were tested on isolated buffers with no L2 reuse:

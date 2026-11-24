@@ -25,6 +25,19 @@ void  wubu_gpu_free(void *d_ptr);
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
                     int K, int n_cols, long long col_stride, float *y);
 
+/* Stage an activation (upload + Q8_K quantise) once, then run several matvecs against
+ * it with wubu_gpu_matvec_cached. Used for q/k/v, which share one input buffer. */
+int wubu_gpu_stage_input(const float *x, int K);
+int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
+                           long long col_stride, float *y);
+
+/* Fused decode FFN: out = down(gelu(gate(x)) * up(x)), gate/up/down all device-resident
+ * and of the same ggml_type. One upload and one download per layer; the tanh GELU runs
+ * on the device. Returns 0 on success so callers can fall back to wubu_gpu_matvec. */
+int wubu_gpu_ffn(const float *x, const void *d_wg, const void *d_wu, const void *d_wd,
+                 int ggml_type, int hidden, int ff,
+                 long long sg, long long su, long long sd, float *out);
+
 #ifdef __cplusplus
 }
 #endif

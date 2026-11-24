@@ -174,23 +174,75 @@ static double gpu_now_ms(void)
 #endif
 }
 
-int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
-                    int K, int n_cols, long long col_stride, float *y)
+/* Fused FFN for decode: gate, up, gelu*up and down without leaving the device. One
+ * upload of `hidden` floats and one download of `hidden` floats per layer instead of
+ * three round trips, and the tanh GELU moves off the CPU. Returns 0 on success so the
+ * caller can fall back to the per-tensor CPU path. */
+int wubu_gpu_ffn(const float *x, const void *d_wg, const void *d_wu, const void *d_wd,
+                 int ggml_type, int hidden, int ff,
+                 long long sg, long long su, long long sd, float *out)
 {
-    if (!S_hooked) { S_hooked = 1; atexit(wubu_gpu_stats_dump); }
-    const double t0 = gpu_now_ms();
-    if (!wubu_gpu_init() || !d_w || !x || !y || K <= 0 || n_cols <= 0) return -1;
-    static float *d_x;
-    static void *d_q8;
-    static float *d_y;
-    static int cap_x, cap_y, cap_q8;
+    if (!wubu_gpu_init() || !x || !d_wg || !d_wu || !d_wd || !out) return -1;
+    typedef int (*fn_ffn_t)(const void *, const void *, const void *, int,
+                            const float *, float *, float *, float *,
+                            int, int, long long, long long, long long);
+    static fn_ffn_t ffn_fn;
+    static int looked;
+    if (!looked) {
+        looked = 1;
+        ffn_fn = (fn_ffn_t)(void *)GetProcAddress(G.h, "wubu_cuda_ffn_dev");
+    }
+    if (!ffn_fn) return -2;
 
+    static float *d_x, *d_gate, *d_up, *d_out;
+    static int cap_h, cap_f;
+    if (cap_h < hidden) {
+        if (d_x) G.free_dev(d_x);
+        if (d_out) G.free_dev(d_out);
+        d_x = (float *)G.alloc((unsigned long long)((size_t)hidden * sizeof(float)));
+        d_out = (float *)G.alloc((unsigned long long)((size_t)hidden * sizeof(float)));
+        if (!d_x || !d_out) { cap_h = 0; return -3; }
+        cap_h = hidden;
+    }
+    if (cap_f < ff) {
+        if (d_gate) G.free_dev(d_gate);
+        if (d_up) G.free_dev(d_up);
+        d_gate = (float *)G.alloc((unsigned long long)((size_t)ff * sizeof(float)));
+        d_up = (float *)G.alloc((unsigned long long)((size_t)ff * sizeof(float)));
+        if (!d_gate || !d_up) { cap_f = 0; return -3; }
+        cap_f = ff;
+    }
+    if (G.upload(d_x, x, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -4;
+    if (ffn_fn(d_wg, d_wu, d_wd, ggml_type, d_x, d_gate, d_up, d_out,
+               hidden, ff, sg, su, sd) != 0) return -5;
+    if (G.download(out, d_out, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -6;
+    return 0;
+}
+
+/* The activations for q, k and v in a layer are the same buffer, so uploading and
+ * quantising it three times per layer is pure overhead. prepare() stages an input;
+ * matvec_cached() then reuses it. A mismatch in K or a missing prepare falls back to
+ * staging again, so a stale cache cannot silently produce wrong numbers. */
+static const float *g_staged_ptr;
+static int g_staged_K;
+
+int wubu_gpu_stage_input(const float *x, int K);
+
+/* Scratch buffers shared by wubu_gpu_matvec and the staged-input variant, so q/k/v in a
+ * layer can reuse one activation upload and one Q8_K quantisation. */
+static float *d_x, *d_y;
+static void *d_q8;
+static int cap_x, cap_y, cap_q8;
+static int g_staged_K;
+
+static int gpu_ensure_buffers(int K, int n_cols)
+{
     if (cap_x < K) {
         if (d_x) G.free_dev(d_x);
         if (d_q8) G.free_dev(d_q8);
         d_x = (float *)G.alloc((unsigned long long)((size_t)K * sizeof(float)));
         d_q8 = G.alloc((unsigned long long)(((size_t)(K / 256) + 1) * 292));
-        if (!d_x || !d_q8) { cap_x = 0; return -2; }
+        if (!d_x || !d_q8) { cap_x = 0; g_staged_K = 0; return -2; }
         cap_x = K;
         cap_q8 = K;
     }
@@ -201,13 +253,13 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
         cap_y = n_cols;
     }
     (void)cap_q8;
+    return 0;
+}
 
-    if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
-    if (G.q8k(d_x, d_q8, K) != 0) return -5;
-    /* Quantising on the CPU and uploading the 292-byte blocks instead measures neutral
-     * (10.7 tok/s either way, 93.5 vs 93.7 ms/token), so the device quantiser stays. */
-    /* IQ2_S has the dp4a lane-per-grid-entry kernel: 0.35 ms for a 15360x3840
-     * matvec device-resident, vs 0.9 ms for the generic warp-per-column one. */
+/* Run the type-specific kernel on the already-staged Q8_K input and download. */
+static int gpu_launch_and_download(const void *d_w, int ggml_type,
+                                   int K, int n_cols, long long col_stride, float *y)
+{
     if (ggml_type == 22 && G.mv2) {
         if (G.mv2(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
     } else if (ggml_type == 18 && G.mv3) {
@@ -218,6 +270,54 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
         return -6;
     }
     if (G.download(y, d_y, (unsigned long long)((size_t)n_cols * sizeof(float))) != 0) return -7;
+    return 0;
+}
+
+/* Stage an activation vector: upload + Q8_K quantise, to be reused by
+ * wubu_gpu_matvec_cached for every weight matrix that reads the same input. The caller
+ * owns the "x is still this buffer" invariant - the engine only uses it for q/k/v. */
+int wubu_gpu_stage_input(const float *x, int K)
+{
+    if (!wubu_gpu_init() || !x || K <= 0 || (K % 256) != 0) return -1;
+    if (gpu_ensure_buffers(K, 1) != 0) return -2;
+    if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -3;
+    if (G.q8k(d_x, d_q8, K) != 0) return -4;
+    g_staged_K = K;
+    return 0;
+}
+
+int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
+                           long long col_stride, float *y)
+{
+    if (!S_hooked) { S_hooked = 1; atexit(wubu_gpu_stats_dump); }
+    const double t0 = gpu_now_ms();
+    if (!d_w || !y || K <= 0 || n_cols <= 0 || K != g_staged_K) return -1;
+    if (gpu_ensure_buffers(K, n_cols) != 0) return -2;
+    const int rc = gpu_launch_and_download(d_w, ggml_type, K, n_cols, col_stride, y);
+    if (rc != 0) return rc;
+    if (ggml_type >= 0 && ggml_type < 32) {
+        S[ggml_type].calls++;
+        S[ggml_type].ms += gpu_now_ms() - t0;
+        S[ggml_type].bytes += (long)n_cols * (long)col_stride;
+    }
+    return 0;
+}
+
+int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
+                    int K, int n_cols, long long col_stride, float *y)
+{
+    if (!S_hooked) { S_hooked = 1; atexit(wubu_gpu_stats_dump); }
+    const double t0 = gpu_now_ms();
+    if (!wubu_gpu_init() || !d_w || !x || !y || K <= 0 || n_cols <= 0) return -1;
+
+    const int brc = gpu_ensure_buffers(K, n_cols);
+    if (brc != 0) return brc;
+
+    if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
+    if (G.q8k(d_x, d_q8, K) != 0) return -5;
+    g_staged_K = K;
+    const int lrc = gpu_launch_and_download(d_w, ggml_type, K, n_cols, col_stride, y);
+    if (lrc != 0) return lrc;
     if (ggml_type >= 0 && ggml_type < 32) {
         S[ggml_type].calls++;
         S[ggml_type].ms += gpu_now_ms() - t0;
