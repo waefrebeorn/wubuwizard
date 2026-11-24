@@ -221,6 +221,27 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Measured: the device attention row is correct to 4.3e-07
+
+`G4_ATTN_ADIFF=1` stages the attention on the device into a host buffer and lets the CPU path
+run as well, then diffs the two rows for the same layer and position (layer 0, position 23,
+24 rows of real cache):
+
+    [ADIFF] layer0 pos23 attention dev-vs-cpu=4.768e-06 rel=4.339e-07 (scale 1.1e+01)
+
+So every stage of the composite is now verified by direct measurement against the CPU
+sequence: q 1.4e-06, k 1.2e-07, v 9.5e-07, KV rows exact, span `pos+1`, attention 4.3e-07.
+The per-layer hidden-state difference is 1.07e-05, and the continuation parts at generated
+token 2 in all-layer mode.
+
+What that leaves is the arithmetic between the attention row and the residual stream: the
+o-projection's Q8_K quantisation of a value that differs in the seventh digit, plus the
+post-attention norm and residual, accumulated over 40 layers. Closing it means emulating the
+CPU's reduction order exactly - `g4_dotf` is two 8-lane FMA accumulators followed by a
+specific add/hadd/hadd tree, and the softmax max/sum are sequential over cached positions -
+so the port is 16 explicit FMA accumulators per score plus a sequential softmax, with
+`fmaf` to match `_mm256_fmadd_ps`. That is a precision-matching port, not a bug fix.
+
 ### Debug hooks in the fused path
 
 All env-gated, all off by default: `G4_ATTN_WARM=<pos>` (start fusing only at that position,

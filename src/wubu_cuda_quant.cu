@@ -1647,6 +1647,57 @@ WUBU_EXPORT int wubu_cuda_attn_half_dev(
     return cudaGetLastError() == cudaSuccess ? 0 : -8;
 }
 
+
+/* Attention stage only: q,k,v -> norms -> RoPE -> KV append -> attention, left in d_attn.
+ * Used by the G4_ATTN_ADIFF instrument to compare the device attention row against the CPU
+ * one at the same position, and by the (removed) CPU-quantisation experiment. */
+WUBU_EXPORT int wubu_cuda_attn_stage(
+        const void *d_wq, const void *d_wk, const void *d_wv,
+        int tq, int tk, int tv,
+        const float *d_x, float *d_q, float *d_k, float *d_v,
+        float *d_kc, float *d_vc, float *d_attn,
+        const float *d_qn, const float *d_kn,
+        int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+        int pos, int kv_start, int kv_len,
+        long long sq, long long sk, long long sv,
+        float pos_f, int n_rot, float theta_scale, const float *d_freqs)
+{
+    if (!d_wq || !d_wk || !d_wv || !d_x) return -1;
+    if (ensure_q8_scratch(hidden) != 0) return -2;
+
+    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
+    int rc;
+    if (tq == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (tq == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (tq == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else               rc = wubu_cuda_quant_matvec(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq);
+    if (rc != 0) return -3;
+    if (tk == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (tk == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (tk == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else               rc = wubu_cuda_quant_matvec(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk);
+    if (rc != 0) return -4;
+    if (tv == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (tv == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (tv == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else               rc = wubu_cuda_quant_matvec(d_wv, tv, g_q8_scratch, d_v, hidden, kvd, sv);
+    if (rc != 0) return -5;
+
+    rms_norm_row_kernel<<<n_heads, 256>>>(d_q, d_qn, d_q, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_k, d_kn, d_k, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_v, NULL, d_v, hd, 1e-6f, 0);
+
+    rope_kernel<<<dim3(1, n_heads, n_kv_heads), 128>>>(
+        d_q, d_k, pos_f, hd, qd, kvd, n_rot, theta_scale, d_freqs, n_heads, n_kv_heads);
+
+    kv_append_kernel<<<(kvd + 255) / 256, 256>>>(d_kc, d_vc, d_k, d_v, pos, kvd);
+
+    if (wubu_cuda_attn_dev(d_q, d_kc, d_vc, d_attn, n_heads, n_kv_heads, hd,
+                           kv_start, kv_len, kvd) != 0) return -6;
+
+    return 0;
+}
+
 /* Host wrapper: everything on the host side, device KV owned here, so EG-124 can compare
  * the composite against a CPU sequence without the engine in the loop. */
 WUBU_EXPORT int wubu_cuda_attn_half_host(

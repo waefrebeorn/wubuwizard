@@ -1296,6 +1296,10 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
     free(scores_local);
 }
 
+/* G4_ATTN_ADIFF scratch: device attention row for the comparison below */
+static float *g_dev_attn;
+static int g_adiff;
+
 /* ============ Single layer forward (CPU, fused matmuls in one parallel region) ============ */
 
 /* ---- section profiler (G4_PROF=1) -------------------------------------
@@ -1444,7 +1448,26 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                     if (!qdump_x) qdump_x = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
                     if (qdump_x) memcpy(qdump_x, normed, (size_t)G4_HIDDEN * sizeof(float));
                 }
-                const int rc_h = wubu_gpu_attn_half(il, layer->attn_q.dev, layer->attn_k.dev,
+                /* G4_ATTN_ADIFF: stage the attention on the device into a host buffer and
+                 * let the CPU path run too, so the two attention rows for the same layer and
+                 * position can be compared directly. */
+                int rc_h = -1;
+                if (getenv("G4_ATTN_ADIFF") && pos_h == 23 && il == 0) {
+                    if (!g_dev_attn) g_dev_attn = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
+                    if (g_dev_attn) {
+                        extern int wubu_gpu_attn_stage_only(int, const void *, const void *, const void *,
+                            int, int, int, const float *, int, int, int, int, int, int, int, int, int,
+                            long long, long long, long long, const float *, const float *, const float *,
+                            int, float, float *);
+                        g_adiff = wubu_gpu_attn_stage_only(il, layer->attn_q.dev, layer->attn_k.dev,
+                            layer->attn_v.dev, layer->attn_q.ggml_type, layer->attn_k.ggml_type,
+                            layer->attn_v.ggml_type, normed, G4_HIDDEN, qd, kvd, hd, G4_HEADS, kvh,
+                            pos_h, kv_start_h, kv_len_h, sq_h, sk_h, sv_h,
+                            layer->attn_q_norm_weight, layer->attn_k_norm_weight,
+                            layer->rope_freqs, layer->n_rot, layer->rope_base, g_dev_attn) == 0;
+                    }
+                } else {
+                rc_h = wubu_gpu_attn_half(il, layer->attn_q.dev, layer->attn_k.dev,
                                        layer->attn_v.dev, layer->attn_out.dev,
                                        layer->attn_q.ggml_type, layer->attn_k.ggml_type,
                                        layer->attn_v.ggml_type, layer->attn_out.ggml_type,
@@ -1454,6 +1477,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                        layer->attn_q_norm_weight, layer->attn_k_norm_weight,
                                        layer->rope_freqs, layer->n_rot, layer->rope_base,
                                        normed, k, v);
+                }
                 if (rc_h == 0) {
                     g4_kv_store(cache_h, pos_h, k, v);
                     /* G4_QDUMP: compare the composite's q against the same matvec + q-norm +
@@ -1646,6 +1670,18 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
         for (int d = 0; d < G4_HIDDEN; d++)
             x[(size_t)t * G4_HIDDEN + d] += normed[(size_t)t * G4_HIDDEN + d];
+    }
+    if (g_adiff && g_dev_attn) {
+        g_adiff = 0;
+        double w = 0.0, sc = 0.0;
+        int wi = -1;
+        for (int i = 0; i < qd; ++i) {
+            const double d = fabs((double)g_dev_attn[i] - (double)attn_out[i]);
+            if (d > w) { w = d; wi = i; }
+            if (fabs((double)attn_out[i]) > sc) sc = fabs((double)attn_out[i]);
+        }
+        fprintf(stderr, "[ADIFF] layer0 pos23 attention dev-vs-cpu=%.3e rel=%.3e at %d (scale %.3e)\n",
+                w, sc > 0 ? w / sc : w, wi, sc);
     }
     /* G4_HSTATE=<path> dumps the hidden state after this layer, so the same position can be
      * compared between the fused and the CPU path without reading the token stream. */
