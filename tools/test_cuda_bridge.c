@@ -19,6 +19,8 @@ static int failures = 0;
 typedef int  (*fn_avail_t)(void);
 typedef int  (*fn_name_t)(char *, int);
 typedef int  (*fn_sgemv_host_t)(const float *, const float *, float *, int, int);
+typedef int  (*fn_meminfo_t)(unsigned long long *, unsigned long long *);
+typedef int  (*fn_fit_t)(unsigned long long, unsigned long long, unsigned long long, unsigned long long);
 
 int main(int argc, char **argv)
 {
@@ -70,6 +72,24 @@ int main(int argc, char **argv)
     }
     CHECK(worst < 1e-3f);
     printf("EG-112 bridge: gemv worst_abs=%.3g\n", worst);
+
+    /* VRAM budget arithmetic (atomic-engine style fit). */
+    {
+        fn_meminfo_t meminfo = (fn_meminfo_t)(void *)GetProcAddress(h, "wubu_cuda_meminfo");
+        fn_fit_t fit = (fn_fit_t)(void *)GetProcAddress(h, "wubu_cuda_fit");
+        CHECK(meminfo != NULL);
+        CHECK(fit != NULL);
+        if (meminfo && fit) {
+            unsigned long long total = 0, freeb = 0;
+            CHECK(meminfo(&total, &freeb) == 0);
+            CHECK(total > 0 && freeb <= total);
+            /* 1 MiB always fits; more than the device does not. */
+            CHECK(fit(1024ULL * 1024ULL, 0, 0, 64ULL * 1024ULL * 1024ULL) == 1);
+            CHECK(fit(total, 0, 0, 0) == 0);
+            printf("EG-112 bridge: vram total=%llu MiB free=%llu MiB\n",
+                   total >> 20, freeb >> 20);
+        }
+    }
 
     FreeLibrary(h);
     if (failures) { fprintf(stderr, "test_cuda_bridge: FAIL (%d)\n", failures); return 1; }

@@ -68,6 +68,31 @@ WUBU_EXPORT int wubu_cuda_sgemv(const float *d_w, const float *d_x, float *d_y,
     return cudaDeviceSynchronize() == cudaSuccess ? 0 : -3;
 }
 
+/* VRAM budget arithmetic, mirroring atomic-engine's fit step: report what the
+ * device has, and decide whether a footprint fits after an explicit reserve. */
+WUBU_EXPORT int wubu_cuda_meminfo(unsigned long long *total, unsigned long long *freeb)
+{
+    size_t f = 0, t = 0;
+    if (cudaMemGetInfo(&f, &t) != cudaSuccess) return -1;
+    if (freeb) *freeb = (unsigned long long)f;
+    if (total) *total = (unsigned long long)t;
+    return 0;
+}
+
+/* 1 = fits (weights + kv + compute <= free - reserve), 0 = does not, <0 = error. */
+WUBU_EXPORT int wubu_cuda_fit(unsigned long long weights, unsigned long long kv,
+                              unsigned long long compute, unsigned long long reserve)
+{
+    unsigned long long freeb = 0;
+    if (wubu_cuda_meminfo(NULL, &freeb) != 0) return -1;
+    if (freeb <= reserve) return 0;
+    const unsigned long long usable = freeb - reserve;
+    const unsigned long long need = weights + kv + compute;
+    /* guard against overflow of the sum */
+    if (need < weights) return 0;
+    return need <= usable ? 1 : 0;
+}
+
 /* Host-side convenience for the bridge test: upload, compute, download. */
 WUBU_EXPORT int wubu_cuda_sgemv_host(const float *h_w, const float *h_x, float *h_y,
                                      int rows, int cols)
