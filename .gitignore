@@ -105,6 +105,8 @@ build/
 # ---- WSL / Windows ----
 *.exe
 *.dll
+*.exp
+*.lib
 
 # ---- Debug logs ----
 debug.log
