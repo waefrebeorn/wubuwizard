@@ -221,6 +221,26 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### The residual is RoPE's trig, and the gate was hiding it
+
+EG-123 has been printing the number all along:
+
+    EG-123 rope: heads=16 head_dim=256 worst_abs=2.384e-06
+
+It passes because the gate's tolerance is looser than that, and 2.384e-06 on q is exactly the
+1.4e-06 q difference (and hence the 3.0e-07 attention difference) that the fused path carries.
+So the residual is not expf and not the reductions: it is `powf(theta_scale, j)` plus the
+`cosf`/`sinf` pair, each implemented differently by CUDA and glibc.
+
+Two consequences worth keeping:
+
+- a gate that passes at 1e-5 cannot see a 1e-06 defect that matters after 40 layers; the rope
+  check should report bit-differences, not just a worst absolute;
+- the fix has a precise shape: precompute the per-j theta factors on the host in double and
+  pass them as a table (removes `powf` from both sides), then a shared `cosf`/`sinf` built the
+  same way as `wubu_expf` (fmaf range reduction plus polynomial). Drive that number to 0 and
+  the fused path becomes bit-identical; no other stage is left.
+
 ### Shared expf: built and validated, not yet wired in
 
 `include/wubu_expf.h` implements one expf (range reduction with fmaf, Horner polynomial,
