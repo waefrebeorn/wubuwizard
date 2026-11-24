@@ -1647,6 +1647,18 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         for (int d = 0; d < G4_HIDDEN; d++)
             x[(size_t)t * G4_HIDDEN + d] += normed[(size_t)t * G4_HIDDEN + d];
     }
+    /* G4_HSTATE=<path> dumps the hidden state after this layer, so the same position can be
+     * compared between the fused and the CPU path without reading the token stream. */
+    {
+        const char *hp = getenv("G4_HSTATE");
+        if (hp && il == 0 && positions[0] == 23) {
+            FILE *f = fopen(hp, "wb");
+            if (f) {
+                fwrite(x, sizeof(float), (size_t)N * G4_HIDDEN, f);
+                fclose(f);
+            }
+        }
+    }
 
     if (N == 1) G4_P[G4P_ATTN_NORM] += g4_now_ms() - _pk;
     G4P_ADD(G4P_ATTNOUT, _pk); _pk = g4_now_ms();

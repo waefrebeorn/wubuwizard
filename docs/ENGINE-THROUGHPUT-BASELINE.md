@@ -218,6 +218,22 @@ against the CPU cache). They exist because every one of the bugs above was invis
 token stream alone - the failure looked like "the fused path is numerically worse" in all
 three cases.
 
+### The residual difference, measured directly
+
+Dumped the hidden state after layer 0 at position 23 in both modes (`G4_HSTATE=<path>`) and
+diffed the vectors: worst absolute difference **1.07e-05** on a vector whose largest element
+is 49.3, i.e. ~2e-07 relative, and no element differs by more than 1e-05. So the sliding
+composite is not computing the wrong thing - it is computing the same thing in a different
+arithmetic order, and that is the whole story:
+
+- full-attention layers: 8 of the 48, so the per-layer ~1e-05 never accumulates enough to
+  flip a greedy token. Fusing them is bit-identical over 64 tokens.
+- sliding layers: 40 of the 48. The same per-layer difference, five times as many layers,
+  and the residual stream drifts far enough to flip a token by the second generated token.
+
+That also retires the "5e-06 per layer" hypothesis in favour of a measured number, and it
+explains why no gate ever failed: every individual stage is within 1e-06 of the CPU.
+
 ### Still open: what the residual divergence actually is
 
 With k and v from the composite matching the CPU to 1e-07 at the same position, its
