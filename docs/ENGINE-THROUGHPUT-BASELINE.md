@@ -269,13 +269,22 @@ independent chains in flight - should hide that latency. Implemented, built, mea
 Neutral, so it was reverted rather than kept (`git checkout`), because a change that neither moves the
 number nor explains something is a change that has to be maintained for nothing.
 
-That kills the memory-latency explanation and leaves instruction throughput: the decode of one block
-costs a grid lookup, eight sign tests, a scale nibble, and the byte extraction - on the order of forty
-to fifty instructions to feed two `dp4a` per lane per row. Overlap cannot help a warp that is issuing
-work rather than waiting for it. The only thing that helps is fewer instructions per weight value, and
-the sign-mask step - eight predicated negations per block - is the obvious target, replaceable with a
-byte-wise `__vsub4` on a mask built from the sign nibble. That is the next change, and it is the first
-one in this document aimed at an instruction count rather than at a stall.
+That kills the memory-latency explanation, and the obvious next step was instruction count: replace the
+eight predicated negations per block with two byte-wise ones. Done - the sign nibble is spread to one
+byte per bit through a multiply by 2^0,2^7,2^14,2^21, widened to 0xFF, and applied with `__vsub4`:
+
+    before: 5.07 5.04 5.02 s         after: 5.01 5.04 4.97 s     (three runs each, 87 tokens)
+
+**No measurable change, against a run-to-run spread of +-0.7%.** It is kept, not because it is faster,
+but because it is strictly fewer instructions and completely branchless with bit-identical output, and
+because reverting it would put the divergent loop back for no gain either. It is not evidence for the
+instruction-throughput theory; that theory is now as unconfirmed as the latency one was.
+
+So after four falsified hypotheses - LM head, MT=8 registers, wire latency, sign-mask instruction
+count - the number that governs this kernel is still unexplained from first principles. The pattern is
+consistent: every change that alters *how* the same work is scheduled or encoded moves nothing, which
+points at something structural the arithmetic does not capture. The next instrument for this is `ncu`,
+not another reasoned guess - a stopwatch and a spec sheet have taken this as far as they can.
 
 ### Decode, measured per phase (G4_PROF=1, 85 tokens, RTX 4050)
 

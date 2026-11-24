@@ -515,10 +515,13 @@ __global__ void iq2s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
             int32_t a0, a1;
             memcpy(&a0, grid, 4);
             memcpy(&a1, grid + 4, 4);
-            for (int j = 0; j < 4; ++j) {
-                if ((signs >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
-                if ((signs >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
-            }
+            /* Eight predicated negations become two byte-wise ones. The nibble is spread to one
+             * byte per sign bit by multiplying through 2^0,2^7,2^14,2^21 (bits land on 0,8,16,24),
+             * then widened to 0xFF so __vsub4 negates exactly the bytes whose sign was set. */
+            const uint32_t m_lo = (((uint32_t)(signs & 0x0F) * 0x00204081u) & 0x01010101u) * 0xFFu;
+            const uint32_t m_hi = (((uint32_t)(signs >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu;
+            a0 = (int32_t)__vsub4((uint32_t)a0 ^ m_lo, m_lo);
+            a1 = (int32_t)__vsub4((uint32_t)a1 ^ m_hi, m_hi);
             const int ls = (entry < 2) ? (1 + 2 * (scales[group] & 0x0f))
                                        : (1 + 2 * (scales[group] >> 4));
             const float wd = 0.125f * f16_fast(d_bits) * (float)ls;
