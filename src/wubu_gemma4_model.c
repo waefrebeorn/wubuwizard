@@ -1449,7 +1449,11 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
              * written only to the CPU cache - and every later token then attended over an
              * uninitialised device row 0. That is a wrong continuation from the second
              * token, which is what the fused path was doing. */
-            if (!primed[il] &&
+            /* G4_KV_REPRIME: re-upload the whole KV cache every token, so the device rows are
+             * identical to the host rows by construction. If that changes the continuation, the
+             * device append/row arithmetic is what diverges, not the attention or the norms. */
+            const int reprime = getenv("G4_KV_REPRIME") != NULL;
+            if ((!primed[il] || reprime) &&
                 wubu_gpu_attn_half_prime(il, cache_h->k, cache_h->v, pos_h, kvd) == 0)
                 primed[il] = 1;
             if (primed[il] && kv_len_h > 0) {
@@ -1504,6 +1508,26 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                     half_done = 1;
                 }
             }
+        }
+    }
+
+    if (getenv("G4_ATTN_DUMP") && half_done && il == 0 && positions[0] == 21) {
+        static float *cmp_attn, *cmp_out;
+        if (!cmp_attn) {
+            cmp_attn = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
+            cmp_out = (float *)malloc((size_t)G4_HIDDEN * sizeof(float));
+        }
+        extern int wubu_gpu_get_attn_dump(float *out, int n);
+        if (cmp_attn && cmp_out && wubu_gpu_get_attn_dump(cmp_attn, qd) == 0) {
+            g4_batched_qmatmul(cmp_attn, &layer->attn_out, 1, G4_HIDDEN, qd, cmp_out);
+            double w = 0.0, sc = 0.0; int wi = -1;
+            for (int i = 0; i < G4_HIDDEN; ++i) {
+                const double dd = fabs((double)cmp_out[i] - (double)normed[i]);
+                if (dd > w) { w = dd; wi = i; }
+                if (fabs((double)cmp_out[i]) > sc) sc = fabs((double)cmp_out[i]);
+            }
+            fprintf(stderr, "[OPROJ] layer%d pos%d dev-vs-cpu=%.3e rel=%.3e at %d (scale %.3e)\n",
+                    il, positions[0], w, sc > 0 ? w / sc : w, wi, sc);
         }
     }
 
@@ -1677,7 +1701,12 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * compared between the fused and the CPU path without reading the token stream. */
     {
         const char *ha = getenv("G4_HSTATE_ALL");
-        if (ha && positions[0] == 23) {
+        /* Which position to dump. Positions before the tokens diverge are the only ones that
+         * can be compared between paths: dumping pos 23 while one path emits 100 and the other
+         * 236775 compares two different tokens and reads as a huge difference at layer 0. */
+        static int hstate_at = -1;
+        if (hstate_at < 0) { const char *e = getenv("G4_HSTATE_AT"); hstate_at = e ? atoi(e) : 23; }
+        if (ha && positions[0] == hstate_at) {
             char pbuf[512];
             snprintf(pbuf, sizeof pbuf, "%s/l%02d.bin", ha, il);
             FILE *f = fopen(pbuf, "wb");

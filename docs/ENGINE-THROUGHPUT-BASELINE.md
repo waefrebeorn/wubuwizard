@@ -258,6 +258,31 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### The divergence is inside layer 0, and the two halves contradict each other
+
+New instruments, all kept: `G4_HSTATE_ALL=<dir>` + `G4_HSTATE_AT=<pos>` dump the residual stream
+after every layer at a chosen position; `G4_ATTN_DUMP` exposes the device attention row
+(`wubu_gpu_get_attn_dump`) so the o-projection that follows it can be compared; `G4_KV_REPRIME`
+re-uploads the whole CPU KV cache every token.
+
+Measured at **position 21, the first decode step, where both paths have identical input**:
+
+| quantity | fused vs default |
+|---|---|
+| attention row (device vs CPU) | 1.5e-07 |
+| o-projection from that row | **0.000e+00 - bit identical** |
+| residual stream after the attention residual, layer 0 | **5.5e-01 (5.2e-03 relative)** |
+
+Two of those cannot all be true: if the attention row matches, and the o-projection of that row
+is bit-identical, then `x += postnorm(oproj)` has the same inputs in both paths and must produce
+the same result. Either the dumped position is not the same step in both runs, or one of the
+three measurements is comparing the wrong buffer. That contradiction is the first thing to
+resolve - guessing past it has been wrong every time this session.
+
+Ruled out on the way: the device KV cache is not stale (`G4_KV_REPRIME` changes nothing, so the
+device rows equal the host rows), and the type-17 K layers are no longer involved (fixed above;
+their error is 1e-06 now, and the divergence is unchanged).
+
 ### Open lead, unresolved
 
 Excluding the five type-17 layers from fusion (`G4_SKIP_T17`, since removed) made the token

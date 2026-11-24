@@ -372,10 +372,17 @@ int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
     return 0;
 }
 
-/* staged q, exposed for the G4_QDUMP comparison */
+/* staged q and attention row, exposed for the G4_QDUMP / G4_ATTN_DUMP comparisons */
 static float g_qdump[8192];
-int wubu_gpu_get_qdump(float *out, int n)
-{
+static float g_attn_host[8192];
+
+int wubu_gpu_get_attn_dump(float *out, int n) {
+    if (!out || n <= 0 || n > 8192) return -1;
+    memcpy(out, g_attn_host, (size_t)n * sizeof(float));
+    return 0;
+}
+
+int wubu_gpu_get_qdump(float *out, int n) {
     if (!out || n <= 0 || n > 8192) return -1;
     memcpy(out, g_qdump, (size_t)n * sizeof(float));
     return 0;
@@ -601,6 +608,11 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
                   (const float *)g_freqs_dev) != 0) return -6;
     if (getenv("G4_QDUMP") && qd <= 8192)
         G.download(g_qdump, d_q, (unsigned long long)((size_t)qd * sizeof(float)));
+    /* G4_ATTN_DUMP: keep the device attention row so the o-projection that follows it can be
+     * compared against the CPU's, which is the only stage left between the row and the
+     * residual that the fused path could be getting wrong. */
+    if (getenv("G4_ATTN_DUMP") && qd <= 8192)
+        G.download(g_attn_host, d_attn, (unsigned long long)((size_t)qd * sizeof(float)));
     if (G.download(out, d_out, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -7;
     if (k_out && G.download(k_out, d_k, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -8;
     if (v_out && G.download(v_out, d_v, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -8;
