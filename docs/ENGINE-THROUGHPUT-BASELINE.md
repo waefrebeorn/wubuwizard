@@ -188,6 +188,15 @@ Fusing q, k and v into one submission (one upload, one quantisation, one downloa
 changed the qkv section by 0.2 ms/token - i.e. the cost is not the number of *transfers*
 either, it is the serialisation of ~200 small submissions per token.
 
+### Device KV cache: the memory arithmetic before the assembly
+
+A device-resident attention half-layer needs the KV cache on the card: `kvd` floats per
+position per layer, twice (K and V). For this model `kvd` is 2048 floats (8 KB), so a full
+4096-position context would need **3.2 GB** across 48 layers - impossible next to 4 GB of
+resident weights on a 6 GB card. At 256 positions it is ~192 MB, so the plan is a
+budgeted device KV (256-512 positions) with a CPU-attention fallback once the context
+outgrows it, rather than silently failing or evicting weights.
+
 Conclusion: the remaining cost is the sync-per-call structure, which only a device-resident
 layer (one submission per layer, one download) removes. That is the next unit; kernel
 tuning has plateaued at 67-99 GB/s for these block sizes.

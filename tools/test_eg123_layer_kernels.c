@@ -20,6 +20,8 @@ typedef int (*fn_rms_t)(const void *, const void *, float *, int, int, float, in
 typedef int (*fn_add_t)(const void *, const void *, float *, int);
 typedef int (*fn_rope_t)(const void *, const void *, float *, float *, float, int, int, int,
                          int, float, const void *, int, int, int);
+typedef int (*fn_attn_t)(const void *, const void *, const void *, float *, int, int, int,
+                         int, int, int, int);
 
 static uint64_t rng = 0x5EED1234ULL;
 static float rnd(void)
@@ -129,6 +131,51 @@ int main(int argc, char **argv)
         }
         printf("EG-123 rope: heads=%d head_dim=%d worst_abs=%.3e\n", HEADS, HD, worst);
         CHECK(worst < 1e-4);
+    }
+
+    /* ---- decode attention vs the sliding-attention CPU routine ---- */
+    {
+        fn_attn_t attn = (fn_attn_t)(void *)GetProcAddress(h, "wubu_cuda_attn_host");
+        CHECK(attn != NULL);
+        if (attn) {
+            enum { HEADS = 8, KVH = 4, HD = 64, KVD = KVH * HD, KCAP = 32, KVLEN = 20 };
+            static float q[HEADS * HD], kc[KCAP * KVD], vc[KCAP * KVD];
+            static float ref[HEADS * HD], got[HEADS * HD];
+            for (int i = 0; i < HEADS * HD; ++i) q[i] = rnd();
+            for (int i = 0; i < KCAP * KVD; ++i) { kc[i] = rnd(); vc[i] = rnd(); }
+
+            /* CPU transcript of g4_sliding_attn_cpu for one position, kv_start = 0. */
+            for (int hq = 0; hq < HEADS; ++hq) {
+                const int kv_h = hq / (HEADS / KVH);
+                const float *qvec = q + hq * HD;
+                float s[KVLEN], mx = -3.4e38f;
+                for (int kp = 0; kp < KVLEN; ++kp) {
+                    const float *kv = kc + (size_t)kp * KVD + (size_t)kv_h * HD;
+                    float sc = 0.0f;
+                    for (int d = 0; d < HD; ++d) sc += qvec[d] * kv[d];
+                    s[kp] = sc;
+                    if (sc > mx) mx = sc;
+                }
+                float sum = 0.0f;
+                for (int kp = 0; kp < KVLEN; ++kp) { s[kp] = expf(s[kp] - mx); sum += s[kp]; }
+                const float inv = 1.0f / (sum + 1e-10f);
+                for (int d = 0; d < HD; ++d) {
+                    float acc = 0.0f;
+                    for (int kp = 0; kp < KVLEN; ++kp)
+                        acc += s[kp] * inv * vc[(size_t)kp * KVD + (size_t)kv_h * HD + d];
+                    ref[hq * HD + d] = acc;
+                }
+            }
+            CHECK(attn(q, kc, vc, got, HEADS, KVH, HD, 0, KVLEN, KVD, KCAP) == 0);
+            double worst = 0.0;
+            for (int i = 0; i < HEADS * HD; ++i) {
+                const double dd = fabs((double)got[i] - (double)ref[i]);
+                if (dd > worst) worst = dd;
+            }
+            printf("EG-123 attn: heads=%d kv_heads=%d kv_len=%d worst_abs=%.3e\n",
+                   HEADS, KVH, KVLEN, worst);
+            CHECK(worst < 1e-4);
+        }
     }
 
     FreeLibrary(h);

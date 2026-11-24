@@ -1118,6 +1118,197 @@ __global__ void rope_kernel(float * __restrict__ q, float * __restrict__ k,
     }
 }
 
+/* Decode attention for ONE query position, mirroring g4_sliding_attn_cpu: no kq scale
+ * (Gemma 4 sets f_attention_scale = 1.0), softmax over [kv_start, kv_start+kv_len), GQA
+ * mapping kv_h = hq / (n_heads / n_kv_heads). One block per head; scores in dynamic
+ * shared memory (kv_len floats). */
+__global__ void attn_decode_kernel(const float * __restrict__ q,
+                                   const float * __restrict__ kc,
+                                   const float * __restrict__ vc,
+                                   float * __restrict__ out,
+                                   int n_heads, int n_kv_heads, int hd,
+                                   int kv_start, int kv_len, int kvd)
+{
+    extern __shared__ float sh[];
+    const int hq = blockIdx.x;
+    const int kv_h = hq / (n_heads / n_kv_heads);
+    const float *qvec = q + (size_t)hq * hd;
+    const float *K = kc + (size_t)kv_h * hd;
+    const float *V = vc + (size_t)kv_h * hd;
+
+    float lmax = -3.4e38f;
+    for (int kp = threadIdx.x; kp < kv_len; kp += blockDim.x) {
+        const float *kvp = K + (size_t)(kv_start + kp) * kvd;
+        float sc = 0.0f;
+        for (int d = 0; d < hd; ++d) sc += qvec[d] * kvp[d];
+        sh[kp] = sc;
+        if (sc > lmax) lmax = sc;
+    }
+    __shared__ float red[32];
+    for (int off = 16; off > 0; off >>= 1) lmax = fmaxf(lmax, __shfl_xor_sync(0xffffffffu, lmax, off));
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = lmax;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float m = -3.4e38f;
+        const int nw = (blockDim.x + 31) / 32;
+        for (int i = 0; i < nw; ++i) m = fmaxf(m, red[i]);
+        red[0] = m;
+    }
+    __syncthreads();
+    const float max_s = red[0];
+    __syncthreads();
+
+    float lsum = 0.0f;
+    for (int kp = threadIdx.x; kp < kv_len; kp += blockDim.x) {
+        const float e = expf(sh[kp] - max_s);
+        sh[kp] = e;
+        lsum += e;
+    }
+    for (int off = 16; off > 0; off >>= 1) lsum += __shfl_xor_sync(0xffffffffu, lsum, off);
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = lsum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float s = 0.0f;
+        const int nw = (blockDim.x + 31) / 32;
+        for (int i = 0; i < nw; ++i) s += red[i];
+        red[0] = 1.0f / (s + 1e-10f);
+    }
+    __syncthreads();
+    const float inv = red[0];
+
+    for (int d = threadIdx.x; d < hd; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int kp = 0; kp < kv_len; ++kp)
+            acc += sh[kp] * V[(size_t)(kv_start + kp) * kvd + d];
+        out[(size_t)hq * hd + d] = acc * inv;
+    }
+}
+
+WUBU_EXPORT int wubu_cuda_attn_dev(const float *d_q, const float *d_kc, const float *d_vc,
+                                   float *d_out, int n_heads, int n_kv_heads, int hd,
+                                   int kv_start, int kv_len, int kvd)
+{
+    if (!d_q || !d_kc || !d_vc || !d_out || n_heads <= 0 || hd <= 0 || kv_len <= 0) return -1;
+    if ((size_t)kv_len * sizeof(float) > 48 * 1024) return -2;   /* shared-mem ceiling */
+    attn_decode_kernel<<<n_heads, 128, (size_t)kv_len * sizeof(float)>>>(
+        d_q, d_kc, d_vc, d_out, n_heads, n_kv_heads, hd, kv_start, kv_len, kvd);
+    return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
+
+__global__ void kv_append_kernel(float * __restrict__ kc, float * __restrict__ vc,
+                                 const float * __restrict__ ksrc, const float * __restrict__ vsrc,
+                                 int pos, int kvd);
+
+/* Whole attention half of a layer for one decode position, in ONE submission:
+ * q8k(x) -> q,k,v matvecs -> per-head RMS norms -> RoPE -> KV append -> attention ->
+ * o-projection. Everything stays in device memory; the caller uploads the normalised
+ * hidden state and downloads the projected attention output.
+ * kq_scale is 1.0 for Gemma 4, so the scores are unscaled dot products. */
+WUBU_EXPORT int wubu_cuda_attn_half_dev(
+        const void *d_wq, const void *d_wk, const void *d_wv, const void *d_wo, int type,
+        const float *d_x, float *d_q, float *d_k, float *d_v,
+        float *d_kc, float *d_vc, float *d_attn, float *d_out,
+        const float *d_qn, const float *d_kn,
+        int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+        int pos, int kv_start, int kv_len,
+        long long sq, long long sk, long long sv, long long so,
+        float pos_f, int n_rot, float theta_scale, const float *d_freqs)
+{
+    if (!d_wq || !d_wk || !d_wv || !d_wo || !d_x || !d_out) return -1;
+    if (ensure_q8_scratch(hidden) != 0) return -2;
+
+    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
+    int rc;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else                 rc = wubu_cuda_quant_matvec(d_wq, type, g_q8_scratch, d_q, hidden, qd, sq);
+    if (rc != 0) return -3;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else                 rc = wubu_cuda_quant_matvec(d_wk, type, g_q8_scratch, d_k, hidden, kvd, sk);
+    if (rc != 0) return -4;
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else                 rc = wubu_cuda_quant_matvec(d_wv, type, g_q8_scratch, d_v, hidden, kvd, sv);
+    if (rc != 0) return -5;
+
+    /* Per-head norms: Q and K with their learned weights, V with none (Gemma 4). */
+    rms_norm_row_kernel<<<n_heads, 256>>>(d_q, d_qn, d_q, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_k, d_kn, d_k, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_v, NULL, d_v, hd, 1e-6f, 0);
+
+    rope_kernel<<<dim3(1, n_heads, n_kv_heads), 128>>>(
+        d_q, d_k, pos_f, hd, qd, kvd, n_rot, theta_scale, d_freqs, n_heads, n_kv_heads);
+
+    kv_append_kernel<<<(kvd + 255) / 256, 256>>>(d_kc, d_vc, d_k, d_v, pos, kvd);
+
+    if (wubu_cuda_attn_dev(d_q, d_kc, d_vc, d_attn, n_heads, n_kv_heads, hd,
+                           kv_start, kv_len, kvd) != 0) return -6;
+
+    if (ensure_q8_scratch(qd) != 0) return -2;
+    quantize_q8k_kernel<<<qd / QK_K, 32>>>(d_attn, g_q8_scratch, qd);
+    if (type == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else if (type == 18) rc = wubu_cuda_matvec_iq3xxs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else if (type == 23) rc = wubu_cuda_matvec_iq4xs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else if (type == 17) rc = wubu_cuda_matvec_iq2xs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else                 rc = wubu_cuda_quant_matvec(d_wo, type, g_q8_scratch, d_out, qd, hidden, so);
+    if (rc != 0) return -7;
+    return cudaGetLastError() == cudaSuccess ? 0 : -8;
+}
+
+/* Append one token's k/v into the device KV cache (kvd floats each). */
+__global__ void kv_append_kernel(float * __restrict__ kc, float * __restrict__ vc,
+                                 const float * __restrict__ ksrc, const float * __restrict__ vsrc,
+                                 int pos, int kvd)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= kvd) return;
+    kc[(size_t)pos * kvd + i] = ksrc[i];
+    vc[(size_t)pos * kvd + i] = vsrc[i];
+}
+
+WUBU_EXPORT int wubu_cuda_kv_append_dev(float *d_kc, float *d_vc, const float *d_ksrc,
+                                        const float *d_vsrc, int pos, int kvd)
+{
+    if (!d_kc || !d_vc || !d_ksrc || !d_vsrc || pos < 0 || kvd <= 0) return -1;
+    kv_append_kernel<<<(kvd + 255) / 256, 256>>>(d_kc, d_vc, d_ksrc, d_vsrc, pos, kvd);
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+/* Host wrappers for the gate. */
+WUBU_EXPORT int wubu_cuda_attn_host(const void *h_q, const void *h_kc, const void *h_vc,
+                                    float *h_out, int n_heads, int n_kv_heads, int hd,
+                                    int kv_start, int kv_len, int kvd, int kcap)
+{
+    void *dq = NULL, *dkc = NULL, *dvc = NULL, *dout = NULL;
+    int rc = -1;
+    const size_t qb = (size_t)n_heads * hd * sizeof(float);
+    const size_t kvb = (size_t)kcap * kvd * sizeof(float);
+    if (cudaMalloc(&dq, qb) != cudaSuccess) goto done;
+    if (cudaMalloc(&dkc, kvb) != cudaSuccess) goto done;
+    if (cudaMalloc(&dvc, kvb) != cudaSuccess) goto done;
+    if (cudaMalloc(&dout, qb) != cudaSuccess) goto done;
+    if (cudaMemcpy(dq, h_q, qb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dkc, h_kc, kvb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dvc, h_vc, kvb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (wubu_cuda_attn_dev((const float *)dq, (const float *)dkc, (const float *)dvc,
+                           (float *)dout, n_heads, n_kv_heads, hd, kv_start, kv_len, kvd) != 0) goto done;
+    if (cudaMemcpy(h_out, dout, qb, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dq) cudaFree(dq);
+    if (dkc) cudaFree(dkc);
+    if (dvc) cudaFree(dvc);
+    if (dout) cudaFree(dout);
+    return rc;
+}
+
 WUBU_EXPORT int wubu_cuda_rms_norm_dev(const float *d_x, const float *d_w, float *d_out,
                                        int rows, int n, float eps, int has_w);
 WUBU_EXPORT int wubu_cuda_residual_add_dev(float *d_x, const float *d_y, int n);
