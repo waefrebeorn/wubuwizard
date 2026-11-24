@@ -320,6 +320,34 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### What upstream actually does, and the correction it forces
+
+Reading llama.cpp's mmq sources rather than guessing at them changed the picture twice.
+
+**First correction: IQ2_S and IQ3_S do not use tensor cores upstream.** In `mmq.cuh` both dispatch to
+`ggml_cuda_mmq_vec_dot_q8_0_q8_1_dp4a`. The `_mma` variants exist for Q4_0, Q8_0, Q2_K and the FP4
+types. The comment on `MMQ_DP4A_MAX_BATCH_SIZE 64` says dp4a is the *preferred* path for these types at
+batch <= 64 and only falls back when it is not. So llama.cpp reaches 477 tok/s on this card with dp4a
+on the exact types this engine uses, and "the answer is tensor cores" - which an earlier section of
+this document asserted - is wrong. The instruction was never the problem.
+
+**What is the problem, from `ggml_cuda_mmq_load_tiles_iq2_s`:**
+
+    threads_per_row = (MMQ_ITER_K / (4 * QR2_S)) / 2      // 256 K / 16 / 2 = 8 threads
+    nrows           = warp_size / threads_per_row        // one warp covers 4 rows
+
+A warp decodes a whole 256-value IQ2_S block for four rows at once, writing the decoded int8 into a
+**shared tile padded by one int per row** (`x_qs[i*(2*MMQ_TILE_NE_K + 1) + 8*kqsx + 2*l]`) - the
+padding is what removes shared-memory bank conflicts, and there is an mma-specific `sram_stride` for the
+tensor-core path. Scales go into the same tile as floats, `((ls & 0x0F)*d + d/2)/4`. Signs are built
+with `__vcmpne4` into 0/0xFF byte masks and applied as `__vsub4(grid ^ signs, signs)` - the same SWAR
+negation this engine derived independently, which at least confirms the decoding arithmetic.
+
+The difference from this engine is therefore not the instruction but the staging: upstream decodes a
+K-slab for a row-tile once into a conflict-free shared tile and then runs many dot products from it,
+where this engine stages per column with a barrier around every block. That is the remaining gap, and
+it is why the tensor-core work below bought 28% rather than the 26x the reference number implies.
+
 ### IQ2_S through tensor cores: decode to shared, mma from shared, verified equivalent
 
     uniform data : worst rel 1.6e-06                       0 of 1336320 outside 1%
