@@ -258,6 +258,41 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Decomposing the kernel by removing stages, and the benchmark bug that fooled it
+
+`ncu` is not installed and `nsys` is not either, so the decomposition was done by hand: a standalone
+kernel with the real shape (15360 cols x 3840 K, M=87, `MT=4`), three variants that read exactly the
+same bytes, and one stage removed at a time - full, no-decode (weights used straight from `qs`),
+no-dot (bytes folded without `dp4a`).
+
+First run, codebook in `__constant__`:
+
+    A full        50.479 ms     decode A-B  39.385 ms (78.0%)
+    B no-decode   11.094 ms     dp4a   B-C  -0.058 ms ( -0.1%)
+    C no-dot      11.151 ms     loads  C    11.151 ms (22.1%)
+
+Seventy-eight percent in the decode, and `MT` scaling to match: MT=4 50.5 ms, MT=8 24.7, MT=16 13.6 -
+3.7x from rows-per-block alone. It looked like the answer to two sessions of guessing.
+
+It was a property of the benchmark. `__constant__` memory serialises divergent addresses 32 ways, and
+every lane in this kernel indexes a different codebook entry. The shipped kernel uses `__device__`
+global for exactly that reason - there is a comment saying so, three lines above the declaration I had
+read. Re-run with the table in global memory, matching what ships:
+
+    A full        13.645 ms     decode A-B   2.454 ms (18.0%)
+    B no-decode   11.192 ms     dp4a   B-C  -0.006 ms ( -0.0%)
+    C no-dot      11.197 ms     loads  C    11.197 ms (82.1%)
+
+**Decode is 18%, the dot is nothing, and 82% of the kernel is loading weight bytes at 37 GB/s.**
+`MT=8` and `MT=16` cut the decode share to 4% and 3% - they cannot cut what was never there. In the
+pipeline MT=16 measures 16.1 tok/s against MT=4's 17.4, because 56 registers cost the occupancy the
+load phase lives on. Reverted; MT stays 4.
+
+The lesson is the same one this document keeps relearning from the other side: a benchmark is a model
+of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark is the thing that is
+wrong. The instrument was corrected before the conclusion was written down, which is the only reason
+this section is useful rather than actively misleading.
+
 ### The decode setup is instruction throughput, not memory latency
 
 Fourth hypothesis, and the fourth measurement to kill one. If the warp stalls waiting on each 82-byte
