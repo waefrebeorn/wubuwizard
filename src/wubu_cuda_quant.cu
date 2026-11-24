@@ -1043,9 +1043,185 @@ __global__ void gelu_mul_kernel(const float * __restrict__ g, float * __restrict
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float x = g[i];
-    /* 0.5x(1+tanh(sqrt(2/pi)(x+0.044715x^3))), the same expression the CPU uses. */
-    const float t = tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x));
-    u[i] = u[i] * (0.5f * x * (1.0f + t));
+    /* g4_gelu_tanh() in the CPU engine uses the ERF form (llama.cpp LLM_FFN_GELU is
+     * ggml_gelu), not the tanh approximation. The device must use the same expression or
+     * the two paths differ by ~1e-3 per element and can eventually flip a token. */
+    u[i] = u[i] * (0.5f * x * (1.0f + erff(x * 0.7071067811865476f)));
+}
+
+/* ---- device building blocks for a device-resident layer --------------------------
+ * These mirror g4_rms_norm(), the V normalisation and g4_rope_apply() exactly, so moving
+ * a layer onto the device does not silently change any arithmetic. */
+
+/* out[i] = x[i] * inv_rms * w[i]; w may be NULL (Gemma 4 normalises V with no weight). */
+__global__ void rms_norm_row_kernel(const float * __restrict__ x, const float * __restrict__ w,
+                                    float * __restrict__ out, int n, float eps, int has_w)
+{
+    __shared__ float red[32];
+    const int row = blockIdx.x;
+    const float *xr = x + (size_t)row * n;
+    float *orow = out + (size_t)row * n;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) ss += xr[i] * xr[i];
+    for (int off = 16; off > 0; off >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, off);
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = ss;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float tot = 0.0f;
+        const int nw = (blockDim.x + 31) / 32;
+        for (int i = 0; i < nw; ++i) tot += red[i];
+        red[0] = rsqrtf(tot / (float)n + eps);
+    }
+    __syncthreads();
+    const float inv = red[0];
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        orow[i] = has_w ? xr[i] * inv * w[i] : xr[i] * inv;
+}
+
+__global__ void residual_add_kernel(float * __restrict__ x, const float * __restrict__ y, int n)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] += y[i];
+}
+
+/* Mirrors g4_rope_apply: same theta_scale, same freqs guard, Q and K loops kept separate. */
+__global__ void rope_kernel(float * __restrict__ q, float * __restrict__ k,
+                            float pos, int d_head, int q_stride, int k_stride,
+                            int n_rot, float theta_scale, const float * __restrict__ freqs,
+                            int n_q_heads, int n_k_heads)
+{
+    const int half = n_rot / 2;
+    for (int h = blockIdx.y; h < n_q_heads; h += gridDim.y) {
+        float *qv = q + (size_t)blockIdx.x * q_stride + (size_t)h * d_head;
+        for (int j = threadIdx.x; j < half; j += blockDim.x) {
+            const float ff = freqs ? freqs[j] : 1.0f;
+            if (ff > 1e20f) continue;
+            const float theta = pos * powf(theta_scale, (float)j) / ff;
+            const float ct = cosf(theta), st = sinf(theta);
+            const float q0 = qv[j], q1 = qv[j + half];
+            qv[j] = q0 * ct - q1 * st;
+            qv[j + half] = q0 * st + q1 * ct;
+        }
+    }
+    if (!k) return;
+    for (int h = blockIdx.z; h < n_k_heads; h += gridDim.z) {
+        float *kv = k + (size_t)blockIdx.x * k_stride + (size_t)h * d_head;
+        for (int j = threadIdx.x; j < half; j += blockDim.x) {
+            const float ff = freqs ? freqs[j] : 1.0f;
+            if (ff > 1e20f) continue;
+            const float theta = pos * powf(theta_scale, (float)j) / ff;
+            const float ct = cosf(theta), st = sinf(theta);
+            const float k0 = kv[j], k1 = kv[j + half];
+            kv[j] = k0 * ct - k1 * st;
+            kv[j + half] = k0 * st + k1 * ct;
+        }
+    }
+}
+
+WUBU_EXPORT int wubu_cuda_rms_norm_dev(const float *d_x, const float *d_w, float *d_out,
+                                       int rows, int n, float eps, int has_w);
+WUBU_EXPORT int wubu_cuda_residual_add_dev(float *d_x, const float *d_y, int n);
+WUBU_EXPORT int wubu_cuda_rope_dev(float *d_q, float *d_k, float pos, int d_head,
+                                   int q_stride, int k_stride, int n_rot, float theta_scale,
+                                   const float *d_freqs, int n_q_heads, int n_k_heads);
+
+/* Host wrappers for the gate: these three kernels are compared against the CPU
+ * implementations (g4_rms_norm, the V normalisation, g4_rope_apply) element by element. */
+WUBU_EXPORT int wubu_cuda_rms_norm_host(const void *h_x, const void *h_w, float *h_out,
+                                        int rows, int n, float eps, int has_w)
+{
+    void *dx = NULL, *dw = NULL, *dout = NULL;
+    int rc = -1;
+    const size_t nb = (size_t)rows * n * sizeof(float);
+    if (cudaMalloc(&dx, nb) != cudaSuccess) goto done;
+    if (cudaMalloc(&dout, nb) != cudaSuccess) goto done;
+    if (has_w) {
+        if (cudaMalloc(&dw, (size_t)n * sizeof(float)) != cudaSuccess) goto done;
+        if (cudaMemcpy(dw, h_w, (size_t)n * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    }
+    if (cudaMemcpy(dx, h_x, nb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (wubu_cuda_rms_norm_dev((const float *)dx, (const float *)dw, (float *)dout,
+                               rows, n, eps, has_w) != 0) goto done;
+    if (cudaMemcpy(h_out, dout, nb, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dx) cudaFree(dx);
+    if (dw) cudaFree(dw);
+    if (dout) cudaFree(dout);
+    return rc;
+}
+
+WUBU_EXPORT int wubu_cuda_residual_add_host(const void *h_x, const void *h_y, float *h_out, int n)
+{
+    void *dx = NULL, *dy = NULL;
+    int rc = -1;
+    const size_t nb = (size_t)n * sizeof(float);
+    if (cudaMalloc(&dx, nb) != cudaSuccess) goto done;
+    if (cudaMalloc(&dy, nb) != cudaSuccess) goto done;
+    if (cudaMemcpy(dx, h_x, nb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dy, h_y, nb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (wubu_cuda_residual_add_dev((float *)dx, (const float *)dy, n) != 0) goto done;
+    if (cudaMemcpy(h_out, dx, nb, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dx) cudaFree(dx);
+    if (dy) cudaFree(dy);
+    return rc;
+}
+
+WUBU_EXPORT int wubu_cuda_rope_host(const void *h_q, const void *h_k, float *h_qo, float *h_ko,
+                                    float pos, int d_head, int q_stride, int k_stride,
+                                    int n_rot, float theta_scale, const void *h_freqs,
+                                    int n_heads, int n_k_heads, int has_freqs)
+{
+    void *dq = NULL, *dk = NULL, *df = NULL;
+    int rc = -1;
+    const size_t qb = (size_t)q_stride * sizeof(float);
+    const size_t kb = (size_t)k_stride * sizeof(float);
+    if (cudaMalloc(&dq, qb) != cudaSuccess) goto done;
+    if (h_k && cudaMalloc(&dk, kb) != cudaSuccess) goto done;
+    if (cudaMemcpy(dq, h_q, qb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (h_k && cudaMemcpy(dk, h_k, kb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (has_freqs) {
+        if (cudaMalloc(&df, (size_t)(n_rot / 2) * sizeof(float)) != cudaSuccess) goto done;
+        if (cudaMemcpy(df, h_freqs, (size_t)(n_rot / 2) * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    }
+    if (wubu_cuda_rope_dev((float *)dq, h_k ? (float *)dk : NULL, pos, d_head, q_stride, k_stride,
+                           n_rot, theta_scale, (const float *)df, n_heads, n_k_heads) != 0) goto done;
+    if (cudaMemcpy(h_qo, dq, qb, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (h_k && h_ko && cudaMemcpy(h_ko, dk, kb, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dq) cudaFree(dq);
+    if (dk) cudaFree(dk);
+    if (df) cudaFree(df);
+    return rc;
+}
+
+WUBU_EXPORT int wubu_cuda_rms_norm_dev(const float *d_x, const float *d_w, float *d_out,
+                                       int rows, int n, float eps, int has_w)
+{
+    if (!d_x || !d_out || rows <= 0 || n <= 0) return -1;
+    rms_norm_row_kernel<<<rows, 256>>>(d_x, d_w, d_out, n, eps, has_w);
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+WUBU_EXPORT int wubu_cuda_residual_add_dev(float *d_x, const float *d_y, int n)
+{
+    if (!d_x || !d_y || n <= 0) return -1;
+    residual_add_kernel<<<(n + 255) / 256, 256>>>(d_x, d_y, n);
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+WUBU_EXPORT int wubu_cuda_rope_dev(float *d_q, float *d_k, float pos, int d_head,
+                                   int q_stride, int k_stride, int n_rot, float theta_scale,
+                                   const float *d_freqs, int n_q_heads, int n_k_heads)
+{
+    if (!d_q || d_head <= 0 || n_rot <= 0) return -1;
+    rope_kernel<<<dim3(1, n_q_heads, n_k_heads > 0 ? n_k_heads : 1), 128>>>(
+        d_q, d_k, pos, d_head, q_stride, k_stride, n_rot, theta_scale, d_freqs,
+        n_q_heads, n_k_heads);
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
 /* q8k + matvec with everything already on the device (no download). */
