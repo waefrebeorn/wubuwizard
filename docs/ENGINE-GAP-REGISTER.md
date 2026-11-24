@@ -1366,6 +1366,12 @@ layers, bad `hot` flags and out-of-range layer counts are rejected.
 `test_eg110_residency: PASS`, exit 0; 30/30 stress runs clean. Residency is modelled,
 not measured: no Flash bandwidth, W4A16 quantisation or KV-cache claim is made.
 
+**EG-110 integration (2026-11-23):** `WUBU_RESIDENCY_MB` in the Gemma4 GGUF loader builds
+the plan from real tensor sizes (attention group hot, FFN group streamed per layer) and
+hands the residual budget to the streaming weight cache. Measured: streamed prefill
+1.0 -> 3.4 tok/s, decode 1.1 -> 0.9 tok/s with the full streamed set cached, and 0.4
+tok/s when the cache cannot hold it. Details in `docs/ENGINE-THROUGHPUT-BASELINE.md`.
+
 | EG-110 | DRAM/Flash hybrid residency planner with fail-closed staging budget (MNN-LLM) | EG-06 plans placement but never proves a streamed layer can be staged in DRAM | MNN-LLM arXiv 2506.10443 / `alibaba/MNN` `transformers/` | `test_eg110_residency` | S | **DONE (residency-contract gate)** — `src/wubu_residency.c/.h` plans hot/streamed layers and fails closed when hot set + staging buffer exceeds the DRAM budget; study clone is read-only. |
 
 **EG-111 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg111_iq_fused`

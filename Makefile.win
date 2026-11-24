@@ -88,6 +88,7 @@ CORE_OBJ = src/wubu_model.o src/wubu_dims.o src/wubu_dims_gpu_stub.o src/wubu_ss
   src/wubu_backend.o src/wubu_agentic_os.o \
   src/wubu_win.o
 CORE_OBJ += src/wubu_vecdot_iq.o
+CORE_OBJ += src/wubu_residency.o
 CORE_OBJ += src/wubu_ev_depth.o
 CORE_OBJ += src/wubu_adapt_len.o
 CORE_OBJ += src/wubu_tree_accept.o

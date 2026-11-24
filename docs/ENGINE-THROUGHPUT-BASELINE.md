@@ -86,6 +86,26 @@ thread tuning.
    Acceptance: decode > 1 tok/s with identical greedy token sequence on 20 prompts;
    a speedup claim requires the measured number in this file, not a PASS line.
 
+## Residency plan wired into the GGUF loader (EG-110 integration)
+
+`WUBU_RESIDENCY_MB=N` (with `G4_STREAM_WEIGHTS=1`) now runs `wubu_residency_plan` over
+the real tensor sizes at load: one plan entry per layer for the attention group (hot)
+and one for the FFN group (streamed), with the remaining budget handed to the streamed
+weight cache as its cap. Measured, 8-token decode, same prompt:
+
+| Mode | budget | cache cap | prefill | decode | cache hits/misses |
+|---|---|---|---|---|---|
+| mmap, no streaming | - | - | 1.0 tok/s | **1.1 tok/s** | - |
+| streamed | 3072 MiB | 2199 MiB | **3.4 tok/s** | 0.4 tok/s | 217 / 2744 |
+| streamed | 6144 MiB | 5271 MiB | 3.3 tok/s | 0.9 tok/s | 2850 / 111 |
+| streamed | 8192 MiB | 7319 MiB | 3.4 tok/s | 0.9 tok/s | 2850 / 111 |
+
+Streaming is **3.4x faster on prefill** (sequential reads + the one-layer-lookahead
+prefetch thread) and slightly slower on decode (0.9 vs 1.1 tok/s) even when the whole
+streamed set is cached, because every matmul copies bytes out of the cache instead of
+reading the mmap directly. Below ~4.4 GiB of cache the streamed set (2720 MiB) does not
+stay resident and decode collapses to 0.4 tok/s.
+
 ## Windows GPU lane (blocked, documented)
 
 `Makefile.win` now has a `%.o: %.cu` rule, a `gpu-probe` target and a

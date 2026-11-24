@@ -13,6 +13,7 @@
 
 #include "wubu_gemma4.h"
 #include "gguf_reader.h"
+#include "wubu_residency.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -250,6 +251,74 @@ static DWORD WINAPI g4_pf_thread(LPVOID arg)
         }
     }
     return 0;
+}
+
+/* ---- EG-110 residency plan -> RAM tier cap ----
+ * WUBU_RESIDENCY_MB turns the ad-hoc G4_WEIGHT_CACHE_MB cap into a plan: attention
+ * and the tied embedding/output stay resident, FFN tensors stream from the GGUF,
+ * and the plan fails closed (everything streams) when the hot set plus one staging
+ * buffer cannot fit the budget. Requires G4_STREAM_WEIGHTS=1 to have any effect. */
+static void g4_apply_residency_plan(g4_model_t *m)
+{
+    const char *env = getenv("WUBU_RESIDENCY_MB");
+    if (!env) return;
+    if (!getenv("G4_STREAM_WEIGHTS")) {
+        fprintf(stderr, "[RESIDENCY] ignored: weights are mmap'd (set G4_STREAM_WEIGHTS=1)\n");
+        return;
+    }
+    long long budget_mb = atoll(env);
+    if (budget_mb <= 0) return;
+    const uint64_t budget = (uint64_t)budget_mb * 1024ULL * 1024ULL;
+
+    /* Two entries per layer (attention group resident, FFN group streamed) keeps
+     * the plan inside wubu_residency's own limit of 256 entries for any model up
+     * to 128 layers, and expresses the real policy: keep attention hot, stream
+     * FFN. */
+    enum { MAXT = 2 * WUBU_RESIDENCY_MAX_LAYERS };
+    wubu_residency_layer_t *layers = (wubu_residency_layer_t *)calloc(MAXT, sizeof(*layers));
+    int *plan = (int *)calloc(MAXT, sizeof(*plan));
+    if (!layers || !plan) { free(layers); free(plan); return; }
+
+    int n = 0;
+    for (int il = 0; il < m->n_layers && n + 2 <= MAXT; ++il) {
+        g4_layer_t *l = &m->layers[il];
+        g4_qweight_t *attn[4] = { &l->attn_q, &l->attn_k, &l->attn_v, &l->attn_out };
+        g4_qweight_t *ffn[3]  = { &l->ffn_gate, &l->ffn_up, &l->ffn_down };
+        uint64_t abytes = 0, fbytes = 0;
+        for (int k = 0; k < 4; ++k)
+            if (attn[k]->stream_ctx && attn[k]->raw_bytes > 0)
+                abytes += (uint64_t)attn[k]->raw_bytes;
+        for (int k = 0; k < 3; ++k)
+            if (ffn[k]->stream_ctx && ffn[k]->raw_bytes > 0)
+                fbytes += (uint64_t)ffn[k]->raw_bytes;
+        if (abytes) { layers[n].bytes = abytes; layers[n].hot = 1; ++n; }
+        if (fbytes) { layers[n].bytes = fbytes; layers[n].hot = 0; ++n; }
+    }
+    if (n == 0) { free(layers); free(plan); return; }
+
+    int rc = wubu_residency_plan(layers, n, budget, plan);
+    if (rc != 0) {
+        for (int i = 0; i < n; ++i) layers[i].hot = 0;
+        rc = wubu_residency_plan(layers, n, budget, plan);
+        fprintf(stderr, "[RESIDENCY] hot set does not fit %lld MiB; streaming every tensor\n",
+                budget_mb);
+    }
+    if (rc != 0) {
+        fprintf(stderr, "[RESIDENCY] budget %lld MiB cannot stage the largest tensor; no cap applied\n",
+                budget_mb);
+        free(layers); free(plan);
+        return;
+    }
+
+    uint64_t dram = wubu_residency_dram_bytes(layers, plan, n);
+    uint64_t flash = wubu_residency_flash_bytes(layers, plan, n);
+    uint64_t staging = budget > dram ? budget - dram : 0;
+    g_cache_cap = (size_t)staging;
+    fprintf(stderr, "[RESIDENCY] budget=%lld MiB hot=%llu MiB streamed=%llu MiB cache_cap=%llu MiB\n",
+            budget_mb, (unsigned long long)(dram >> 20), (unsigned long long)(flash >> 20),
+            (unsigned long long)(staging >> 20));
+    free(layers);
+    free(plan);
 }
 
 static void g4_prefetch_request(g4_model_t *m, int il);
@@ -778,6 +847,7 @@ bool g4_model_init(g4_model_t *model, const char *gguf_path) {
     model->gguf_n_tensors = (int)ctx->n_tensors;
     model->gguf_tensor_info = ctx->tensors;
     strncpy(model->gguf_path, gguf_path, sizeof(model->gguf_path) - 1);
+    g4_apply_residency_plan(model);
     g4_prefetch_init(model, model->gguf_path);
     if (getenv("G4_CACHE_LM_HEAD")) {
         int64_t head_elems = (int64_t)G4_VOCAB * G4_HIDDEN;
