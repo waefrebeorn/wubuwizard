@@ -640,12 +640,12 @@ WUBU_EXPORT int wubu_cuda_qkv_mrow(const void *d_wq, int tq, const void *d_wk, i
  *      each scaled by its own nibble, is exact. One scale per chunk is not expressible.
  *
  * The uniform test passed while the scaling was still wrong, which is why both tests exist. */
-#define IQ2S_MMA_COLS 32   /* 4 warps' worth of columns; the other 4 warps take the next row half */
+#define IQ2S_MMA_COLS (IQ2S_MMA_WPB * 8)
 /* 260 bytes = 65 words per row, an odd stride: with 256 every column's tile started at the same
  * bank offset and the b-fragment reads collided. chondrule-free staging is what upstream's
  * "+1 int per row" padding is for. */
 #define IQ2S_MMA_PAD  260
-#define IQ2S_MMA_WPB  8      /* 8 warps = two 16-row halves sharing one staged tile */
+#define IQ2S_MMA_WPB  4
 
 __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                                        const c_q8_k * __restrict__ xq8m,
@@ -661,20 +661,14 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
     const int warp = threadIdx.x >> 5;
     const int tid = threadIdx.x;
     const int gid = lane >> 2, tig = lane & 3;
-    /* warps 4-7 walk the same columns 16 rows further down, so the decoded tile is reused for 32
-     * rows instead of 16 and the staging plus barrier cost halves per row. */
-    const int rhalf = warp >> 2;
-    const int w4 = warp & 3;
     const int col0 = blockIdx.x * IQ2S_MMA_COLS;
-    const int row0 = blockIdx.y * 32 + rhalf * 16;
-    /* No early return here: when the second row-half lands past the end (any prompt under 32 rows,
-     * e.g. short ones), returning would skip the __syncthreads() the other half is waiting on. The
-     * per-row guards below already handle out-of-range rows, and the write-out is guarded too. */
+    const int row0 = blockIdx.y * 16;
+    if (row0 >= M) return;
 
     float accf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     for (int b = 0; b < nblocks; ++b) {
-        if (tid < IQ2S_MMA_COLS * 4) {
+        {
             const int c = tid / 4;
             const int entry = tid & 3;
             const int gc = col0 + c;
@@ -712,7 +706,7 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
             if (r0 < M) dq0 = xq8m[(int64_t)r0 * q8_row_blocks + b].d;
             if (r1 < M) dq1 = xq8m[(int64_t)r1 * q8_row_blocks + b].d;
         }
-        const int cl0 = w4 * 8 + tig * 2;
+        const int cl0 = warp * 8 + tig * 2;
 
         for (int g = 0; g < 8; ++g) {
             const int r0 = row0 + gid, r1 = r0 + 8;
@@ -729,7 +723,7 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                 memcpy(&a[3], q1 + tig * 4 + 16, 4);
             }
             uint32_t b2[2] = {0, 0};
-            const int cl = w4 * 8 + gid;
+            const int cl = warp * 8 + gid;
             memcpy(&b2[0], &sW[cl][g * 32 + tig * 4], 4);
             memcpy(&b2[1], &sW[cl][g * 32 + tig * 4 + 16], 4);
 
@@ -748,7 +742,7 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
         __syncthreads();
     }
 
-    const int oc = col0 + w4 * 8 + tig * 2;
+    const int oc = col0 + warp * 8 + tig * 2;
     const int orow = row0 + gid;
     if (orow < M && oc + 1 < n_cols + 1) {
         y[(int64_t)orow * n_cols + oc] = accf[0];
@@ -780,7 +774,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
     /* Tensor cores for prompts: one pass over the weights instead of ceil(M/16). Decode (M == 1)
      * stays on dp4a, where the four-MAC-per-lane path is already within 1.8x of llama.cpp. */
     if (M >= 16 && !getenv("G4_NO_MMA")) {
-        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 31) / 32);
+        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
         iq2s_matvec_mma_kernel<<<mgrid, IQ2S_MMA_WPB * 32>>>(
             (const uint8_t *)d_w, q8m, my, col_stride, nblocks, n_cols, M, nblocks);
         if (cudaGetLastError() != cudaSuccess) return -5;
@@ -922,20 +916,14 @@ __global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
     const int warp = threadIdx.x >> 5;
     const int tid = threadIdx.x;
     const int gid = lane >> 2, tig = lane & 3;
-    /* warps 4-7 walk the same columns 16 rows further down, so the decoded tile is reused for 32
-     * rows instead of 16 and the staging plus barrier cost halves per row. */
-    const int rhalf = warp >> 2;
-    const int w4 = warp & 3;
     const int col0 = blockIdx.x * IQ2S_MMA_COLS;
-    const int row0 = blockIdx.y * 32 + rhalf * 16;
-    /* No early return here: when the second row-half lands past the end (any prompt under 32 rows,
-     * e.g. short ones), returning would skip the __syncthreads() the other half is waiting on. The
-     * per-row guards below already handle out-of-range rows, and the write-out is guarded too. */
+    const int row0 = blockIdx.y * 16;
+    if (row0 >= M) return;
 
     float accf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
     for (int b = 0; b < nblocks; ++b) {
-        if (tid < IQ2S_MMA_COLS * 4) {
+        {
             const int c = tid / 4;
             const int l = tid & 3;
             const int gc = col0 + c;
@@ -975,7 +963,7 @@ __global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
             if (r0 < M) dq0 = xq8m[(int64_t)r0 * q8_row_blocks + b].d;
             if (r1 < M) dq1 = xq8m[(int64_t)r1 * q8_row_blocks + b].d;
         }
-        const int cl0 = w4 * 8 + tig * 2;
+        const int cl0 = warp * 8 + tig * 2;
 
         for (int g = 0; g < 8; ++g) {
             const int r0 = row0 + gid, r1 = r0 + 8;
@@ -991,7 +979,7 @@ __global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
                 memcpy(&a[3], q1 + tig * 4 + 16, 4);
             }
             uint32_t b2[2] = {0, 0};
-            const int cl = w4 * 8 + gid;
+            const int cl = warp * 8 + gid;
             memcpy(&b2[0], &sW[cl][g * 32 + tig * 4], 4);
             memcpy(&b2[1], &sW[cl][g * 32 + tig * 4 + 16], 4);
 
@@ -1006,7 +994,7 @@ __global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
         __syncthreads();
     }
 
-    const int oc = col0 + w4 * 8 + tig * 2;
+    const int oc = col0 + warp * 8 + tig * 2;
     const int orow = row0 + gid;
     if (orow < M) {
         if (oc < n_cols) y[(int64_t)orow * n_cols + oc] = accf[0];
@@ -1054,7 +1042,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq3s_mrow(const void *d_w, const float *h_x, in
     const int warps_per_block = 8;
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
     if (M >= 16 && !getenv("G4_NO_MMA")) {
-        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 31) / 32);
+        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
         iq3s_matvec_mma_kernel<<<mgrid, IQ2S_MMA_WPB * 32>>>(
             (const uint8_t *)d_w, g_q8m, g_mrow_y, col_stride, nblocks, n_cols, M, nblocks);
         if (cudaGetLastError() != cudaSuccess) return -5;
