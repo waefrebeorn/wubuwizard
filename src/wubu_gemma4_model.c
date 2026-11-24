@@ -641,19 +641,35 @@ static void g4_cpu_stats_dump(void)
                     G4_CPU_DEC_STATS[t].calls, G4_CPU_DEC_STATS[t].ms);
 }
 
+static long G4_DEC_GPU_CALLS;
+static long G4_DEC_TYPE_CALLS[64];   /* every decode matvec, by ggml_type */
+static long G4_DEC_TYPE_GPU[64];     /* the subset that ran on the device    */
+
 void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
                                int M, int N, int K, float *c) {
     if (!w) return;
     if (!G4_CPU_STATS_hooked) { G4_CPU_STATS_hooked = 1; atexit(g4_cpu_stats_dump); }
+    /* Every decode matvec, by type. Calls that did not reach the device are the
+     * difference from G4_DEC_TYPE_GPU below, so no separate counter is needed (an
+     * earlier "cpu calls" counter incremented at entry and reported 202 for a token
+     * that only had 5 CPU matvecs). */
+    if (M == 1 && w->ggml_type >= 0 && w->ggml_type < 64) ++G4_DEC_TYPE_CALLS[w->ggml_type];
     const double t_cpu0 = g4_now_ms();
     /* Device-resident weights: decode (M == 1) runs entirely on the GPU. */
     if (w->dev && M == 1 && (K % 256) == 0 &&
         (w->ggml_type == GGML_TYPE_IQ2_S || w->ggml_type == GGML_TYPE_IQ3_S ||
          w->ggml_type == GGML_TYPE_Q3_K || w->ggml_type == GGML_TYPE_Q4_0 ||
          w->ggml_type == GGML_TYPE_IQ3_XXS ||     /* 282 MB of the 12B file */
-         w->ggml_type == GGML_TYPE_IQ4_XS)) {     /* 125 MB */
+         w->ggml_type == GGML_TYPE_IQ4_XS ||      /* 125 MB */
+         w->ggml_type == GGML_TYPE_IQ2_XS)) {     /* 11 MB, last CPU matvec */
         const long long stride = (long long)(w->raw_bytes / N);
-        if (wubu_gpu_matvec(w->dev, w->ggml_type, x, K, N, stride, c) == 0) return;
+        if (wubu_gpu_matvec(w->dev, w->ggml_type, x, K, N, stride, c) == 0) {
+            if (M == 1) {
+                ++G4_DEC_GPU_CALLS;
+                if (w->ggml_type >= 0 && w->ggml_type < 64) ++G4_DEC_TYPE_GPU[w->ggml_type];
+            }
+            return;
+        }
     }
     if (!w->data && w->stream_ctx) {
         if (g4_type_native_supported(w->ggml_type) && N > 0) {
@@ -1095,8 +1111,13 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
 
     memset(attn_out, 0, (size_t)N * qd * sizeof(float));
 
-    #pragma omp parallel for if(N > 1)
-    for (int t = 0; t < N; t++) {
+    /* Flattened over (token, head): during decode N == 1, so paralleling over t left the
+     * whole attention block on one core (8.4 ms/token for ~60k MACs per layer). Each
+     * (t, hq) writes a disjoint slice of scores_buf and of attn_out. */
+    #pragma omp parallel for if(N * n_heads > 1)
+    for (int th = 0; th < N * n_heads; th++) {
+        const int t = th / n_heads;
+        const int hq = th % n_heads;
         int pos = positions[t];
         int kv_start = (pos >= window) ? (pos - window + 1) : 0; /* exactly `window` keys incl. current */
         int kv_len = pos - kv_start + 1;
@@ -1104,12 +1125,12 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
         if (kv_len <= 0) continue;
         int kv_end = kv_start + kv_len - 1;
 
-        for (int hq = 0; hq < n_heads; hq++) {
+        {
             int kv_h = hq / (n_heads / kv_heads); /* GQA: consecutive Q heads share a KV head */
             const float *q_vec = q + (size_t)t * qd + (size_t)hq * hd;
 
             /* Scores in thread-local part of scores_buf */
-            float *s = scores_buf + (size_t)(t * n_heads + hq) * window;
+            float *s = scores_buf + (size_t)th * window;
 
             float max_s = -FLT_MAX;
             for (int kp = kv_start; kp <= kv_end; kp++) {
@@ -1165,18 +1186,21 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
 
     memset(attn_out, 0, (size_t)N * qd * sizeof(float));
 
-    #pragma omp parallel for if(N > 1)
-    for (int t = 0; t < N; t++) {
+    /* Flattened over (token, head) for the same reason as sliding attention above. */
+    #pragma omp parallel for if(N * n_heads > 1)
+    for (int th = 0; th < N * n_heads; th++) {
+        const int t = th / n_heads;
+        const int hq = th % n_heads;
         int pos = positions[t];
         int kv_end = kv_size - 1;
         if (kv_end > pos) kv_end = pos;
         int kv_len = kv_end + 1;
         if (kv_len <= 0) continue;
 
-        for (int hq = 0; hq < n_heads; hq++) {
+        {
             int kv_h = hq / (n_heads / kv_heads); /* GQA: consecutive Q heads share a KV head */
             const float *q_vec = q + (size_t)t * qd + (size_t)hq * hd;
-            float *s = scores_local + (size_t)(t * n_heads + hq) * kv_size;
+            float *s = scores_local + (size_t)th * kv_size;
 
             float max_s = -FLT_MAX;
             for (int kp = 0; kp <= kv_end; kp++) {
@@ -1233,6 +1257,19 @@ static void g4_prof_dump(void)
     fprintf(stderr, "[PROF] per decode token over %ld tokens (ms):\n", G4_P_TOKENS);
     for (int i = 0; i < G4P_COUNT; ++i)
         fprintf(stderr, "[PROF] %-14s %8.2f\n", names[i], G4_P[i] / (double)G4_P_TOKENS);
+    {
+        long total = 0;
+        for (int t = 0; t < 64; ++t) total += G4_DEC_TYPE_CALLS[t];
+        fprintf(stderr, "[PROF] decode matvecs/token: %.1f total, %.1f on GPU, %.1f on CPU\n",
+                (double)total / (double)G4_P_TOKENS,
+                (double)G4_DEC_GPU_CALLS / (double)G4_P_TOKENS,
+                (double)(total - G4_DEC_GPU_CALLS) / (double)G4_P_TOKENS);
+    }
+    for (int t = 0; t < 64; ++t)
+        if (G4_DEC_TYPE_CALLS[t])
+            fprintf(stderr, "[PROF]   type %2d: %.1f calls/token, %.1f on GPU\n", t,
+                    (double)G4_DEC_TYPE_CALLS[t] / (double)G4_P_TOKENS,
+                    (double)G4_DEC_TYPE_GPU[t] / (double)G4_P_TOKENS);
 }
 
 void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
@@ -1299,7 +1336,11 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
 
     G4P_ADD(G4P_NORM_QKV, _pk); _pk = g4_now_ms();
 
-    /* ===== Q/K head norms ===== */
+    /* ===== Q/K head norms =====
+     * Kept single-threaded for decode on purpose: flattening this over (token, head)
+     * measured 3.5 -> 9.5 ms/token, because 2 OpenMP fork/join pairs per layer
+     * (~60 us each, 96 per token) cost more than the 16 x 128-element norms they
+     * distribute. Parallelism here only pays for prefill (N > 1). */
     #pragma omp parallel for if(N > 1)
     for (int t = 0; t < N; t++) {
         for (int h = 0; h < G4_HEADS; h++)
@@ -1318,7 +1359,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 for (int d = 0; d < hd; d++)
                     ss += v[(size_t)t * kvd + (size_t)h * hd + d]
                         * v[(size_t)t * kvd + (size_t)h * hd + d];
-                float inv_rms = 1.0f / sqrtf(ss / (float)hd + G4_RMS_EPS);
+                const float inv_rms = 1.0f / sqrtf(ss / (float)hd + G4_RMS_EPS);
                 for (int d = 0; d < hd; d++)
                     v[(size_t)t * kvd + (size_t)h * hd + d] *= inv_rms;
             }

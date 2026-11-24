@@ -69,6 +69,11 @@ int main(int argc, char **argv)
         fn_tab2_t tab = (fn_tab2_t)(void *)GetProcAddress(h, "wubu_cuda_upload_tables");
         CHECK(tab != NULL);
         if (tab) CHECK(tab(wubu_vecdot_iq2s_grid(), wubu_vecdot_iq3s_grid()) == 0);
+        /* IQ2_XS grid for the type-17 kernel; without it every dot returns 0. */
+        fn_tab1_t tab17 = (fn_tab1_t)(void *)GetProcAddress(h, "wubu_cuda_upload_tables_iq2xs");
+        extern const void *wubu_vecdot_iq2_xs_grid(void);
+        CHECK(tab17 != NULL);
+        if (tab17) CHECK(tab17(wubu_vecdot_iq2_xs_grid()) == 0);
     }
 
     enum { K = 1024, NCOL = 96 };
@@ -148,6 +153,44 @@ int main(int argc, char **argv)
             ++bad;
         }
         printf("EG-122 iq2_s narrow columns=%d mismatches=%d\n", NCW, bad);
+        CHECK(bad == 0);
+    }
+
+    /* IQ2_XS: same treatment - real blocks from the model would be ideal, but random
+     * bytes are legal blocks and the CPU port is gated against the dequantiser. */
+    {
+        enum { KX = 1024, NCX = 96 };
+        static uint8_t w17[NCX * (KX / QK_K) * 74];
+        static float xx[KX];
+        static block_q8_K q8x;
+        static float gx[NCX], cx[NCX];
+        unsigned s4 = 4242u;
+        for (int c = 0; c < NCX; ++c)
+            for (int b = 0; b < KX / QK_K; ++b) {
+                uint8_t *blk = w17 + ((size_t)c * (KX / QK_K) + b) * 74;
+                for (int i = 0; i < 74; ++i) {
+                    s4 = s4 * 1103515245u + 12345u;
+                    blk[i] = (uint8_t)(s4 >> 16);
+                }
+                const uint16_t d16 = (uint16_t)(0x2C00u + (s4 & 0x3FFu));
+                memcpy(blk, &d16, 2);
+            }
+        for (int j = 0; j < KX; ++j) {
+            s4 = s4 * 1103515245u + 12345u;
+            xx[j] = (float)((int)((s4 >> 16) & 0x3FF) - 512) / 300.0f;
+        }
+        quantize_row_q8_K(xx, &q8x, KX);
+        for (int c = 0; c < NCX; ++c) {
+            extern int wubu_vec_dot_iq2_xs_q8_k_scalar(int n, float *s, const void *w, const void *q8);
+            CHECK(wubu_vec_dot_iq2_xs_q8_k_scalar(KX, &cx[c], w17 + (size_t)c * (KX / QK_K) * 74, &q8x) == 0);
+        }
+        CHECK(mv18(w17, 17, &q8x, gx, KX, NCX, (KX / QK_K) * 74) == 0);
+        int bad = 0;
+        for (int c = 0; c < NCX; ++c) if (!close_enough(gx[c], cx[c])) {
+            if (bad < 3) printf("EG-122 iq2_xs col %d gpu=%g cpu=%g\n", c, gx[c], cx[c]);
+            ++bad;
+        }
+        printf("EG-122 iq2_xs columns=%d mismatches=%d\n", NCX, bad);
         CHECK(bad == 0);
     }
 

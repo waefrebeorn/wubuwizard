@@ -50,6 +50,7 @@ static struct {
     fn_mv2 mv2;   /* warp-per-column IQ2_S kernel (v3) */
     fn_mv2 mv3;   /* warp-per-column IQ3_XXS kernel */
     fn_mv2 mv4;   /* warp-per-column IQ4_XS kernel */
+    fn_mv2 mv5;   /* warp-per-column IQ2_XS kernel */
 } G;
 
 int wubu_gpu_init(void)
@@ -75,6 +76,7 @@ int wubu_gpu_init(void)
     G.mv2 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_v3");
     G.mv3 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq3xxs");
     G.mv4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq4xs");
+    G.mv5 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2xs");
     if (!avail || !G.alloc || !G.upload || !G.free_dev || !G.download || !G.q8k || !G.mv) return 0;
     if (!avail()) return 0;
     if (tables) {
@@ -98,6 +100,12 @@ int wubu_gpu_init(void)
         fn_mv2 up4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_upload_table_iq4nl");
         extern const void *wubu_vecdot_iq4_xs_table(void);
         if (!(up4 && up4(wubu_vecdot_iq4_xs_table(), 0, 0, 0, 0, 0) == 0)) G.mv4 = NULL;
+    }
+    /* IQ2_XS 512-entry grid for the type-17 device kernel. */
+    {
+        fn_mv2 up5 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_upload_tables_iq2xs");
+        extern const void *wubu_vecdot_iq2_xs_grid(void);
+        if (!(up5 && up5(wubu_vecdot_iq2_xs_grid(), 0, 0, 0, 0, 0) == 0)) G.mv5 = NULL;
     }
     char dev[192] = {0};
     if (name) name(dev, (int)sizeof(dev));
@@ -266,6 +274,8 @@ static int gpu_launch_and_download(const void *d_w, int ggml_type,
         if (G.mv3(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
     } else if (ggml_type == 23 && G.mv4) {
         if (G.mv4(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
+    } else if (ggml_type == 17 && G.mv5) {
+        if (G.mv5(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
     } else if (G.mv(d_w, ggml_type, d_q8, d_y, K, n_cols, col_stride) != 0) {
         return -6;
     }

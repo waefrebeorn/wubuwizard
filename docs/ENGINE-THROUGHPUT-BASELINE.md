@@ -67,7 +67,12 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | + device IQ3_XXS kernel (EG-120/122) | 6.8 tok/s | 9.8 tok/s |
 | + device IQ4_XS kernel (EG-121/122) | 6.8 tok/s | 10.3 tok/s |
 | + hardware fp16 decode in the device kernels | 6.7 tok/s | 10.7 tok/s |
-| + fused device FFN (gate/up/gelu/down in one round trip) | 6.7 tok/s | **11.6 tok/s** |
+| + fused device FFN (gate/up/gelu/down in one round trip) | 6.7 tok/s | 11.6 tok/s |
+| + attention parallel over heads, device IQ2_XS kernel | 6.7 tok/s | **12.5 tok/s** |
+
+Decode is now **GPU-only for matvecs**: 202 matvecs per token, 202 on the device, 0 on the
+CPU (the last holdout was the 11 MB of IQ2_XS, 5 calls/token). Per-type/token: IQ3_S 95,
+IQ2_S 83, IQ3_XXS 14, IQ2_XS 5, IQ4_XS 4, Q3_K 1 (the head).
 | clean rebuild, CPU only | 6.6 tok/s | 5.7 tok/s |
 
 Note on rebuilding: the Makefile does not track header dependencies, so editing a
@@ -115,7 +120,14 @@ the real tensor sizes at load: one plan entry per layer for the attention group 
 and one for the FFN group (streamed), with the remaining budget handed to the streamed
 weight cache as its cap. Measured, 8-token decode, same prompt:
 
-|FFN breakdown after the fusion (`G4_PROF=1`, per decode token): proj 35.4 ms,
+|Attention also had to be fixed for decode: its loop was `#pragma omp parallel for if(N>1)`
+over tokens, so with N == 1 all 48 layers ran on one core (8.4 ms/token for ~60k MACs per
+layer). Parallelising over (token, head) instead brought it to 5.2 ms. The same treatment
+applied to the Q/K head norms made things **worse** (3.5 -> 9.5 ms) because 96 OpenMP
+fork/join pairs per token cost more than the work they distribute, so that block stays
+serial and the reason is recorded in the code.
+
+FFN breakdown after the fusion (`G4_PROF=1`, per decode token): proj 35.4 ms,
 gelu+mul 1.8 ms (was 7.5 with the tanh on one CPU core), norm+resid 0.4 ms. The fused
 path does one upload of the 3840-float input and one download of the 3840-float output
 per layer instead of three round trips.

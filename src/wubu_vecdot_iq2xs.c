@@ -42,6 +42,8 @@ static const uint8_t wubu_ksigns_iq2xs[128] = {
     240, 113, 114, 243, 116, 245, 246, 119, 120, 249, 250, 123, 252, 125, 126, 255,
 };
 
+const void *wubu_vecdot_iq2_xs_grid(void) { return (const void *)iq2xs_grid; }
+
 int wubu_vec_dot_iq2_xs_q8_k_scalar(int n, float *s, const void *w, const void *q8v)
 {
     const wubu_block_iq2_xs *x = (const wubu_block_iq2_xs *)w;

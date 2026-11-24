@@ -36,6 +36,8 @@ __device__ uint32_t c_iq3xxs_grid[256];
 __device__ uint8_t  c_ksigns_iq2xs[128];
 /* IQ4_XS: 16 signed int8 code values. */
 __device__ int8_t   c_iq4nl[16];
+/* IQ2_XS: 512 grid entries of 8 unsigned bytes each. */
+__device__ uint64_t c_iq2xs_grid[512];
 
 WUBU_EXPORT int wubu_cuda_upload_tables(const void *iq2s_1024_u64, const void *iq3s_512_u32)
 {
@@ -413,6 +415,14 @@ WUBU_EXPORT int wubu_cuda_upload_tables2(const void *iq2s, const void *iq3s)
     return wubu_cuda_upload_tables(iq2s, iq3s);
 }
 
+WUBU_EXPORT int wubu_cuda_upload_tables_iq2xs(const void *grid_512_u64)
+{
+    if (grid_512_u64 &&
+        cudaMemcpyToSymbol(c_iq2xs_grid, grid_512_u64, 512 * sizeof(uint64_t)) != cudaSuccess)
+        return -1;
+    return 0;
+}
+
 WUBU_EXPORT int wubu_cuda_upload_table_iq4nl(const void *tbl_16_i8)
 {
     if (tbl_16_i8 && cudaMemcpyToSymbol(c_iq4nl, tbl_16_i8, 16) != cudaSuccess) return -1;
@@ -480,6 +490,67 @@ __global__ void iq3xxs_matvec_kernel(const uint8_t * __restrict__ w,
     for (int off = 16; off > 0; off >>= 1)
         sum += __shfl_down_sync(0xffffffffu, sum, off);
     if (lane == 0) y[col] = sum;
+}
+
+/* IQ2_XS x Q8_K, warp per column. Block: fp16 d, 32 uint16 grid/sign words
+ * (4 per 32-element group: low 9 bits = grid index, bits 9-15 = sign mask), and 8
+ * scale bytes (low nibble for entries 0-1, high for 2-3; value 1+2*scale). Lane ->
+ * (group = lane>>2, entry = lane&3) covers one 256-element block with 32 lanes. */
+__global__ void iq2xs_matvec_kernel(const uint8_t * __restrict__ w,
+                                    const c_q8_k * __restrict__ xq8,
+                                    float * __restrict__ y,
+                                    int64_t col_stride_bytes, int nblocks, int n_cols)
+{
+    const int warps_per_block = blockDim.x / 32;
+    const int col = blockIdx.x * warps_per_block + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    if (col >= n_cols) return;
+
+    const int g = lane >> 2;
+    const int l = lane & 3;
+    float sum = 0.0f;
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+
+    for (int b = 0; b < nblocks; ++b) {
+        const uint8_t *blk = wcol + (int64_t)b * 74;
+        const uint16_t d_bits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+        const uint8_t *scales = blk + 2 + 64;
+        uint16_t q;
+        memcpy(&q, blk + 2 + 2 * (4 * g + l), 2);
+
+        const uint8_t *grid = (const uint8_t *)(c_iq2xs_grid + (q & 511));
+        const uint8_t signs = c_ksigns_iq2xs[(q >> 9) & 127];
+        const int8_t *q8 = xq8[b].qs + g * 32 + l * 8;
+
+        int32_t a0, a1;
+        memcpy(&a0, grid, 4);
+        memcpy(&a1, grid + 4, 4);
+        for (int j = 0; j < 4; ++j) {
+            if ((signs >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
+            if ((signs >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
+        }
+        int32_t b0, b1;
+        memcpy(&b0, q8 + 0, 4);
+        memcpy(&b1, q8 + 4, 4);
+        const int sumi = __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
+        const int ls = (l < 2) ? (1 + 2 * (scales[g] & 0x0f)) : (1 + 2 * (scales[g] >> 4));
+        sum += 0.125f * f16_fast(d_bits) * xq8[b].d * (float)(sumi * ls);
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, off);
+    if (lane == 0) y[col] = sum;
+}
+
+WUBU_EXPORT int wubu_cuda_matvec_iq2xs(const void *d_w, const void *d_q8, float *d_y,
+                                       int K, int n_cols, long long col_stride)
+{
+    if (!d_w || !d_q8 || !d_y || K <= 0 || n_cols <= 0 || (K % QK_K) != 0) return -1;
+    const int wpb = 8;
+    const int blocks = (n_cols + wpb - 1) / wpb;
+    iq2xs_matvec_kernel<<<blocks, wpb * 32>>>(
+        (const uint8_t *)d_w, (const c_q8_k *)d_q8, d_y, col_stride, K / QK_K, n_cols);
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
 /* IQ4_XS x Q8_K, warp per column. Per 256-element block: 8 sub-blocks of 32
@@ -902,7 +973,8 @@ WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type,
     /* Dispatch the same way the engine's wubu_gpu_matvec() does, so this host
      * entry point can gate the type-specific kernels too. */
     int mrc;
-    if (type == 18)      mrc = wubu_cuda_matvec_iq3xxs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
+    if (type == 17)      mrc = wubu_cuda_matvec_iq2xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
+    else if (type == 18) mrc = wubu_cuda_matvec_iq3xxs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else if (type == 23) mrc = wubu_cuda_matvec_iq4xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else                 mrc = wubu_cuda_quant_matvec(d_w, type, d_xq8, d_y, K, n_cols, col_stride_bytes);
     if (mrc != 0) goto done;
