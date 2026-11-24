@@ -757,6 +757,20 @@ int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K, int n_cols
     return G.mrow(d_w, x, K, n_cols, col_stride, M, y);
 }
 
+typedef int (*fn_attn_causal)(const float *, const float *, const float *, float *, const int *,
+                             int, int, int, int, int, int, int, int);
+
+/* Batched causal attention on the device. Returns 0 on success, non-zero to fall back to CPU. */
+int wubu_gpu_attn_causal(const float *q, const float *k, const float *v, float *out,
+                         const int *pos, int N, int n_heads, int kv_heads, int hd,
+                         int qd, int kvd, int kv_size, int window)
+{
+    if (!wubu_gpu_init()) return -1;
+    fn_attn_causal f = (fn_attn_causal)(void *)GetProcAddress(G.h, "wubu_cuda_attn_causal");
+    if (!f) return -1;
+    return f(q, k, v, out, pos, N, n_heads, kv_heads, hd, qd, kvd, kv_size, window);
+}
+
 typedef void (*fn_pool_stats)(void);
 
 /* Print the device workspace pool: every scratch buffer the kernels declared, by role. */

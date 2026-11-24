@@ -1212,6 +1212,14 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
     int kv_heads = cache->kv_heads;
     int window = G4_SLIDING_WINDOW;
 
+    if (N > 1 && getenv("G4_ATTN_GPU_BATCH")) {
+        extern int wubu_gpu_attn_causal(const float *, const float *, const float *, float *,
+                                        const int *, int, int, int, int, int, int, int, int);
+        if (wubu_gpu_attn_causal(q, cache->k, cache->v, attn_out, positions, N, n_heads, kv_heads,
+                                 hd, qd, kvd, cache->size, window) == 0)
+            return;
+    }
+
     memset(attn_out, 0, (size_t)N * qd * sizeof(float));
 
     /* Flattened over (token, head): during decode N == 1, so paralleling over t left the
@@ -1281,6 +1289,13 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
     int kv_size = cache->size;
     /* Caller's scores buffer is sized for SWA windows; full attention needs
      * one score per cached position. Allocate locally to avoid heap overflow. */
+    if (N > 1 && getenv("G4_ATTN_GPU_BATCH")) {
+        extern int wubu_gpu_attn_causal(const float *, const float *, const float *, float *,
+                                        const int *, int, int, int, int, int, int, int, int);
+        if (wubu_gpu_attn_causal(q, cache->k, cache->v, attn_out, positions, N, n_heads, kv_heads,
+                                 hd, qd, kvd, kv_size, 0) == 0)
+            return;
+    }
     float *scores_local = (float *)malloc((size_t)N * n_heads * (kv_size > 0 ? kv_size : 1) * sizeof(float));
     if (!scores_local) return;
 
