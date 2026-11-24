@@ -47,7 +47,9 @@ static struct {
     fn_download download;
     fn_q8k q8k;
     fn_mv_dev mv;
-    fn_mv2 mv2;   /* lane-per-grid-entry IQ2_S kernel */
+    fn_mv2 mv2;   /* warp-per-column IQ2_S kernel (v3) */
+    fn_mv2 mv3;   /* warp-per-column IQ3_XXS kernel */
+    fn_mv2 mv4;   /* warp-per-column IQ4_XS kernel */
 } G;
 
 int wubu_gpu_init(void)
@@ -71,12 +73,31 @@ int wubu_gpu_init(void)
     G.q8k = (fn_q8k)(void *)GetProcAddress(G.h, "wubu_cuda_quantize_q8k_dev");
     G.mv = (fn_mv_dev)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_dev");
     G.mv2 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_v3");  /* v3: warp-per-column, no atomics */
+    G.mv3 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq3xxs");
+    G.mv4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq4xs");
     if (!avail || !G.alloc || !G.upload || !G.free_dev || !G.download || !G.q8k || !G.mv) return 0;
     if (!avail()) return 0;
     if (tables) {
         extern const void *wubu_vecdot_iq2s_grid(void);
         extern const void *wubu_vecdot_iq3s_grid(void);
         if (tables(wubu_vecdot_iq2s_grid(), wubu_vecdot_iq3s_grid()) != 0) return 0;
+    }
+    /* IQ3_XXS grid + sign tables, needed by the device kernel for type 18. */
+    {
+        fn_mv2 up3 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_upload_tables_iq3xxs");
+        extern const void *wubu_vecdot_iq3_xxs_grid(void);
+        extern const void *wubu_vecdot_iq3_xxs_signs(void);
+        if (up3 && up3(wubu_vecdot_iq3_xxs_grid(), wubu_vecdot_iq3_xxs_signs(), 0, 0, 0, 0) == 0) {
+            /* uploaded; the kernel is usable */
+        } else {
+            G.mv3 = NULL;
+        }
+    }
+    /* IQ4_XS code table for the type-23 device kernel. */
+    {
+        fn_mv2 up4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_upload_table_iq4nl");
+        extern const void *wubu_vecdot_iq4_xs_table(void);
+        if (!(up4 && up4(wubu_vecdot_iq4_xs_table(), 0, 0, 0, 0, 0) == 0)) G.mv4 = NULL;
     }
     char dev[192] = {0};
     if (name) name(dev, (int)sizeof(dev));
@@ -187,6 +208,10 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
      * matvec device-resident, vs 0.9 ms for the generic warp-per-column one. */
     if (ggml_type == 22 && G.mv2) {
         if (G.mv2(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
+    } else if (ggml_type == 18 && G.mv3) {
+        if (G.mv3(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
+    } else if (ggml_type == 23 && G.mv4) {
+        if (G.mv4(d_w, d_q8, d_y, K, n_cols, col_stride) != 0) return -6;
     } else if (G.mv(d_w, ggml_type, d_q8, d_y, K, n_cols, col_stride) != 0) {
         return -6;
     }

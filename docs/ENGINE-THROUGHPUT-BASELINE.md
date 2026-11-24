@@ -63,7 +63,9 @@ whole-tensor F32 dequantisation branch is deleted. Same command, same host:
 | + fused IQ2_XS dot (EG-117) | 6.7 tok/s | **5.2 tok/s** |
 | + same, `G4_GPU=1` (device IQ2_S/IQ3_S/Q3_K/Q4_0) | - | 7.6 tok/s |
 | + v3 warp-per-column IQ2_S kernel (no atomics) | - | 8.3 tok/s |
-| clean rebuild, `G4_GPU=1` (all kernels, no stale objects) | 6.8 tok/s | **8.8 tok/s** |
+| clean rebuild, `G4_GPU=1` (all kernels, no stale objects) | 6.8 tok/s | 8.8 tok/s |
+| + device IQ3_XXS kernel (EG-120/122) | 6.8 tok/s | 9.8 tok/s |
+| + device IQ4_XS kernel (EG-121/122) | 6.8 tok/s | **10.3 tok/s** |
 | clean rebuild, CPU only | 6.6 tok/s | 5.7 tok/s |
 
 Note on rebuilding: the Makefile does not track header dependencies, so editing a
@@ -111,7 +113,22 @@ the real tensor sizes at load: one plan entry per layer for the attention group 
 and one for the FFN group (streamed), with the remaining budget handed to the streamed
 weight cache as its cap. Measured, 8-token decode, same prompt:
 
-| Mode | budget | cache cap | prefill | decode | cache hits/misses |
+|Where the decode time goes now (WUBU_GPU_STATS=1, 9 decode tokens):
+
+```
+[GPU stats] type  calls   ms_total  MiB(touched)     [CPU stats] decode_calls  decode_ms
+           11       8       85.7     (Q3_K head)      11      0        0.0
+           18     160       33.3     (IQ3_XXS)        18      0        0.0
+           21     760      181.1     (IQ3_S)          21      0        0.0
+           22    1632      360.4     (IQ2_S)          22      0        0.0
+           23      32       11.1     (IQ4_XS)         23      0        0.0
+                                                      17     40       37.6  (IQ2_XS, 4.2 ms/tok)
+```
+
+Every matvec except the 5 IQ2_XS tensors (11 MB) is device-resident during decode. GPU
+time is ~23 ms of the 97 ms forward, so the remaining ~70 ms/token is not matvec work at
+all: it is the rest of the forward (norms, attention, MoE routing, head quantisation).
+That is the next thing to instrument, not another kernel.
 |---|---|---|---|---|---|
 | mmap, no streaming | - | - | 1.0 tok/s | **1.1 tok/s** | - |
 | streamed | 3072 MiB | 2199 MiB | **3.4 tok/s** | 0.4 tok/s | 217 / 2744 |

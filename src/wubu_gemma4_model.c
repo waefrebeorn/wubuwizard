@@ -649,7 +649,9 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
     /* Device-resident weights: decode (M == 1) runs entirely on the GPU. */
     if (w->dev && M == 1 && (K % 256) == 0 &&
         (w->ggml_type == GGML_TYPE_IQ2_S || w->ggml_type == GGML_TYPE_IQ3_S ||
-         w->ggml_type == GGML_TYPE_Q3_K || w->ggml_type == GGML_TYPE_Q4_0)) {
+         w->ggml_type == GGML_TYPE_Q3_K || w->ggml_type == GGML_TYPE_Q4_0 ||
+         w->ggml_type == GGML_TYPE_IQ3_XXS ||     /* 282 MB of the 12B file */
+         w->ggml_type == GGML_TYPE_IQ4_XS)) {     /* 125 MB */
         const long long stride = (long long)(w->raw_bytes / N);
         if (wubu_gpu_matvec(w->dev, w->ggml_type, x, K, N, stride, c) == 0) return;
     }
