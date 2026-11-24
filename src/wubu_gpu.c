@@ -703,6 +703,21 @@ int wubu_gpu_qkv_mrow(const void *d_wq, int tq, const void *d_wk, int tk, const 
     return f(d_wq, tq, d_wk, tk, d_wv, tv, x, K, M, nq, nk, nv, sq, sk, sv, q, k, v);
 }
 
+typedef int (*fn_ffn_mrow_t)(const void *, int, const void *, int, const void *, int,
+                             const float *, int, int, int, long long, long long, long long, float *);
+
+/* Whole FFN for a prompt on the device: one upload, gate/up, GELU, down, one download. */
+int wubu_gpu_ffn_mrow(const float *x, const void *d_wg, int tg, const void *d_wu, int tu,
+                      const void *d_wd, int td, int M, int hidden, int ff,
+                      long long sg, long long su, long long sd, float *out)
+{
+    if (!wubu_gpu_init()) return -1;
+    static fn_ffn_mrow_t f; static int looked;
+    if (!looked) { looked = 1; f = (fn_ffn_mrow_t)(void *)GetProcAddress(G.h, "wubu_cuda_ffn_mrow_dev3"); }
+    if (!f) return -1;
+    return f(d_wg, tg, d_wu, tu, d_wd, td, x, M, hidden, ff, sg, su, sd, out);
+}
+
 int wubu_gpu_qkv3(const void *d_wq, const void *d_wk, const void *d_wv,
                   int tq, int tk, int tv, const float *x,
                   int K, int qd, int kvd, long long sq, long long sk, long long sv,

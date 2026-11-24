@@ -2573,6 +2573,73 @@ done:
 /* A type per FFN tensor: the 12B model does not use one quant type for gate, up and down,
  * so the single-type fused FFN only covered a fraction of the layers and the rest went back
  * to three round trips each. */
+/* ---------------- FFN over M rows, all on the device ----------------
+ *
+ * Per-shape accounting puts 2.4 s of a 3.37 s prefill outside the kernels: 190 matvec calls each
+ * uploading an input and blocking on a download. The FFN is the worst of it - gate and up come back
+ * to the host only to be GELU'd and multiplied, then go back up for the down projection: 16 MB per
+ * layer across PCIe for 5.3 MB of arithmetic.
+ *
+ * This keeps the chain resident: one upload of the normalised rows, gate and up through the tensor
+ * cores into device buffers, GELU*mul on the device, the result quantised in place and fed straight
+ * to the down projection, one download. Same arithmetic as wubu_cuda_ffn_dev3, which does this for a
+ * single row. */
+static int mrow_into_dev(int type, const void *dw, const c_q8_k *q8m, float *d_y,
+                         int64_t stride, int nblocks, int cols, int M)
+{
+    if (type == 22) {
+        dim3 g((cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 16 * IQ2S_MMA_RH - 1) / (16 * IQ2S_MMA_RH));
+        iq2s_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)dw, q8m, d_y, stride,
+                                                        nblocks, cols, M, nblocks);
+    } else if (type == 21) {
+        dim3 g((cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
+        iq3s_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)dw, q8m, d_y, stride,
+                                                        nblocks, cols, M, nblocks);
+    } else {
+        return -1;
+    }
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+WUBU_EXPORT int wubu_cuda_ffn_mrow_dev3(const void *d_wg, int tg, const void *d_wu, int tu,
+                                        const void *d_wd, int td, const float *h_x, int M,
+                                        int hidden, int ff, long long sg, long long su, long long sd,
+                                        float *h_out)
+{
+    if (!d_wg || !d_wu || !d_wd || !h_x || !h_out || M <= 0) return -1;
+    if ((hidden % QK_K) || (ff % QK_K) || (hidden % 256) || (ff % 256)) return -1;
+    if ((tg != 21 && tg != 22) || (tu != 21 && tu != 22) || (td != 21 && td != 22)) return -1;
+
+    const int nbx = hidden / QK_K, nbf = ff / QK_K;
+    float *dx = (float *)pool_get("ffn.x", (size_t)hidden * M * sizeof(float));
+    float *dg = (float *)pool_get("ffn.gate", (size_t)ff * M * sizeof(float));
+    float *du = (float *)pool_get("ffn.up", (size_t)ff * M * sizeof(float));
+    float *dout = (float *)pool_get("ffn.out", (size_t)hidden * M * sizeof(float));
+    c_q8_k *qx = (c_q8_k *)pool_get("ffn.q8x", (size_t)nbx * M * sizeof(c_q8_k));
+    c_q8_k *qf = (c_q8_k *)pool_get("ffn.q8f", (size_t)nbf * M * sizeof(c_q8_k));
+    if (!dx || !dg || !du || !dout || !qx || !qf) return -2;
+
+    if (cudaMemcpy(dx, h_x, (size_t)hidden * M * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        return -3;
+    quantize_q8k_kernel<<<dim3(nbx, M), 32>>>(dx, qx, hidden, hidden, nbx);
+    if (cudaGetLastError() != cudaSuccess) return -4;
+
+    if (mrow_into_dev(tg, d_wg, qx, dg, sg, nbx, ff, M) != 0) return -5;
+    if (mrow_into_dev(tu, d_wu, qx, du, su, nbx, ff, M) != 0) return -6;
+
+    const int elems = M * ff;
+    gelu_mul_kernel<<<(elems + 255) / 256, 256>>>(dg, du, elems);
+    if (cudaGetLastError() != cudaSuccess) return -7;
+
+    /* the down projection reads the GELU'd product, so quantise it in place on the device */
+    quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(du, qf, ff, ff, nbf);
+    if (cudaGetLastError() != cudaSuccess) return -8;
+    if (mrow_into_dev(td, d_wd, qf, dout, sd, nbf, hidden, M) != 0) return -9;
+
+    return cudaMemcpy(h_out, dout, (size_t)hidden * M * sizeof(float),
+                      cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -10;
+}
+
 WUBU_EXPORT int wubu_cuda_ffn_dev3(const void *d_wg, const void *d_wu, const void *d_wd,
                                    int tg, int tu, int td,
                                    const float *d_x, float *d_gate, float *d_up, float *d_out,

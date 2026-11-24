@@ -1883,6 +1883,23 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * of the layers on three separate round trips. */
     /* G4_FFN_CPU forces the CPU FFN. It exists to separate the two sources of the fused path's
      * residual: with the device FFN disabled, any remaining divergence is the attention half. */
+    /* Prefill: the same fusion for M rows. Without it gate and up come back to the host to be
+     * GELU'd and multiplied and go back up for the down projection - 16 MB per layer across PCIe
+     * for 5.3 MB of arithmetic, and 2.4 s of a 3.37 s prefill lives in that traffic. */
+    if (N > 1 && !getenv("G4_FFN_NO_FUSE") &&
+        layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
+        (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
+        extern int wubu_gpu_ffn_mrow(const float *, const void *, int, const void *, int,
+                                     const void *, int, int, int, int,
+                                     long long, long long, long long, float *);
+        const long long sg = (long long)(layer->ffn_gate.raw_bytes / G4_FFN);
+        const long long su = (long long)(layer->ffn_up.raw_bytes / G4_FFN);
+        const long long sd = (long long)(layer->ffn_down.raw_bytes / G4_HIDDEN);
+        ffn_dev_done = (wubu_gpu_ffn_mrow(normed, layer->ffn_gate.dev, layer->ffn_gate.ggml_type,
+                                          layer->ffn_up.dev, layer->ffn_up.ggml_type,
+                                          layer->ffn_down.dev, layer->ffn_down.ggml_type,
+                                          N, G4_HIDDEN, G4_FFN, sg, su, sd, ffn_down_out) == 0);
+    }
     if (N == 1 && !getenv("G4_FFN_CPU") &&
         layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
         (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
