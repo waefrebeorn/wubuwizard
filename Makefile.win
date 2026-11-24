@@ -642,6 +642,27 @@ test_eg108_kv_connector: tools/test_eg108_kv_connector.c src/wubu_kv_connector.c
 test_eg109_fp8_shift: tools/test_eg109_fp8_shift.c src/wubu_fp8_shift.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
+# CUDA translation units (sm_89) — device objects for the GPU engine targets.
+%.o: %.cu
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+
+# Probe: which GPU objects compile on Windows today (make -k gpu-probe).
+gpu-probe: src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o src/gpu_gemma4.o
+	@echo gpu-probe-complete
+
+# GPU gemma4 engine: nvcc device objects + MinGW host code (extern "C" ABI).
+G4_GPU_OBJ = src/wubu_gemma4_model.o src/gguf_reader.o src/quantized_matmul.o \
+             src/quantized_dot_generic.o src/gpu_gemma4_forward.o \
+             src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o \
+             src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
+
+# GNU make on this host cannot spawn a shell for recipes containing quotes, so the
+# CUDA lib path is spelled in 8.3 form and nothing else in the recipe is quoted.
+CUDA_LIB83 = C:/PROGRA~1/NVIDIA~2/CUDA/v13.5/lib/x64
+
+gen_text_gemma4_gpu: tools/gen_text_gemma4.c $(G4_GPU_OBJ)
+	$(CXX) $(CFLAGS) $(CUDA_INC) -DGPU_SUPPORT -o $@ tools/gen_text_gemma4.c $(G4_GPU_OBJ) -L$(CUDA_LIB83) -lcudart -lcublas -fopenmp -lm -lstdc++
+
 # EG-110: DRAM/Flash hybrid residency planner gate.
 test_eg110_residency: tools/test_eg110_residency.c src/wubu_residency.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static

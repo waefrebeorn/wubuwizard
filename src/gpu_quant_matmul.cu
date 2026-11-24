@@ -9,6 +9,12 @@
 #include "gguf_reader.h"
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <string.h>
+
+/* nvcc with the MSVC host compiler has no __builtin_memcpy. */
+#if defined(_MSC_VER) && !defined(__builtin_memcpy)
+#define __builtin_memcpy memcpy
+#endif
 
 #define QK_K 256
 
