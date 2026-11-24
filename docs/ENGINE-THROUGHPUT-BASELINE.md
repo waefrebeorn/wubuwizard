@@ -320,6 +320,29 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The shared-accumulator GEMM, measured, and why the answer is tensor cores
+
+The obvious way to get one weight pass per prompt: keep the accumulators in shared memory instead of
+registers and let one decoded weight block feed all 87 rows. Written, checked against the current
+kernel, timed:
+
+    ref  MT=16 (registers) :  11.081 ms    10.2 GB/s
+    shared accumulators    :  23.678 ms     0.8 GB/s    speedup 0.47x
+
+Twice as slow. A shared read-modify-write per row per block costs three instructions where a register
+add costs one, and 45 KB of shared memory per block caps it at four warps against eight. Rows per
+weight pass cannot be bought with shared memory.
+
+Which leaves the actual reason llama.cpp does 477 tok/s and this engine does 18.3: **tensor cores**.
+This kernel does four multiply-accumulates per `dp4a` instruction, one per lane. An `mma.sync`
+m16n8k32 int8 instruction does 4096, and sm_89 has them. Prefill is a matrix-matrix product and this
+engine computes it with the scalar path that is correct for a single row. No amount of tiling,
+staging or lane remapping in the current kernel closes that - it is the wrong instruction.
+
+That redefines the next piece of work: an int8 tensor-core kernel for the prefill path, with the
+quantised weights decoded into the a-fragment layout `mma.sync` requires and the Q8_K activations into
+the b-fragment. Decode stays on the dp4a path, where it is already within 1.8x of llama.cpp.
+
 ### The reference number on this machine, and what it finally explains
 
 `llama-bench` was already on this box in two builds. The CUDA one has no CUDA backend and falls back
