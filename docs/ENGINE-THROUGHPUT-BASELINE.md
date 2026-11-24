@@ -60,8 +60,11 @@ Confirmed by measurement, not assumed:
 
 - fusing q/k/v into one submission (one upload, one quantisation, one download of q|k|v)
   changed the qkv section by 0.2 ms/token — the number of *transfers* is not the limit;
-- pinned staging (`wubu_cuda_bench_xfer`): 0.030 ms -> 0.018 ms per call, i.e. 6.8 -> 3.2
-  ms/token across 202 calls — real, small, not the gap;
+- pinned staging (`wubu_cuda_bench_xfer`): 0.030 ms -> 0.018 ms per call in isolation, i.e.
+  6.8 -> 3.2 ms/token across 202 calls. Implemented end to end as a single DLL call
+  (`upload + q8k + kernel + download` through pinned buffers): measured **11.2 tok/s
+  against the 11.4 baseline**, i.e. no gain, and removed. The isolated transfer saving does
+  not survive contact with the real path, which is the useful correction;
 - launch shape is flat (2/4/8/16 warps per block: 76-79 GB/s);
 - two columns per warp: +6%, and slower than one column once the fp16 fix landed;
 - coalesced 3x32 B block reads with shuffles: 8% worse.

@@ -244,6 +244,7 @@ static void *d_q8;
 static int cap_x, cap_y, cap_q8;
 static int g_staged_K;
 
+
 static int gpu_ensure_buffers(int K, int n_cols)
 {
     if (cap_x < K) {
