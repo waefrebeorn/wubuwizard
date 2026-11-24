@@ -344,6 +344,28 @@ M-row kernels agree with each other to float precision while disagreeing with th
 unproven stays gated behind `G4_XXS_MMA`, and the next step is a harness that computes both paths into
 separate buffers within one process and compares them **before** any other code touches those buffers.
 
+### Bisected: four of the five layers break it, the last one does not
+
+`G4_FUSE_LAYER=<n>` fuses exactly one layer with everything else on the host path:
+
+    only layer  1 fused   236779 236779 236779 236779 236779 236779 236779 236761
+    only layer  5 fused    366 236761 650 236761 236767 236750 236761 236750
+    only layer  8 fused   236761 236772 236772 236772 236772 236772 236772 236772
+    only layer 11 fused   236779 22291 22291 22291 22291 22291 22291 22291
+    only layer 47 fused   45518 107 236775 818 6590 529 1972 563        <- baseline, correct
+
+Layers 1, 5, 8 and 11 all break it; layer 47 - the last layer - is exactly right, and the counter confirms
+it really did fuse (`fused=1`). The five layers have the same quant types (18/18/21 for layer 1, 18/18/23
+for the rest) and the same dimensions, so the types do not explain the split, and layer 47 proves the
+kernel can produce correct output on this data.
+
+What separates 47 from the others is **depth**: an error injected at layer 47 reaches the logits through
+one layer, an error at layer 1 reaches them through 46. So the working hypothesis is now that the XXS
+path carries a small but non-trivial error - ~7% of elements differ from the host by more than 10% of
+scale - which the network amplifies over the remaining layers, while the same magnitude at the last
+layer is absorbed. That would mean the kernel is not exact in a way that matters even though it is not
+"wrong" in a way any single-layer comparison detects.
+
 ### The valid experiment: the kernels match the host, and fusing those layers still breaks the model
 
 The retraction above says no conclusion could be drawn. With the harness fixed there is one, and it

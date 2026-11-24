@@ -1927,7 +1927,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * layer is a valid comparison - unlike the earlier cross-run dumps, whose inputs had diverged. */
     const int fuse_only_xxs = getenv("G4_FUSE_ONLY_XXS") != NULL;
     const int is_xxs_layer = (layer->ffn_gate.ggml_type == 18 || layer->ffn_gate.ggml_type == 23);
-    if (N > 1 && (!getenv("G4_FFN_NO_FUSE") || (fuse_only_xxs && is_xxs_layer)) &&
+    const char *fuse_one = getenv("G4_FUSE_LAYER");
+    const int fuse_this_one = fuse_one && atoi(fuse_one) == il;
+    if (N > 1 && (!getenv("G4_FFN_NO_FUSE") || (fuse_only_xxs && is_xxs_layer) || fuse_this_one) &&
         layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
         (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
         extern int wubu_gpu_ffn_mrow(const float *, const void *, int, const void *, int,
