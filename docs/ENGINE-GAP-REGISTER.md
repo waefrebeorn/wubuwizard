@@ -1368,6 +1368,10 @@ not measured: no Flash bandwidth, W4A16 quantisation or KV-cache claim is made.
 
 | EG-110 | DRAM/Flash hybrid residency planner with fail-closed staging budget (MNN-LLM) | EG-06 plans placement but never proves a streamed layer can be staged in DRAM | MNN-LLM arXiv 2506.10443 / `alibaba/MNN` `transformers/` | `test_eg110_residency` | S | **DONE (residency-contract gate)** — `src/wubu_residency.c/.h` plans hot/streamed layers and fails closed when hot set + staging buffer exceeds the DRAM budget; study clone is read-only. |
 
+Wiring status: every row above is a *contract* gate. `docs/ENGINE-WIRING-AUDIT.md`
+(2026-11-23) measures that 117 of 123 gate modules have zero engine call sites and only
+6 are called from non-test source, so the next work item is wiring, not another gate.
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
