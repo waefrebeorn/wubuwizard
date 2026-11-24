@@ -221,6 +221,29 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Disassembled GCC, reproduced it op for op, still no match
+
+The rms-norm sum was read out of the object file rather than guessed. `objdump` on
+`g4_rms_norm` shows the vectoriser using **four** 8-lane accumulators over
+x[32t+0..7], [+8..15], [+16..23], [+24..31] with `vfmadd231ps`, combined as
+`(S0+S1) + (S2+S3)` per lane (`vaddps %ymm1,%ymm11,%ymm4` / `vaddps %ymm8,%ymm0,%ymm8` /
+`vaddps %ymm8,%ymm4,%ymm6`), then `vextractf128` + `vaddps` (lo+hi), then the hadd pair.
+
+That was implemented exactly on the device, with `__fmaf_rn` and `__fadd_rn` so nothing could
+be contracted or reassociated, single-threaded so the order is fixed:
+
+    EG-123 rms_norm weighted: 3.576e-07  ->  3.576e-07   (unchanged)
+    ADIFF:                    2.77e-07   ->  3.25e-07    (marginally worse)
+
+So the reduction order is **not** the difference. That is a real elimination, not a guess: the
+instruction-level reproduction of the loop left the number exactly where it was, which points
+at the `1/sqrtf` path (no `vsqrtps`/`vdivss` appears in the disassembled range, so GCC is
+calling out) or at EG-123's own reference rather than the kernel.
+
+Reverted. Four approaches to the last 2.6e-07 have now been measured and all failed; the
+useful residue is that the reductions are eliminated by construction for rms, and that the
+attention row is verified correct to 2.8e-07 by an end-to-end comparison.
+
 ### Three attempts at the residual, one result: guessing the compiler does not work
 
 After sharing the trig (which did help: fused divergence moved from token 2 to token 8) the
