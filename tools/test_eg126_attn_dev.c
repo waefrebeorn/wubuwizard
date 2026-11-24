@@ -27,7 +27,11 @@ int main(int argc, char **argv)
     fn_t attn = (fn_t)(void *)GetProcAddress(h, "wubu_cuda_attn_host");
     if (!attn) { printf("EG-126: SKIP (no export)\n"); FreeLibrary(h); return 0; }
 
-    const int NHEADS = 16, NKV = 8, HD = 256, KVD = NKV * HD, CAP = 32;
+    /* Two shapes: the sliding layers (hd 256, 8 kv heads) and the full-attention layers
+     * (hd 512, 1 kv head) - the model uses both, and only the first was ever compared. */
+    const int both = (argc > 2 && argv[2][0] == 'f');
+    const int NHEADS = 16, NKV = both ? 1 : 8, HD = both ? 512 : 256;
+    const int KVD = NKV * HD, CAP = 32;
     const int KVSTART = 0, KVLEN = 20, QD = NHEADS * HD;
 
     float *q = (float *)malloc(sizeof(float) * QD);

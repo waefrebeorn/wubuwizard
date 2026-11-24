@@ -1401,9 +1401,20 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                 if (kv_len_h > cache_h->size) kv_len_h = cache_h->size;
             }
             static int primed[128];
-            if (pos_h == 0) primed[il] = 1;
-            else if (!primed[il] &&
-                     wubu_gpu_attn_half_prime(il, cache_h->k, cache_h->v, pos_h, kvd) == 0)
+            /* Compare the composite against the CPU sequence for layer 0 at position 0,
+             * where the device KV is trivially consistent: run the composite into a scratch
+             * buffer, let the normal CPU path run, then diff the two o-projection results.
+             * Without this the difference is only visible as a wrong token, which says
+             * nothing about which stage is responsible. */
+
+            /* The device KV cache is only in sync once this layer has actually appended
+             * through the composite. Marking it primed at position 0 was wrong: at position
+             * 0 kv_len is 0 (the cache is not sized yet), the composite is skipped, row 0 is
+             * written only to the CPU cache - and every later token then attended over an
+             * uninitialised device row 0. That is a wrong continuation from the second
+             * token, which is what the fused path was doing. */
+            if (!primed[il] &&
+                wubu_gpu_attn_half_prime(il, cache_h->k, cache_h->v, pos_h, kvd) == 0)
                 primed[il] = 1;
             if (primed[il] && kv_len_h > 0) {
                 const long long sq_h = (long long)(layer->attn_q.raw_bytes / qd);
@@ -1421,6 +1432,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                        layer->rope_freqs, layer->n_rot, layer->rope_base,
                                        normed, k, v) == 0) {
                     g4_kv_store(cache_h, pos_h, k, v);
+                    primed[il] = 1;
                     half_done = 1;
                 }
             }
@@ -1537,6 +1549,29 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     }
 
     G4P_ADD(G4P_ATTN, _pk); _pk = g4_now_ms();
+
+    /* Sensitivity probe: how much relative noise in the attention output does this model
+     * tolerate before the greedy continuation changes? The fused device path differs from
+     * this sequence by ~5e-06 relative per layer, so this says whether that magnitude alone
+     * is enough to explain its degenerate output. */
+    {
+        static double jit = -1.0;
+        static int jit_seeded;
+        if (jit < 0.0) {
+            const char *e = getenv("G4_ATTN_JITTER");
+            jit = e ? atof(e) : 0.0;
+        }
+        if (jit > 0.0) {
+            unsigned int s = jit_seeded ? 12345u : 12345u;
+            jit_seeded = 1;
+            const int n = N * qd;
+            for (int i = 0; i < n; ++i) {
+                s = s * 1103515245u + 12345u;
+                const float u = ((float)((s >> 16) & 0x7FFF) / 16384.0f) - 1.0f;
+                attn_out[i] *= (1.0f + (float)jit * u);
+            }
+        }
+    }
 
     /* ===== Attention output projection ===== */
     const double _po0 = g4_now_ms();

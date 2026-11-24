@@ -422,6 +422,30 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
                        int pos, int kv_start, int kv_len,
                        long long sq, long long sk, long long sv, long long so,
                        const float *qn, const float *kn, const float *freqs,
+                       int n_rot, float rope_base, float *out, float *k_out, float *v_out);
+
+/* Attention only: the same composite with the o-projection skipped (d_wo NULL), returning
+ * the attention rows so a gate can compare that stage on its own. */
+int wubu_gpu_attn_only(int layer_id, const void *d_wq, const void *d_wk, const void *d_wv,
+                       int tq, int tk, int tv, const float *x,
+                       int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+                       int pos, int kv_start, int kv_len,
+                       long long sq, long long sk, long long sv,
+                       const float *qn, const float *kn, const float *freqs,
+                       int n_rot, float rope_base, float *attn_out, float *k_out, float *v_out)
+{
+    return wubu_gpu_attn_half(layer_id, d_wq, d_wk, d_wv, NULL, tq, tk, tv, 0, x,
+                              hidden, qd, kvd, hd, n_heads, n_kv_heads, pos, kv_start, kv_len,
+                              sq, sk, sv, 0, qn, kn, freqs, n_rot, rope_base,
+                              attn_out, k_out, v_out);
+}
+
+int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const void *d_wv,
+                       const void *d_wo, int tq, int tk, int tv, int to, const float *x,
+                       int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+                       int pos, int kv_start, int kv_len,
+                       long long sq, long long sk, long long sv, long long so,
+                       const float *qn, const float *kn, const float *freqs,
                        int n_rot, float rope_base, float *out, float *k_out, float *v_out)
 {
     if (!wubu_gpu_init() || layer_id < 0 || layer_id >= MAX_LAYERS_DEV) return -1;

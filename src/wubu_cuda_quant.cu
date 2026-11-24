@@ -718,6 +718,29 @@ __global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __res
     if (lane == 0) y[blk].d = -max_val / 127.0f;
 }
 
+/* Gate hook: run the device Q8_K quantiser on a host array and download the bytes, so a
+ * test can compare them against quantize_row_q8_K() element by element. */
+WUBU_EXPORT int wubu_cuda_q8k_host(const float *h_x, void *h_out, int n)
+{
+    if (!h_x || !h_out || n <= 0 || (n % QK_K) != 0) return -1;
+    const int nb = n / QK_K;
+    float *dx = NULL;
+    void *dq = NULL;
+    int rc = -2;
+    if (cudaMalloc(&dx, (size_t)n * sizeof(float)) != cudaSuccess) goto done;
+    if (cudaMalloc(&dq, (size_t)nb * 292) != cudaSuccess) goto done;
+    if (cudaMemcpy(dx, h_x, (size_t)n * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    quantize_q8k_kernel<<<nb, 32>>>(dx, (c_q8_k *)dq, n);
+    if (cudaGetLastError() != cudaSuccess) goto done;
+    if (cudaMemcpy(h_out, dq, (size_t)nb * 292, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dx) cudaFree(dx);
+    if (dq) cudaFree(dq);
+    return rc;
+}
+
+
 /* Quantize K F32 activations (already on device) into Q8_K blocks on device. */
 __global__ void bsums_kernel(c_q8_k *y, int nblk)
 {

@@ -157,8 +157,38 @@ It is the faster path: **14.1-14.3 tok/s** against 12.8-12.9 at 65 tokens of con
 place. Its arithmetic also tracks the CPU sequence closely (q/k/v/attention to 4e-07,
 o-projection to 1.5e-05, EG-124).
 
-It is still opt-in. The root cause is now pinned down as **accumulation order, ~5e-06
-relative per layer**, not a structural bug:
+### Research pass (llama.cpp gemma4.cpp, upstream) and what it settled
+
+Checked the upstream graph against the engine's composite: Q -> q_norm -> rope,
+K -> k_norm -> rope, V -> rms_norm with no scale and no rope, then attention with
+`hparams.f_attention_scale`. That is exactly the order the engine uses, including the
+unnormalised-weight V norm, so the architecture is not the source of the difference.
+
+Two gates were added to close the remaining blind spots:
+
+- **EG-127** compares the device Q8_K quantiser against `quantize_row_q8_K` byte for byte at
+  n = 4096 (the o-projection's K). Scales and all 4096 quantised values match exactly; only
+  the unused `bsums` differ, and no kernel reads them. PASS.
+- **EG-126** now covers both layer shapes: hd 256 / 8 kv heads (sliding) and hd 512 / 1 kv
+  head (full). Both pass at ~4e-06 against a double reference.
+
+### A real bug: the device KV row 0 was never primed
+
+The composite is skipped at position 0 because `kv_len` is 0 there (the cache is not sized
+yet), so row 0 was written only to the CPU cache - but `primed[layer]` was set at position 0
+anyway, so the one-time device prime never ran and every later token attended over an
+uninitialised device row 0. Marking a layer primed only after it has actually appended fixes
+it; the fused continuation moved from wrong-at-token-0 to matching the first two tokens.
+
+### Still open: the composite's attention over its own cache
+
+With k and v from the composite matching the CPU to 1e-07 at the same position, its
+attention output still differed by 1.3 relative. The attention kernel itself is gated
+(EG-126), the quantiser is gated (EG-127), k and v match - so the remaining suspects are the
+staged q (not yet compared) and the device cache contents. Reproducing that comparison needs
+the composite to return its attention row, which is the next probe.
+
+It is still opt-in. The earlier root-cause note said accumulation order, ~5e-06 per layer:
 
 - EG-126 (new) gates `attn_decode_kernel` at the model's real width (16 q heads, 8 kv heads,
   hd 256, 20 populated positions) against a double reference: worst absolute 4.6e-06,
