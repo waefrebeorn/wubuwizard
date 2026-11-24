@@ -1396,7 +1396,7 @@ the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate nam
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=119 FAIL=0`, no failed targets (EG-105..110 included). The
+was rebuilt and executed in one loop: `PASS=120 FAIL=0`, no failed targets (EG-105..111 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
