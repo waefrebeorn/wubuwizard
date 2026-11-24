@@ -158,7 +158,7 @@ Full reports: `front-e-second-degree.md`, `front-f-new-engines.md`, `front-g-q3-
 
 ## Local reference code (do not vendor)
 
-Shallow clones of 38 engines live at `~/WuBu/research/engine-sources/` outside the
+Shallow clones of 40 engines live at `~/WuBu/research/engine-sources/` outside the
 wubuwizard tree. They are **study material only**: never link, copy verbatim, or add
 them to `CORE_OBJ`. Read a file, extract the mechanism, reimplement it in C11 with a
 gate. See `docs/research/engine-sweeps/q3q4-2026-repos.md` for the Q3/Q4 2026
@@ -168,8 +168,9 @@ catalog and `gh`-derived creation dates.
 
 Added as **study-only** clones after the cited `front-k-unacquired-engines.md` sweep:
 `ik_llama.cpp`, `ktransformers`, `flyweight`, `llm-inference-cpp`, `LMCache`, `vattention`.
-Two shortlisted repos (`vllm.cpp`, `MNN`) failed shallow-clone index packing and were not
-left as partial directories. From these clones, EG-107 gates vAttention's contiguous virtual
+Two shortlisted repos (`vllm.cpp`, `MNN`) first failed ordinary shallow-clone index
+packing, then succeeded with `--filter=blob:none --no-checkout` plus cone sparse-checkout;
+they are present as study-only clones. From these clones, EG-107 gates vAttention's contiguous virtual
 KV / demand physical mapping contract and EG-108 gates LMCache's chunk-vs-page connector
 with pin/lookup/compress control. Nothing was linked or vendored.
 
