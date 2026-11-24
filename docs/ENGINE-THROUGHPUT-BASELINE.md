@@ -344,7 +344,31 @@ M-row kernels agree with each other to float precision while disagreeing with th
 unproven stays gated behind `G4_XXS_MMA`, and the next step is a harness that computes both paths into
 separate buffers within one process and compares them **before** any other code touches those buffers.
 
-### Bisected: four of the five layers break it, the last one does not
+### WITHDRAWN: the bisect, because mixing the two FFN paths breaks the model on its own
+
+Before trusting the layer-by-layer bisect, a control that should have come first: fuse **one** layer whose
+kernel is known-good, and leave the other 47 on the host path.
+
+    only layer  0 fused (IQ2_S)   236761 236779 236761 236779 ...
+    only layer  2 fused (IQ2_S)   236761 236761 568 236761 ...
+    only layer  9 fused (IQ2_S)   236772 236772 236772 236761 ...
+    only layer 20 fused (IQ2_S)   45518 107 236829 139 818 2430 ...   <- starts right, derails at token 4
+    all 48 host                   45518 107 236775 818 6590 529 1972 563   <- correct
+    all 48 fused                  45518 107 236775 818 6590 529 1972 563   <- correct
+
+Fusing a single known-good layer with everything else on the host breaks the output, while either extreme
+is correct. **Mixing the two paths is itself broken**, so `G4_FUSE_LAYER` and `G4_FUSE_ONLY_XXS` are
+invalid instruments, and the bisect below - and the "valid experiment" above it - are withdrawn with them.
+The layer-0 output in the mixed run matches the all-host run to 3.1% of scale at the same time as the
+tokens diverge completely, which is internally inconsistent: identical end-to-end results cannot come from
+3%-different per-layer values. So the per-layer dumps are also not measuring what they claim.
+
+The only comparisons trusted from here on are **end-to-end, all-one-path** runs: all-host and all-fused
+both reproduce the reference tokens exactly, and all-fused-with-the-XXS-kernels does not. Finding why
+mixing breaks is now the blocker for every per-layer experiment in this file, and it is where the next
+work goes.
+
+### WITHDRAWN: the bisect, because mixing the two FFN paths breaks the model on its own
 
 `G4_FUSE_LAYER=<n>` fuses exactly one layer with everything else on the host path:
 
