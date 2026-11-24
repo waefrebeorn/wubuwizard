@@ -1282,13 +1282,32 @@ exit 0. This is a branch-prior policy gate; no throughput claim is made.
 
 | EG-104 | W=4 Markov beam-tree branch selection | EG-21 verifies trees but has no branch policy | Strata v0.2.19 DSpark | `test_eg104_markov_tree` | M | **DONE** — `src/wubu_markov_w4.c/.h` selects top-4 branches from order-4 counts; exact EG-21 verification passes; evidence above. |
 
+**EG-105 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg105_loop_place`
+gates the placement rule discovered by a real local benchmark. Online sources:
+Thinking Machines reports Inkling 2 Mini's middle 12 layers loop 3x (48 layer
+applications/token); ComputingForGeeks and the Inkling loop-optimisation report
+identify the looped core as the bottleneck. Measured here on RTX 4050 Laptop
+(6 GB) via Unsloth llama.cpp b12651 Vulkan, IQ2_XXS GGUF (26.07B, 7.89 GiB),
+`-p 128 -n 32 -r 3 -t 4 -ngl 99 -dev Vulkan1`: baseline `-ncmoe 12` gave
+pp128 `126.19 ± 2.08` and tg32 `15.44 ± 0.35` t/s; placing only non-loop
+expert layers on CPU with `-ot 'blk\.(0|1|2|3|4|5|18|19|20|21|22|23)\.ffn_.*_exps=CPU'`
+gave `196.27 ± 2.07` pp and `20.88 ± 0.86` tg — 1.56x prefill and 1.35x decode
+with identical architecture and weights. The C11 gate checks the same rule:
+loop layers 6..17 stay GPU, non-loop experts spill, naive first-12 CPU placement
+re-reads 6 loop layers 3x per token (1536 vs 768 MiB synthetic byte count, 768
+MiB of repeated loop reads removed); a loop core bigger than the GPU hot budget
+is refused. `test_eg105_loop_place: PASS`, exit 0; 30/30 stress runs clean. Byte
+counts are synthetic; the speedup above is the measured real-host number.
+
+| EG-105 | Loop-aware expert placement for looped transformers | EG-45c stages experts but no loop-core placement rule | Thinking Machines Inkling 2 Mini + Unsloth b12651 loop report | `test_eg105_loop_place` | M | **DONE (placement gate)** — `src/wubu_loop_place.c/.h` pins loop core to GPU and spills only non-loop experts; real RTX 4050 Vulkan benchmark evidence above. |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=113 FAIL=0`, no failed targets. The
+was rebuilt and executed in one loop: `PASS=114 FAIL=0`, no failed targets (EG-105 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights

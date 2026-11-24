@@ -7,6 +7,7 @@
 | Diagram | Description | Status |
 |---------|-------------|--------|
 | `inference-pipeline-v22.svg` | **Full inference pipeline**: per-layer data flow, quant types, 3:1 SSM/GQA interleaved, cos-sim badges, Q4_0 KV cache, honest status (VERIFIED/PARTIAL/BROKEN) | ✅ **Current (May 19 PM)** |
+| `wubuwizard-lego-pieces.html` | **Lego-piece map of all 114 named EG gates**, generated from `Makefile.win`; grouped by family with benchmark and DA cards | ✅ Current (Nov 23, 2026) |
 | `phase-roadmap.svg` | Project phase roadmap (may be stale) | 🟡 May 17 |
 | `bug-status.svg` | Dequant verification status vs llama.cpp | 🟡 May 17 |
 | `quant-layer-map.svg` | MoE down_exps tensor types by layer | 🟡 May 17 |

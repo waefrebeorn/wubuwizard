@@ -76,6 +76,7 @@ CORE_OBJ += src/wubu_adaptive_cap.o
 CORE_OBJ += src/wubu_kv8.o
 CORE_OBJ += src/wubu_agent_spec.o
 CORE_OBJ += src/wubu_spectr_select.o
+CORE_OBJ += src/wubu_loop_place.o
 CUDA_OBJ = src/cuda_kernels.o src/gpu_output_proj.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o
 GPU_OBJ = src/wubu_model_gpu.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/gpu_moe_kernel.o src/gpu_ssm_recurrence.o
 RSGD_OBJ = src/rsgd.o
@@ -408,6 +409,9 @@ src/wubu_agent_spec.o: src/wubu_agent_spec.c include/wubu_agent_spec.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_spectr_select.o: src/wubu_spectr_select.c include/wubu_spectr_select.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+src/wubu_loop_place.o: src/wubu_loop_place.c include/wubu_loop_place.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 src/wubu_ssm_chunked.o: src/wubu_ssm_chunked.c include/wubu_ssm.h
@@ -1265,6 +1269,10 @@ test_eg39_agent_spec: tools/test_eg39_agent_spec.c src/wubu_agent_spec.c
 
 # EG-25e: SpecTr candidate mass selection gate.
 test_eg25_spectr: tools/test_eg25_spectr.c src/wubu_spectr_select.c
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# EG-105: loop-aware expert placement gate.
+test_eg105_loop_place: tools/test_eg105_loop_place.c src/wubu_loop_place.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-12: composable sampler chain.
