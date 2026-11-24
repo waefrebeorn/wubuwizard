@@ -258,6 +258,24 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Where the last token divergence comes from: it is a three-way tie, not a defect
+
+`G4_FFN_CPU` was added to separate the two halves of the device path. Three configurations, same
+prompt, 24 tokens:
+
+| configuration | tokens 21-24 |
+|---|---|
+| CPU only (no GPU at all) | `... 52491, 236786, **37475, 1915**` |
+| **default: fused attention + device FFN** | `... 52491, 236786, **37475, 1915**` |
+| fused attention + **CPU** FFN | `... 52491, 236786, **193634, 3750**` |
+
+The default reproduces the all-CPU continuation exactly for 24 tokens. The config that diverges is
+the *mixture* - device attention with a CPU FFN - which is neither of the two pure paths. So there
+is no single component to blame: all three sit within ~1e-07 of each other, and which pair matches
+first is decided by which components share a rounding path. That is the resolution floor for a
+device matvec against a float CPU matvec, and it is why the remaining work is not more kernel
+tuning.
+
 ### The remaining ADIFF outliers are row amplification that the o-projection cancels
 
 ADIFF reports 2.0-2.4 (17-20% of scale) on layers 14, 18, 31, 32, 33, 39 while the other 42

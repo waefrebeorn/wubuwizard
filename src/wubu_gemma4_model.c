@@ -1787,7 +1787,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     int ffn_dev_done = 0;
     /* A type per tensor, not one for all three: requiring a shared type left about a third
      * of the layers on three separate round trips. */
-    if (N == 1 && layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
+    /* G4_FFN_CPU forces the CPU FFN. It exists to separate the two sources of the fused path's
+     * residual: with the device FFN disabled, any remaining divergence is the attention half. */
+    if (N == 1 && !getenv("G4_FFN_CPU") &&
+        layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
         (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
         const long long sg = (long long)(layer->ffn_gate.raw_bytes / G4_FFN);
         const long long su = (long long)(layer->ffn_up.raw_bytes / G4_FFN);
