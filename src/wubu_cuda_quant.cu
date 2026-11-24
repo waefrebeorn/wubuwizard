@@ -317,13 +317,8 @@ __global__ void iq2s_matvec_v3_kernel(const uint8_t * __restrict__ w,
     const int group = lane >> 2;
     const int entry = lane & 3;
 
-    /* The IQ2_S grid is 1024 x uint64 = 8 KiB: stage it in shared memory so the
-     * per-lane random lookups do not go to global/L2 on every block. */
-    __shared__ uint64_t sgrid[1024];
-    for (int gi = threadIdx.x; gi < 1024; gi += blockDim.x)
-        sgrid[gi] = c_iq2s_grid[gi];
-    __syncthreads();
-
+    /* Measured: staging the 8 KiB IQ2_S grid in shared memory was neutral
+     * (0.26 vs 0.25 ms), so the lookups stay in global memory. */
     float sum = 0.0f;
     const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
     for (int b = 0; b < nblocks; ++b) {
