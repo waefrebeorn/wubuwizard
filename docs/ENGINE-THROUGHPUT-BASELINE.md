@@ -320,6 +320,32 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### IQ2_S through tensor cores: decode to shared, mma from shared, verified equivalent
+
+    uniform data : worst rel 1.6e-06                       0 of 1336320 outside 1%
+    random data  : worst abs 1.22e-03 on max |y| 3415      0 of 1336320 outside 1%
+    dp4a MT=16   : 10.799 ms   10.5 GB/s   (6 passes over the weights)
+    iq2s -> mma  :  6.450 ms    2.9 GB/s   (1 pass)         1.67x
+
+The decode is unchanged - same lane mapping, same grid, same signs, same scale nibbles - only its
+destination moves: shared memory as int8, from which the b-fragment is read. Two bugs had to be found
+to get here, and both are worth recording because both were invisible in the timing.
+
+**First:** the a-fragment index skipped `c_q8_k`'s 36-byte header and its per-block stride, so it read
+unrelated bytes. The kernel still ran at 2x while producing nonsense.
+
+**Second, and subtler:** a 32-k `mma` chunk straddles *four* IQ2_S grid entries, and entries 0,1 take
+the low scale nibble while entries 2,3 take the high one. A single scale per chunk is therefore
+inexpressible, and it showed as a 1600-count disagreement on a 3415 maximum. The b-fragment splits
+exactly on that boundary - `b[0]` covers the first 16 k, `b[1]` the second - so two `mma` per chunk,
+each scaled by its own nibble, is exact. The uniform-data case passed even while the kernel was wrong,
+which is why a uniform test alone is not evidence: it proves the layout, not the scaling.
+
+1.67x on one pass against six is the floor for this shape. What remains is the pipelining llama.cpp
+has and this does not: `cp.async` staging with double buffering, `ldmatrix`, and enough mma per warp to
+keep the tensor pipe fed. The engine integration is now the work that matters most, because 1.67x on
+the projections is 1.6x on prefill end to end.
+
 ### The tensor-core path, built and validated: bit-exact, 1.67x, and what it must become
 
 `mma.sync.aligned.m16n8k32.s32.s8.s8` does 4096 MACs per instruction against dp4a's 4. Before any
