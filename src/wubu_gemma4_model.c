@@ -1646,6 +1646,22 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             qkv_done = 1;
         }
     }
+    /* Prefill: one staged activation, one Q8_K pass, three kernels. Without this the same rows are
+     * uploaded and quantised three times per layer, which is why the qkv projection measured
+     * 6.8 GB/s against the FFN's 20. */
+    if (!qkv_done && N > 1 && qkv_all_dev) {
+        extern int wubu_gpu_qkv_mrow(const void *, int, const void *, int, const void *, int,
+                                     const float *, int, int, int, int, int,
+                                     long long, long long, long long, float *, float *, float *);
+        const long long sq = (long long)(layer->attn_q.raw_bytes / qd);
+        const long long sk = (long long)(layer->attn_k.raw_bytes / kvd);
+        const long long sv = (long long)(layer->attn_v.raw_bytes / kvd);
+        if (wubu_gpu_qkv_mrow(layer->attn_q.dev, layer->attn_q.ggml_type,
+                              layer->attn_k.dev, layer->attn_k.ggml_type,
+                              layer->attn_v.dev, layer->attn_v.ggml_type,
+                              normed, G4_HIDDEN, N, qd, kvd, kvd, sq, sk, sv, q, k, v) == 0)
+            qkv_done = 1;
+    }
     if (!qkv_done) {
         wubu_gpu_tag = 1;
         g4_batched_qmatmul(normed, &layer->attn_q, N, qd, G4_HIDDEN, q);

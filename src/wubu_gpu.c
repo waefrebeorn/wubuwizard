@@ -643,6 +643,23 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
  * IQ3_S, so the single-type fused path only covered part of the layers and the rest fell
  * back to three separate round trips (2.5 device calls per layer, measured). One
  * quantisation of the shared input, three kernels, one submission. */
+typedef int (*fn_qkv_mrow_t)(const void *, int, const void *, int, const void *, int,
+                            const float *, int, int, int, int, int,
+                            long long, long long, long long, float *, float *, float *);
+
+/* Fused Q/K/V for a prompt: one staging of the normalised rows, one Q8_K quantisation, three
+ * M-row kernels. The N == 1 path (wubu_gpu_qkv3) does the same for a single row. */
+int wubu_gpu_qkv_mrow(const void *d_wq, int tq, const void *d_wk, int tk, const void *d_wv, int tv,
+                      const float *x, int K, int M, int nq, int nk, int nv,
+                      long long sq, long long sk, long long sv, float *q, float *k, float *v)
+{
+    if (!wubu_gpu_init()) return -1;
+    static fn_qkv_mrow_t f; static int looked;
+    if (!looked) { looked = 1; f = (fn_qkv_mrow_t)(void *)GetProcAddress(G.h, "wubu_cuda_qkv_mrow"); }
+    if (!f) return -1;
+    return f(d_wq, tq, d_wk, tk, d_wv, tv, x, K, M, nq, nk, nv, sq, sk, sv, q, k, v);
+}
+
 int wubu_gpu_qkv3(const void *d_wq, const void *d_wk, const void *d_wv,
                   int tq, int tk, int tv, const float *x,
                   int K, int qd, int kvd, long long sq, long long sk, long long sv,

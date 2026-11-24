@@ -472,7 +472,8 @@ WUBU_EXPORT void wubu_cuda_pool_stats(void)
  *
  * M=1 takes the same arithmetic path as iq2s_matvec_v3_kernel (same block order, same lane
  * sum, same shuffle), so the two are comparable bit for bit - EG-130 checks that. */
-__global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __restrict__ y, int K);
+__global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __restrict__ y, int K,
+                                    int xrow_stride, int yrow_stride);
 WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type, const void *h_xq8,
                                             float *h_y, int K, int n_cols,
                                             int64_t col_stride_bytes);
@@ -553,6 +554,65 @@ static int g_q8m_cap;
 static float *g_mrow_x, *g_mrow_y;
 static size_t g_mrow_xcap, g_mrow_ycap;
 
+__global__ void iq2s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
+                                        const c_q8_k * __restrict__ xq8m,
+                                        float * __restrict__ y, int64_t col_stride_bytes,
+                                        int nblocks, int n_cols, int M, int q8_row_blocks);
+__global__ void iq3s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
+                                        const c_q8_k * __restrict__ xq8m,
+                                        float * __restrict__ y, int64_t col_stride_bytes,
+                                        int nblocks, int n_cols, int M, int q8_row_blocks);
+
+/* ---------------- fused Q/K/V over M rows ----------------
+ *
+ * Prefill had no fused path (wubu_gpu_qkv3 is N == 1), so every layer uploaded the normalised
+ * hidden state three times and ran the Q8_K quantiser three times on the same bytes before the
+ * three projections. Here the staging and the quantisation happen once and all three M-row kernels
+ * read the same q8 rows. Type ids follow ggml: 21 = IQ3_S, 22 = IQ2_S. Anything else returns
+ * non-zero and the caller falls back to the per-tensor path it used before. */
+static int qkv_mrow_one(int type, const void *dw, const c_q8_k *q8m, float *my,
+                        int64_t stride, int nblocks, int cols, int M, float *out)
+{
+    const int wpb = 8;
+    const int blocks = (cols + wpb - 1) / wpb;
+    if (type == 22)
+        iq2s_matvec_mrow_kernel<<<blocks, wpb * 32>>>((const uint8_t *)dw, q8m, my, stride,
+                                                     nblocks, cols, M, nblocks);
+    else if (type == 21)
+        iq3s_matvec_mrow_kernel<<<blocks, wpb * 32>>>((const uint8_t *)dw, q8m, my, stride,
+                                                     nblocks, cols, M, nblocks);
+    else
+        return -2;
+    if (cudaGetLastError() != cudaSuccess) return -3;
+    return cudaMemcpy(out, my, (size_t)cols * (size_t)M * sizeof(float),
+                      cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -4;
+}
+
+WUBU_EXPORT int wubu_cuda_qkv_mrow(const void *d_wq, int tq, const void *d_wk, int tk,
+                                   const void *d_wv, int tv, const float *h_x, int K, int M,
+                                   int nq, int nk, int nv, long long sq, long long sk, long long sv,
+                                   float *h_q, float *h_k, float *h_v)
+{
+    if (!d_wq || !d_wk || !d_wv || !h_x || !h_q || !h_k || !h_v) return -1;
+    if (K <= 0 || M <= 0 || nq <= 0 || nk <= 0 || nv <= 0 || (K % QK_K) != 0) return -1;
+    if ((tq != 21 && tq != 22) || (tk != 21 && tk != 22) || (tv != 21 && tv != 22)) return -1;
+    const int nblocks = K / QK_K;
+    c_q8_k *q8m = (c_q8_k *)pool_get("q8.mrow", (size_t)nblocks * (size_t)M * sizeof(c_q8_k));
+    float *mx = (float *)pool_get("mrow.x", (size_t)K * (size_t)M * sizeof(float));
+    const int ymax = nq > nk ? (nq > nv ? nq : nv) : (nk > nv ? nk : nv);
+    float *my = (float *)pool_get("mrow.y", (size_t)ymax * (size_t)M * sizeof(float));
+    if (!q8m || !mx || !my) return -2;
+    if (cudaMemcpy(mx, h_x, (size_t)K * (size_t)M * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        return -4;
+    quantize_q8k_kernel<<<dim3(nblocks, M), 32>>>(mx, q8m, K, K, nblocks);
+    if (cudaGetLastError() != cudaSuccess) return -5;
+
+    int rc = qkv_mrow_one(tq, d_wq, q8m, my, (int64_t)sq, nblocks, nq, M, h_q);
+    if (rc == 0) rc = qkv_mrow_one(tk, d_wk, q8m, my, (int64_t)sk, nblocks, nk, M, h_k);
+    if (rc == 0) rc = qkv_mrow_one(tv, d_wv, q8m, my, (int64_t)sv, nblocks, nv, M, h_v);
+    return rc;
+}
+
 WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
                                            int K, int n_cols, long long col_stride,
                                            int M, float *h_y)
@@ -567,7 +627,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
     if (cudaMemcpy(mx, h_x, (size_t)K * (size_t)M * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
         return -4;
     for (int m = 0; m < M; ++m)
-        quantize_q8k_kernel<<<nblocks, 32>>>(mx + (size_t)m * K, q8m + (size_t)m * nblocks, K);
+        quantize_q8k_kernel<<<nblocks, 32>>>(mx + (size_t)m * K, q8m + (size_t)m * nblocks, K, 0, 0);
     const int warps_per_block = 8;
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
     iq2s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
@@ -714,7 +774,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq3s_mrow(const void *d_w, const float *h_x, in
     if (cudaMemcpy(g_mrow_x, h_x, xneed, cudaMemcpyHostToDevice) != cudaSuccess) return -4;
     for (int m = 0; m < M; ++m)
         quantize_q8k_kernel<<<nblocks, 32>>>(g_mrow_x + (size_t)m * K,
-                                             g_q8m + (size_t)m * nblocks, K);
+                                             g_q8m + (size_t)m * nblocks, K, 0, 0);
     const int warps_per_block = 8;
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
     iq3s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
@@ -1127,9 +1187,12 @@ WUBU_EXPORT int wubu_cuda_free_dev(void *d_ptr)
 }
 
 /* Same arithmetic as quantize_row_q8_K() in src/quantized_dot_generic.c. */
-__global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __restrict__ y, int K)
+__global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __restrict__ y, int K, int xrow_stride, int yrow_stride)
 {
     const int blk = blockIdx.x;
+    const int row = blockIdx.y;                 /* 0 on the 1-D launches */
+    const float * __restrict__ xr = x + (size_t)row * (size_t)xrow_stride;
+    c_q8_k * __restrict__ yr = y + (size_t)row * (size_t)yrow_stride;
     const int lane = threadIdx.x;
     const int base = blk * QK_K;
     __shared__ float amax_sh;
@@ -1140,7 +1203,7 @@ __global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __res
      * -max_val/127 (not the reciprocal). */
     float local_abs = 0.0f, local_val = 0.0f;
     for (int i = lane; i < QK_K; i += blockDim.x) {
-        const float v = x[base + i];
+        const float v = xr[base + i];
         const float a = fabsf(v);
         if (a > local_abs) { local_abs = a; local_val = v; }
     }
@@ -1155,8 +1218,8 @@ __global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __res
 
     const float max_val = d_sh;
     if (max_val == 0.0f) {
-        for (int i = lane; i < QK_K; i += blockDim.x) y[blk].qs[i] = 0;
-        if (lane == 0) y[blk].d = 0.0f;
+        for (int i = lane; i < QK_K; i += blockDim.x) yr[blk].qs[i] = 0;
+        if (lane == 0) yr[blk].d = 0.0f;
         __syncthreads();
         return;
     }
@@ -1168,14 +1231,14 @@ __global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __res
          * whenever iscale*x was negative (iscale carries the sign of max_val), which made
          * the device quantiser differ from the CPU one by +-1 on many elements - measured
          * as a 2.5e-02 disagreement on q/k/v between the two paths (EG-124). */
-        const float xv = x[base + i];
+        const float xv = xr[base + i];
         float v = iscale * xv + (xv >= 0.0f ? 0.5f : -0.5f);
         int q = (int)v;
         if (q > 127) q = 127;
         if (q < -128) q = -128;
-        y[blk].qs[i] = (int8_t)q;
+        yr[blk].qs[i] = (int8_t)q;
     }
-    if (lane == 0) y[blk].d = -max_val / 127.0f;
+    if (lane == 0) yr[blk].d = -max_val / 127.0f;
 }
 
 /* Gate hook: run the device Q8_K quantiser on a host array and download the bytes, so a
@@ -1190,7 +1253,7 @@ WUBU_EXPORT int wubu_cuda_q8k_host(const float *h_x, void *h_out, int n)
     if (cudaMalloc(&dx, (size_t)n * sizeof(float)) != cudaSuccess) goto done;
     if (cudaMalloc(&dq, (size_t)nb * 292) != cudaSuccess) goto done;
     if (cudaMemcpy(dx, h_x, (size_t)n * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
-    quantize_q8k_kernel<<<nb, 32>>>(dx, (c_q8_k *)dq, n);
+    quantize_q8k_kernel<<<nb, 32>>>(dx, (c_q8_k *)dq, n, 0, 0);
     if (cudaGetLastError() != cudaSuccess) goto done;
     if (cudaMemcpy(h_out, dq, (size_t)nb * 292, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
     rc = 0;
@@ -1220,7 +1283,7 @@ WUBU_EXPORT int wubu_cuda_quantize_q8k_dev(const float *d_x, void *d_q8, int K)
     /* one warp per block: the max reduction is a warp shuffle. No sync here —
      * the kernels below are ordered on the same stream and the result download
      * is what synchronizes. bsums are unused by the four dots we run. */
-    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, (c_q8_k *)d_q8, K);
+    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, (c_q8_k *)d_q8, K, 0, 0);
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
@@ -1286,7 +1349,7 @@ WUBU_EXPORT int wubu_cuda_bench_shapes(void)
         if (ok && cudaMalloc((void **)&d_y, sizeof(float) * N) != cudaSuccess) ok = 0;
         if (ok) {
             cudaMemcpy(d_x, (const void *)h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
-            quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+            quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K, 0, 0);
             const int wpb = 8;
             const int blocks = (N + wpb - 1) / wpb;
             cudaDeviceSynchronize();
@@ -1419,7 +1482,7 @@ WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
         cudaMemcpyAsync(d_x, h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
         cudaEventRecord(e1); cudaEventSynchronize(e1); up += ev_ms(e0, e1);
         cudaEventRecord(e0);
-        quantize_q8k_kernel<<<nb, 32>>>(d_x, (c_q8_k *)d_q8, K);
+        quantize_q8k_kernel<<<nb, 32>>>(d_x, (c_q8_k *)d_q8, K, 0, 0);
         cudaEventRecord(e1); cudaEventSynchronize(e1); q8t += ev_ms(e0, e1);
         cudaEventRecord(e0);
         const int wpb = 8, blocks = (N + wpb - 1) / wpb;
@@ -1464,7 +1527,7 @@ WUBU_EXPORT int wubu_cuda_bench_wpb(void)
     if (cudaMalloc(&d_q8, (size_t)(K / QK_K + 1) * 292) != cudaSuccess) return -2;
     if (cudaMalloc((void **)&d_y, sizeof(float) * N) != cudaSuccess) return -2;
     cudaMemcpy(d_x, (const void *)h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
-    quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+    quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K, 0, 0);
 
 
     const int wpbs[4] = { 2, 4, 8, 16 };
@@ -1539,7 +1602,7 @@ WUBU_EXPORT int wubu_cuda_bench_stages(int iters)
         cudaEventRecord(e0);
         /* Same shape the engine uses (one warp per K-block); the earlier 1-block
          * launch made q8k look 10x more expensive than it is. */
-        quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K);
+        quantize_q8k_kernel<<<K / QK_K, 32>>>((const float *)d_x, (c_q8_k *)d_q8, K, 0, 0);
         cudaEventRecord(e1); cudaEventSynchronize(e1);
         cudaEventElapsedTime(&ms, e0, e1); t_q8 += ms;
 
@@ -1991,7 +2054,7 @@ static int matvec_devbuf(const void *d_w, int type, const float *d_x, float *d_y
                          int K, int n_cols, long long stride)
 {
     if (ensure_q8_scratch(K) != 0) return -1;
-    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, g_q8_scratch, K);
+    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, g_q8_scratch, K, 0, 0);
     return mv_any(d_w, type, g_q8_scratch, d_y, K, n_cols, stride);
 }
 
@@ -2031,7 +2094,7 @@ WUBU_EXPORT int wubu_cuda_qkv_dev3(const void *d_wq, const void *d_wk, const voi
     if (!d_wq || !d_wk || !d_wv || !d_x || !d_q || !d_k || !d_v) return -1;
     if ((K % QK_K) != 0) return -1;
     if (ensure_q8_scratch(K) != 0) return -2;
-    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, (c_q8_k *)g_q8_scratch, K);
+    quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, (c_q8_k *)g_q8_scratch, K, 0, 0);
     if (mv_any(d_wq, tq, g_q8_scratch, d_q, K, qd, sq) != 0) return -3;
     if (mv_any(d_wk, tk, g_q8_scratch, d_k, K, kvd, sk) != 0) return -4;
     if (mv_any(d_wv, tv, g_q8_scratch, d_v, K, kvd, sv) != 0) return -5;
@@ -2092,7 +2155,7 @@ WUBU_EXPORT int wubu_cuda_attn_half_dev(
     if (!d_wq || !d_wk || !d_wv || !d_wo || !d_x || !d_out) return -1;
     if (ensure_q8_scratch(hidden) != 0) return -2;
 
-    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
+    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden, 0, 0);
     int rc;
     if (mv_any(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq) != 0) return -3;
     if (mv_any(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk) != 0) return -4;
@@ -2111,7 +2174,7 @@ WUBU_EXPORT int wubu_cuda_attn_half_dev(
                            kv_start, kv_len, kvd) != 0) return -6;
 
     if (ensure_q8_scratch(qd) != 0) return -2;
-    quantize_q8k_kernel<<<qd / QK_K, 32>>>(d_attn, g_q8_scratch, qd);
+    quantize_q8k_kernel<<<qd / QK_K, 32>>>(d_attn, g_q8_scratch, qd, 0, 0);
     if (mv_any(d_wo, to, g_q8_scratch, d_out, qd, hidden, so) != 0) return -7;
     return cudaGetLastError() == cudaSuccess ? 0 : -8;
 }
@@ -2134,7 +2197,7 @@ WUBU_EXPORT int wubu_cuda_attn_stage(
     if (!d_wq || !d_wk || !d_wv || !d_x) return -1;
     if (ensure_q8_scratch(hidden) != 0) return -2;
 
-    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
+    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden, 0, 0);
     int rc;
     if (mv_any(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq) != 0) return -3;
     if (mv_any(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk) != 0) return -4;
