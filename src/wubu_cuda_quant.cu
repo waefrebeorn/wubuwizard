@@ -645,6 +645,9 @@ WUBU_EXPORT int wubu_cuda_qkv_mrow(const void *d_wq, int tq, const void *d_wk, i
  * bank offset and the b-fragment reads collided. chondrule-free staging is what upstream's
  * "+1 int per row" padding is for. */
 #define IQ2S_MMA_PAD  260
+/* Row-halves per warp: reuse one decoded tile for 32 rows without adding warps, which is what cost
+ * 25% at 1717 when the block went to 8 warps. */
+#define IQ2S_MMA_RH   2
 #define IQ2S_MMA_WPB  4
 
 __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
@@ -662,10 +665,12 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
     const int tid = threadIdx.x;
     const int gid = lane >> 2, tig = lane & 3;
     const int col0 = blockIdx.x * IQ2S_MMA_COLS;
-    const int row0 = blockIdx.y * 16;
+    const int row0 = blockIdx.y * (16 * IQ2S_MMA_RH);   /* one block covers RH row-halves */
     if (row0 >= M) return;
 
-    float accf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float accf[IQ2S_MMA_RH][4];
+    for (int r = 0; r < IQ2S_MMA_RH; ++r)
+        for (int q = 0; q < 4; ++q) accf[r][q] = 0.0f;
 
     for (int b = 0; b < nblocks; ++b) {
         {
@@ -700,16 +705,18 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
         }
         __syncthreads();
 
+        for (int rh = 0; rh < IQ2S_MMA_RH; ++rh) {
+        const int rbase = row0 + rh * 16;
         float dq0 = 0.0f, dq1 = 0.0f;
         {
-            const int r0 = row0 + gid, r1 = r0 + 8;
+            const int r0 = rbase + gid, r1 = r0 + 8;
             if (r0 < M) dq0 = xq8m[(int64_t)r0 * q8_row_blocks + b].d;
             if (r1 < M) dq1 = xq8m[(int64_t)r1 * q8_row_blocks + b].d;
         }
         const int cl0 = warp * 8 + tig * 2;
 
         for (int g = 0; g < 8; ++g) {
-            const int r0 = row0 + gid, r1 = r0 + 8;
+            const int r0 = rbase + gid, r1 = r0 + 8;
             const size_t qoff = (size_t)g * 32;
             uint32_t a[4] = {0, 0, 0, 0};
             if (r0 < M) {
@@ -734,23 +741,26 @@ __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
             mma_i8_s32(accHi, aHi, bHi);
             const float lo0 = sLo[cl0][g], lo1 = sLo[cl0 + 1][g];
             const float hi0 = sHi[cl0][g], hi1 = sHi[cl0 + 1][g];
-            accf[0] += ((float)accLo[0] * lo0 + (float)accHi[0] * hi0) * dq0;
-            accf[1] += ((float)accLo[1] * lo1 + (float)accHi[1] * hi1) * dq0;
-            accf[2] += ((float)accLo[2] * lo0 + (float)accHi[2] * hi0) * dq1;
-            accf[3] += ((float)accLo[3] * lo1 + (float)accHi[3] * hi1) * dq1;
+            accf[rh][0] += ((float)accLo[0] * lo0 + (float)accHi[0] * hi0) * dq0;
+            accf[rh][1] += ((float)accLo[1] * lo1 + (float)accHi[1] * hi1) * dq0;
+            accf[rh][2] += ((float)accLo[2] * lo0 + (float)accHi[2] * hi0) * dq1;
+            accf[rh][3] += ((float)accLo[3] * lo1 + (float)accHi[3] * hi1) * dq1;
+        }
         }
         __syncthreads();
     }
 
     const int oc = col0 + warp * 8 + tig * 2;
-    const int orow = row0 + gid;
-    if (orow < M && oc + 1 < n_cols + 1) {
-        y[(int64_t)orow * n_cols + oc] = accf[0];
-        if (oc + 1 < n_cols) y[(int64_t)orow * n_cols + oc + 1] = accf[1];
-    }
-    if (orow + 8 < M) {
-        if (oc < n_cols) y[(int64_t)(orow + 8) * n_cols + oc] = accf[2];
-        if (oc + 1 < n_cols) y[(int64_t)(orow + 8) * n_cols + oc + 1] = accf[3];
+    for (int rh = 0; rh < IQ2S_MMA_RH; ++rh) {
+        const int orow = row0 + rh * 16 + gid;
+        if (orow < M) {
+            if (oc < n_cols) y[(int64_t)orow * n_cols + oc] = accf[rh][0];
+            if (oc + 1 < n_cols) y[(int64_t)orow * n_cols + oc + 1] = accf[rh][1];
+        }
+        if (orow + 8 < M) {
+            if (oc < n_cols) y[(int64_t)(orow + 8) * n_cols + oc] = accf[rh][2];
+            if (oc + 1 < n_cols) y[(int64_t)(orow + 8) * n_cols + oc + 1] = accf[rh][3];
+        }
     }
 }
 
@@ -774,7 +784,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
     /* Tensor cores for prompts: one pass over the weights instead of ceil(M/16). Decode (M == 1)
      * stays on dp4a, where the four-MAC-per-lane path is already within 1.8x of llama.cpp. */
     if (M >= 16 && !getenv("G4_NO_MMA")) {
-        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
+        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 16 * IQ2S_MMA_RH - 1) / (16 * IQ2S_MMA_RH));
         iq2s_matvec_mma_kernel<<<mgrid, IQ2S_MMA_WPB * 32>>>(
             (const uint8_t *)d_w, q8m, my, col_stride, nblocks, n_cols, M, nblocks);
         if (cudaGetLastError() != cudaSuccess) return -5;
