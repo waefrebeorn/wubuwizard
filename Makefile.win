@@ -647,6 +647,14 @@ test_eg109_fp8_shift: tools/test_eg109_fp8_shift.c src/wubu_fp8_shift.c
 %.o: %.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
+# GPU compute DLL: nvcc/MSVC build, loaded at runtime by the MinGW engine.
+wubu_cuda.dll: src/wubu_cuda_bridge.cu
+	$(NVCC) $(NVCCFLAGS) -shared -o $@ src/wubu_cuda_bridge.cu -lcudart
+
+# EG-112: MinGW -> CUDA DLL bridge gate.
+test_cuda_bridge: tools/test_cuda_bridge.c
+	$(CC) $(CFLAGS) -o $@ tools/test_cuda_bridge.c -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
 # Probe: which GPU objects compile on Windows today (make -k gpu-probe).
 gpu-probe: src/gpu_gemma4_forward.o src/gpu_quant_matmul.o src/gpu_quant_matmul_row_major.o src/flash_attn_q4_0_opt.o src/flash_attn_q4_0_prefill_opt.o src/gpu_gemma4.o
 	@echo gpu-probe-complete
