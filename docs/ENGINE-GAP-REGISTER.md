@@ -1392,6 +1392,32 @@ is expected: activations are now Q8_K-quantised instead of F32.
 
 | EG-111 | Fused IQ2_S/IQ3_S x Q8_K dot with no F32 weight buffer | EG-110 audit found IQ2_S/IQ3_S dequantised whole tensors per token | ggml `llama/ggml-cpu/quants.c`, `llama/ggml-common.h` | `test_eg111_iq_fused` | M | **DONE and wired** — `src/wubu_vecdot_iq.c/.h`; engine decode 10x faster on the 12B IQ2 GGUF. |
 
+**EG-113 evidence (2026-11-23):** `test_eg113_q4_0` gates a fused Q4_0 x Q8_K dot
+(`src/wubu_vecdot_q4_0.c/.h`, AVX2 + scalar) against the `gguf_dequantize` reference:
+worst relative error 1.2e-07 over 64 synthetic 256-element blocks, fail-closed on bad
+arguments. Wired through `quantized_matmul_batched`/`subset`; Q4_0 matrices no longer
+take the scalar per-column nibble path.
+
+| EG-113 | Fused Q4_0 x Q8_K dot | Q4_0 had no vec_dot, only a scalar nibble loop | ggml `block_q4_0`, `ggml_vec_dot_q4_0_q8_0` | `test_eg113_q4_0` | S | **DONE and wired** — `src/wubu_vecdot_q4_0.c/.h`. |
+
+**EG-114 evidence (2026-11-23):** `test_eg114_q3_k` gates a fused Q3_K x Q8_K dot
+(`src/wubu_vecdot_q3_k.c/.h`, AVX2 + scalar) against the same reference: worst relative
+error 8.0e-08. Porting traps recorded: ggml's `block_q3_K` stores the fp16 scale LAST,
+and the 6-bit scale unpack order matters. **This was the decode bottleneck**: the 12B
+Gemma-4 IQ2 GGUF's tied LM head is one Q3_K tensor (412 MB) that was dequantised to F32
+every token. Decode 1.1 -> 4.2 tok/s, prefill 1.0 -> 4.9 tok/s, identical greedy tokens.
+
+| EG-114 | Fused Q3_K x Q8_K dot for the tensor-tying LM head | head had no vec_dot; 412 MB dequantised per token | ggml `block_q3_K`, `ggml_vec_dot_q3_K_q8_K` | `test_eg114_q3_k` | M | **DONE and wired** — the single largest measured decode win so far (3.8x). |
+
+**EG-115 evidence (2026-11-23):** `test_eg115_cuda_matvec` loads `wubu_cuda.dll`, uploads
+the IQ grids and compares a device warp-per-column matvec against the exact CPU ports for
+IQ2_S, IQ3_S, Q3_K and Q4_0: 64 columns each, zero mismatches. Bench 15360x3840 IQ2_S:
+19.9 ms CPU (single thread) vs 3.7 ms GPU including upload (5.5x). End-to-end the GPU path
+is a *tie* (4.0 vs 4.2 tok/s) because the CPU engine already runs 12 threads and the block
+layout is uncoalesced; numbers and the tile-repack plan are in `docs/GPU-LANE-PLAN.md`.
+
+| EG-115 | Device (CUDA) quantized matvec for IQ2_S/IQ3_S/Q3_K/Q4_0 | no GPU path existed at all (MSVC-ABI link wall) | ggml CUDA `dequantize_mul_mat_vec` structure | `test_eg115_cuda_matvec` | L | **DONE, opt-in (`G4_GPU=1`)** — correct against the CPU kernels; not yet faster end-to-end. |
+
 Wiring status: every row above is a *contract* gate. `docs/ENGINE-WIRING-AUDIT.md`
 (2026-11-23) measures that 117 of 123 gate modules have zero engine call sites and only
 6 are called from non-test source, so the next work item is wiring, not another gate.
@@ -1402,7 +1428,7 @@ the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate nam
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=120 FAIL=0`, no failed targets (EG-105..111 included). The
+was rebuilt and executed in one loop: `PASS=123 FAIL=0`, no failed targets (EG-105..115 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
