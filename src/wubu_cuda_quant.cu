@@ -1695,17 +1695,29 @@ done:
     return rc;
 }
 
+/* A type per FFN tensor: the 12B model does not use one quant type for gate, up and down,
+ * so the single-type fused FFN only covered a fraction of the layers and the rest went back
+ * to three round trips each. */
+WUBU_EXPORT int wubu_cuda_ffn_dev3(const void *d_wg, const void *d_wu, const void *d_wd,
+                                   int tg, int tu, int td,
+                                   const float *d_x, float *d_gate, float *d_up, float *d_out,
+                                   int hidden, int ff, long long sg, long long su, long long sd)
+{
+    if (!d_wg || !d_wu || !d_wd || !d_x || !d_gate || !d_up || !d_out) return -1;
+    if ((hidden % QK_K) != 0 || (ff % QK_K) != 0) return -1;
+    if (matvec_devbuf(d_wg, tg, d_x, d_gate, hidden, ff, sg) != 0) return -2;
+    if (matvec_devbuf(d_wu, tu, d_x, d_up, hidden, ff, su) != 0) return -3;
+    gelu_mul_kernel<<<(ff + 255) / 256, 256>>>(d_gate, d_up, ff);
+    if (matvec_devbuf(d_wd, td, d_up, d_out, ff, hidden, sd) != 0) return -4;
+    return cudaGetLastError() == cudaSuccess ? 0 : -5;
+}
+
 WUBU_EXPORT int wubu_cuda_ffn_dev(const void *d_wg, const void *d_wu, const void *d_wd, int type,
                                   const float *d_x, float *d_gate, float *d_up, float *d_out,
                                   int hidden, int ff, long long sg, long long su, long long sd)
 {
-    if (!d_wg || !d_wu || !d_wd || !d_x || !d_gate || !d_up || !d_out) return -1;
-    if ((hidden % QK_K) != 0 || (ff % QK_K) != 0) return -1;
-    if (matvec_devbuf(d_wg, type, d_x, d_gate, hidden, ff, sg) != 0) return -2;
-    if (matvec_devbuf(d_wu, type, d_x, d_up, hidden, ff, su) != 0) return -3;
-    gelu_mul_kernel<<<(ff + 255) / 256, 256>>>(d_gate, d_up, ff);
-    if (matvec_devbuf(d_wd, type, d_up, d_out, ff, hidden, sd) != 0) return -4;
-    return cudaGetLastError() == cudaSuccess ? 0 : -5;
+    return wubu_cuda_ffn_dev3(d_wg, d_wu, d_wd, type, type, type, d_x, d_gate, d_up, d_out,
+                              hidden, ff, sg, su, sd);
 }
 
 WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type,

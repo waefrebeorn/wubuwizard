@@ -204,6 +204,46 @@ static double gpu_now_ms(void)
  * upload of `hidden` floats and one download of `hidden` floats per layer instead of
  * three round trips, and the tanh GELU moves off the CPU. Returns 0 on success so the
  * caller can fall back to the per-tensor CPU path. */
+int wubu_gpu_ffn3(const float *x, const void *d_wg, const void *d_wu, const void *d_wd,
+                  int tg, int tu, int td, int hidden, int ff,
+                  long long sg, long long su, long long sd, float *out)
+{
+    typedef int (*fn_f3_t)(const void *, const void *, const void *, int, int, int,
+                           const float *, float *, float *, float *, int, int,
+                           long long, long long, long long);
+    static fn_f3_t dev3;
+    static int looked;
+    if (!wubu_gpu_init() || !x || !out) return -1;
+    if (!looked) { looked = 1; dev3 = (fn_f3_t)(void *)GetProcAddress(G.h, "wubu_cuda_ffn_dev3"); }
+    if (!dev3) return -2;
+
+    static float *dx, *dg, *du, *dout;
+    static int cap_x, cap_f, cap_o;
+    if (cap_x < hidden) {
+        if (dx) G.free_dev(dx);
+        dx = (float *)G.alloc((unsigned long long)((size_t)hidden * sizeof(float)));
+        if (!dx) { cap_x = 0; return -3; }
+        cap_x = hidden;
+    }
+    if (cap_f < ff) {
+        if (dg) { G.free_dev(dg); G.free_dev(du); }
+        dg = (float *)G.alloc((unsigned long long)((size_t)ff * sizeof(float)));
+        du = (float *)G.alloc((unsigned long long)((size_t)ff * sizeof(float)));
+        if (!dg || !du) { cap_f = 0; return -3; }
+        cap_f = ff;
+    }
+    if (cap_o < hidden) {
+        if (dout) G.free_dev(dout);
+        dout = (float *)G.alloc((unsigned long long)((size_t)hidden * sizeof(float)));
+        if (!dout) { cap_o = 0; return -3; }
+        cap_o = hidden;
+    }
+    if (G.upload(dx, x, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -4;
+    if (dev3(d_wg, d_wu, d_wd, tg, tu, td, dx, dg, du, dout, hidden, ff, sg, su, sd) != 0) return -5;
+    if (G.download(out, dout, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -6;
+    return 0;
+}
+
 int wubu_gpu_ffn(const float *x, const void *d_wg, const void *d_wu, const void *d_wd,
                  int ggml_type, int hidden, int ff,
                  long long sg, long long su, long long sd, float *out)

@@ -1558,16 +1558,18 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * whole FFN on the device (one upload + one download instead of three round trips,
      * and the tanh GELU off the CPU). Falls through to the per-tensor path otherwise. */
     int ffn_dev_done = 0;
+    /* A type per tensor, not one for all three: requiring a shared type left about a third
+     * of the layers on three separate round trips. */
     if (N == 1 && layer->ffn_gate.dev && layer->ffn_up.dev && layer->ffn_down.dev &&
-        layer->ffn_gate.ggml_type == layer->ffn_up.ggml_type &&
-        layer->ffn_gate.ggml_type == layer->ffn_down.ggml_type &&
         (G4_HIDDEN % 256) == 0 && (G4_FFN % 256) == 0) {
         const long long sg = (long long)(layer->ffn_gate.raw_bytes / G4_FFN);
         const long long su = (long long)(layer->ffn_up.raw_bytes / G4_FFN);
         const long long sd = (long long)(layer->ffn_down.raw_bytes / G4_HIDDEN);
-        ffn_dev_done = (wubu_gpu_ffn(normed, layer->ffn_gate.dev, layer->ffn_up.dev,
-                                     layer->ffn_down.dev, layer->ffn_gate.ggml_type,
-                                     G4_HIDDEN, G4_FFN, sg, su, sd, ffn_down_out) == 0);
+        ffn_dev_done = (wubu_gpu_ffn3(normed, layer->ffn_gate.dev, layer->ffn_up.dev,
+                                      layer->ffn_down.dev,
+                                      layer->ffn_gate.ggml_type, layer->ffn_up.ggml_type,
+                                      layer->ffn_down.ggml_type,
+                                      G4_HIDDEN, G4_FFN, sg, su, sd, ffn_down_out) == 0);
     }
     if (!ffn_dev_done) {
         wubu_gpu_tag = 3;

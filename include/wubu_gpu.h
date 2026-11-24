@@ -31,6 +31,11 @@ int wubu_gpu_stage_input(const float *x, int K);
 int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
                            long long col_stride, float *y);
 
+/* Fused FFN with a type per tensor (gate, up, down). */
+int wubu_gpu_ffn3(const float *x, const void *d_wg, const void *d_wu, const void *d_wd,
+                  int tg, int tu, int td, int hidden, int ff,
+                  long long sg, long long su, long long sd, float *out);
+
 /* Fused q/k/v with a type per projection (see wubu_gpu.c). */
 int wubu_gpu_qkv3(const void *d_wq, const void *d_wk, const void *d_wv,
                   int tq, int tk, int tv, const float *x,

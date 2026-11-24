@@ -18,8 +18,8 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 
 | metric | value |
 |---|---|
-| decode at 33 tokens of context | **12.8 tok/s** |
-| decode at 257 tokens of context | **11.9 tok/s** |
+| decode at 33 tokens of context | **13.2 tok/s** |
+| decode at 257 tokens of context | **12.2 tok/s** |
 | prefill, 21-token prompt | **6.8 tok/s** |
 | prefill, 72-token prompt | **15.0 tok/s** |
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
@@ -117,9 +117,8 @@ submission, with a per-layer device KV cache (512 positions, primed from the CPU
 
 | context | default | `G4_ATTN_DEV=1` |
 |---|---|---|
-| 33 tokens | 12.8 tok/s | - |
-| 200 tokens | 11.4 tok/s | 13.0 tok/s |
-| 257 tokens | 11.9 tok/s | - |
+| 33 tokens | 13.2 tok/s | - |
+| 257 tokens | 12.2 tok/s | - |
 
 The default path used to fall from 11.4 to 9.1 tok/s between 65 and 256 tokens because the
 attention section was scalar and grew with kv_len (7.3 -> 29.1 ms). Vectorising it took
