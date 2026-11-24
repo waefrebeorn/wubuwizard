@@ -221,6 +221,32 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Every hyperparameter cross-checked against the GGUF and against upstream
+
+The GGUF's own metadata (parsed directly, 58 KV pairs) against the engine's constants:
+
+| GGUF key | value | engine |
+|---|---|---|
+| `attention.head_count` | 16 | G4_HEADS 16 |
+| `attention.head_count_kv` | per-layer array, 8 with 1 at layers 5, 11, 17, ... | g4_kv_heads from the pattern |
+| `attention.key_length` / `_swa` | 512 / 256 | G4_FULL/SW_HEAD_DIM |
+| `attention.sliding_window` | 1024 | G4_SLIDING_WINDOW |
+| `attention.sliding_window_pattern` | T,T,T,T,T,F repeating | g4_layer_is_full |
+| `attention.shared_kv_layers` | **0** | no shared caches |
+| `rope.dimension_count` / `_swa` | 512 / 256 | G4_FULL/SW_N_ROT |
+| `rope.freq_base` / `_swa` | 1e6 / 1e4 | G4_FULL/SW_ROPE_BASE |
+| `attention.layer_norm_rms_epsilon` | 9.99999997e-07 | G4_RMS_EPS |
+
+All match, so the model wiring is not the source of the sliding-layer divergence. Upstream
+(llama.cpp `gemma4.cpp`) also confirms the two things that had been assumed: `f_attention_scale
+= 1.0f` ("Gemma4 uses self.scaling = 1.0, no pre-attn scaling") and `ROPE_FREQ_BASE_SWA` as a
+separate base for the sliding layers. It also documents that shared-KV layers read a specific
+earlier layer's cache (`kv_source_impl[il] = n_layer_kv_from_start - (is_swa ? 2 : 1)`) - not
+relevant here because this checkpoint declares zero shared layers, but worth knowing.
+
+So the sliding-layer divergence is numeric amplification, not a wiring error: 7 fused layers
+(full only) stay exact over 64 tokens, 48 fused layers at the same ~1.6e-07 per layer do not.
+
 ### All reciprocal-sqrt approximations removed; the early stutter is structural, not numeric
 
 After the double-sqrt fix the object file contains **zero** `vrsqrtss`/`vrcpss` (was 3): the
