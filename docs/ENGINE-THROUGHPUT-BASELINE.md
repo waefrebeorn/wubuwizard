@@ -110,6 +110,23 @@ and every submission after that gap pays to resume. `nvidia-smi -pm 1` reports `
 this GeForce part, so there is no driver-side persistence mode to hold it up - the fix is
 to stop going idle, which is precisely what the fused half-layer does.
 
+## Tried and removed: IQ3_S kernel micro-optimisation
+
+After the fusions, decode issues only **49 matvec calls per token** (48 x IQ3_S, 1 x Q3_K),
+so IQ3_S is effectively the whole matvec path. Two changes were built and measured:
+
+- a compile-time-typed kernel (`matvec_t_kernel<21>`) so the block loop has no runtime type
+  switch, with 8 warps per block instead of 4;
+- branch-free sign application (`c_sign4` + `__vsub4`) instead of eight conditional byte
+  negations per 4-byte group in `iq3s_block_dot`.
+
+A/B at 65 tokens: **12.9 / 12.7 with both, 12.8 / 12.8 without**. Neutral, so both were
+reverted rather than kept. The o-projection stays at 0.273 ms/call for a 0.045 ms kernel,
+which means that gap is per-call overhead (launch plus a synchronising download on a device
+that has just idled through the CPU attention), not the block decode. Removing it requires
+fusing across the attention boundary, which changes the numerics and so breaks token
+identity - the same trade the fused half-layer makes.
+
 ## Device attention half-layer (opt-in, `G4_ATTN_DEV=1`)
 
 `q,k,v -> per-head RMS norms -> RoPE -> KV append -> attention -> o-projection` in one
