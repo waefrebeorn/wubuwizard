@@ -320,6 +320,30 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The M-row kernels are numerically sound; the divergence is somewhere else
+
+Two independent implementations of the M-row path for IQ3_XXS and IQ4_XS (an mma version and a simpler
+warp-per-column dp4a version) both measure about 2x prefill and both produce wrong text. Rather than
+keep guessing, `G4_XXS_CHECK` now A/Bs the new kernel against the per-row kernel the engine already
+uses, on the **real tensors and real activations**, and reports how many elements disagree:
+
+    type 18  K 3840  cols 15360  M 87 | worst 0.131 | differing 1160920 | >0.1% 86 | >1% 7 of 1336320
+    type 23  K 15360 cols 3840   M 87 | worst 0.067 | differing  311886 | >0.1% 35 | >1% 2 of  334080
+
+Seven elements in 1.3 million, and every one of them is a cancellation case - the row total is ~1e-5
+while the individual terms are ~1e-3, so a rounding difference in the order of operations shows up as a
+large *relative* error on a value that is numerically meaningless. Elsewhere the two agree to float
+precision. **The kernels are not the bug.**
+
+That leaves what the fused path does around them for these five layers, which is the next thing to
+isolate. It is also the reason both variants stay gated behind `G4_XXS_MMA`: a path that is arithmetically
+right but produces wrong text is worse than a slow one.
+
+One measurement hazard worth recording: whether tensors are device-resident depends on free VRAM at load
+(nvidia-smi showed 0 MiB used and 5920 free, yet one run uploaded nothing and fell back to 7.3 tok/s), so
+`fused=` must be printed on **every** measurement or a fallback run is silently compared against a fused
+one.
+
 ### An M-row kernel for IQ3_XXS / IQ4_XS measures 2x prefill - and is not correct yet
 
 The per-row kernels for types 18 and 23 already exist and are correct, but the prefill path calls them

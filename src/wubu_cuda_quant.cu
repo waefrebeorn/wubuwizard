@@ -2584,11 +2584,11 @@ done:
  * cores into device buffers, GELU*mul on the device, the result quantised in place and fed straight
  * to the down projection, one download. Same arithmetic as wubu_cuda_ffn_dev3, which does this for a
  * single row. */
-__global__ void iq_xxs_matvec_mma_kernel(const uint8_t * __restrict__ w,
-                                         const c_q8_k * __restrict__ xq8m,
-                                         float * __restrict__ y, int64_t col_stride_bytes,
-                                         int nblocks, int n_cols, int M, int q8_row_blocks,
-                                         int type, int row_per_block);
+__global__ void iq_xxs_matvec_warp_kernel(const uint8_t * __restrict__ w,
+                                          const c_q8_k * __restrict__ xq8,
+                                          float * __restrict__ y, int64_t col_stride_bytes,
+                                          int nblocks, int n_cols, int M, int q8_row_blocks,
+                                          int type, int row_group);
 
 static int mrow_into_dev(int type, const void *dw, const c_q8_k *q8m, float *d_y,
                          int64_t stride, int nblocks, int cols, int M)
@@ -2602,20 +2602,27 @@ static int mrow_into_dev(int type, const void *dw, const c_q8_k *q8m, float *d_y
         iq3s_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)dw, q8m, d_y, stride,
                                                         nblocks, cols, M, nblocks);
     } else if ((type == 18 || type == 23) && getenv("G4_XXS_MMA")) {
-        /* Opt-in while the decode is proved out: the block layout and the codebooks are taken from
-         * ggml and the tables are confirmed present on the device, but the output still disagrees with
-         * the per-row kernels, so this is NOT correct yet. It is worth chasing because it measures 2x
-         * the whole prefill: the per-row kernels re-read all 19.9 MB of weights once per row, which is
-         * the 205-253 ms those five layers cost. Needs a numeric harness against a CPU dequant. */
-        const int rpb = 16 * IQ2S_MMA_RH;
-        dim3 g((cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + rpb - 1) / rpb);
-        iq_xxs_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)dw, q8m, d_y, stride,
-                                                           nblocks, cols, M, nblocks, type, rpb);
+        /* IQ3_XXS / IQ4_XS for M rows: one warp per column, one lane per row, cooperative decode
+         * into shared memory then a plain integer dot. The decode is verified exact against a CPU
+         * dequantiser and dp4a is exact, so this has no fragment layout to get wrong - which the mma
+         * version did. Weight traffic is one read per 32-row group.
+         *
+         * GATED OFF: A/B'd against the per-row kernels on the real tensors, these agree to within
+         * float rounding on all but a handful of cancellation cases (type 18: 7 of 1.34M elements
+         * over 1%; type 23: 2 of 334k), yet the model's text diverges completely with the path on.
+         * So the kernels are sound and the disagreement is in what the fused path does around them
+         * for these five layers - the next thing to isolate. */
+        const int rg = 32;
+        dim3 g(cols, (M + rg - 1) / rg);
+        iq_xxs_matvec_warp_kernel<<<g, 32>>>((const uint8_t *)dw, q8m, d_y, stride, nblocks, cols,
+                                             M, nblocks, type, rg);
     } else {
         return -1;
     }
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
+
+WUBU_EXPORT int wubu_cuda_check_xxs(const void *, int, const void *, int, int, long long, int);
 
 /* Stage accounting for the fused FFN. Every claim this session made about where the 36 ms per layer
  * goes was arithmetic on transfer sizes; this measures the six stages directly and prints the average
@@ -2658,6 +2665,13 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
     ffn_stage_mark(1);
     quantize_q8k_kernel<<<dim3(nbx, M), 32>>>(dx, qx, hidden == K ? K : K, K, nbx);
     ffn_stage_mark(2);
+    if (getenv("G4_XXS_CHECK") && (tg == 18 || tg == 23)) {
+        static int done;
+        if (!done) {
+            done = 1;
+            wubu_cuda_check_xxs(d_wg, tg, qx, K, ff, sg, M);
+        }
+    }
     if (mrow_into_dev(tg, d_wg, qx, dg, sg, nbx, ff, M) != 0) return -5;
     if (mrow_into_dev(tu, d_wu, qx, du, su, nbx, ff, M) != 0) return -6;
     ffn_stage_mark(3);
@@ -2666,6 +2680,13 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
     ffn_stage_mark(4);
     quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(dg, qf, ff, ff, nbf);
     ffn_stage_mark(5);
+    if (getenv("G4_XXS_CHECK") && (td == 18 || td == 23)) {
+        static int done_d;
+        if (!done_d) {
+            done_d = 1;
+            wubu_cuda_check_xxs(d_wd, td, qf, ff, hidden, sd, M);
+        }
+    }
     if (mrow_into_dev(td, d_wd, qf, dout, sd, nbf, hidden, M) != 0) return -9;
     ffn_stage_mark(6);
     if (cudaMemcpy(h_out, dout, (size_t)hidden * M * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
@@ -2891,146 +2912,6 @@ WUBU_EXPORT int wubu_cuda_attn_block_mrow(const void *d_wq, int tq, const void *
 }
 
 
-/* IQ3_XXS (18) and IQ4_XS (23) for M rows. The single-row kernels already exist and are correct, but
- * the per-tensor prefill path calls them once per row, and each row re-reads the whole weight matrix:
- * 87 rows x 19.9 MB is what made the five layers using these types cost 205-253 ms each. This is the
- * same block shape as the IQ2_S mma kernel - four threads per column decoding eight signed codes into
- * shared memory, then the shared mma tail - with only the decode differing, reading the codebooks that
- * wubu_gpu_init already uploads into c_iq3xxs_grid / c_ksigns_iq2xs / c_iq4nl. */
-__global__ void iq_xxs_matvec_mma_kernel(const uint8_t * __restrict__ w,
-                                         const c_q8_k * __restrict__ xq8m,
-                                         float * __restrict__ y, int64_t col_stride_bytes,
-                                         int nblocks, int n_cols, int M, int q8_row_blocks,
-                                         int type, int row_per_block)
-{
-    __shared__ int8_t sW[IQ2S_MMA_COLS][IQ2S_MMA_PAD];
-    __shared__ float  sLo[IQ2S_MMA_COLS][8];
-    __shared__ float  sHi[IQ2S_MMA_COLS][8];
-
-    const int lane = threadIdx.x & 31;
-    const int warp = threadIdx.x >> 5;
-    const int tid = threadIdx.x;
-    const int gid = lane >> 2, tig = lane & 3;
-    const int col0 = blockIdx.x * IQ2S_MMA_COLS;
-    const int row0 = blockIdx.y * row_per_block;
-    if (row0 >= M) return;
-    const int RH = row_per_block / 16;
-
-    float accf[8][4];
-    for (int r = 0; r < RH; ++r)
-        for (int q = 0; q < 4; ++q) accf[r][q] = 0.0f;
-
-    const int wbytes = (type == 18) ? 98 : 136;
-
-    for (int b = 0; b < nblocks; ++b) {
-        const int c = tid / 4, entry = tid & 3, gc = col0 + c;
-        if (gc < n_cols) {
-            const uint8_t *blk = w + (int64_t)gc * col_stride_bytes + (int64_t)b * wbytes;
-            const float dsuper = f16_fast((uint16_t)(blk[0] | ((uint16_t)blk[1] << 8)));
-            if (type == 18) {
-                const uint8_t *qs = blk + 2, *ss = blk + 66;
-                for (int g = 0; g < 8; ++g) {
-                    uint32_t a32;
-                    memcpy(&a32, ss + 4 * g, 4);
-                    const float sc = dsuper * (0.5f + (float)(a32 >> 28)) * 0.5f;
-                    const uint8_t signs = c_ksigns_iq2xs[(a32 >> (7 * entry)) & 127];
-                    int32_t a0, a1;
-                    memcpy(&a0, &c_iq3xxs_grid[qs[8 * g + 2 * entry + 0]], 4);
-                    memcpy(&a1, &c_iq3xxs_grid[qs[8 * g + 2 * entry + 1]], 4);
-                    const uint32_t ml = (((uint32_t)(signs & 0x0F) * 0x00204081u) & 0x01010101u) * 0xFFu;
-                    const uint32_t mh = (((uint32_t)(signs >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu;
-                    a0 = (int32_t)__vsub4((uint32_t)a0 ^ ml, ml);
-                    a1 = (int32_t)__vsub4((uint32_t)a1 ^ mh, mh);
-                    memcpy(&sW[c][g * 32 + entry * 8 + 0], &a0, 4);
-                    memcpy(&sW[c][g * 32 + entry * 8 + 4], &a1, 4);
-                    sLo[c][g] = sc;
-                    sHi[c][g] = sc;
-                }
-            } else {
-                const uint16_t sh = (uint16_t)(blk[2] | ((uint16_t)blk[3] << 8));
-                const uint8_t *sl = blk + 4, *qs = blk + 8;
-                const int high = (entry >= 2);
-                const int bytebase = (entry & 1) * 8;
-                for (int g = 0; g < 8; ++g) {
-                    const int ls = ((sl[g / 2] >> (4 * (g % 2))) & 0xf) | (((sh >> (2 * g)) & 3) << 4);
-                    const float dl = dsuper * (float)(ls - 32);
-                    const uint8_t *qb = qs + 16 * g + bytebase;
-                    int32_t a0 = 0, a1 = 0;
-                    for (int j = 0; j < 4; ++j) {
-                        const int v0 = high ? (qb[j] >> 4) : (qb[j] & 0xf);
-                        const int v1 = high ? (qb[4 + j] >> 4) : (qb[4 + j] & 0xf);
-                        ((int8_t *)&a0)[j] = c_iq4nl[v0];
-                        ((int8_t *)&a1)[j] = c_iq4nl[v1];
-                    }
-                    memcpy(&sW[c][g * 32 + entry * 8 + 0], &a0, 4);
-                    memcpy(&sW[c][g * 32 + entry * 8 + 4], &a1, 4);
-                    sLo[c][g] = dl;
-                    sHi[c][g] = dl;
-                }
-            }
-        } else {
-            memset(&sW[c][0], 0, IQ2S_MMA_PAD);
-            for (int g = 0; g < 8; ++g) { sLo[c][g] = 0.0f; sHi[c][g] = 0.0f; }
-        }
-        __syncthreads();
-
-        for (int rh = 0; rh < RH; ++rh) {
-            const int rbase = row0 + rh * 16;
-            float dq0 = 0.0f, dq1 = 0.0f;
-            {
-                const int r0 = rbase + gid, r1 = r0 + 8;
-                if (r0 < M) dq0 = xq8m[(int64_t)r0 * q8_row_blocks + b].d;
-                if (r1 < M) dq1 = xq8m[(int64_t)r1 * q8_row_blocks + b].d;
-            }
-            const int cl0 = warp * 8 + tig * 2;
-            for (int g = 0; g < 8; ++g) {
-                const int r0 = rbase + gid, r1 = r0 + 8;
-                const size_t qoff = (size_t)g * 32;
-                uint32_t a[4] = {0, 0, 0, 0};
-                if (r0 < M) {
-                    const int8_t *q0 = xq8m[(int64_t)r0 * q8_row_blocks + b].qs + qoff;
-                    memcpy(&a[0], q0 + tig * 4, 4);
-                    memcpy(&a[2], q0 + tig * 4 + 16, 4);
-                }
-                if (r1 < M) {
-                    const int8_t *q1 = xq8m[(int64_t)r1 * q8_row_blocks + b].qs + qoff;
-                    memcpy(&a[1], q1 + tig * 4, 4);
-                    memcpy(&a[3], q1 + tig * 4 + 16, 4);
-                }
-                uint32_t b2[2] = {0, 0};
-                const int cl = warp * 8 + gid;
-                memcpy(&b2[0], &sW[cl][g * 32 + tig * 4], 4);
-                memcpy(&b2[1], &sW[cl][g * 32 + tig * 4 + 16], 4);
-
-                int32_t accLo[4] = {0, 0, 0, 0}, accHi[4] = {0, 0, 0, 0};
-                const uint32_t aLo[4] = {a[0], a[1], 0, 0}, aHi[4] = {0, 0, a[2], a[3]};
-                const uint32_t bLo[2] = {b2[0], 0}, bHi[2] = {0, b2[1]};
-                mma_i8_s32(accLo, aLo, bLo);
-                mma_i8_s32(accHi, aHi, bHi);
-                const float lo0 = sLo[cl0][g], lo1 = sLo[cl0 + 1][g];
-                const float hi0 = sHi[cl0][g], hi1 = sHi[cl0 + 1][g];
-                accf[rh][0] += ((float)accLo[0] * lo0 + (float)accHi[0] * hi0) * dq0;
-                accf[rh][1] += ((float)accLo[1] * lo1 + (float)accHi[1] * hi1) * dq0;
-                accf[rh][2] += ((float)accLo[2] * lo0 + (float)accHi[2] * hi0) * dq1;
-                accf[rh][3] += ((float)accLo[3] * lo1 + (float)accHi[3] * hi1) * dq1;
-            }
-        }
-        __syncthreads();
-    }
-
-    const int oc = col0 + warp * 8 + tig * 2;
-    for (int rh = 0; rh < RH; ++rh) {
-        const int orow = row0 + rh * 16 + gid;
-        if (orow < M) {
-            if (oc < n_cols) y[(int64_t)orow * n_cols + oc] = accf[rh][0];
-            if (oc + 1 < n_cols) y[(int64_t)orow * n_cols + oc + 1] = accf[rh][1];
-        }
-        if (orow + 8 < M) {
-            if (oc < n_cols) y[(int64_t)(orow + 8) * n_cols + oc] = accf[rh][2];
-            if (oc + 1 < n_cols) y[(int64_t)(orow + 8) * n_cols + oc + 1] = accf[rh][3];
-        }
-    }
-}
 
 /* Diagnostic: prove the IQ3_XXS / IQ4_XS codebooks actually reached the device. A missing table makes
  * the mma kernel return zero for every column, which shows up as plausible-looking but wrong text. */
@@ -3042,5 +2923,141 @@ WUBU_EXPORT int wubu_cuda_dump_tables(void)
     if (cudaMemcpyFromSymbol(v, c_iq4nl, sizeof(v)) != cudaSuccess) return -2;
     fprintf(stderr, "[TBL] iq3xxs %08x %08x %08x %08x | iq4nl %d %d %d %d\n",
             g[0], g[1], g[2], g[3], v[0], v[1], v[2], v[3]);
+    return 0;
+}
+
+/* IQ3_XXS (18) and IQ4_XS (23) for M rows, warp per column. The single-row kernels exist and are
+ * correct, but the prefill path calls them once per row and each row re-reads all 19.9 MB of weights -
+ * that is the 205-253 ms the five layers using these types cost. Here one warp takes a column: the 32
+ * lanes decode the block cooperatively (lane = group*4 + entry, eight values each, exactly the
+ * verified decode), then every lane dots ITS row against shared memory with dp4a. */
+__global__ void iq_xxs_matvec_warp_kernel(const uint8_t * __restrict__ w,
+                                          const c_q8_k * __restrict__ xq8,
+                                          float * __restrict__ y, int64_t col_stride_bytes,
+                                          int nblocks, int n_cols, int M, int q8_row_blocks,
+                                          int type, int row_group)
+{
+    __shared__ int8_t sW[256];
+    __shared__ float  sSc[8];
+
+    const int lane = threadIdx.x & 31;
+    const int col = blockIdx.x;
+    const int row = blockIdx.y * row_group + lane;
+    if (col >= n_cols) return;
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+    const int g = lane >> 2, entry = lane & 3;
+    const int wbytes = (type == 18) ? 98 : 136;
+
+    float acc = 0.0f;
+    for (int b = 0; b < nblocks; ++b) {
+        const uint8_t *blk = wcol + (int64_t)b * wbytes;
+        const float dsuper = f16_fast((uint16_t)(blk[0] | ((uint16_t)blk[1] << 8)));
+        if (type == 18) {
+            uint32_t a32;
+            memcpy(&a32, blk + 66 + 4 * g, 4);
+            const uint8_t signs = c_ksigns_iq2xs[(a32 >> (7 * entry)) & 127];
+            int32_t a0, a1;
+            memcpy(&a0, &c_iq3xxs_grid[blk[2 + 8 * g + 2 * entry + 0]], 4);
+            memcpy(&a1, &c_iq3xxs_grid[blk[2 + 8 * g + 2 * entry + 1]], 4);
+            const uint32_t ml = (((uint32_t)(signs & 0x0F) * 0x00204081u) & 0x01010101u) * 0xFFu;
+            const uint32_t mh = (((uint32_t)(signs >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu;
+            a0 = (int32_t)__vsub4((uint32_t)a0 ^ ml, ml);
+            a1 = (int32_t)__vsub4((uint32_t)a1 ^ mh, mh);
+            memcpy(&sW[g * 32 + entry * 8 + 0], &a0, 4);
+            memcpy(&sW[g * 32 + entry * 8 + 4], &a1, 4);
+            sSc[g] = dsuper * (0.5f + (float)(a32 >> 28)) * 0.5f;
+        } else {
+            const uint16_t sh = (uint16_t)(blk[2] | ((uint16_t)blk[3] << 8));
+            const uint8_t *sl = blk + 4, *qs = blk + 8;
+            const int ls = ((sl[g / 2] >> (4 * (g % 2))) & 0xf) | (((sh >> (2 * g)) & 3) << 4);
+            const uint8_t *qb = qs + 16 * g + (entry & 1) * 8;
+            const int high = (entry >= 2);
+            int32_t a0 = 0, a1 = 0;
+            for (int j = 0; j < 4; ++j) {
+                const int v0 = high ? (qb[j] >> 4) : (qb[j] & 0xf);
+                const int v1 = high ? (qb[4 + j] >> 4) : (qb[4 + j] & 0xf);
+                ((int8_t *)&a0)[j] = c_iq4nl[v0];
+                ((int8_t *)&a1)[j] = c_iq4nl[v1];
+            }
+            memcpy(&sW[g * 32 + entry * 8 + 0], &a0, 4);
+            memcpy(&sW[g * 32 + entry * 8 + 4], &a1, 4);
+            sSc[g] = dsuper * (float)(ls - 32);
+        }
+        __syncwarp();
+
+        if (row < M) {
+            const c_q8_k *q8b = xq8 + (int64_t)row * q8_row_blocks + b;
+            for (int gg = 0; gg < 8; ++gg) {
+                const int8_t *q = q8b->qs + gg * 32;
+                const int8_t *s = sW + gg * 32;
+                int sumi = 0;
+                for (int v = 0; v < 32; v += 4) {
+                    int32_t qa, wa;
+                    memcpy(&qa, q + v, 4);
+                    memcpy(&wa, s + v, 4);
+                    sumi = __dp4a(qa, wa, sumi);
+                }
+                acc += (float)sumi * sSc[gg] * q8b->d;
+            }
+        }
+        __syncwarp();
+    }
+    if (row < M) y[(int64_t)row * n_cols + col] = acc;
+}
+
+/* A/B the two kernels on identical arguments: the M-row path against the per-row kernel that decode
+ * and the fallback already use. Whichever side is wrong becomes visible as a per-row difference. */
+WUBU_EXPORT int wubu_cuda_check_xxs(const void *d_w, int type, const void *d_q8, int K, int n_cols,
+                                    long long stride, int M)
+{
+    const int nb = K / QK_K;
+    const c_q8_k *q8 = (const c_q8_k *)d_q8;
+    float *y1 = (float *)malloc((size_t)M * n_cols * sizeof(float));
+    float *y2 = (float *)malloc((size_t)M * n_cols * sizeof(float));
+    if (!y1 || !y2) return -1;
+    float *dy = (float *)pool_get("chk.y", (size_t)M * (size_t)n_cols * sizeof(float));
+    if (!dy) { free(y1); free(y2); return -2; }
+    dim3 g(n_cols, (M + 31) / 32);
+    iq_xxs_matvec_warp_kernel<<<g, 32>>>((const uint8_t *)d_w, q8, dy, stride, nb, n_cols, M, nb, type, 32);
+    if (cudaGetLastError() != cudaSuccess) { free(y1); free(y2); return -3; }
+    cudaDeviceSynchronize();
+    if (cudaMemcpy(y1, dy, (size_t)M * n_cols * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+        return -4;
+    for (int r = 0; r < M; ++r) {
+        int rc = (type == 18)
+            ? wubu_cuda_matvec_iq3xxs(d_w, (const char *)d_q8 + (size_t)r * nb * sizeof(c_q8_k),
+                                      dy, K, n_cols, stride)
+            : wubu_cuda_matvec_iq4xs(d_w, (const char *)d_q8 + (size_t)r * nb * sizeof(c_q8_k),
+                                     dy, K, n_cols, stride);
+        if (rc != 0) { free(y1); free(y2); return -5; }
+        cudaDeviceSynchronize();
+        if (cudaMemcpy(y2 + (size_t)r * n_cols, dy, (size_t)n_cols * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess) { free(y1); free(y2); return -6; }
+    }
+    double worst = 0.0; int wi = -1, wj = -1;
+    for (int r = 0; r < M; ++r)
+        for (int c = 0; c < n_cols; ++c) {
+            const double a = y1[(size_t)r * n_cols + c], b2 = y2[(size_t)r * n_cols + c];
+            const double den = fabs(b2) > 1e-6 ? fabs(b2) : 1.0;
+            const double rel = fabs(a - b2) / den;
+            if (rel > worst) { worst = rel; wi = r; wj = c; }
+        }
+    int over1 = 0, over01 = 0, nonzero = 0;
+    for (int r = 0; r < M; ++r)
+        for (int c = 0; c < n_cols; ++c) {
+            const double a = y1[(size_t)r * n_cols + c], b2 = y2[(size_t)r * n_cols + c];
+            const double den = fabs(b2) > 1e-6 ? fabs(b2) : 1.0;
+            const double rel = fabs(a - b2) / den;
+            if (fabs(a - b2) > 0.0) ++nonzero;
+            if (rel > 0.01) ++over1;
+            if (rel > 0.001) ++over01;
+        }
+    fprintf(stderr, "[XXS] type %d K %d cols %d M %d | worst %.4g (r%d c%d: %.6g vs %.6g) | "
+                    "elements differing: %d, >0.1%%: %d, >1%%: %d of %d\n",
+            type, K, n_cols, M, worst, wi, wj,
+            wi >= 0 ? (double)y1[(size_t)wi * n_cols + wj] : 0.0,
+            wi >= 0 ? (double)y2[(size_t)wi * n_cols + wj] : 0.0,
+            nonzero, over01, over1, M * n_cols);
+    free(y1); free(y2);
     return 0;
 }
