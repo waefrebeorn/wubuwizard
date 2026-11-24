@@ -570,6 +570,12 @@ layers, zero bandwidth and NULL stall outputs are rejected.
 compute windows are synthetic; no measured I/O trace or speedup is claimed.
 
 | EG-45 | Low-rank/amortised KV, variable-bit packed VQ, coordinated expert layer staging | new KV families vs TurboQuant/RotorQuant; refines EG-20 | LowRAM, MeltKV, MoE-CORE (Oct–Nov 2026) | `test_eg45_kvfam`, `test_eg45_varbit_vq`, `test_eg45_expert_stage` | L | **DONE (all three halves gated)** — `src/wubu_lowrank_kv.c/.h` gates reconstruction error/storage; `src/wubu_varbit_vq.c/.h` gates variable-width bit packing (EG-45b); `src/wubu_expert_stage.c/.h` gates overlapped staging and stall arithmetic (EG-45c). |
+Hardware context only (2026-11-23): a published Turing/GTX 16 P2P guide grows the
+256 MB BAR1 window to full VRAM and patches driver modules plus an LD_PRELOAD
+shim to allow peer copies across different chips. It targets a multi-GPU Linux
+bench, not the single 6 GB RTX 4050 T1 host, and requires boot-time firmware
+and driver changes. Recorded as context for EG-31/EG-46; no gate is claimed.
+
 | EG-46 | Sync-free all-reduce (redundant pull + speculative reduction) | new; TIER-GATED T4, no T1 work | SiFAR, MICRO 2026 | `test_eg46_allreduce` | XL | Defer until multi-GPU tier exists | **DEFERRED (2026-11-23):** tier-gated T4; no multi-GPU tier exists on this target.
 
 ## Wave 6 — second-degree, new engines and 2026 Q3 (deduped)
