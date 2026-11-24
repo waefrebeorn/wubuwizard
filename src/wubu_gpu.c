@@ -54,6 +54,7 @@ static struct {
     fn_mv2 mv4;   /* warp-per-column IQ4_XS kernel */
     fn_mv2 mv5;   /* warp-per-column IQ2_XS kernel */
     fn_mv_mrow mrow;  /* M-row IQ2_S prefill kernel (weight decoded once per MT rows) */
+    fn_mv_mrow mrow3; /* M-row IQ3_S prefill kernel */
 } G;
 
 int wubu_gpu_init(void)
@@ -98,6 +99,7 @@ int wubu_gpu_init(void)
     G.mv4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq4xs");
     G.mv5 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2xs");
     G.mrow = (fn_mv_mrow)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_mrow");
+    G.mrow3 = (fn_mv_mrow)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq3s_mrow");
     if (!avail || !G.alloc || !G.upload || !G.free_dev || !G.download || !G.q8k || !G.mv) return 0;
     if (!avail()) return 0;
     if (tables) {
@@ -753,6 +755,13 @@ int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K, int n_cols
 {
     if (!wubu_gpu_init() || !G.mrow) return -1;
     return G.mrow(d_w, x, K, n_cols, col_stride, M, y);
+}
+
+int wubu_gpu_matvec_iq3s_mrow(const void *d_w, const float *x, int K, int n_cols,
+                              long long col_stride, int M, float *y)
+{
+    if (!wubu_gpu_init() || !G.mrow3) return -1;
+    return G.mrow3(d_w, x, K, n_cols, col_stride, M, y);
 }
 
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,

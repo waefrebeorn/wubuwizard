@@ -557,6 +557,132 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow_host(const void *h_w, const float *h_
     return rc;
 }
 
+
+/* ---------------- M-row IQ3_S: same idea as the IQ2_S path above ----------------
+ * IQ3_S owns attn_v, attn_out and ffn_down in this model - ffn_down alone is 15360x3840 -
+ * so leaving it on the CPU would cap the batched prefill no matter how good the IQ2_S
+ * kernel gets. Lane-per-block as in matvec_kernel, but the block is decoded once and
+ * consumed by MT rows; only the q8 bytes and the row scale differ per row. */
+#define IQ3S_MT 4
+__global__ void iq3s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
+                                        const c_q8_k * __restrict__ xq8m,
+                                        float * __restrict__ y,
+                                        int64_t col_stride_bytes, int nblocks,
+                                        int n_cols, int M, int q8_row_blocks)
+{
+    const int warps_per_block = blockDim.x / 32;
+    const int col = blockIdx.x * warps_per_block + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    if (col >= n_cols) return;
+
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+
+    for (int m0 = 0; m0 < M; m0 += IQ3S_MT) {
+        const int mt = (M - m0) < IQ3S_MT ? (M - m0) : IQ3S_MT;
+        float acc[IQ3S_MT];
+        for (int t = 0; t < IQ3S_MT; ++t) acc[t] = 0.0f;
+
+        for (int b = lane; b < nblocks; b += 32) {
+            const c_iq3_s *xb = (const c_iq3_s *)wcol + b;
+            const uint8_t *qs = xb->qs;
+            const uint8_t *qh = xb->qh;
+            const uint8_t *signs = xb->signs;
+            int bsum[IQ3S_MT];
+            for (int t = 0; t < IQ3S_MT; ++t) bsum[t] = 0;
+
+            for (int ib32 = 0; ib32 < 8; ib32 += 2) {
+                const int ls1 = 2 * (xb->scales[ib32 / 2] & 0xf) + 1;
+                const int ls2 = 2 * (xb->scales[ib32 / 2] >> 4) + 1;
+                for (int half = 0; half < 2; ++half) {
+                    int sumi[IQ3S_MT];
+                    for (int t = 0; t < IQ3S_MT; ++t) sumi[t] = 0;
+                    for (int l = 0; l < 4; ++l) {
+                        const uint8_t *g1 = (const uint8_t *)(c_iq3s_grid +
+                            (uint32_t)(qs[2 * l + 0] | ((qh[ib32 + half] << (8 - 2 * l)) & 256)));
+                        const uint8_t *g2 = (const uint8_t *)(c_iq3s_grid +
+                            (uint32_t)(qs[2 * l + 1] | ((qh[ib32 + half] << (7 - 2 * l)) & 256)));
+                        int32_t a0, a1;
+                        memcpy(&a0, g1, 4);
+                        memcpy(&a1, g2, 4);
+                        /* decoded once for every row in the tile */
+                        for (int j = 0; j < 4; ++j) {
+                            if ((signs[l] >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
+                            if ((signs[l] >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
+                        }
+                        for (int t = 0; t < mt; ++t) {
+                            const c_q8_k *q8b = xq8m + (int64_t)(m0 + t) * q8_row_blocks + b;
+                            const int8_t *q8 = q8b->qs + (ib32 >> 1) * 64 + half * 32 + l * 8;
+                            int32_t b0, b1;
+                            memcpy(&b0, q8 + 0, 4);
+                            memcpy(&b1, q8 + 4, 4);
+                            sumi[t] += __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
+                        }
+                    }
+                    for (int t = 0; t < mt; ++t) bsum[t] += sumi[t] * (half ? ls2 : ls1);
+                    /* Advance per HALF, exactly as iq3s_block_dot does: 8 qs bytes and 4 sign
+                     * bytes cover one half-block. Advancing per ib32 pair instead was the bug
+                     * that made the first version of this kernel produce garbage. */
+                    qs += 8;
+                    signs += 4;
+                }
+            }
+            const float dx = f16_to_f32_dev(xb->d);
+            for (int t = 0; t < mt; ++t) {
+                const c_q8_k *q8b = xq8m + (int64_t)(m0 + t) * q8_row_blocks + b;
+                acc[t] += dx * q8b->d * (float)bsum[t];
+            }
+        }
+
+        for (int t = 0; t < mt; ++t) {
+            float s = acc[t];
+            for (int off = 16; off > 0; off >>= 1)
+                s += __shfl_down_sync(0xffffffffu, s, off);
+            if (lane == 0) y[(int64_t)(m0 + t) * n_cols + col] = s;
+        }
+    }
+}
+
+WUBU_EXPORT int wubu_cuda_matvec_iq3s_mrow(const void *d_w, const float *h_x, int K,
+                                           int n_cols, long long col_stride, int M, float *h_y)
+{
+    if (!d_w || !h_x || !h_y || K <= 0 || n_cols <= 0 || M <= 0 || (K % QK_K) != 0) return -1;
+    const int nblocks = K / QK_K;
+    const int need = nblocks * M;
+    if (g_q8m_cap < need) {
+        if (g_q8m) cudaFree(g_q8m);
+        g_q8m = NULL;
+        if (cudaMalloc((void **)&g_q8m, (size_t)need * sizeof(c_q8_k)) != cudaSuccess) {
+            g_q8m_cap = 0;
+            return -2;
+        }
+        g_q8m_cap = need;
+    }
+    const size_t xneed = (size_t)K * (size_t)M * sizeof(float);
+    const size_t yneed = (size_t)n_cols * (size_t)M * sizeof(float);
+    if (g_mrow_xcap < xneed) {
+        if (g_mrow_x) cudaFree(g_mrow_x);
+        g_mrow_x = NULL;
+        if (cudaMalloc((void **)&g_mrow_x, xneed) != cudaSuccess) { g_mrow_xcap = 0; return -3; }
+        g_mrow_xcap = xneed;
+    }
+    if (g_mrow_ycap < yneed) {
+        if (g_mrow_y) cudaFree(g_mrow_y);
+        g_mrow_y = NULL;
+        if (cudaMalloc((void **)&g_mrow_y, yneed) != cudaSuccess) { g_mrow_ycap = 0; return -3; }
+        g_mrow_ycap = yneed;
+    }
+    if (cudaMemcpy(g_mrow_x, h_x, xneed, cudaMemcpyHostToDevice) != cudaSuccess) return -4;
+    for (int m = 0; m < M; ++m)
+        quantize_q8k_kernel<<<nblocks, 32>>>(g_mrow_x + (size_t)m * K,
+                                             g_q8m + (size_t)m * nblocks, K);
+    const int warps_per_block = 8;
+    const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
+    iq3s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
+        (const uint8_t *)d_w, g_q8m, g_mrow_y, col_stride, nblocks, n_cols, M, nblocks);
+    if (cudaGetLastError() != cudaSuccess) return -5;
+    return cudaMemcpy(h_y, g_mrow_y, yneed, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
+}
+
 /* Narrow matvecs are occupancy-limited (a 3072-column projection is 3072 warps for
  * 20 SMs, each still walking K), so split K four ways below this width. The FFN
  * shapes (15360 columns) stay on the warp-per-column v3 kernel. */

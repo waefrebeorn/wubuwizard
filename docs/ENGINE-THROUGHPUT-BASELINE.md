@@ -288,6 +288,14 @@ structural rather than fixable by tuning. M rows through an M==1 kernel is M syn
 round trips per tensor per layer; for a 1717-token prompt that is roughly 400k CUDA calls, and the
 weight read - the only cost that matters - is not amortised at all. Reverted.
 
+**Measured ladder, 87-token prompt, RTX 4050:** CPU batched 7.3 → IQ2_S M-row 14.3 → IQ2_S + IQ3_S
+M-row **17.2**, against the per-token loop's 13.9. That is a 24% win over the current default, with
+6 of 7 prompts producing an identical 24-token continuation and the seventh diverging at token 22 -
+the same sub-ulp class as the three-way tie described above, and the same thing every engine sees
+between prompt-processing and token-by-token attention (batched causal attention sums in a
+different order than the incremental KV path). It stays opt-in (`G4_PREFILL_BATCH=1`) for that
+reason, not because it is unmeasured.
+
 **First working step: an M-row IQ2_S kernel doubles the batched path** (measured at 87 tokens:
 7.3 → **14.3 tok/s**). The cost a GEMM actually amortises here is not the `dp4a`, it is the IQ2_S
 decode - grid lookup, eight sign tests, scale nibble, block scale - which was being redone for

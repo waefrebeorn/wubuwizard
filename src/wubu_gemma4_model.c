@@ -734,13 +734,19 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
      * MT=4 prompt rows (wubu_cuda_quant.cu, iq2s_matvec_mrow_kernel). */
     if (getenv("G4_MROW_DEBUG"))
         fprintf(stderr, "[MM] dev=%d M=%d N=%d K=%d type=%d\n", w->dev ? 1 : 0, M, N, K, w->ggml_type);
-    if (w->dev && M > 1 && !getenv("G4_PREFILL_CPU") && w->ggml_type == GGML_TYPE_IQ2_S &&
+    if (w->dev && M > 1 && !getenv("G4_PREFILL_CPU") &&
+        (w->ggml_type == GGML_TYPE_IQ2_S || w->ggml_type == GGML_TYPE_IQ3_S) &&
         (K % 256) == 0) {
         extern int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K,
                                              int n_cols, long long col_stride, int M,
                                              float *y);
+        extern int wubu_gpu_matvec_iq3s_mrow(const void *d_w, const float *x, int K,
+                                             int n_cols, long long col_stride, int M,
+                                             float *y);
         const long long stride = (long long)(w->raw_bytes / N);
-        const int mrc = wubu_gpu_matvec_iq2s_mrow(w->dev, x, K, N, stride, M, c);
+        const int mrc = (w->ggml_type == GGML_TYPE_IQ2_S)
+            ? wubu_gpu_matvec_iq2s_mrow(w->dev, x, K, N, stride, M, c)
+            : wubu_gpu_matvec_iq3s_mrow(w->dev, x, K, N, stride, M, c);
         if (getenv("G4_MROW_DEBUG"))
             fprintf(stderr, "[MROW] K=%d N=%d M=%d stride=%lld rc=%d\n", K, N, M, stride, mrc);
         if (mrc == 0) {
