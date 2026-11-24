@@ -1365,6 +1365,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     int half_done = 0;
     {
         static int half_enabled = -1;
+        static int half_mode = 0;
         if (half_enabled < 0) {
             /* Opt-in, and the reason is quality, not bookkeeping. It is the faster path -
              * 14.1-14.3 tok/s against 12.8-12.9 at 65 tokens of context and 13.5 against
@@ -1378,8 +1379,14 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
              * opt-in for measurement, not default. */
             const char *e = getenv("G4_ATTN_DEV");
             half_enabled = (e != NULL && *e != '0');
+            /* Bisect which layer kind the composite gets wrong: G4_ATTN_DEV=full runs it
+             * only on the full-attention layers, =slide only on the sliding ones. */
+            if (e && strcmp(e, "full") == 0) half_mode = 1;
+            else if (e && strcmp(e, "slide") == 0) half_mode = 2;
         }
-        if (half_enabled && N == 1 && !layer->share_kv && layer->attn_q.dev &&
+        const int mode_ok = (half_mode == 0) || (half_mode == 1 && layer->is_full) ||
+                            (half_mode == 2 && !layer->is_full);
+        if (half_enabled && mode_ok && N == 1 && !layer->share_kv && layer->attn_q.dev &&
             layer->attn_k.dev && layer->attn_v.dev && layer->attn_out.dev) {
             g4_kv_cache_t *cache_h = g4_kv_get(model, layer);
             const int pos_h = positions[0];

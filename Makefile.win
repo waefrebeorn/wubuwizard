@@ -688,6 +688,10 @@ gen_text_gemma4_gpu: tools/gen_text_gemma4.c $(G4_GPU_OBJ)
 test_eg122_cuda_iq_new: tools/test_eg122_cuda_iq_new.c src/wubu_vecdot_iq3_xxs.c src/wubu_vecdot_iq4_xs.c src/wubu_vecdot_iq.c src/wubu_vecdot_iq2xs.c src/gguf_reader.c src/wubu_dequant_fp4.c src/quantized_dot_generic.c src/wubu_win.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
+# EG-126: device attention over a populated KV cache at the model's real dimensions.
+test_eg126_attn_dev: tools/test_eg126_attn_dev.c
+	$(CC) $(CFLAGS) -o $@ tools/test_eg126_attn_dev.c -static
+
 # EG-124: composite attention half-layer vs the CPU sequence.
 test_eg124_attn_half: tools/test_eg124_attn_half.c src/wubu_vecdot_iq.c src/gguf_reader.c src/wubu_dequant_fp4.c src/quantized_dot_generic.c src/wubu_win.c
 	$(CC) $(CFLAGS) -o $@ tools/test_eg124_attn_half.c src/wubu_vecdot_iq.c src/gguf_reader.c src/wubu_dequant_fp4.c src/quantized_dot_generic.c src/wubu_win.c -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static

@@ -157,8 +157,25 @@ It is the faster path: **14.1-14.3 tok/s** against 12.8-12.9 at 65 tokens of con
 place. Its arithmetic also tracks the CPU sequence closely (q/k/v/attention to 4e-07,
 o-projection to 1.5e-05, EG-124).
 
-It is still opt-in because it is **wrong on real data, from the first token**, not because
-of a bookkeeping rule and not because of slow drift:
+It is still opt-in. The root cause is now pinned down as **accumulation order, ~5e-06
+relative per layer**, not a structural bug:
+
+- EG-126 (new) gates `attn_decode_kernel` at the model's real width (16 q heads, 8 kv heads,
+  hd 256, 20 populated positions) against a double reference: worst absolute 4.6e-06,
+  relative 4.6e-06. So the attention kernel is right at real dimensions - EG-124's blind
+  spot was its small shape, not the kernel.
+- The error per layer therefore comes from computing the same attention in a different
+  order (the device does a plain mul-add score with a warp reduction; the CPU path uses
+  FMA with two accumulators and a different horizontal sum).
+- Bisected by layer kind: with only the full-attention layers fused the first two tokens
+  match (`45518, 107`) and it parts at token 2; with only the sliding layers it parts at
+  token 1; with all 48 fused it is already wrong at token 0. That is a per-layer error
+  compounding with the number of fused layers, which is what 5e-06 x N looks like.
+- Priming the device KV cache from the CPU cache before every token changes nothing, so KV
+  maintenance is not implicated either.
+
+The earlier note here said "wrong from the first token" and treated that as a structural
+bug. It is what all-48-layers-fused looks like, and the bisect above is the correction:
 
 - all 48 layers take the fused path (`share_kv=0`, `no_dev=0`), so there is no mixed-path
   KV-cache explanation for it;
