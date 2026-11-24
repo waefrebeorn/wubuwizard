@@ -320,6 +320,20 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The row-group count was splitting the weight matrix
+
+The stage accounting pointed at the matvec, and the matvec stats showed ~3.3 GB/s of packed weight
+traffic against the 20 GB/s the same kernel reports on its own counters. The cause was the grid: with
+`IQ2S_MMA_RH 2`, a block covers 32 rows, so an 87-row prompt split into three y-blocks and **each
+one re-read the entire weight matrix**. Raising it to 6 puts 96 rows in a block and the prompt fits in
+one.
+
+    interleaved, 87 tokens:   RH=6  32.2 / 32.1      RH=2  31.3 / 31.3       (+3%)
+    1717 tokens:              59.97 s               (was 61.35 s)
+
+dp4a against mma on the same shape, same prompt: 26.5 against 31.6 tok/s, so mma stays the right
+dispatch and the remaining gap is the kernel's unpack and issue rate, not its memory pattern.
+
 ### CORRECTION: the FFN is not transfer-bound. It is 98% matvec.
 
 Two entries above claim the FFN's ~24 ms per layer was "pageable transfer and two Q8_K passes". Both
