@@ -34,27 +34,27 @@ typedef struct {
     int n_blocks;
 } wubu_arena_t;
 
-wubu_arena_t *wubu_arena_create(size_t capacity);
-void wubu_arena_free(wubu_arena_t *a);
+wubu_arena_t *wubu_uarena_create(size_t capacity);
+void wubu_uarena_free(wubu_arena_t *a);
 
 /* Allocate one token's slot in either KV or STATE space. */
-int wubu_arena_alloc(wubu_arena_t *a, int token_id,
+int wubu_uarena_alloc(wubu_arena_t *a, int token_id,
                      wubu_arena_kind_t kind, size_t bytes);
 
 /* All-or-nothing admission of n_tokens consecutive token ids. */
-int wubu_arena_alloc_request(wubu_arena_t *a, int base_token, int n_tokens,
+int wubu_uarena_alloc_request(wubu_arena_t *a, int base_token, int n_tokens,
                              wubu_arena_kind_t kind, size_t bytes_per_token);
 
 /* Free every block owned by a token. Returns number of blocks freed. */
-int wubu_arena_free_token(wubu_arena_t *a, int token_id);
+int wubu_uarena_free_token(wubu_arena_t *a, int token_id);
 
 /* Slide live blocks down to remove holes. Returns bytes reclaimed. */
-size_t wubu_arena_compact(wubu_arena_t *a);
+size_t wubu_uarena_compact(wubu_arena_t *a);
 
-size_t wubu_arena_used(const wubu_arena_t *a);
+size_t wubu_uarena_used(const wubu_arena_t *a);
 
 /* 1 when no two live blocks overlap and all lie inside capacity. */
-int wubu_arena_validate(const wubu_arena_t *a);
+int wubu_uarena_validate(const wubu_arena_t *a);
 
 #ifdef __cplusplus
 }

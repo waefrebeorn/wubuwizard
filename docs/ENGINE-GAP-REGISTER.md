@@ -1368,6 +1368,24 @@ not measured: no Flash bandwidth, W4A16 quantisation or KV-cache claim is made.
 
 | EG-110 | DRAM/Flash hybrid residency planner with fail-closed staging budget (MNN-LLM) | EG-06 plans placement but never proves a streamed layer can be staged in DRAM | MNN-LLM arXiv 2506.10443 / `alibaba/MNN` `transformers/` | `test_eg110_residency` | S | **DONE (residency-contract gate)** — `src/wubu_residency.c/.h` plans hot/streamed layers and fails closed when hot set + staging buffer exceeds the DRAM budget; study clone is read-only. |
 
+**EG-111 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg111_iq_fused`
+gates fused IQ2_S / IQ3_S x Q8_K dot products ported from
+`llama/ggml-cpu/quants.c` (`ggml_vec_dot_iq2_s_q8_K_generic`,
+`ggml_vec_dot_iq3_s_q8_K_generic`). Reference is the repo's independent
+`gguf_dequantize()` path turned into F32 and dotted against the dequantised Q8_K
+row: 64 synthetic blocks per type plus a two-block run agree to worst relative
+error 1.0e-07 (IQ2_S) and 1.1e-07 (IQ3_S). The IQ2_S 0.125 factor on
+`(0.5 + scale)` was the one porting trap the gate caught (8x error). NULL
+arguments and non-multiple-of-256 lengths fail closed. This gate is **wired into
+the engine**, not test-only: `quantized_matmul_batched` and
+`quantized_matmul_subset` dispatch to the fused kernels and the whole-tensor F32
+dequantisation branch is gone. Measured on the 12B IQ2 model: decode
+0.1 -> 0.7 tok/s (183.15 s -> 18.57 s for 13 tokens), prefill 0.4 -> 0.7 tok/s.
+Greedy output matches the pre-change run for 9 samples and diverges after, which
+is expected: activations are now Q8_K-quantised instead of F32.
+
+| EG-111 | Fused IQ2_S/IQ3_S x Q8_K dot with no F32 weight buffer | EG-110 audit found IQ2_S/IQ3_S dequantised whole tensors per token | ggml `llama/ggml-cpu/quants.c`, `llama/ggml-common.h` | `test_eg111_iq_fused` | M | **DONE and wired** — `src/wubu_vecdot_iq.c/.h`; engine decode 10x faster on the 12B IQ2 GGUF. |
+
 Wiring status: every row above is a *contract* gate. `docs/ENGINE-WIRING-AUDIT.md`
 (2026-11-23) measures that 117 of 123 gate modules have zero engine call sites and only
 6 are called from non-test source, so the next work item is wiring, not another gate.

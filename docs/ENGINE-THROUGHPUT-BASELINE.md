@@ -47,6 +47,27 @@ before the matmul. That is tens of GB of F32 traffic per token on a 4 GB model, 
 matches the measured 14 s/token. IQ2_XXS (20 tensors) already has a fused
 `iq2_xxs_vec_dot`; the two dominant types do not.
 
+## After EG-111 (fused IQ2_S/IQ3_S x Q8_K dot, 2026-11-23)
+
+The two dominant types now have a Q8_K vec_dot (`src/wubu_vecdot_iq.c`, ported from
+`llama/ggml-cpu/quants.c`) and `quantized_matmul_batched` dispatches to them; the
+whole-tensor F32 dequantisation branch is deleted. Same command, same host:
+
+| Run | Prefill | Decode |
+|---|---|---|
+| before (dequant to F32 per call) | 21 tok in 53.21 s (0.4 tok/s) | 13 tok in 183.15 s (0.1 tok/s) |
+| after (fused Q8_K vec_dot) | 21 tok in 31.56 s (0.7 tok/s) | 13 tok in 18.57 s (0.7 tok/s) |
+
+Decode is 9.9x faster; prefill 1.7x. Correctness: the kernels agree with the
+`gguf_dequantize()` reference to 1e-7 relative on 64 synthetic blocks per type (gate
+`test_eg111_iq_fused`). Greedy output matches the old run for 9 samples and then
+diverges, because activations are Q8_K-quantised instead of F32 — expected, not a bug.
+
+Remaining gap to llama.cpp (~21 tok/s decode) is now *inside* the kernel: the ported
+kernels are scalar, the column loop is OpenMP-parallel but each dot is serial, and the
+embedding/output head still dequantises. Next: AVX2 IQ2_S/IQ3_S dots (llama.cpp uses
+`ggml_vec_dot_iq2_s_q8_K` AVX2 variants), then thread tuning per column count.
+
 ## Next engine work (replaces further gate work)
 
 1. Port `ggml_vec_dot_iq2_s_q8_K` and `ggml_vec_dot_iq3_s_q8_K` from the in-repo

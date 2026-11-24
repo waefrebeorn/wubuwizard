@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-wubu_arena_t *wubu_arena_create(size_t capacity) {
+wubu_arena_t *wubu_uarena_create(size_t capacity) {
     wubu_arena_t *a;
     if (capacity == 0) return NULL;
     a = (wubu_arena_t *)calloc(1, sizeof(*a));
@@ -14,10 +14,10 @@ wubu_arena_t *wubu_arena_create(size_t capacity) {
     return a;
 }
 
-void wubu_arena_free(wubu_arena_t *a) { free(a); }
+void wubu_uarena_free(wubu_arena_t *a) { free(a); }
 
 static size_t arena_free_bytes(const wubu_arena_t *a) {
-    return a->capacity - wubu_arena_used(a);
+    return a->capacity - wubu_uarena_used(a);
 }
 
 static size_t first_fit_offset(const wubu_arena_t *a, size_t bytes) {
@@ -31,7 +31,7 @@ static size_t first_fit_offset(const wubu_arena_t *a, size_t bytes) {
     return a->capacity - cursor >= bytes ? cursor : (size_t)-1;
 }
 
-int wubu_arena_alloc(wubu_arena_t *a, int token_id,
+int wubu_uarena_alloc(wubu_arena_t *a, int token_id,
                      wubu_arena_kind_t kind, size_t bytes) {
     size_t off;
     wubu_arena_block_t *b;
@@ -47,15 +47,15 @@ int wubu_arena_alloc(wubu_arena_t *a, int token_id,
     return 0;
 }
 
-int wubu_arena_alloc_request(wubu_arena_t *a, int base_token, int n_tokens,
+int wubu_uarena_alloc_request(wubu_arena_t *a, int base_token, int n_tokens,
                              wubu_arena_kind_t kind, size_t bytes_per_token) {
     int i, start;
     if (!a || n_tokens <= 0 || bytes_per_token == 0) return -1;
     if ((size_t)n_tokens * bytes_per_token > arena_free_bytes(a)) return -1;
-    (void)wubu_arena_compact(a); /* guarantee one contiguous free region */
+    (void)wubu_uarena_compact(a); /* guarantee one contiguous free region */
     start = a->n_blocks;
     for (i = 0; i < n_tokens; i++) {
-        if (wubu_arena_alloc(a, base_token + i, kind, bytes_per_token) != 0) {
+        if (wubu_uarena_alloc(a, base_token + i, kind, bytes_per_token) != 0) {
             while (a->n_blocks > start) {
                 a->n_blocks--;
                 memset(&a->blocks[a->n_blocks], 0, sizeof(a->blocks[0]));
@@ -66,7 +66,7 @@ int wubu_arena_alloc_request(wubu_arena_t *a, int base_token, int n_tokens,
     return 0;
 }
 
-int wubu_arena_free_token(wubu_arena_t *a, int token_id) {
+int wubu_uarena_free_token(wubu_arena_t *a, int token_id) {
     int freed = 0;
     if (!a) return 0;
     for (int i = 0; i < a->n_blocks; i++)
@@ -77,10 +77,10 @@ int wubu_arena_free_token(wubu_arena_t *a, int token_id) {
     return freed;
 }
 
-size_t wubu_arena_compact(wubu_arena_t *a) {
+size_t wubu_uarena_compact(wubu_arena_t *a) {
     size_t cursor = 0, before;
     if (!a) return 0;
-    before = wubu_arena_used(a);
+    before = wubu_uarena_used(a);
     for (int i = 0; i < a->n_blocks; i++) {
         wubu_arena_block_t *b = &a->blocks[i];
         if (!b->used) { b->offset = 0; b->bytes = 0; continue; }
@@ -97,10 +97,10 @@ size_t wubu_arena_compact(wubu_arena_t *a) {
         b->offset = cursor;
         cursor += b->bytes;
     }
-    return before - wubu_arena_used(a);
+    return before - wubu_uarena_used(a);
 }
 
-size_t wubu_arena_used(const wubu_arena_t *a) {
+size_t wubu_uarena_used(const wubu_arena_t *a) {
     size_t total = 0;
     if (!a) return 0;
     for (int i = 0; i < a->n_blocks; i++)
@@ -108,7 +108,7 @@ size_t wubu_arena_used(const wubu_arena_t *a) {
     return total;
 }
 
-int wubu_arena_validate(const wubu_arena_t *a) {
+int wubu_uarena_validate(const wubu_arena_t *a) {
     if (!a) return 0;
     for (int i = 0; i < a->n_blocks; i++) {
         const wubu_arena_block_t *b = &a->blocks[i];

@@ -22,6 +22,7 @@
 
 #include "gguf_reader.h"
 #include "wubu_ssm.h"
+#include "wubu_vecdot_iq.h"
 
 // ========================================================================
 // Block sizes (from ggml-common.h)
@@ -33,6 +34,10 @@
 #define IQ2XXS_BLOCK_SIZE 66
 // block_iq3_xxs: uint16_t d (2) + uint8_t qs[96] (96) = 98
 #define IQ3XXS_BLOCK_SIZE 98
+// block_iq2_s: ggml_half d (2) + uint8_t qs[64] + uint8_t qh[8] + uint8_t scales[8] = 82
+#define IQ2S_BLOCK_SIZE 82
+// block_iq3_s: ggml_half d (2) + uint8_t qs[64] + uint8_t qh[8] + uint8_t signs[32] + uint8_t scales[4] = 110
+#define IQ3S_BLOCK_SIZE 110
 // block_iq4_xs: uint16_t d (2) + uint16_t scales_h (2) + uint8_t scales_l[4] + uint8_t qs[128] = 136
 #define IQ4XS_BLOCK_SIZE 136
 // block_q5_K: ggml_half d (2) + ggml_half dmin (2) + uint8_t scales[12] + uint8_t qh[32] + uint8_t qs[128] = 176
@@ -56,6 +61,8 @@ static int64_t raw_size_for_type(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_F16:      return n_elems * 2;
         case GGML_TYPE_IQ2_XXS:  return n_blocks * IQ2XXS_BLOCK_SIZE;
         case GGML_TYPE_IQ3_XXS:  return n_blocks * IQ3XXS_BLOCK_SIZE;
+        case GGML_TYPE_IQ2_S:    return n_blocks * IQ2S_BLOCK_SIZE;
+        case GGML_TYPE_IQ3_S:    return n_blocks * IQ3S_BLOCK_SIZE;
         case GGML_TYPE_IQ4_XS:   return n_blocks * IQ4XS_BLOCK_SIZE;
         case GGML_TYPE_Q5_K:     return n_blocks * Q5K_BLOCK_SIZE;
         case GGML_TYPE_Q4_K:     return n_blocks * Q4K_BLOCK_SIZE;
@@ -78,6 +85,8 @@ static int64_t block_size_for_type(int ggml_type) {
         case GGML_TYPE_F16:      return 2;     // per element
         case GGML_TYPE_IQ2_XXS:  return IQ2XXS_BLOCK_SIZE;
         case GGML_TYPE_IQ3_XXS:  return IQ3XXS_BLOCK_SIZE;
+        case GGML_TYPE_IQ2_S:    return IQ2S_BLOCK_SIZE;
+        case GGML_TYPE_IQ3_S:    return IQ3S_BLOCK_SIZE;
         case GGML_TYPE_IQ4_XS:   return IQ4XS_BLOCK_SIZE;
         case GGML_TYPE_Q5_K:     return Q5K_BLOCK_SIZE;
         case GGML_TYPE_Q4_K:     return Q4K_BLOCK_SIZE;
@@ -273,6 +282,8 @@ void quantized_matmul(const float *x,
     switch (weight_type) {
         case GGML_TYPE_IQ2_XXS: dot_fn = (vec_dot_fn)iq2_xxs_vec_dot; break;
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
+        case GGML_TYPE_IQ2_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
+        case GGML_TYPE_IQ3_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
 #if defined(__AVX2__)
@@ -442,6 +453,8 @@ void quantized_matmul_from_q8(const void *q8_x,
     switch (weight_type) {
         case GGML_TYPE_IQ2_XXS: dot_fn = (vec_dot_fn)iq2_xxs_vec_dot; break;
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
+        case GGML_TYPE_IQ2_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
+        case GGML_TYPE_IQ3_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
 #if defined(__AVX2__)
@@ -503,47 +516,12 @@ void quantized_matmul_batched(const float *x,
         return;
     }
 
-    /* IQ2_S / IQ3_S have no Q8 vec_dot yet: quantized_matmul dequantizes the
-     * WHOLE weight per call. For a batch, dequantize ONCE and run a dense
-     * GEMM over all N tokens (prefill was re-dequantizing up to 236 MB per
-     * token per matmul). */
-    if (weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ3_S) {
-        int64_t total = n_rows * n_cols;
-        float *wf = (float *)malloc((size_t)total * sizeof(float));
-        if (wf) {
-            gguf_dequantize((const uint8_t *)W, weight_type, total, wf);
-            #pragma omp parallel for collapse(2) if(N * n_cols > 64)
-            for (int i = 0; i < N; i++) {
-                for (int64_t j = 0; j < n_cols; j++) {
-                    const float *xm = x + (size_t)i * n_rows;
-                    const float *wn = wf + (size_t)j * n_rows;
-                    float sum = 0.0f;
-                    int64_t k = 0;
-#if defined(__AVX2__) && defined(__FMA__)
-                    __m256 acc = _mm256_setzero_ps();
-                    for (; k + 8 <= n_rows; k += 8)
-                        acc = _mm256_fmadd_ps(_mm256_loadu_ps(xm + k),
-                                              _mm256_loadu_ps(wn + k), acc);
-                    __m128 s = _mm_add_ps(_mm256_castps256_ps128(acc),
-                                          _mm256_extractf128_ps(acc, 1));
-                    s = _mm_hadd_ps(s, s);
-                    s = _mm_hadd_ps(s, s);
-                    sum = _mm_cvtss_f32(s);
-#endif
-                    for (; k < n_rows; k++) sum += xm[k] * wn[k];
-                    y[(size_t)i * n_cols + j] = sum;
-                }
-            }
-            free(wf);
-            return;
-        }
-        /* OOM: fall through to the per-token path below */
-    }
+    /* IQ2_S / IQ3_S are fused below: the Q8_K vec_dot reads the packed blocks
+     * directly, so no F32 weight buffer is materialised (EG-111). */
 
     if (weight_type == GGML_TYPE_F16 || weight_type == GGML_TYPE_BF16 || weight_type == 30 ||
         weight_type == GGML_TYPE_IQ1_M || weight_type == GGML_TYPE_IQ1_S ||
-        weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ2_XS ||
-        weight_type == GGML_TYPE_IQ3_S ||
+        weight_type == GGML_TYPE_IQ2_XS ||
         weight_type == GGML_TYPE_Q2_K || weight_type == GGML_TYPE_Q3_K ||
         weight_type == GGML_TYPE_Q8_0) {
         for (int i = 0; i < N; i++)
@@ -583,6 +561,8 @@ void quantized_matmul_batched(const float *x,
     switch (weight_type) {
         case GGML_TYPE_IQ2_XXS: dot_fn = (vec_dot_fn)iq2_xxs_vec_dot; break;
         case GGML_TYPE_IQ3_XXS: dot_fn = (vec_dot_fn)iq3_xxs_vec_dot; break;
+        case GGML_TYPE_IQ2_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
+        case GGML_TYPE_IQ3_S:   dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         case GGML_TYPE_IQ4_XS:  dot_fn = (vec_dot_fn)iq4_xs_vec_dot;  break;
         case GGML_TYPE_Q5_K:    dot_fn = (vec_dot_fn)q5_K_vec_dot;    break;
 #if defined(__AVX2__)
@@ -631,8 +611,7 @@ void quantized_matmul_subset(const float *x,
     
     // Handle non-vec_dot types via dequant
     if (weight_type == GGML_TYPE_IQ1_M || weight_type == GGML_TYPE_IQ1_S ||
-        weight_type == GGML_TYPE_IQ2_S || weight_type == GGML_TYPE_IQ2_XS ||
-        weight_type == GGML_TYPE_IQ3_S ||
+        weight_type == GGML_TYPE_IQ2_XS ||
         weight_type == GGML_TYPE_Q2_K || weight_type == GGML_TYPE_Q3_K) {
         // For these types, just compute each column individually
         int64_t blk_sz = block_size_for_type(weight_type);
@@ -671,6 +650,8 @@ void quantized_matmul_subset(const float *x,
         case GGML_TYPE_Q4_K: dot_fn = (vec_dot_fn)q4_K_vec_dot; break;
         case GGML_TYPE_Q5_K: dot_fn = (vec_dot_fn)q5_K_vec_dot; break;
         case GGML_TYPE_Q6_K: dot_fn = (vec_dot_fn)q6_K_vec_dot; break;
+        case GGML_TYPE_IQ2_S: dot_fn = (vec_dot_fn)wubu_vec_dot_iq2_s_q8_k_vd; break;
+        case GGML_TYPE_IQ3_S: dot_fn = (vec_dot_fn)wubu_vec_dot_iq3_s_q8_k_vd; break;
         default:
             fprintf(stderr, "quantized_matmul_subset: unsupported type %d\n", weight_type);
             return;
