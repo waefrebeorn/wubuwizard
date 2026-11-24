@@ -221,6 +221,33 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Shared sin/cos and iterative theta: reference re-baselined, +2% default speed
+
+`include/wubu_trig.h` implements one sin/cos (Cody-Waite reduction in double - theta reaches
+~1024, and a float reduction measured 4e-06 against libc - then a float minimax polynomial
+evaluated with `fmaf`), and both rope paths now build `theta_scale^j` by repeated multiply
+instead of `powf`. Both sides therefore perform the same sequence of operations, and
+`theta_scale` is computed with double `pow` on both.
+
+Effect, measured:
+
+| | before | after |
+|---|---|---|
+| decode 65 ctx | 13.2-13.4 tok/s | **13.5-13.6** |
+| decode 257 ctx | 12.6 | 12.8 |
+| attention row vs CPU (ADIFF) | 3.04e-07 | 2.82e-07 |
+| EG-123 rope worst_abs (vs libc) | 2.38e-06 | 4.05e-06 (expected: it now measures the shared implementation against libc) |
+
+**The reference moved:** the CPU path now uses this trig instead of libc's, so tokens match the
+old baseline through position 20 and diverge at 21 (236786 -> 193634). The continuation stays
+coherent - it still produces "thought ... Context ... classic ... philosoph ...", the same
+vocabulary - and the new sequence is the reference from here on. Recorded rather than hidden
+because every earlier measurement in this document was made against the old one.
+
+The fused path is still not bit-identical (2.8e-07), so the exactness target is not reached;
+what is left after this is the q8 of the pre-attention activation, which the composite
+quantises on the device and the CPU path on the host.
+
 ### The residual is RoPE's trig, and the gate was hiding it
 
 EG-123 has been printing the number all along:

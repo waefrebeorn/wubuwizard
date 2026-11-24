@@ -13,6 +13,7 @@
  */
 #include <cuda_runtime.h>
 #include "wubu_expf.h"   /* one deterministic expf, shared with the CPU attention */
+#include "wubu_trig.h"   /* one deterministic sin/cos, likewise */
 #include <cuda_fp16.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1222,8 +1223,12 @@ __global__ void rope_kernel(float * __restrict__ q, float * __restrict__ k,
         for (int j = threadIdx.x; j < half; j += blockDim.x) {
             const float ff = freqs ? freqs[j] : 1.0f;
             if (ff > 1e20f) continue;
-            const float theta = pos * powf(theta_scale, (float)j) / ff;
-            const float ct = cosf(theta), st = sinf(theta);
+            /* same construction as the CPU: repeated multiply and one shared sin/cos */
+            float tf = 1.0f;
+            for (int kk = 0; kk < j; kk++) tf *= theta_scale;
+            const float theta = pos * tf / ff;
+            float st, ct;
+            wubu_sincosf(theta, &st, &ct);
             const float q0 = qv[j], q1 = qv[j + half];
             qv[j] = q0 * ct - q1 * st;
             qv[j + half] = q0 * st + q1 * ct;
@@ -1238,8 +1243,12 @@ __global__ void rope_kernel(float * __restrict__ q, float * __restrict__ k,
         for (int j = threadIdx.x; j < half; j += blockDim.x) {
             const float ff = freqs ? freqs[j] : 1.0f;
             if (ff > 1e20f) continue;
-            const float theta = pos * powf(theta_scale, (float)j) / ff;
-            const float ct = cosf(theta), st = sinf(theta);
+            /* same construction as the CPU: repeated multiply and one shared sin/cos */
+            float tf = 1.0f;
+            for (int kk = 0; kk < j; kk++) tf *= theta_scale;
+            const float theta = pos * tf / ff;
+            float st, ct;
+            wubu_sincosf(theta, &st, &ct);
             const float k0 = kv[j], k1 = kv[j + half];
             kv[j] = k0 * ct - k1 * st;
             kv[j + half] = k0 * st + k1 * ct;

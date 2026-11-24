@@ -618,6 +618,7 @@ static int G4_CPU_STATS_hooked;
 
 #if defined(__AVX2__)
 #include "wubu_expf.h"
+#include "wubu_trig.h"
 #include <immintrin.h>
 /* Dot product for the attention score and value loops. These were the only remaining
  * scalar inner loops in decode: hd=256 per (query head, cached position), so a 1024-token
@@ -870,7 +871,9 @@ static void g4_rope_apply(float *q, float *k, int n_tokens, int d_head,
                           const float *freqs, int is_full) {
     (void)is_full;
     int half = n_rot / 2;
-    float theta_scale = powf(rope_base, -2.0f / (float)n_rot);
+    /* double pow on both sides: the bridge computes the device's theta_scale the same way, and
+     * powf vs pow disagree in the last bit. */
+    float theta_scale = (float)pow((double)rope_base, -2.0 / (double)n_rot);
     for (int t = 0; t < n_tokens; t++) {
         float pos = (float)positions[t];
         /* Q has n_head heads, K has n_head_kv heads. Rotating K with the Q
@@ -881,9 +884,14 @@ static void g4_rope_apply(float *q, float *k, int n_tokens, int d_head,
             for (int j = 0; j < half; j++) {
                 float ff = freqs ? freqs[j] : 1.0f;
                 if (ff > 1e20f) continue;              /* inactive rotary pair */
-                float theta = pos * powf(theta_scale, (float)j) / ff;
-                float cos_t = cosf(theta);
-                float sin_t = sinf(theta);
+                /* theta_scale^j by repeated multiply, and one shared sin/cos: pow/cos/sin differ
+                 * per toolchain and that difference is exactly what kept the fused path
+                 * from being bit-identical (EG-123 rope worst_abs 2.384e-06). */
+                float tf = 1.0f;
+                for (int kk = 0; kk < j; kk++) tf *= theta_scale;
+                float theta = pos * tf / ff;
+                float cos_t, sin_t;
+                wubu_sincosf(theta, &sin_t, &cos_t);
                 float q0 = qv[j], q1 = qv[j + half];
                 qv[j]       = q0 * cos_t - q1 * sin_t;
                 qv[j+half]  = q0 * sin_t + q1 * cos_t;
