@@ -1354,13 +1354,27 @@ kernel or a measured speedup.
 
 | EG-109 | Table-free arithmetic E4M3 decode (KTransformers) | EG-36 uses table-based FP8 KV | KTransformers issue #2245 / `kt-kernel/operators/avx2/fp8_dequant.hpp` | `test_eg109_fp8_shift` | S | **DONE (format-contract gate)** — `src/wubu_fp8_shift.c/.h` exhaustively matches arithmetic E4M3 decode; study clone is read-only. |
 
+**EG-110 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg110_residency`
+gates the MNN-LLM DRAM-Flash hybrid residency contract (MNN-LLM arXiv 2506.10443,
+`alibaba/MNN` `transformers/`): attention and hot layers stay resident in DRAM while
+the remaining layers stream from Flash in order, so a plan must prove DRAM can hold
+the hot set *plus* one staging buffer for the largest streamed layer. A 4-layer model
+(hot 128+64 MiB, streamed 128+64 MiB) plans `[1 0 1 0]` with 192 MiB DRAM and 192 MiB
+Flash inside a 320 MiB budget; the same model fails closed at 256 MiB, and a lone
+128 MiB streamed layer fails at a 64 MiB budget. NULL layer/plan pointers, zero-byte
+layers, bad `hot` flags and out-of-range layer counts are rejected.
+`test_eg110_residency: PASS`, exit 0; 30/30 stress runs clean. Residency is modelled,
+not measured: no Flash bandwidth, W4A16 quantisation or KV-cache claim is made.
+
+| EG-110 | DRAM/Flash hybrid residency planner with fail-closed staging budget (MNN-LLM) | EG-06 plans placement but never proves a streamed layer can be staged in DRAM | MNN-LLM arXiv 2506.10443 / `alibaba/MNN` `transformers/` | `test_eg110_residency` | S | **DONE (residency-contract gate)** — `src/wubu_residency.c/.h` plans hot/streamed layers and fails closed when hot set + staging buffer exceeds the DRAM budget; study clone is read-only. |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=118 FAIL=0`, no failed targets (EG-105..109 included). The
+was rebuilt and executed in one loop: `PASS=119 FAIL=0`, no failed targets (EG-105..110 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights

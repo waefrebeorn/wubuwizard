@@ -1304,6 +1304,9 @@ test_eg108_kv_connector: tools/test_eg108_kv_connector.c src/wubu_kv_connector.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # EG-109: table-free E4M3 arithmetic decode gate.
+test_eg110_residency: tools/test_eg110_residency.c src/wubu_residency.c
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
 test_eg109_fp8_shift: tools/test_eg109_fp8_shift.c src/wubu_fp8_shift.c
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 

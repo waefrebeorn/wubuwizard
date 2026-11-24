@@ -642,6 +642,10 @@ test_eg108_kv_connector: tools/test_eg108_kv_connector.c src/wubu_kv_connector.c
 test_eg109_fp8_shift: tools/test_eg109_fp8_shift.c src/wubu_fp8_shift.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
+# EG-110: DRAM/Flash hybrid residency planner gate.
+test_eg110_residency: tools/test_eg110_residency.c src/wubu_residency.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
 # EG-12: composable sampler chain.
 test_eg12_sampler: tools/test_eg12_sampler.c src/wubu_sampler_chain.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
