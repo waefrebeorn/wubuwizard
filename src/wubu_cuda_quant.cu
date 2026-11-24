@@ -86,6 +86,17 @@ typedef struct { uint8_t hmask[32]; uint8_t qs[64]; uint8_t scales[12]; uint16_t
 typedef struct { uint16_t d; uint8_t qs[16]; } c_q4_0;
 typedef struct { float d; int8_t qs[256]; int16_t bsums[16]; } c_q8_k;
 
+/* int8 tensor-core matrix multiply-accumulate: 16 rows x 8 cols x 32 k in one instruction, against
+ * dp4a's four multiply-adds per lane. Used by the prefill path only. */
+__device__ __forceinline__ void mma_i8_s32(int32_t c[4], const uint32_t a[4], const uint32_t b[2])
+{
+    asm volatile(
+        "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.s8.s8.s32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+}
+
 /* Hardware fp16 -> fp32 when the toolkit exposes it: the hand-written version below
  * has a normalise loop for subnormals, and at one conversion per lane per block it is
  * a measurable share of the kernel's instructions. */
@@ -613,6 +624,132 @@ WUBU_EXPORT int wubu_cuda_qkv_mrow(const void *d_wq, int tq, const void *d_wk, i
     return rc;
 }
 
+/* ---------------- IQ2_S x Q8_K through tensor cores (prefill) ----------------
+ *
+ * Verified in isolation against the dp4a kernel before being wired in here: uniform data to 1.6e-06
+ * relative, random data 0 of 1336320 outputs outside 1% (worst abs 1.2e-03 on a 3415 maximum), and
+ * 1.67x on one pass over the weights against six. The decode is the dp4a kernel's own decode - same
+ * lane mapping, same grid, same sign masks, same nibbles - and only its destination changes: shared
+ * memory as int8, from which the b-fragment is read.
+ *
+ * Two things that cost real debugging and must not be undone:
+ *   1. c_q8_k is { float d; int16 bsums[16]; int8 qs[256] }, so activations for block b start at
+ *      b*sizeof(c_q8_k) + 36, and sub-block g occupies qs[g*32 .. g*32+31].
+ *   2. A 32-k mma chunk straddles four IQ2_S grid entries: entries 0,1 take the low scale nibble and
+ *      entries 2,3 the high. The b-fragment splits exactly on that boundary, so two mma per chunk,
+ *      each scaled by its own nibble, is exact. One scale per chunk is not expressible.
+ *
+ * The uniform test passed while the scaling was still wrong, which is why both tests exist. */
+#define IQ2S_MMA_COLS (IQ2S_MMA_WPB * 8)
+#define IQ2S_MMA_WPB  4
+
+__global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
+                                       const c_q8_k * __restrict__ xq8m,
+                                       float * __restrict__ y,
+                                       int64_t col_stride_bytes, int nblocks,
+                                       int n_cols, int M, int q8_row_blocks)
+{
+    __shared__ int8_t sW[IQ2S_MMA_COLS][256];
+    __shared__ float  sLo[IQ2S_MMA_COLS][8];
+    __shared__ float  sHi[IQ2S_MMA_COLS][8];
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int tid = threadIdx.x;
+    const int gid = lane >> 2, tig = lane & 3;
+    const int col0 = blockIdx.x * IQ2S_MMA_COLS;
+    const int row0 = blockIdx.y * 16;
+    if (row0 >= M) return;
+
+    float accf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (int b = 0; b < nblocks; ++b) {
+        {
+            const int c = tid / 4;
+            const int entry = tid & 3;
+            const int gc = col0 + c;
+            if (gc < n_cols) {
+                const uint8_t *blk = w + (int64_t)gc * col_stride_bytes + (int64_t)b * 82;
+                const uint16_t db = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+                const uint8_t *qs = blk + 2, *qh = blk + 66, *sc = blk + 74;
+                for (int g = 0; g < 8; ++g) {
+                    const uint32_t idx = (uint32_t)(qs[g * 4 + entry] |
+                                         ((qh[g] << (8 - 2 * entry)) & 0x300));
+                    const uint8_t *gr = (const uint8_t *)(c_iq2s_grid + idx);
+                    const uint8_t signs = qs[32 + g * 4 + entry];
+                    int32_t a0, a1;
+                    memcpy(&a0, gr, 4);
+                    memcpy(&a1, gr + 4, 4);
+                    const uint32_t ml = (((uint32_t)(signs & 0x0F) * 0x00204081u) & 0x01010101u) * 0xFFu;
+                    const uint32_t mh = (((uint32_t)(signs >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu;
+                    a0 = (int32_t)__vsub4((uint32_t)a0 ^ ml, ml);
+                    a1 = (int32_t)__vsub4((uint32_t)a1 ^ mh, mh);
+                    memcpy(&sW[c][g * 32 + entry * 8 + 0], &a0, 4);
+                    memcpy(&sW[c][g * 32 + entry * 8 + 4], &a1, 4);
+                    if (entry == 0) sLo[c][g] = 0.125f * f16_fast(db) * (float)(1 + 2 * (sc[g] & 0x0f));
+                    else if (entry == 2) sHi[c][g] = 0.125f * f16_fast(db) * (float)(1 + 2 * (sc[g] >> 4));
+                }
+            } else {
+                memset(&sW[c][0], 0, 256);
+                for (int g = 0; g < 8; ++g) { sLo[c][g] = 0.0f; sHi[c][g] = 0.0f; }
+            }
+        }
+        __syncthreads();
+
+        float dq0 = 0.0f, dq1 = 0.0f;
+        {
+            const int r0 = row0 + gid, r1 = r0 + 8;
+            if (r0 < M) dq0 = xq8m[(int64_t)r0 * q8_row_blocks + b].d;
+            if (r1 < M) dq1 = xq8m[(int64_t)r1 * q8_row_blocks + b].d;
+        }
+        const int cl0 = warp * 8 + tig * 2;
+
+        for (int g = 0; g < 8; ++g) {
+            const int r0 = row0 + gid, r1 = r0 + 8;
+            const size_t qoff = (size_t)g * 32;
+            uint32_t a[4] = {0, 0, 0, 0};
+            if (r0 < M) {
+                const int8_t *q0 = xq8m[(int64_t)r0 * q8_row_blocks + b].qs + qoff;
+                memcpy(&a[0], q0 + tig * 4, 4);
+                memcpy(&a[2], q0 + tig * 4 + 16, 4);
+            }
+            if (r1 < M) {
+                const int8_t *q1 = xq8m[(int64_t)r1 * q8_row_blocks + b].qs + qoff;
+                memcpy(&a[1], q1 + tig * 4, 4);
+                memcpy(&a[3], q1 + tig * 4 + 16, 4);
+            }
+            uint32_t b2[2] = {0, 0};
+            const int cl = warp * 8 + gid;
+            memcpy(&b2[0], &sW[cl][g * 32 + tig * 4], 4);
+            memcpy(&b2[1], &sW[cl][g * 32 + tig * 4 + 16], 4);
+
+            int32_t accLo[4] = {0, 0, 0, 0}, accHi[4] = {0, 0, 0, 0};
+            const uint32_t aLo[4] = {a[0], a[1], 0, 0}, aHi[4] = {0, 0, a[2], a[3]};
+            const uint32_t bLo[2] = {b2[0], 0}, bHi[2] = {0, b2[1]};
+            mma_i8_s32(accLo, aLo, bLo);
+            mma_i8_s32(accHi, aHi, bHi);
+            const float lo0 = sLo[cl0][g], lo1 = sLo[cl0 + 1][g];
+            const float hi0 = sHi[cl0][g], hi1 = sHi[cl0 + 1][g];
+            accf[0] += ((float)accLo[0] * lo0 + (float)accHi[0] * hi0) * dq0;
+            accf[1] += ((float)accLo[1] * lo1 + (float)accHi[1] * hi1) * dq0;
+            accf[2] += ((float)accLo[2] * lo0 + (float)accHi[2] * hi0) * dq1;
+            accf[3] += ((float)accLo[3] * lo1 + (float)accHi[3] * hi1) * dq1;
+        }
+        __syncthreads();
+    }
+
+    const int oc = col0 + warp * 8 + tig * 2;
+    const int orow = row0 + gid;
+    if (orow < M && oc + 1 < n_cols + 1) {
+        y[(int64_t)orow * n_cols + oc] = accf[0];
+        if (oc + 1 < n_cols) y[(int64_t)orow * n_cols + oc + 1] = accf[1];
+    }
+    if (orow + 8 < M) {
+        if (oc < n_cols) y[(int64_t)(orow + 8) * n_cols + oc] = accf[2];
+        if (oc + 1 < n_cols) y[(int64_t)(orow + 8) * n_cols + oc + 1] = accf[3];
+    }
+}
+
 WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
                                            int K, int n_cols, long long col_stride,
                                            int M, float *h_y)
@@ -630,6 +767,16 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
         quantize_q8k_kernel<<<nblocks, 32>>>(mx + (size_t)m * K, q8m + (size_t)m * nblocks, K, 0, 0);
     const int warps_per_block = 8;
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
+    /* Tensor cores for prompts: one pass over the weights instead of ceil(M/16). Decode (M == 1)
+     * stays on dp4a, where the four-MAC-per-lane path is already within 1.8x of llama.cpp. */
+    if (M >= 16 && !getenv("G4_NO_MMA")) {
+        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
+        iq2s_matvec_mma_kernel<<<mgrid, IQ2S_MMA_WPB * 32>>>(
+            (const uint8_t *)d_w, q8m, my, col_stride, nblocks, n_cols, M, nblocks);
+        if (cudaGetLastError() != cudaSuccess) return -5;
+        return cudaMemcpy(h_y, my, (size_t)n_cols * (size_t)M * sizeof(float),
+                          cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
+    }
     iq2s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
         (const uint8_t *)d_w, q8m, my, col_stride, nblocks, n_cols, M, nblocks);
     if (cudaGetLastError() != cudaSuccess) return -5;
@@ -742,6 +889,119 @@ __global__ void iq3s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
     }
 }
 
+/* ---------------- IQ3_S x Q8_K through tensor cores (prefill) ----------------
+ *
+ * IQ3_S owns attn_v, attn_out and ffn_down - most of the prefill bytes - and was still on the dp4a
+ * path after IQ2_S moved. Its structure differs from IQ2_S in a way that helps: a 32-value chunk is
+ * exactly one half-block, so it carries ONE scale nibble, where IQ2_S's chunk straddled two. That
+ * removes the two-mma-per-chunk trick the IQ2_S kernel needs; one mma per chunk, one scale.
+ *
+ * Layout per block: 8 sub-blocks of 32 values; sub-block g takes 4 grid entries l = 0..3, each
+ * contributing 4 magnitudes from c_iq3s_grid plus 4 sign bits, so lane l covers values
+ * [l*8 .. l*8+7] of the chunk - which is exactly the ordering the dp4a kernel already uses. */
+__global__ void iq3s_matvec_mma_kernel(const uint8_t * __restrict__ w,
+                                       const c_q8_k * __restrict__ xq8m,
+                                       float * __restrict__ y,
+                                       int64_t col_stride_bytes, int nblocks,
+                                       int n_cols, int M, int q8_row_blocks)
+{
+    __shared__ int8_t sW[IQ2S_MMA_COLS][256];
+    __shared__ float  sSc[IQ2S_MMA_COLS][8];
+
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int tid = threadIdx.x;
+    const int gid = lane >> 2, tig = lane & 3;
+    const int col0 = blockIdx.x * IQ2S_MMA_COLS;
+    const int row0 = blockIdx.y * 16;
+    if (row0 >= M) return;
+
+    float accf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    for (int b = 0; b < nblocks; ++b) {
+        {
+            const int c = tid / 4;
+            const int l = tid & 3;
+            const int gc = col0 + c;
+            if (gc < n_cols) {
+                const c_iq3_s *xb = (const c_iq3_s *)(w + (int64_t)gc * col_stride_bytes) + b;
+                const float dx = f16_fast(xb->d);
+                for (int g = 0; g < 8; ++g) {
+                    const uint8_t *qsb = xb->qs + g * 8;
+                    const uint8_t sg = xb->signs[g * 4 + l];
+                    const uint8_t *p1 = (const uint8_t *)(c_iq3s_grid +
+                        (uint32_t)(qsb[2 * l + 0] | ((xb->qh[g] << (8 - 2 * l)) & 256)));
+                    const uint8_t *p2 = (const uint8_t *)(c_iq3s_grid +
+                        (uint32_t)(qsb[2 * l + 1] | ((xb->qh[g] << (7 - 2 * l)) & 256)));
+                    int32_t a0, a1;
+                    memcpy(&a0, p1, 4);
+                    memcpy(&a1, p2, 4);
+                    for (int j = 0; j < 4; ++j) {
+                        if ((sg >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
+                        if ((sg >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
+                    }
+                    memcpy(&sW[c][g * 32 + l * 8 + 0], &a0, 4);
+                    memcpy(&sW[c][g * 32 + l * 8 + 4], &a1, 4);
+                    if (l == 0)
+                        sSc[c][g] = dx * (float)(((g & 1) ? (2 * (xb->scales[g >> 1] >> 4))
+                                                        : (2 * (xb->scales[g >> 1] & 0x0f))) + 1);
+                }
+            } else {
+                memset(&sW[c][0], 0, 256);
+                for (int g = 0; g < 8; ++g) sSc[c][g] = 0.0f;
+            }
+        }
+        __syncthreads();
+
+        float dq0 = 0.0f, dq1 = 0.0f;
+        {
+            const int r0 = row0 + gid, r1 = r0 + 8;
+            if (r0 < M) dq0 = xq8m[(int64_t)r0 * q8_row_blocks + b].d;
+            if (r1 < M) dq1 = xq8m[(int64_t)r1 * q8_row_blocks + b].d;
+        }
+        const int cl0 = warp * 8 + tig * 2;
+
+        for (int g = 0; g < 8; ++g) {
+            const int r0 = row0 + gid, r1 = r0 + 8;
+            uint32_t a[4] = {0, 0, 0, 0};
+            if (r0 < M) {
+                const int8_t *q0 = xq8m[(int64_t)r0 * q8_row_blocks + b].qs + (size_t)g * 32;
+                memcpy(&a[0], q0 + tig * 4, 4);
+                memcpy(&a[2], q0 + tig * 4 + 16, 4);
+            }
+            if (r1 < M) {
+                const int8_t *q1 = xq8m[(int64_t)r1 * q8_row_blocks + b].qs + (size_t)g * 32;
+                memcpy(&a[1], q1 + tig * 4, 4);
+                memcpy(&a[3], q1 + tig * 4 + 16, 4);
+            }
+            uint32_t b2[2] = {0, 0};
+            const int cl = warp * 8 + gid;
+            memcpy(&b2[0], &sW[cl][g * 32 + tig * 4], 4);
+            memcpy(&b2[1], &sW[cl][g * 32 + tig * 4 + 16], 4);
+
+            int32_t acc[4] = {0, 0, 0, 0};
+            mma_i8_s32(acc, a, b2);
+            const float w0 = sSc[cl0][g], w1 = sSc[cl0 + 1][g];
+            accf[0] += (float)acc[0] * w0 * dq0;
+            accf[1] += (float)acc[1] * w1 * dq0;
+            accf[2] += (float)acc[2] * w0 * dq1;
+            accf[3] += (float)acc[3] * w1 * dq1;
+        }
+        __syncthreads();
+    }
+
+    const int oc = col0 + warp * 8 + tig * 2;
+    const int orow = row0 + gid;
+    if (orow < M) {
+        if (oc < n_cols) y[(int64_t)orow * n_cols + oc] = accf[0];
+        if (oc + 1 < n_cols) y[(int64_t)orow * n_cols + oc + 1] = accf[1];
+    }
+    if (orow + 8 < M) {
+        if (oc < n_cols) y[(int64_t)(orow + 8) * n_cols + oc] = accf[2];
+        if (oc + 1 < n_cols) y[(int64_t)(orow + 8) * n_cols + oc + 1] = accf[3];
+    }
+}
+
 WUBU_EXPORT int wubu_cuda_matvec_iq3s_mrow(const void *d_w, const float *h_x, int K,
                                            int n_cols, long long col_stride, int M, float *h_y)
 {
@@ -777,6 +1037,13 @@ WUBU_EXPORT int wubu_cuda_matvec_iq3s_mrow(const void *d_w, const float *h_x, in
                                              g_q8m + (size_t)m * nblocks, K, 0, 0);
     const int warps_per_block = 8;
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
+    if (M >= 16 && !getenv("G4_NO_MMA")) {
+        dim3 mgrid((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
+        iq3s_matvec_mma_kernel<<<mgrid, IQ2S_MMA_WPB * 32>>>(
+            (const uint8_t *)d_w, g_q8m, g_mrow_y, col_stride, nblocks, n_cols, M, nblocks);
+        if (cudaGetLastError() != cudaSuccess) return -5;
+        return cudaMemcpy(h_y, g_mrow_y, yneed, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
+    }
     iq3s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
         (const uint8_t *)d_w, g_q8m, g_mrow_y, col_stride, nblocks, n_cols, M, nblocks);
     if (cudaGetLastError() != cudaSuccess) return -5;
