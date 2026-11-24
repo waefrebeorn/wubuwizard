@@ -344,8 +344,35 @@ M-row kernels agree with each other to float precision while disagreeing with th
 unproven stays gated behind `G4_XXS_MMA`, and the next step is a harness that computes both paths into
 separate buffers within one process and compares them **before** any other code touches those buffers.
 
-### RETRACTED: the "FFN output differs" evidence was a broken harness
-### Where the divergence actually is: the FFN output, not the matvec
+### The valid experiment: the kernels match the host, and fusing those layers still breaks the model
+
+The retraction above says no conclusion could be drawn. With the harness fixed there is one, and it
+splits the problem in two.
+
+`G4_FUSE_ONLY_XXS` fuses **only** the layers whose FFN weights are IQ3_XXS/IQ4_XS, while everything else
+runs the host path in both runs. That makes every upstream layer identical between the two runs, which is
+what the earlier cross-run dumps never had - layer 1's input depended on layer 0, whose FFN differed
+precisely because one run fused and the other did not.
+
+    layer 1 (IQ3_XXS), upstream identical:  mean difference 2.28% of scale, max 114%
+    control, layer 0 (IQ2_S), same harness: mean difference 3.10% of scale, max 102%
+
+Both are Q8_K activation quantisation against the host's f32 matvec. **The new kernels are numerically
+equivalent to the host path.** The decode was independently verified exact against ggml and against this
+repo's own CPU dequantiser, and the device tensor is byte-identical to the host file.
+
+And yet:
+
+    baseline                    45518 107 236775 818 6590 529 1972 563 24002 107 140 236829
+    only the XXS layers fused   236772 236779 236779 236779 236770 236770 236772 236770 ...
+    everything fused             586 653 653 3161 653 236778 236772 17270 27823 653 ...
+
+Fusing **only those five** - with a kernel that matches the host to the same tolerance as the type-22
+control - destroys the output. So the matvec is not what is wrong with these layers; something structural
+about them is, and the search moves there. They are the only five layers with IQ3_XXS weights, which is
+also the only thing that distinguishes them from the 43 that fuse correctly.
+
+### SUPERSEDED: the "FFN output differs" evidence was a broken harness
 
 `G4_DUMP_FFN=<layer>` writes that layer's FFN output, so the two paths can be compared as numbers
 instead of as text. For layer 1 - one of the five - fused against host:
