@@ -288,6 +288,18 @@ structural rather than fixable by tuning. M rows through an M==1 kernel is M syn
 round trips per tensor per layer; for a 1717-token prompt that is roughly 400k CUDA calls, and the
 weight read - the only cost that matters - is not amortised at all. Reverted.
 
+**First working step: an M-row IQ2_S kernel doubles the batched path** (measured at 87 tokens:
+7.3 → **14.3 tok/s**). The cost a GEMM actually amortises here is not the `dp4a`, it is the IQ2_S
+decode - grid lookup, eight sign tests, scale nibble, block scale - which was being redone for
+every prompt row. `iq2s_matvec_mrow_kernel` decodes a block once into registers and reuses it
+across four rows, so one weight pass serves four tokens. That ties the per-token loop (14.1) with
+strictly less total work, so the next step is the same treatment for IQ3_S (type 21), which owns
+`ffn_down`, `attn_v` and `attn_out` - the largest remaining tensors in the batch path.
+
+One more thing measured on the way: prefill was computing the **LM head for all M prompt rows**,
+and generation only ever samples from the last one. Skipping the rest is correct and tiny (12.7 →
+11.9 s at 87 tokens), because the head is not where prefill time goes - the projections are.
+
 So a batched device prefill needs a genuine kernel: read each quantized weight block **once**,
 multiply it against M activation rows, write M partial sums, with M held in registers or shared
 memory. That is the same shape as the existing decode kernel with the inner loop moved outward, and

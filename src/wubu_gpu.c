@@ -33,6 +33,7 @@ typedef int (*fn_download)(void *, const void *, unsigned long long);
 typedef int (*fn_q8k)(const float *, void *, int);
 typedef int (*fn_mv_dev)(const void *, int, const void *, float *, int, int, long long);
 typedef int (*fn_mv2)(const void *, const void *, float *, int, int, long long);
+typedef int (*fn_mv_mrow)(const void *, const float *, int, int, long long, int, float *);
 
 static struct {
     int ready;
@@ -52,6 +53,7 @@ static struct {
     fn_mv2 mv3;   /* warp-per-column IQ3_XXS kernel */
     fn_mv2 mv4;   /* warp-per-column IQ4_XS kernel */
     fn_mv2 mv5;   /* warp-per-column IQ2_XS kernel */
+    fn_mv_mrow mrow;  /* M-row IQ2_S prefill kernel (weight decoded once per MT rows) */
 } G;
 
 int wubu_gpu_init(void)
@@ -95,6 +97,7 @@ int wubu_gpu_init(void)
     G.mv3 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq3xxs");
     G.mv4 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq4xs");
     G.mv5 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2xs");
+    G.mrow = (fn_mv_mrow)(void *)GetProcAddress(G.h, "wubu_cuda_matvec_iq2s_mrow");
     if (!avail || !G.alloc || !G.upload || !G.free_dev || !G.download || !G.q8k || !G.mv) return 0;
     if (!avail()) return 0;
     if (tables) {
@@ -741,6 +744,15 @@ void wubu_gpu_stage_report(void)
         printf("[GPU]   %-7s %5ld calls  %8.1f ms total  %7.3f ms/call\n",
                g_tag_name[t], g_tag_n[t], g_tag_ms[t], g_tag_ms[t] / (double)g_tag_n[t]);
     }
+}
+
+/* M-row IQ2_S prefill. Returns non-zero when the DLL has no such entry, so the caller can
+ * fall back to whatever it did before. */
+int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K, int n_cols,
+                              long long col_stride, int M, float *y)
+{
+    if (!wubu_gpu_init() || !G.mrow) return -1;
+    return G.mrow(d_w, x, K, n_cols, col_stride, M, y);
 }
 
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,

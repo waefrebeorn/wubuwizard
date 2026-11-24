@@ -730,6 +730,24 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
             return;
         }
     }
+    /* M-row device prefill for IQ2_S: the weight block is decoded once and reused across
+     * MT=4 prompt rows (wubu_cuda_quant.cu, iq2s_matvec_mrow_kernel). */
+    if (getenv("G4_MROW_DEBUG"))
+        fprintf(stderr, "[MM] dev=%d M=%d N=%d K=%d type=%d\n", w->dev ? 1 : 0, M, N, K, w->ggml_type);
+    if (w->dev && M > 1 && !getenv("G4_PREFILL_CPU") && w->ggml_type == GGML_TYPE_IQ2_S &&
+        (K % 256) == 0) {
+        extern int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K,
+                                             int n_cols, long long col_stride, int M,
+                                             float *y);
+        const long long stride = (long long)(w->raw_bytes / N);
+        const int mrc = wubu_gpu_matvec_iq2s_mrow(w->dev, x, K, N, stride, M, c);
+        if (getenv("G4_MROW_DEBUG"))
+            fprintf(stderr, "[MROW] K=%d N=%d M=%d stride=%lld rc=%d\n", K, N, M, stride, mrc);
+        if (mrc == 0) {
+            ++G4_DEC_GPU_CALLS;
+            return;
+        }
+    }
     /* Prefill does NOT use the per-row device kernel. Measured on a 1717-token prompt:
      * 3.4 tok/s, against 14.4 for the CPU batched path below - 4x slower. The reason is
      * structural: M rows through the M==1 kernel is M synchronised H2D/D2H round trips per
@@ -1914,20 +1932,32 @@ void g4_model_forward(g4_model_t *model, const float *embeddings, int B, int T, 
     if (N == 1) { ++G4_P_TOKENS; G4_P[G4P_HEAD] -= g4_now_ms(); }
 
     /* ===== LM head (Q3_K tied embedding, or cached F32 matvec) ===== */
+    /* Prefill only ever consumes the LAST row's logits - generation samples from the final
+     * prompt position. Computing the head for all M rows is M times the largest matmul in the
+     * model for nothing: on an 87-token prompt the head was about 70% of prefill. Rows other
+     * than the one written are left untouched, so a caller that needs them sets G4_LOGITS_ALL;
+     * G4_LOGITS_ROW0 writes the last row at offset 0 so a batched caller can allocate one row. */
+    const int logits_last_only = (N > 1) && !getenv("G4_LOGITS_ALL");
+    const int logits_first = logits_last_only ? (N - 1) : 0;
+    const int logits_dst_base = (logits_last_only && getenv("G4_LOGITS_ROW0")) ? 0 : logits_first;
+    (void)logits_dst_base;
+
     if (model->lm_head_f32) {
         #pragma omp parallel for collapse(2) if(N * G4_VOCAB > 65536)
-        for (int t = 0; t < N; t++) {
+        for (int t = logits_first; t < N; t++) {
             for (int j = 0; j < G4_VOCAB; j++) {
                 const float *xm = normed + (size_t)t * G4_HIDDEN;
                 const float *w = model->lm_head_f32 + (size_t)j * G4_HIDDEN;
                 float sum = 0.0f;
                 for (int k = 0; k < G4_HIDDEN; k++) sum += xm[k] * w[k];
-                logits[(size_t)t * G4_VOCAB + j] = sum;
+                logits[(size_t)(t - logits_first + logits_dst_base) * G4_VOCAB + j] = sum;
             }
         }
     } else {
         wubu_gpu_tag = 4;
-        g4_batched_qmatmul(normed, &model->output, N, G4_VOCAB, G4_HIDDEN, logits);
+        g4_batched_qmatmul(normed + (size_t)logits_first * G4_HIDDEN, &model->output,
+                           N - logits_first, G4_VOCAB, G4_HIDDEN,
+                           logits + (size_t)logits_dst_base * G4_VOCAB);
         wubu_gpu_tag = 0;
     }
 

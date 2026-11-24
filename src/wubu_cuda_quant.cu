@@ -404,6 +404,159 @@ __global__ void iq2s_matvec_v3_kernel(const uint8_t * __restrict__ w,
     if (lane == 0) y[col] = sum;
 }
 
+
+/* ---------------- M-row IQ2_S: amortise the weight decode over prompt rows ----------------
+ *
+ * Prefill is the profile that matters and it was 7.3 tok/s at 1717 tokens: 235 s before the
+ * first output token. The per-row path cannot fix it - M rows through an M==1 kernel is M
+ * synchronised round trips (~400k for that prompt) and measured 3.4 tok/s - and the CPU
+ * batched path loses to the GPU because a Ryzen 5 has to stream 4 GB of weights the 4050
+ * already holds.
+ *
+ * The cost that a GEMM actually amortises here is not the dp4a, it is the IQ2_S decode: the
+ * grid lookup, the eight sign tests, the scale nibble and the block scale are identical for
+ * every prompt row and were being redone per row. This kernel decodes a block ONCE into
+ * registers and reuses it across MT rows, so the same weight pass serves MT tokens.
+ *
+ * M=1 takes the same arithmetic path as iq2s_matvec_v3_kernel (same block order, same lane
+ * sum, same shuffle), so the two are comparable bit for bit - EG-130 checks that. */
+__global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __restrict__ y, int K);
+WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type, const void *h_xq8,
+                                            float *h_y, int K, int n_cols,
+                                            int64_t col_stride_bytes);
+
+#define IQ2S_MT 4
+__global__ void iq2s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
+                                        const c_q8_k * __restrict__ xq8m,
+                                        float * __restrict__ y,
+                                        int64_t col_stride_bytes, int nblocks,
+                                        int n_cols, int M, int q8_row_blocks)
+{
+    const int warps_per_block = blockDim.x / 32;
+    const int col = blockIdx.x * warps_per_block + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    if (col >= n_cols) return;
+
+    const int group = lane >> 2;
+    const int entry = lane & 3;
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+
+    for (int m0 = 0; m0 < M; m0 += IQ2S_MT) {
+        const int mt = (M - m0) < IQ2S_MT ? (M - m0) : IQ2S_MT;
+        float acc[IQ2S_MT];
+        for (int t = 0; t < IQ2S_MT; ++t) acc[t] = 0.0f;
+
+        for (int b = 0; b < nblocks; ++b) {
+            const uint8_t *blk = wcol + (int64_t)b * 82;
+            const uint16_t d_bits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+            const uint8_t *qs = blk + 2;
+            const uint8_t *qh = blk + 66;
+            const uint8_t *scales = blk + 74;
+
+            /* decoded once, reused for every row in this tile */
+            const uint32_t idx = (uint32_t)(qs[group * 4 + entry] |
+                                 ((qh[group] << (8 - 2 * entry)) & 0x300));
+            const uint8_t *grid = (const uint8_t *)(c_iq2s_grid + idx);
+            const uint8_t signs = qs[32 + group * 4 + entry];
+            int32_t a0, a1;
+            memcpy(&a0, grid, 4);
+            memcpy(&a1, grid + 4, 4);
+            for (int j = 0; j < 4; ++j) {
+                if ((signs >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
+                if ((signs >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
+            }
+            const int ls = (entry < 2) ? (1 + 2 * (scales[group] & 0x0f))
+                                       : (1 + 2 * (scales[group] >> 4));
+            const float wd = 0.125f * f16_fast(d_bits) * (float)ls;
+
+            const c_q8_k *rowbase = xq8m + (int64_t)m0 * q8_row_blocks;
+            for (int t = 0; t < mt; ++t) {
+                const c_q8_k *q8b = rowbase + (int64_t)t * q8_row_blocks + b;
+                const int8_t *q8 = q8b->qs + group * 32 + entry * 8;
+                int32_t b0, b1;
+                memcpy(&b0, q8 + 0, 4);
+                memcpy(&b1, q8 + 4, 4);
+                const int sumi = __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
+                acc[t] += wd * q8b->d * (float)sumi;
+            }
+        }
+
+        for (int t = 0; t < mt; ++t) {
+            float s = acc[t];
+            for (int off = 16; off > 0; off >>= 1)
+                s += __shfl_down_sync(0xffffffffu, s, off);
+            if (lane == 0) y[(int64_t)(m0 + t) * n_cols + col] = s;
+        }
+    }
+}
+
+/* Scratch for M quantised rows, and the host entry that drives the kernel above. */
+static c_q8_k *g_q8m;
+static int g_q8m_cap;
+static float *g_mrow_x, *g_mrow_y;
+static size_t g_mrow_xcap, g_mrow_ycap;
+
+WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
+                                           int K, int n_cols, long long col_stride,
+                                           int M, float *h_y)
+{
+    if (!d_w || !h_x || !h_y || K <= 0 || n_cols <= 0 || M <= 0 || (K % QK_K) != 0) return -1;
+    const int nblocks = K / QK_K;
+    const int need = nblocks * M;
+    if (g_q8m_cap < need) {
+        if (g_q8m) cudaFree(g_q8m);
+        g_q8m = NULL;
+        if (cudaMalloc((void **)&g_q8m, (size_t)need * sizeof(c_q8_k)) != cudaSuccess) {
+            g_q8m_cap = 0;
+            return -2;
+        }
+        g_q8m_cap = need;
+    }
+    const size_t xneed = (size_t)K * (size_t)M * sizeof(float);
+    const size_t yneed = (size_t)n_cols * (size_t)M * sizeof(float);
+    if (g_mrow_xcap < xneed) {
+        if (g_mrow_x) cudaFree(g_mrow_x);
+        g_mrow_x = NULL;
+        if (cudaMalloc((void **)&g_mrow_x, xneed) != cudaSuccess) { g_mrow_xcap = 0; return -3; }
+        g_mrow_xcap = xneed;
+    }
+    if (g_mrow_ycap < yneed) {
+        if (g_mrow_y) cudaFree(g_mrow_y);
+        g_mrow_y = NULL;
+        if (cudaMalloc((void **)&g_mrow_y, yneed) != cudaSuccess) { g_mrow_ycap = 0; return -3; }
+        g_mrow_ycap = yneed;
+    }
+    if (cudaMemcpy(g_mrow_x, h_x, xneed, cudaMemcpyHostToDevice) != cudaSuccess) return -4;
+    for (int m = 0; m < M; ++m)
+        quantize_q8k_kernel<<<nblocks, 32>>>(g_mrow_x + (size_t)m * K,
+                                             g_q8m + (size_t)m * nblocks, K);
+    const int warps_per_block = 8;
+    const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
+    iq2s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
+        (const uint8_t *)d_w, g_q8m, g_mrow_y, col_stride, nblocks, n_cols, M, nblocks);
+    if (cudaGetLastError() != cudaSuccess) return -5;
+    return cudaMemcpy(h_y, g_mrow_y, yneed, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
+}
+
+
+/* Host entry for the M-row path: uploads the weight bytes once, then runs the M-row kernel.
+ * The gate for it (EG-130) compares against an independent dequantise-and-dot in the test
+ * tool, not against the kernel's own family. */
+WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow_host(const void *h_w, const float *h_x,
+                                                int K, int n_cols, int M, float *h_y)
+{
+    if (!h_w || !h_x || !h_y || K <= 0 || n_cols <= 0 || M <= 0 || (K % QK_K) != 0) return -1;
+    const int nblocks = K / QK_K;
+    const size_t wbytes = (size_t)n_cols * (size_t)nblocks * 82;
+    void *d_w = NULL;
+    if (cudaMalloc(&d_w, wbytes) != cudaSuccess) return -2;
+    int rc = -3;
+    if (cudaMemcpy(d_w, h_w, wbytes, cudaMemcpyHostToDevice) == cudaSuccess)
+        rc = wubu_cuda_matvec_iq2s_mrow(d_w, h_x, K, n_cols, (long long)nblocks * 82, M, h_y);
+    cudaFree(d_w);
+    return rc;
+}
+
 /* Narrow matvecs are occupancy-limited (a 3072-column projection is 3072 warps for
  * 20 SMs, each still walking K), so split K four ways below this width. The FFN
  * shapes (15360 columns) stay on the warp-per-column v3 kernel. */
