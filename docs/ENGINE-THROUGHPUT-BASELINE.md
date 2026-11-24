@@ -95,6 +95,22 @@ Confirmed by measurement, not assumed:
 What did move a kernel: replacing the hand-written fp16 decoder (branch plus a normalise
 loop for subnormals) with `__half2float` took IQ2_S from 78 to 100 GB/s.
 
+## Where the waiting is (measured, not assumed)
+
+| suspect | measurement | verdict |
+|---|---|---|
+| host wait policy | `G4_WAIT=spin` 11.4, `yield` 11.4, `block` 10.0 tok/s | spin is right; block costs 12%, now pinned explicitly |
+| three syncs per matvec | one-shot `upload+quantise+launch+download+1 sync` wired and measured: 0.265 vs 0.259 ms/call, 11.3 vs 11.3 tok/s | **neutral, removed** |
+| allocation fragmentation | isolated o-proj bench with 48 separate 3.1 MB allocations instead of contiguous: kernel 0.041 ms, identical | not the cause |
+| clock throttling | 63 C, no power/thermal slow-down flags; during generation the GPU holds P0 at ~2650 MHz of 3105 and **55-67% utilisation** | not throttled, but 35-45% idle |
+| GPU idle between layers | utilisation above; the idle is exactly the CPU-only attention stretch (7.3 ms at 32 ctx, 29 ms at 256) | **this is the waiting**, and the fused path removes it |
+
+So the per-call overhead that makes an isolated kernel look 6x faster than the same kernel
+in situ is not sync, allocation, or clock: the device is idle while the CPU runs attention,
+and every submission after that gap pays to resume. `nvidia-smi -pm 1` reports `[N/A]` on
+this GeForce part, so there is no driver-side persistence mode to hold it up - the fix is
+to stop going idle, which is precisely what the fused half-layer does.
+
 ## Device attention half-layer (opt-in, `G4_ATTN_DEV=1`)
 
 `q,k,v -> per-head RMS norms -> RoPE -> KV append -> attention -> o-projection` in one

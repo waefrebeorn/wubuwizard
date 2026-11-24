@@ -908,7 +908,7 @@ WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
     const int K = 2560, N = 3840;
     const int nb = K / QK_K;
     const size_t row = (size_t)nb * 82;
-    enum { NBUF = 16 };   /* 16 x 3.1 MB = 50 MB, past the 32 MB L2 */
+    enum { NBUF = 48 };   /* 48 separate 3.1 MB allocations, like the engine's tensors */
     void *d_w[NBUF];
     float *h_x = NULL, *d_x = NULL, *d_y = NULL, *h_y = NULL;
     void *d_q8 = NULL;

@@ -74,7 +74,8 @@ int wubu_gpu_init(void)
             int mode = 0;
             if (e && e[0] == 'y') mode = 1;
             else if (e && e[0] == 'b') mode = 2;
-            const int rc = w(mode);
+            else if (e && (e[0] == 'o' || e[0] == 'n')) mode = -1;   /* leave the default */
+            const int rc = (mode < 0) ? 0 : w(mode);
             printf("[GPU] wait policy %s (rc=%d)\n",
                    mode == 0 ? "spin" : (mode == 1 ? "yield" : "block"), rc);
         }
@@ -524,20 +525,27 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
     const int brc = gpu_ensure_buffers(K, n_cols);
     if (brc != 0) return brc;
 
-    double _s0 = gpu_now_ms();
+    /* Timing is off unless G4_PROF is set: two clock reads per matvec is 400 per token and
+     * that showed up as 11.4 -> 11.2 tok/s. */
+    static int prof_on = -1;
+    if (prof_on < 0) { const char *e = getenv("G4_PROF"); prof_on = (e && *e == '1'); }
+    const double _s0 = prof_on ? gpu_now_ms() : 0.0;
     if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
-    double _s1 = gpu_now_ms(); wubu_gpu_t_upload += _s1 - _s0;
+    double _s1 = prof_on ? gpu_now_ms() : 0.0; if (prof_on) wubu_gpu_t_upload += _s1 - _s0;
     if (G.q8k(d_x, d_q8, K) != 0) return -5;
-    double _s2 = gpu_now_ms(); wubu_gpu_t_q8 += _s2 - _s1;
+    double _s2 = prof_on ? gpu_now_ms() : 0.0; if (prof_on) wubu_gpu_t_q8 += _s2 - _s1;
     g_staged_K = K;
     const int lrc = gpu_launch_and_download(d_w, ggml_type, K, n_cols, col_stride, y);
     if (lrc != 0) return lrc;
-    wubu_gpu_t_call += gpu_now_ms() - _s2;
-    ++wubu_gpu_n_matvec;
-    {
-        const int tg = (wubu_gpu_tag >= 0 && wubu_gpu_tag < 8) ? wubu_gpu_tag : 0;
-        g_tag_ms[tg] += gpu_now_ms() - _s0;
-        ++g_tag_n[tg];
+    if (prof_on) {
+        const double _e = gpu_now_ms();
+        wubu_gpu_t_call += _e - _s2;
+        ++wubu_gpu_n_matvec;
+        {
+            const int tg = (wubu_gpu_tag >= 0 && wubu_gpu_tag < 8) ? wubu_gpu_tag : 0;
+            g_tag_ms[tg] += _e - _s0;
+            ++g_tag_n[tg];
+        }
     }
     if (ggml_type >= 0 && ggml_type < 32) {
         S[ggml_type].calls++;
