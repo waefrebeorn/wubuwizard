@@ -208,7 +208,10 @@ int main(int argc, char **argv)
                             const float s = fabsf(got3[c]) > fabsf(ref3[c]) ? fabsf(got3[c]) : fabsf(ref3[c]);
                             const float rel = d / (1.0f + s);
                             if (rel > w3rel) w3rel = rel;
-                            if (!close_enough(got3[c], ref3[c])) ++bad;
+                            if (!close_enough(got3[c], ref3[c])) {
+                                if (bad < 6) printf("  col %d got %.6g ref %.6g\n", c, got3[c], ref3[c]);
+                                ++bad;
+                            }
                         }
                         printf("EG-115 iq3_s v2 worst_rel=%.3g\n", w3rel);
                     } else bad = 99;

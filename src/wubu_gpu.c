@@ -124,9 +124,40 @@ void wubu_gpu_free(void *d)
 
 /* y = W[n][K] . x[K] entirely on the device. W and the scratch are cached by the
  * caller; only x (K floats) and y (n floats) cross PCIe per call. */
+/* Per-type accounting, printed at exit when WUBU_GPU_STATS=1. */
+static struct { double ms; long calls; long bytes; } S[32];
+static int S_hooked;
+
+static void wubu_gpu_stats_dump(void)
+{
+    if (!getenv("WUBU_GPU_STATS")) return;
+    fprintf(stderr, "[GPU stats] type  calls   ms_total  MiB(touched)\n");
+    for (int t = 0; t < 32; ++t) {
+        if (!S[t].calls) continue;
+        fprintf(stderr, "[GPU stats] %4d %7ld %9.1f %10.1f\n",
+                t, S[t].calls, S[t].ms, (double)S[t].bytes / 1048576.0);
+    }
+}
+
+static double gpu_now_ms(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    static LARGE_INTEGER freq;
+    static int init;
+    if (!init) { QueryPerformanceFrequency(&freq); init = 1; }
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+    return 0.0;
+#endif
+}
+
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
                     int K, int n_cols, long long col_stride, float *y)
 {
+    if (!S_hooked) { S_hooked = 1; atexit(wubu_gpu_stats_dump); }
+    const double t0 = gpu_now_ms();
     if (!wubu_gpu_init() || !d_w || !x || !y || K <= 0 || n_cols <= 0) return -1;
     static float *d_x;
     static void *d_q8;
@@ -160,5 +191,10 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
         return -6;
     }
     if (G.download(y, d_y, (unsigned long long)((size_t)n_cols * sizeof(float))) != 0) return -7;
+    if (ggml_type >= 0 && ggml_type < 32) {
+        S[ggml_type].calls++;
+        S[ggml_type].ms += gpu_now_ms() - t0;
+        S[ggml_type].bytes += (long)n_cols * (long)col_stride;
+    }
     return 0;
 }

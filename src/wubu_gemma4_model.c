@@ -612,9 +612,38 @@ static int g4_qweight_stream_f32(const g4_qweight_t *w, float **out)
     return 1;
 }
 
+static struct { double ms; long calls; } G4_CPU_STATS[64];
+static int G4_CPU_STATS_hooked;
+
+static double g4_now_ms(void)
+{
+#ifdef _WIN32
+    LARGE_INTEGER f, c;
+    static LARGE_INTEGER freq;
+    static int init;
+    if (!init) { QueryPerformanceFrequency(&freq); init = 1; }
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+    return 0.0;
+#endif
+}
+
+static void g4_cpu_stats_dump(void)
+{
+    if (!getenv("WUBU_GPU_STATS")) return;
+    fprintf(stderr, "[CPU stats] type  calls   ms_total\n");
+    for (int t = 0; t < 64; ++t)
+        if (G4_CPU_STATS[t].calls)
+            fprintf(stderr, "[CPU stats] %4d %7ld %9.1f\n", t,
+                    G4_CPU_STATS[t].calls, G4_CPU_STATS[t].ms);
+}
+
 void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
                                int M, int N, int K, float *c) {
     if (!w) return;
+    if (!G4_CPU_STATS_hooked) { G4_CPU_STATS_hooked = 1; atexit(g4_cpu_stats_dump); }
+    const double t_cpu0 = g4_now_ms();
     /* Device-resident weights: decode (M == 1) runs entirely on the GPU. */
     if (w->dev && M == 1 && (K % 256) == 0 &&
         (w->ggml_type == GGML_TYPE_IQ2_S || w->ggml_type == GGML_TYPE_IQ3_S ||
@@ -709,6 +738,10 @@ void g4_batched_qmatmul(const float *x, const g4_qweight_t *w,
     int64_t col_stride = w->raw_bytes / N;
     quantized_matmul_batched(x, w->data, w->ggml_type,
                              (int64_t)K, (int64_t)N, col_stride, M, c);
+    if (w->ggml_type >= 0 && w->ggml_type < 64) {
+        G4_CPU_STATS[w->ggml_type].calls++;
+        G4_CPU_STATS[w->ggml_type].ms += g4_now_ms() - t_cpu0;
+    }
 }
 
 /* ============ Math ============ */

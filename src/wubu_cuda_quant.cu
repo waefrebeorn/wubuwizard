@@ -119,10 +119,17 @@ __device__ __forceinline__ float iq3s_block_dot(const c_iq3_s *x, const c_q8_k *
             for (int l = 0; l < 4; ++l) {
                 const uint8_t *g1 = (const uint8_t *)(c_iq3s_grid + (uint32_t)(qs[2 * l + 0] | ((qh[ib32 + half] << (8 - 2 * l)) & 256)));
                 const uint8_t *g2 = (const uint8_t *)(c_iq3s_grid + (uint32_t)(qs[2 * l + 1] | ((qh[ib32 + half] << (7 - 2 * l)) & 256)));
+                /* __dp4a: 4 int8 MACs per instruction, signs folded into the grid bytes. */
+                int32_t a0, a1, b0, b1;
+                memcpy(&a0, g1, 4);
+                memcpy(&a1, g2, 4);
                 for (int j = 0; j < 4; ++j) {
-                    sumi += g1[j] * q8[j + 0] * ((signs[l] >> j) & 1 ? -1 : 1);
-                    sumi += g2[j] * q8[j + 4] * ((signs[l] >> (j + 4)) & 1 ? -1 : 1);
+                    if ((signs[l] >> j) & 1) ((int8_t *)&a0)[j] = (int8_t)(-((int8_t *)&a0)[j]);
+                    if ((signs[l] >> (j + 4)) & 1) ((int8_t *)&a1)[j] = (int8_t)(-((int8_t *)&a1)[j]);
                 }
+                memcpy(&b0, q8 + 0, 4);
+                memcpy(&b1, q8 + 4, 4);
+                sumi += __dp4a(a0, b0, 0) + __dp4a(a1, b1, 0);
                 q8 += 8;
             }
             qs += 8;
