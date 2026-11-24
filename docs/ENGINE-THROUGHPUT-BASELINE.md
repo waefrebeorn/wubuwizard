@@ -258,6 +258,41 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Root cause: the composite's q/k/v dispatch had a silent hole, and IQ2_XS fell into it
+
+The two contradictory measurements resolved to one bug. `wubu_cuda_attn_half_dev` spelled its own
+dispatch for the three projections:
+
+    if (tq == 22) ... iq2s_v3
+    else if (tq == 18) ... iq3xxs
+    else if (tq == 23) ... iq4xs
+    else rc = wubu_cuda_quant_matvec(...)     // everything else
+
+The generic kernel does **not** implement type 17, and it answers with a zero buffer and
+`rc = 0`. So on the five layers whose `attn_k` is IQ2_XS the composite attended on an **all-zero
+K**: no error, no fallback, and `max|k| = 0.0e+00` (measured; the device weight bytes matched the
+host bytes exactly, so the tensor was uploaded fine). That is why every structural hypothesis
+failed - KV rows, spans, reductions, exp, sqrt, quantiser were all correct, because the problem was
+that K was never computed.
+
+Fixed by one dispatch function `mv_any()` used by the composite, the stage-only path and the
+o-projection, so a missing type cannot silently fall through again.
+
+| | before | after |
+|---|---|---|
+| `max|k|`, layer 16 (attn_k IQ2_XS) | 0.0 | 9.25e-01 |
+| all-layer fusion, 40 tokens | stutter at token 3 | **matches the reference for 30** |
+| all-layer speed @65 / @257 | n/a (degenerate) | **14.0 / 13.3 tok/s** |
+| default (full layers) speed | 13.1 / 12.4 | unchanged |
+| worst per-layer ADIFF | 9.7 - 16.7 | 2.0 - 2.4 |
+
+All-layer fusion is now **7% faster than the default** and produces the same continuation for 30 of
+40 tokens before diverging. It stays opt-in (`G4_ATTN_DEV=all`) because token identity is the bar
+for a default change, but the reason it was unusable was this bug, not accumulation.
+
+Open: layers 14, 18, 31, 32, 33, 39 still measure 2.0-2.4 absolute in ADIFF while their neighbours
+measure 1e-6, and all of them are ordinary IQ2_S layers. That is the next lead.
+
 ### The divergence is inside layer 0, and the two halves contradict each other
 
 New instruments, all kept: `G4_HSTATE_ALL=<dir>` + `G4_HSTATE_AT=<pos>` dump the residual stream

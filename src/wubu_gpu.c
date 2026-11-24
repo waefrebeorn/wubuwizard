@@ -119,11 +119,18 @@ int wubu_gpu_init(void)
         extern const void *wubu_vecdot_iq4_xs_table(void);
         if (!(up4 && up4(wubu_vecdot_iq4_xs_table(), 0, 0, 0, 0, 0) == 0)) G.mv4 = NULL;
     }
-    /* IQ2_XS 512-entry grid for the type-17 device kernel. */
+    /* IQ2_XS 512-entry grid for the type-17 device kernel. Without this upload the kernel
+     * returns 0 for every column, which reads as an attention error of exactly the output
+     * scale rather than as a missing table. */
     {
         fn_mv2 up5 = (fn_mv2)(void *)GetProcAddress(G.h, "wubu_cuda_upload_tables_iq2xs");
         extern const void *wubu_vecdot_iq2_xs_grid(void);
-        if (!(up5 && up5(wubu_vecdot_iq2_xs_grid(), 0, 0, 0, 0, 0) == 0)) G.mv5 = NULL;
+        const int up5_rc = (up5 && wubu_vecdot_iq2_xs_grid())
+                             ? up5(wubu_vecdot_iq2_xs_grid(), 0, 0, 0, 0, 0) : -99;
+        if (getenv("G4_DEBUG_TABLES"))
+            fprintf(stderr, "[TABLES] iq2xs up5=%p grid=%p rc=%d\n",
+                    (void *)up5, wubu_vecdot_iq2_xs_grid(), up5_rc);
+        if (up5_rc != 0) G.mv5 = NULL;
     }
     char dev[192] = {0};
     if (name) name(dev, (int)sizeof(dev));
@@ -375,6 +382,14 @@ int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
 /* staged q and attention row, exposed for the G4_QDUMP / G4_ATTN_DUMP comparisons */
 static float g_qdump[8192];
 static float g_attn_host[8192];
+
+/* Read a few bytes back from a device buffer: used to check that a tensor was uploaded at
+ * all, which "returns zeros" and "never uploaded" look identical without. */
+int wubu_gpu_peek(const void *dev, void *host, long long n) {
+    if (!dev || !host || n <= 0) return -1;
+    if (!wubu_gpu_init()) return -2;
+    return G.download(host, dev, (unsigned long long)n) == 0 ? 0 : -3;
+}
 
 int wubu_gpu_get_attn_dump(float *out, int n) {
     if (!out || n <= 0 || n > 8192) return -1;

@@ -1364,6 +1364,19 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     double _pk = _pt0;
     #define G4P_ADD(slot, from) do { if (N == 1) { const double _n = g4_now_ms(); G4_P[slot] += _n - (from); } } while (0)
     g4_layer_t *layer = &model->layers[il];
+    /* G4_XIN: capture this layer's input, so a dump can distinguish "different input" from
+     * "same input, different output" instead of assuming which one it is. */
+    {
+        const char *xi = getenv("G4_XIN");
+        static int xin_at = -1;
+        if (xin_at < 0) { const char *e = getenv("G4_HSTATE_AT"); xin_at = e ? atoi(e) : 23; }
+        if (xi && il == 0 && positions[0] == xin_at) {
+            char pbuf[512];
+            snprintf(pbuf, sizeof pbuf, "%s/in.bin", xi);
+            FILE *f = fopen(pbuf, "wb");
+            if (f) { fwrite(x, sizeof(float), (size_t)N * G4_HIDDEN, f); fclose(f); }
+        }
+    }
     int hd = layer->head_dim;
     int qd = layer->q_dim;
     int kvd = layer->kv_dim;
@@ -1475,7 +1488,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                  * position can be compared directly. */
                 int rc_h = -1;
                 const char *adiff_env = getenv("G4_ATTN_ADIFF");
-                if (adiff_env && pos_h == 23 && (il == 0 || strcmp(adiff_env, "all") == 0)) {
+                static int adiff_at = -1;
+                if (adiff_at < 0) { const char *e = getenv("G4_ADIFF_AT"); adiff_at = e ? atoi(e) : 23; }
+                if (adiff_env && pos_h == adiff_at && (il == 0 || strcmp(adiff_env, "all") == 0)) {
                     g_adiff_layer = il;
                     if (!g_dev_attn) g_dev_attn = (float *)malloc((size_t)G4_MAX_Q_DIM * sizeof(float));
                     if (g_dev_attn) {
@@ -1501,6 +1516,29 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
                                        layer->attn_q_norm_weight, layer->attn_k_norm_weight,
                                        layer->rope_freqs, layer->n_rot, layer->rope_base,
                                        normed, k, v);
+                }
+                if (getenv("G4_KNORM") && (il == 0 || il == 16 || il == 20) && pos_h == 21)
+                    fprintf(stderr, "[RC] il=%d tk=%d rc_h=%d\n", il, (int)layer->attn_k.ggml_type, rc_h);
+                if (getenv("G4_KNORM") && (il == 16 || il == 20) && pos_h == 21) {
+                    unsigned char raw[16]; unsigned char hostraw[16] = {0};
+                    extern int wubu_gpu_peek(const void *, void *, long long);
+                    if (layer->attn_k.data) memcpy(hostraw, layer->attn_k.data, sizeof hostraw);
+                    fprintf(stderr, "[KNRM] il=%d ptr=%p w0=%.4f w1=%.4f qn=%p\n", il,
+                            (void *)layer->attn_k_norm_weight,
+                            layer->attn_k_norm_weight ? layer->attn_k_norm_weight[0] : -999.0f,
+                            layer->attn_k_norm_weight ? layer->attn_k_norm_weight[1] : -999.0f,
+                            (void *)layer->attn_q_norm_weight);
+                    if (layer->attn_k.dev && wubu_gpu_peek(layer->attn_k.dev, raw, 16) == 0)
+                        fprintf(stderr, "[WPEEK] il=%d dev=%02x%02x%02x%02x %02x%02x%02x%02x host=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                il, raw[0],raw[1],raw[2],raw[3],raw[4],raw[5],raw[6],raw[7],
+                                hostraw[0],hostraw[1],hostraw[2],hostraw[3],hostraw[4],hostraw[5],hostraw[6],hostraw[7]);
+                    float mk = 0.0f, mv2 = 0.0f;
+                    for (int d = 0; d < kvd; ++d) {
+                        if (fabsf(k[d]) > mk) mk = fabsf(k[d]);
+                        if (fabsf(v[d]) > mv2) mv2 = fabsf(v[d]);
+                    }
+                    fprintf(stderr, "[KNORM] il=%d tk=%d max|k|=%.4e max|v|=%.4e\n",
+                            il, (int)layer->attn_k.ggml_type, mk, mv2);
                 }
                 if (rc_h == 0) {
                     g4_kv_store(cache_h, pos_h, k, v);

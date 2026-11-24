@@ -1564,6 +1564,24 @@ static int matvec_devbuf(const void *d_w, int type, const float *d_x, float *d_y
  * q/k/v path so the three projections can carry different quant types (on the 12B model
  * attn_q is IQ2_S while attn_k is IQ3_S, which is why the same-type fused path only
  * covered part of the layers). */
+/* One place that maps a ggml type to a kernel. The composite used to spell its own
+ * if-chain for q/k/v, which listed 22/18/23 and fell through to the generic kernel for
+ * everything else - including 17 (IQ2_XS), which the generic kernel does not implement and
+ * answers with a zero buffer and rc=0. That is why exactly the five layers whose attn_k is
+ * IQ2_XS attended on an all-zero K: no error, no fallback, max|k| = 0.0. */
+static int mv_any(const void *d_w, int type, const void *d_q8, float *d_y,
+                  int K, int n_cols, long long col_stride);
+
+static int mv_any(const void *d_w, int type, const void *d_q8, float *d_y,
+                  int K, int n_cols, long long col_stride)
+{
+    if (type == 22) return wubu_cuda_matvec_iq2s_v3(d_w, d_q8, d_y, K, n_cols, col_stride);
+    if (type == 18) return wubu_cuda_matvec_iq3xxs(d_w, d_q8, d_y, K, n_cols, col_stride);
+    if (type == 23) return wubu_cuda_matvec_iq4xs(d_w, d_q8, d_y, K, n_cols, col_stride);
+    if (type == 17) return wubu_cuda_matvec_iq2xs(d_w, d_q8, d_y, K, n_cols, col_stride);
+    return wubu_cuda_quant_matvec(d_w, type, d_q8, d_y, K, n_cols, col_stride);
+}
+
 static int mv_dispatch(const void *d_w, int type, const void *d_q8, float *d_y,
                        int K, int n_cols, long long col_stride)
 {
@@ -1661,21 +1679,9 @@ WUBU_EXPORT int wubu_cuda_attn_half_dev(
 
     quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
     int rc;
-    if (tq == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (tq == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (tq == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else               rc = wubu_cuda_quant_matvec(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq);
-    if (rc != 0) return -3;
-    if (tk == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (tk == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (tk == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else               rc = wubu_cuda_quant_matvec(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk);
-    if (rc != 0) return -4;
-    if (tv == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (tv == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (tv == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else               rc = wubu_cuda_quant_matvec(d_wv, tv, g_q8_scratch, d_v, hidden, kvd, sv);
-    if (rc != 0) return -5;
+    if (mv_any(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq) != 0) return -3;
+    if (mv_any(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk) != 0) return -4;
+    if (mv_any(d_wv, tv, g_q8_scratch, d_v, hidden, kvd, sv) != 0) return -5;
 
     rms_norm_row_kernel<<<n_heads, 256>>>(d_q, d_qn, d_q, hd, 1e-6f, 1);
     rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_k, d_kn, d_k, hd, 1e-6f, 1);
@@ -1691,11 +1697,7 @@ WUBU_EXPORT int wubu_cuda_attn_half_dev(
 
     if (ensure_q8_scratch(qd) != 0) return -2;
     quantize_q8k_kernel<<<qd / QK_K, 32>>>(d_attn, g_q8_scratch, qd);
-    if (to == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else if (to == 18) rc = wubu_cuda_matvec_iq3xxs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else if (to == 23) rc = wubu_cuda_matvec_iq4xs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
-    else               rc = wubu_cuda_quant_matvec(d_wo, to, g_q8_scratch, d_out, qd, hidden, so);
-    if (rc != 0) return -7;
+    if (mv_any(d_wo, to, g_q8_scratch, d_out, qd, hidden, so) != 0) return -7;
     return cudaGetLastError() == cudaSuccess ? 0 : -8;
 }
 
@@ -1719,21 +1721,9 @@ WUBU_EXPORT int wubu_cuda_attn_stage(
 
     quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
     int rc;
-    if (tq == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (tq == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else if (tq == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
-    else               rc = wubu_cuda_quant_matvec(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq);
-    if (rc != 0) return -3;
-    if (tk == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (tk == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else if (tk == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
-    else               rc = wubu_cuda_quant_matvec(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk);
-    if (rc != 0) return -4;
-    if (tv == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (tv == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else if (tv == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
-    else               rc = wubu_cuda_quant_matvec(d_wv, tv, g_q8_scratch, d_v, hidden, kvd, sv);
-    if (rc != 0) return -5;
+    if (mv_any(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq) != 0) return -3;
+    if (mv_any(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk) != 0) return -4;
+    if (mv_any(d_wv, tv, g_q8_scratch, d_v, hidden, kvd, sv) != 0) return -5;
 
     rms_norm_row_kernel<<<n_heads, 256>>>(d_q, d_qn, d_q, hd, 1e-6f, 1);
     rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_k, d_kn, d_k, hd, 1e-6f, 1);
