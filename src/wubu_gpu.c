@@ -757,6 +757,16 @@ int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K, int n_cols
     return G.mrow(d_w, x, K, n_cols, col_stride, M, y);
 }
 
+typedef void (*fn_pool_stats)(void);
+
+/* Print the device workspace pool: every scratch buffer the kernels declared, by role. */
+void wubu_gpu_pool_stats(void)
+{
+    if (!wubu_gpu_init()) return;
+    fn_pool_stats f = (fn_pool_stats)(void *)GetProcAddress(G.h, "wubu_cuda_pool_stats");
+    if (f) f();
+}
+
 int wubu_gpu_matvec_iq3s_mrow(const void *d_w, const float *x, int K, int n_cols,
                               long long col_stride, int M, float *y)
 {

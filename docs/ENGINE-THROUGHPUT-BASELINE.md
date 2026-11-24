@@ -258,6 +258,38 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### Staging, not arithmetic: one workspace pool declared by role
+
+The speed in an engine like this is not in the kernel maths, it is in the memory ladder - SSD, then
+RAM as transient, then VRAM as workspace - and in never paying for the same staging twice. Every
+device scratch buffer in `wubu_cuda_quant.cu` used to be its own static with its own `cudaMalloc`:
+the decode q8 row, the M-row activations, the M-row q8 block. They are all the same thing, a staging
+area for a shape, and the producer always writes the whole buffer before the consumer reads it, so
+**the contents are irrelevant to the declaration**. The data differs, the staging does not.
+
+`pool_get(role, bytes)` is that declaration: a buffer is named by role, materialised on first use,
+and reused for any later tensor of the same shape. Nothing allocates after the shapes are seen once.
+
+Measured on an 87-token prefill, `G4_POOL_STATS=1`:
+
+    [POOL] 3 slots, 11.6 MiB total
+    [POOL]   q8.mrow    1.45 MiB  uses=204
+    [POOL]   mrow.x     5.10 MiB  uses=204
+    [POOL]   mrow.y     5.10 MiB  uses=204
+
+**204 matmul calls, three buffers, one allocation each.** That is 11.6 MiB of workspace serving all
+48 layers of a 12B model, because the roles recycle. Prefill stayed at 17.3 tok/s and decode tokens
+stayed exact, so the recycling is free.
+
+What is still allocated per call rather than declared: the host-side `q`, `k`, `v`, `attn_out`,
+`ffn_gate`, `ffn_up`, `ffn_down_out`, `scores` buffers (`model->buf_*`, grown by `realloc` in
+`g4_model_forward`), and the CPU phases that walk them - head norms, V norm, RoPE, causal attention,
+residual adds, GELU. The kernels already exist on the device for the elementwise ones
+(`rms_norm_row_kernel`, `gelu_mul_kernel`); the work is to keep q/k/v resident on the card through
+norm, RoPE and attention instead of round-tripping them per layer, and to declare their workspaces
+in the same pool. That is the next structural step, and it is the one that actually removes CPU
+phases rather than accelerating them.
+
 ### Prefill is the real gap, and the device path has to be a GEMM
 
 Everything above tunes decode, one token at a time, and the numbers look respectable in isolation:

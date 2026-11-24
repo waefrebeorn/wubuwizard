@@ -405,6 +405,58 @@ __global__ void iq2s_matvec_v3_kernel(const uint8_t * __restrict__ w,
 }
 
 
+/* ---------------- device workspace pool ----------------
+ *
+ * Every device scratch buffer in this file used to be its own static with its own cudaMalloc:
+ * the decode q8 row, the M-row x/y, the M-row q8 block. They are all the same thing - a staging
+ * area for a shape - and the contents are irrelevant because the producer always writes the whole
+ * thing before the consumer reads it. So they are declared here by ROLE and capacity, materialised
+ * on first use, and reused for any later tensor of the same shape even though the data differs.
+ *
+ * That is the whole point: the staging is recycled, not the data. A prompt of 87 rows and a
+ * decode step are the same declarations at different sizes, and nothing allocates inside a
+ * forward pass once the shapes have been seen once. */
+typedef struct { const char *role; size_t bytes; void *ptr; unsigned uses; } c_pool_slot_t;
+static c_pool_slot_t g_pool[24];
+static int g_pool_n;
+static unsigned long long g_pool_bytes;
+
+static void *pool_get(const char *role, size_t bytes)
+{
+    if (bytes == 0) return NULL;
+    for (int i = 0; i < g_pool_n; ++i) {
+        c_pool_slot_t *s = &g_pool[i];
+        if (s->role != role) continue;
+        if (s->bytes >= bytes) { ++s->uses; return s->ptr; }
+        /* Same role, bigger shape: grow in place, keeping the slot. */
+        void *np = NULL;
+        if (cudaMalloc(&np, bytes) != cudaSuccess) return NULL;
+        if (s->ptr) cudaFree(s->ptr);
+        g_pool_bytes += bytes - s->bytes;
+        s->ptr = np; s->bytes = bytes; ++s->uses;
+        return s->ptr;
+    }
+    if (g_pool_n >= (int)(sizeof(g_pool) / sizeof(g_pool[0]))) return NULL;
+    void *np = NULL;
+    if (cudaMalloc(&np, bytes) != cudaSuccess) return NULL;
+    g_pool[g_pool_n].role = role;
+    g_pool[g_pool_n].bytes = bytes;
+    g_pool[g_pool_n].ptr = np;
+    g_pool[g_pool_n].uses = 1;
+    ++g_pool_n;
+    g_pool_bytes += bytes;
+    return np;
+}
+
+/* G4_POOL_STATS=1 prints this: role, bytes, and how many times each was handed out. */
+WUBU_EXPORT void wubu_cuda_pool_stats(void)
+{
+    fprintf(stderr, "[POOL] %d slots, %.1f MiB total\n", g_pool_n, (double)g_pool_bytes / (1024.0 * 1024.0));
+    for (int i = 0; i < g_pool_n; ++i)
+        fprintf(stderr, "[POOL]   %-12s %8.2f MiB  uses=%u\n", g_pool[i].role,
+                (double)g_pool[i].bytes / (1024.0 * 1024.0), g_pool[i].uses);
+}
+
 /* ---------------- M-row IQ2_S: amortise the weight decode over prompt rows ----------------
  *
  * Prefill is the profile that matters and it was 7.3 tok/s at 1717 tokens: 235 s before the
@@ -504,40 +556,22 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow(const void *d_w, const float *h_x,
 {
     if (!d_w || !h_x || !h_y || K <= 0 || n_cols <= 0 || M <= 0 || (K % QK_K) != 0) return -1;
     const int nblocks = K / QK_K;
-    const int need = nblocks * M;
-    if (g_q8m_cap < need) {
-        if (g_q8m) cudaFree(g_q8m);
-        g_q8m = NULL;
-        if (cudaMalloc((void **)&g_q8m, (size_t)need * sizeof(c_q8_k)) != cudaSuccess) {
-            g_q8m_cap = 0;
-            return -2;
-        }
-        g_q8m_cap = need;
-    }
-    const size_t xneed = (size_t)K * (size_t)M * sizeof(float);
-    const size_t yneed = (size_t)n_cols * (size_t)M * sizeof(float);
-    if (g_mrow_xcap < xneed) {
-        if (g_mrow_x) cudaFree(g_mrow_x);
-        g_mrow_x = NULL;
-        if (cudaMalloc((void **)&g_mrow_x, xneed) != cudaSuccess) { g_mrow_xcap = 0; return -3; }
-        g_mrow_xcap = xneed;
-    }
-    if (g_mrow_ycap < yneed) {
-        if (g_mrow_y) cudaFree(g_mrow_y);
-        g_mrow_y = NULL;
-        if (cudaMalloc((void **)&g_mrow_y, yneed) != cudaSuccess) { g_mrow_ycap = 0; return -3; }
-        g_mrow_ycap = yneed;
-    }
-    if (cudaMemcpy(g_mrow_x, h_x, xneed, cudaMemcpyHostToDevice) != cudaSuccess) return -4;
+    /* Declared by role; recycled across tensors and across prompt sizes. */
+    c_q8_k *q8m = (c_q8_k *)pool_get("q8.mrow", (size_t)nblocks * (size_t)M * sizeof(c_q8_k));
+    float *mx = (float *)pool_get("mrow.x", (size_t)K * (size_t)M * sizeof(float));
+    float *my = (float *)pool_get("mrow.y", (size_t)n_cols * (size_t)M * sizeof(float));
+    if (!q8m || !mx || !my) return -2;
+    if (cudaMemcpy(mx, h_x, (size_t)K * (size_t)M * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess)
+        return -4;
     for (int m = 0; m < M; ++m)
-        quantize_q8k_kernel<<<nblocks, 32>>>(g_mrow_x + (size_t)m * K,
-                                             g_q8m + (size_t)m * nblocks, K);
+        quantize_q8k_kernel<<<nblocks, 32>>>(mx + (size_t)m * K, q8m + (size_t)m * nblocks, K);
     const int warps_per_block = 8;
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
     iq2s_matvec_mrow_kernel<<<blocks, warps_per_block * 32>>>(
-        (const uint8_t *)d_w, g_q8m, g_mrow_y, col_stride, nblocks, n_cols, M, nblocks);
+        (const uint8_t *)d_w, q8m, my, col_stride, nblocks, n_cols, M, nblocks);
     if (cudaGetLastError() != cudaSuccess) return -5;
-    return cudaMemcpy(h_y, g_mrow_y, yneed, cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
+    return cudaMemcpy(h_y, my, (size_t)n_cols * (size_t)M * sizeof(float),
+                      cudaMemcpyDeviceToHost) == cudaSuccess ? 0 : -6;
 }
 
 
@@ -558,6 +592,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_mrow_host(const void *h_w, const float *h_
     cudaFree(d_w);
     return rc;
 }
+
 
 
 /* ---------------- M-row IQ3_S: same idea as the IQ2_S path above ----------------
