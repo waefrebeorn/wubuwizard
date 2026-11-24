@@ -320,6 +320,23 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The attention block moved to the device, and the profile shows what it fixed
+
+    before    norm+qkv 1153.3   qk norm+rope 171.2   attention 55.4   ffn 1964.3   total 3513.6
+    after     norm+qkv  650.6   qk norm+rope  37.3   attention 21.1   ffn 1742.7   total 2766.2
+
+Projections down 43%, head norms and RoPE down 78%, attention down 62%, prefill from 3513 to 2766 ms.
+The earlier guess that this whole chain was worth ~8% was low: it is 11% at 87 tokens and 11% at 1717,
+and it is the single largest correct change since the tensor cores.
+
+**FFN is now 63% of prefill** at 1743 ms, and its kernels are only ~17 ms per layer of that - the rest
+is the upload of the normalised rows, two Q8_K passes and the download of the down projection, the same
+traffic pattern the attention block just eliminated one layer over. Applying the same treatment there
+means the residual stream itself has to live on the device: x staged once per forward, normalised,
+added and re-used in place, with only the final row crossing PCIe for the head. That is the last
+structural item, worth roughly 16% by the transfer arithmetic, and it is a coherent piece of work
+rather than an afternoon's patch.
+
 ### Keeping q on the device: 30 tok/s, and wrong
 
 The obvious next saving was the q round trip: the QKV projection downloads q, then the attention kernel
