@@ -13,6 +13,8 @@ int main(int argc, char **argv)
     b(20);
     if (x) x(200);
     fn_t sh = (fn_t)(void *)GetProcAddress(h, "wubu_cuda_bench_shapes");
+    fn_t op = (fn_t)(void *)GetProcAddress(h, "wubu_cuda_bench_oproj");
+    if (op) printf("[BENCH] oproj rc=%d\n", op(30)); else printf("[BENCH] oproj missing\n");
     if (sh) sh(0);
     return w(0);
 }

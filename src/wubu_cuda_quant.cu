@@ -894,6 +894,68 @@ WUBU_EXPORT int wubu_cuda_bench_xfer(int iters)
  * different warps-per-block, to see whether the 76 GB/s streaming rate is a
  * concurrency limit (fixable by launch shape) or a per-warp read pattern limit
  * (needs a different kernel). */
+static double ev_ms(cudaEvent_t a, cudaEvent_t b)
+{
+    float ms = 0.0f;
+    cudaEventElapsedTime(&ms, a, b);
+    return (double)ms;
+}
+
+/* Is the short-K wide-N shape (the o-projection: K=2560, N=3840) limited by the kernel or
+ * by the round trip? Three rotating buffers so streaming is not masked by L2. */
+WUBU_EXPORT int wubu_cuda_bench_oproj(int iters)
+{
+    const int K = 2560, N = 3840;
+    const int nb = K / QK_K;
+    const size_t row = (size_t)nb * 82;
+    void *d_w[3] = {0, 0, 0};
+    float *h_x = NULL, *d_x = NULL, *d_y = NULL, *h_y = NULL;
+    void *d_q8 = NULL;
+    if (iters <= 0) iters = 20;
+    for (int i = 0; i < 3; ++i)
+        if (cudaMalloc(&d_w[i], row * N) != cudaSuccess) return -1;
+    if (cudaHostAlloc((void **)&h_x, sizeof(float) * K, cudaHostAllocDefault) != cudaSuccess) return -1;
+    if (cudaHostAlloc((void **)&h_y, sizeof(float) * N, cudaHostAllocDefault) != cudaSuccess) return -1;
+    if (cudaMalloc(&d_x, sizeof(float) * K) != cudaSuccess) return -1;
+    if (cudaMalloc(&d_y, sizeof(float) * N) != cudaSuccess) return -1;
+    if (cudaMalloc(&d_q8, (size_t)(nb + 1) * sizeof(c_q8_k)) != cudaSuccess) return -1;
+    for (int i = 0; i < K; ++i) h_x[i] = (float)i * 0.001f;
+    for (int i = 0; i < 3; ++i) {
+        uint8_t *blk = (uint8_t *)malloc(row * N);
+        for (size_t b = 0; b < row * N; ++b) blk[b] = (uint8_t)(b * 2654435761u);
+        cudaMemcpy(d_w[i], blk, row * N, cudaMemcpyHostToDevice);
+        free(blk);
+    }
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0); cudaEventCreate(&e1);
+    double up = 0, q8t = 0, kern = 0, down = 0;
+    for (int it = 0; it < iters; ++it) {
+        cudaEventRecord(e0);
+        cudaMemcpyAsync(d_x, h_x, sizeof(float) * K, cudaMemcpyHostToDevice);
+        cudaEventRecord(e1); cudaEventSynchronize(e1); up += ev_ms(e0, e1);
+        cudaEventRecord(e0);
+        quantize_q8k_kernel<<<nb, 32>>>(d_x, (c_q8_k *)d_q8, K);
+        cudaEventRecord(e1); cudaEventSynchronize(e1); q8t += ev_ms(e0, e1);
+        cudaEventRecord(e0);
+        const int wpb = 8, blocks = (N + wpb - 1) / wpb;
+        iq2s_matvec_v3_kernel<<<blocks, wpb * 32>>>((const uint8_t *)d_w[it % 3],
+                                                    (const c_q8_k *)d_q8, d_y, (int64_t)row, nb, N);
+        cudaEventRecord(e1); cudaEventSynchronize(e1); kern += ev_ms(e0, e1);
+        cudaEventRecord(e0);
+        cudaMemcpyAsync(h_y, d_y, sizeof(float) * N, cudaMemcpyDeviceToHost);
+        cudaEventRecord(e1); cudaEventSynchronize(e1); down += ev_ms(e0, e1);
+    }
+    const double total = up + q8t + kern + down;
+    printf("[BENCH] %d iters oproj %dx%d: upload %.3f, q8k %.3f, kernel %.3f, download %.3f ms;"
+           " total %.3f ms/call; kernel rate %.1f GB/s; at 48 calls/token %.1f ms\n",
+           iters, K, N, up / iters, q8t / iters, kern / iters, down / iters, total / iters,
+           ((double)row * N / (kern / iters)) / 1e6, total / iters * 48.0);
+    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    for (int i = 0; i < 3; ++i) cudaFree(d_w[i]);
+    cudaFreeHost(h_x); cudaFreeHost(h_y); cudaFree(d_x); cudaFree(d_y); cudaFree(d_q8);
+    return 0;
+}
+
 WUBU_EXPORT int wubu_cuda_bench_wpb(void)
 {
     const int K = 3840, N = 15360;

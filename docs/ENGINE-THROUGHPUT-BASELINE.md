@@ -67,6 +67,11 @@ Confirmed by measurement, not assumed:
 
 - fusing q/k/v into one submission (one upload, one quantisation, one download of q|k|v)
   changed the qkv section by 0.2 ms/token — the number of *transfers* is not the limit;
+- o-projection shape end to end (`wubu_cuda_bench_oproj`, K=2560 x N=3840, 30 iters):
+  upload 0.008 + q8k 0.035 + kernel 0.040 + download 0.026 = **0.110 ms/call**, so 48 calls
+  per token should cost **5.3 ms** — against the 12.6 ms the engine charges for the same
+  section. The kernel is 78 GB/s at that shape, so the shape is not the problem; ~0.15 ms
+  per call is unaccounted for and is the next thing to bisect;
 - pinned staging (`wubu_cuda_bench_xfer`): 0.030 ms -> 0.018 ms per call in isolation, i.e.
   6.8 -> 3.2 ms/token across 202 calls. Implemented end to end as a single DLL call
   (`upload + q8k + kernel + download` through pinned buffers): measured **11.2 tok/s
