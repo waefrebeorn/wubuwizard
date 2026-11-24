@@ -320,6 +320,35 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The reference number on this machine, and what it finally explains
+
+`llama-bench` was already on this box in two builds. The CUDA one has no CUDA backend and falls back
+to CPU; the Vulkan one uses the GPU. Same GGUF, same card, same session:
+
+    llama.cpp Vulkan, RTX 4050, gemma-4-12b IQ2_M        pp87    477.36 +- 2.46 tok/s
+                                                         tg32     24.31 +- 0.65 tok/s
+    llama.cpp CPU-only (other build)                     pp87      7.28 tok/s
+                                                         tg32      4.60 tok/s
+    wubuwizard, CUDA, this session                       prefill  18.3 tok/s      26x behind
+                                                         decode   13.6 tok/s      1.8x behind
+
+**Decode is within 1.8x of llama.cpp** - a hand-written engine that is only 1.8x off a mature
+implementation at token generation is not broken, and the M-row kernels, the pooled staging and the
+device attention are why. Against llama.cpp CPU-only this engine is 2.5x faster at prefill and 3x at
+decode, which is the more honest comparison for a machine with no working CUDA llama.cpp build.
+
+**Prefill is 26x behind, and the gap is now fully accounted for.** llama.cpp runs an 87-token prompt
+as *one* pass over the weights: 4 GB in roughly 0.18 s, about 22 GB/s. This engine runs it as six
+passes (M = 87, MT = 16) at ~11 GB/s. Six passes at half the rate is the 26x, and both halves of that
+were measured here independently - the pass count from the MT table, the rate from `G4_MV_STATS`.
+
+So the 13x gap between the 143 GB/s the card streams and the 11 GB/s the kernel achieves is not a
+mystery any more, it is a GEMM that does not exist: a kernel where one staged weight block feeds a
+tile of 32-64 rows out of shared memory, the way llama.cpp's quantised mat-matrix kernels do, so a
+prefill costs one pass instead of ceil(M/MT). Every attempt so far tried to reach that by raising MT
+in a kernel whose accumulators live in registers, and registers run out at 16 rows. That is the wall,
+and the answer is a different kernel, not another parameter.
+
 ### Per-shape accounting: every matvec runs at ~11 GB/s and I cannot yet say why
 
 `G4_MV_STATS=1` times every M-row call and prints the shape, the call count and the rate computed
