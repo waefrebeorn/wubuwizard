@@ -480,7 +480,7 @@ WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type, const voi
 
 /* MT=8 measured 16.1 tok/s against MT=4's 17.2 at 87 tokens: more rows per weight pass
  * costs occupancy and loses. */
-#define IQ2S_MT 4
+#define IQ2S_MT 16
 __global__ void iq2s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
                                         const c_q8_k * __restrict__ xq8m,
                                         float * __restrict__ y,

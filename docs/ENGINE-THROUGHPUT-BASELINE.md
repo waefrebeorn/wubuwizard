@@ -320,6 +320,31 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### MT=16, and why MT is a fight against occupancy
+
+`acc[MT]` costs one register per row, so rows-per-decoded-block and occupancy trade against each
+other almost exactly:
+
+    MT=16:  56 registers  -> 48 warps/SM (full)
+    MT=32: 128 registers  -> 16 warps/SM
+    MT=64: 254 registers  ->  8 warps/SM
+    MT=96: 384-byte stack frame - accumulators fall out of registers into local memory
+
+That is why the isolated harness curve is flat from MT=8 to MT=64: every row added removes weight
+traffic and removes occupancy by the same factor, and the two cancel. The optimum is where occupancy
+is still full, which is MT=16.
+
+    MT=4    4.85 s  17.9 tok/s      4.88 s  17.8
+    MT=16   4.69 s  18.5 tok/s      4.69 s  18.5      <- interleaved A/B, nothing else on the card
+    MT=32   5.03 s  17.3 tok/s      5.01 s  17.4
+
+**+3.6% for MT=16, and a correction:** an earlier pass in this document concluded "MT=8 and MT=16
+lose, revert to MT=4". That measurement was taken while a test suite was running in the background
+and was simply wrong - the same builds measure 16.0-16.1 tok/s under load and 17.8-18.5 tok/s alone.
+Every A/B in this document that was not interleaved on an idle card is suspect for that reason.
+
+`IQ3_S` stays at MT=4: MT=8 and MT=16 both measured 18.4-18.7 against 18.5, which is noise.
+
 ### The decode setup is instruction throughput, not memory latency
 
 Fourth hypothesis, and the fourth measurement to kill one. If the warp stalls waiting on each 82-byte
