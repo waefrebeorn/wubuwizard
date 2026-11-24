@@ -221,6 +221,26 @@ about the amplifier. Removed rather than left as a flag. Recorded so the next at
 from the fact that the two paths differ for a reason nobody has isolated yet, not from the
 assumption that only the quantiser differs.
 
+### Shared expf: built and validated, not yet wired in
+
+`include/wubu_expf.h` implements one expf (range reduction with fmaf, Horner polynomial,
+scale by a power of two via the exponent field) declared `__host__ __device__` so both
+attention paths can call it. EG-128 now checks it:
+
+    EG-128 wubu_expf dev-vs-cpu: 0/4096 differ        <- bit-identical across toolchains
+    EG-128 expf dev-vs-libc:     654/4096 differ, max 2 ulp
+
+So the approach works. It is not wired into the model yet because it does not fix the fused
+path on its own: with expf shared the attention row still differed by 3.0e-07, and that
+residual traces back to **q**, which differs by 1.4e-06 - i.e. to RoPE's `cosf`/`sinf`/
+`powf`, the same class of toolchain difference one stage earlier. Wiring it in today would
+change the CPU reference's tokens (measured: divergence at generated token 10) in exchange
+for no speed, since RoPE still blocks exactness.
+
+The remaining work is therefore the same treatment for `cosf`, `sinf` and the per-layer
+`powf` used for the RoPE theta - a shared implementation each, then wire all four in and
+re-baseline once.
+
 ### The residual is `expf`, measured (EG-128)
 
 `test_eg128_expf` compares the device `expf` against the C library's over the range the

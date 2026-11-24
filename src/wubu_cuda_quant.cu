@@ -12,6 +12,7 @@
  *   src/wubu_vecdot_q4_0.c    (Q4_0)
  */
 #include <cuda_runtime.h>
+#include "wubu_expf.h"   /* one deterministic expf, shared with the CPU attention */
 #include <cuda_fp16.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,7 +43,7 @@ __device__ uint64_t c_iq2xs_grid[512];
 __global__ void expf_probe_kernel(const float * __restrict__ x, float * __restrict__ y, int n)
 {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) y[i] = expf(x[i]);
+    if (i < n) y[i] = wubu_expf(x[i]);
 }
 
 /* Gate hook: does the device expf agree with the CPU's bit for bit? The fused attention
@@ -1314,8 +1315,8 @@ __global__ void attn_decode_kernel(const float * __restrict__ q,
     for (int d = threadIdx.x; d < hd; d += blockDim.x) {
         float acc = 0.0f;
         for (int kp = 0; kp < kv_len; ++kp) {
-            const float w = sh[kp] * inv;
-            acc += w * V[(size_t)(kv_start + kp) * kvd + d];
+            const float w = __fmul_rn(sh[kp], inv);
+            acc = __fmaf_rn(w, V[(size_t)(kv_start + kp) * kvd + d], acc);
         }
         out[(size_t)hq * hd + d] = acc;
     }

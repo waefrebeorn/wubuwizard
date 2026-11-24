@@ -7,6 +7,7 @@
 #include <string.h>
 #include <math.h>
 #include <windows.h>
+#include "wubu_expf.h"   /* same implementation the CPU attention uses */
 
 typedef int (*fn_t)(const float *, float *, int);
 
@@ -28,6 +29,13 @@ int main(int argc, char **argv)
     }
     if (probe(x, y, N) != 0) { printf("EG-128 FAIL probe\n"); return 1; }
 
+    int cpu_diff = 0;
+    for (int i = 0; i < N; ++i) {
+        const float c = wubu_expf(x[i]);
+        if (memcmp(&c, &y[i], 4) != 0) ++cpu_diff;
+    }
+    printf("EG-128 wubu_expf dev-vs-cpu: %d/%d differ (must be 0 for the fused path to be exact)\n",
+           cpu_diff, N);
     int diff = 0, maxulp = 0;
     float worst_x = 0.0f;
     for (int i = 0; i < N; ++i) {

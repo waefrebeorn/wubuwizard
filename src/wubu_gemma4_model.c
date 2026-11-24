@@ -617,6 +617,7 @@ static struct { double ms; long calls; } G4_CPU_DEC_STATS[64];  /* M == 1 only *
 static int G4_CPU_STATS_hooked;
 
 #if defined(__AVX2__)
+#include "wubu_expf.h"
 #include <immintrin.h>
 /* Dot product for the attention score and value loops. These were the only remaining
  * scalar inner loops in decode: hd=256 per (query head, cached position), so a 1024-token
