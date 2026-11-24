@@ -320,6 +320,31 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### The tensor-core prefill ladder, and the 8-warp lesson
+
+    dp4a, MT=16 (baseline)        87 tok 18.4    1717 tok 16.3  (105.2 s)
+    + mma, 4 warps, 16 rows       87 tok 23.5    1717 tok 21.5  ( 79.8 s)
+    + bank-conflict padding       87 tok 24.8          -
+    + 8 warps, 32 rows            87 tok 26.7    1717 tok 16.0  (107.3 s)   <- reverted
+    final: mma 4 warps + padding  87 tok 25.1    1717 tok 22.8  ( 75.2 s)
+
+**More rows per staged tile is not free at every prompt length.** Eight warps with 32 rows per tile is
+the best 87-token result measured (26.7) and the worst 1717-token result (107.3, against 79.8 for the
+same kernel at 16 rows). At length there are already 54 row-tiles to fill the card, so halving the
+number of blocks buys nothing and the extra warps fighting over one shared tile cost 25%. It was
+reverted, because time-to-first-token at length is the number this engine is judged on.
+
+Three bugs of my own, each found only because the tokens were checked after every change:
+- an early `return` on warps whose row-half was past the end (any prompt under 32 rows) skipped the
+  `__syncthreads()` the other half waited on;
+- `IQ2S_MMA_COLS` was derived from the warp count, so doubling warps made each block claim 64 columns
+  while the warp->column mapping covered 32 - half the output was simply never written;
+- the original tile had no padding, so all 32 columns began at the same bank offset.
+
+And one methodological failure repeated: three A/Bs in this stretch were taken while a test suite or a
+long-context run held the card. The same binary reads 18.4 tok/s idle and 2.6 tok/s under a concurrent
+1717-token run. Every number above is from an interleaved pair on an idle card.
+
 ### What upstream actually does, and the correction it forces
 
 Reading llama.cpp's mmq sources rather than guessing at them changed the picture twice.
