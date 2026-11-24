@@ -209,6 +209,18 @@ the fused continuation go from a permanent control-token loop to one that tracks
 for most of 24 tokens, with a two-token stutter at positions 2-4 and one divergence at
 position 11.
 
+### Tried and removed: CPU quantisation of the device attention (G4_ATTN_Q8H)
+
+Hypothesis: the fused path's 1e-05 per-layer difference is amplified by the int8 quantisation
+of the attention row - a 1e-06 difference near a step boundary flips a whole step, which is
+0.8% of that block's scale. Built it: `wubu_cuda_attn_stage` (the composite stopped after
+attention) + CPU `quantize_row_q8_K` + `wubu_cuda_matvec_dev`. Result: the continuation got
+*worse* on the sliding layers (`45518 107 818 2430 ...`) rather than matching, so the variant
+was not equivalent to the composite for some other reason and the experiment proved nothing
+about the amplifier. Removed rather than left as a flag. Recorded so the next attempt starts
+from the fact that the two paths differ for a reason nobody has isolated yet, not from the
+assumption that only the quantiser differs.
+
 ### Debug hooks in the fused path
 
 All env-gated, all off by default: `G4_ATTN_WARM=<pos>` (start fusing only at that position,
