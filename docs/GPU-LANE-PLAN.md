@@ -78,10 +78,23 @@ Two findings, both real:
    different code path. Any promotion of this path needs a token-agreement gate, not a
    tolerance check.
 
-Fixes, in order: keep activations and the Q8_K row device-resident across a layer (one
-upload per token, not per matvec), remove the per-call `cudaDeviceSynchronize`, then
-repack weights to tiles. Until then the GPU path stays opt-in (`G4_GPU=1`) and the CPU
-path is the default.
+Two fixes were applied and measured:
+
+- Grids moved from `__constant__` to `__device__` memory: every lane indexes a different
+  grid entry, and constant memory serializes divergent addresses. Per-matmul speedup went
+  from 2.6x to **5.5x** (`15360x3840` IQ2_S: 20.1 ms CPU single-thread vs 3.7 ms GPU
+  including upload).
+- The per-call `cudaDeviceSynchronize` calls were dropped (overlapping launches, the
+  result download is the only sync). End-to-end decode went 1.5 -> **4.0 tok/s**.
+
+That is still a *tie* with the CPU path (4.2 tok/s), and the arithmetic explains why: the
+CPU engine already uses 12 threads at ~36 GMAC/s, while a single GPU matvec of the FFN
+shape runs 59 MMAC in ~1.5 ms (~40 GMAC/s). The GPU only wins by 10-20x when the weights
+are laid out so warps read coalesced tiles — i.e. after repacking, which is the remaining
+work. Tokens still diverge at step 8-10 vs the CPU path because the device Q8_K quantizer
+rounds differently.
+
+Until then the GPU path stays opt-in (`G4_GPU=1`) and the CPU path is the default.
 
 ## What not to do
 

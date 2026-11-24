@@ -26,8 +26,10 @@
 
 /* ---------- tables shared with the CPU kernels ---------- */
 
-__constant__ uint64_t c_iq2s_grid[1024];
-__constant__ uint32_t c_iq3s_grid[512];
+/* Global, not __constant__: every lane indexes a different grid entry, and
+ * constant memory serializes divergent addresses (32-way replay). */
+__device__ uint64_t c_iq2s_grid[1024];
+__device__ uint32_t c_iq3s_grid[512];
 
 WUBU_EXPORT int wubu_cuda_upload_tables(const void *iq2s_1024_u64, const void *iq3s_512_u32)
 {
@@ -229,7 +231,7 @@ WUBU_EXPORT int wubu_cuda_quant_matvec(const void *d_w, int type,
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
     matvec_kernel<<<blocks, threads>>>((const void *)d_w, type, d_xq8, d_y,
                                        col_stride_bytes, K / QK_K, n_cols);
-    return cudaDeviceSynchronize() == cudaSuccess ? 0 : -2;
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
 WUBU_EXPORT int wubu_cuda_upload_tables2(const void *iq2s, const void *iq3s)
@@ -326,11 +328,11 @@ __global__ void bsums_kernel(c_q8_k *y, int nblk)
 WUBU_EXPORT int wubu_cuda_quantize_q8k_dev(const float *d_x, void *d_q8, int K)
 {
     if (!d_x || !d_q8 || K <= 0 || (K % QK_K) != 0) return -1;
-    /* one warp per block: the max reduction is a warp shuffle */
+    /* one warp per block: the max reduction is a warp shuffle. No sync here —
+     * the kernels below are ordered on the same stream and the result download
+     * is what synchronizes. bsums are unused by the four dots we run. */
     quantize_q8k_kernel<<<K / QK_K, 32>>>(d_x, (c_q8_k *)d_q8, K);
-    if (cudaDeviceSynchronize() != cudaSuccess) return -2;
-    bsums_kernel<<<K / QK_K, 32>>>((c_q8_k *)d_q8, K / QK_K);
-    return cudaDeviceSynchronize() == cudaSuccess ? 0 : -3;
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
 /* Fully device-resident matvec: weights and Q8_K row already on the device. */
