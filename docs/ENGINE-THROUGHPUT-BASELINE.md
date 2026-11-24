@@ -143,6 +143,30 @@ applied to the Q/K head norms made things **worse** (3.5 -> 9.5 ms) because 96 O
 fork/join pairs per token cost more than the work they distribute, so that block stays
 serial and the reason is recorded in the code.
 
+Section split at 32 tokens of context (`G4_PROF=1`, per decode token):
+
+```
+layer total     76.0     ffn all       35.2   (proj 33.1, gelu 1.7, norm 0.4)
+norm+qkv        16.6     attn out      13.0   (o proj 12.6, norm+resid 0.5)
+attention        7.3     head          10.5
+qk norm+rope     3.6
+```
+
+Efficiency per section, against the 100 GB/s the IQ2_S kernel reaches in isolation:
+
+| section | bytes/token | ms | GB/s |
+|---|---|---|---|
+| ffn proj (2.7 GB) | 2700 MB | 33.1 | 82 |
+| norm+qkv (q,k,v) | 940 MB | 16.6 | 57 |
+| o proj (3072->3840) | 226 MB | 12.6 | **18** |
+| head (Q3_K, 1 GB) | 1030 MB | 10.5 | 98 |
+
+The o-projection moves 4.7 MB per layer in 0.26 ms: about 0.05 ms of kernel and 0.21 ms
+of host/device round trip (upload, q8k, submit, download). With 202 matvecs per token at
+~0.2-0.3 ms each, roughly 60% of the matvec time is round-trip cost, not arithmetic. That
+is the next structural target: a device-resident layer (one round trip per layer instead
+of seven) rather than more kernel tuning.
+
 FFN breakdown after the fusion (`G4_PROF=1`, per decode token): proj 35.4 ms,
 gelu+mul 1.8 ms (was 7.5 with the tanh on one CPU core), norm+resid 0.4 ms. The fused
 path does one upload of the 3840-float input and one download of the 3840-float output

@@ -1248,7 +1248,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
  * N == 1 forward and reported per token, because that is the case being optimised. */
 enum { G4P_LAYER, G4P_NORM_QKV, G4P_QKNORM_ROPE, G4P_KVSTORE, G4P_ATTN,
        G4P_ATTNOUT, G4P_FFN, G4P_HEAD, G4P_FFN_PROJ, G4P_FFN_GELU, G4P_FFN_NORM,
-       G4P_COUNT };
+       G4P_OPROJ, G4P_ATTN_NORM, G4P_COUNT };
 static double G4_P[G4P_COUNT];
 static long G4_P_TOKENS;
 static int G4_P_hooked;
@@ -1258,7 +1258,8 @@ static void g4_prof_dump(void)
     if (!getenv("G4_PROF") || G4_P_TOKENS <= 0) return;
     static const char *names[G4P_COUNT] = {
         "layer total", "norm+qkv", "qk norm+rope", "kv store", "attention",
-        "attn out+resid", "ffn all", "head", "  ffn proj", "  ffn gelu+mul", "  ffn norm+resid"
+        "attn out+resid", "ffn all", "head", "  ffn proj", "  ffn gelu+mul", "  ffn norm+resid",
+        "  o proj", "  attn norm+resid"
     };
     fprintf(stderr, "[PROF] per decode token over %ld tokens (ms):\n", G4_P_TOKENS);
     for (int i = 0; i < G4P_COUNT; ++i)
@@ -1404,7 +1405,9 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     G4P_ADD(G4P_ATTN, _pk); _pk = g4_now_ms();
 
     /* ===== Attention output projection ===== */
+    const double _po0 = g4_now_ms();
     g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
+    if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_OPROJ] += _t - _po0; _pk = _t; }
 
     /* ===== Post-attention norm + residual ===== */
     #pragma omp parallel for if(N > 1)
@@ -1415,6 +1418,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
             x[(size_t)t * G4_HIDDEN + d] += normed[(size_t)t * G4_HIDDEN + d];
     }
 
+    if (N == 1) G4_P[G4P_ATTN_NORM] += g4_now_ms() - _pk;
     G4P_ADD(G4P_ATTNOUT, _pk); _pk = g4_now_ms();
 
     /* ===== FFN ===== */
