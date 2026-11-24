@@ -647,7 +647,7 @@ WUBU_EXPORT int wubu_cuda_qkv_mrow(const void *d_wq, int tq, const void *d_wk, i
 #define IQ2S_MMA_PAD  260
 /* Row-halves per warp: reuse one decoded tile for 32 rows without adding warps, which is what cost
  * 25% at 1717 when the block went to 8 warps. */
-#define IQ2S_MMA_RH   2
+#define IQ2S_MMA_RH   6
 #define IQ2S_MMA_WPB  4
 
 __global__ void iq2s_matvec_mma_kernel(const uint8_t * __restrict__ w,
