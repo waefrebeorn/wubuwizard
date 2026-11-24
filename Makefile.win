@@ -131,6 +131,7 @@ CORE_OBJ += src/wubu_kv8.o
 CORE_OBJ += src/wubu_agent_spec.o
 CORE_OBJ += src/wubu_spectr_select.o
 CORE_OBJ += src/wubu_loop_place.o
+CORE_OBJ += src/wubu_bench_stats.o
 
 .PHONY: all cpu-build clean
 
@@ -620,6 +621,10 @@ test_eg25_spectr: tools/test_eg25_spectr.c src/wubu_spectr_select.c
 
 # EG-105: loop-aware expert placement gate.
 test_eg105_loop_place: tools/test_eg105_loop_place.c src/wubu_loop_place.c
+	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
+
+# EG-106: benchmark statistics gate.
+test_eg106_bench_stats: tools/test_eg106_bench_stats.c src/wubu_bench_stats.c
 	$(CC) $(CFLAGS) -o $@ $^ -lws2_32 -ladvapi32 -lkernel32 -luser32 -fopenmp -lm -static
 
 # EG-12: composable sampler chain.

@@ -1301,13 +1301,29 @@ counts are synthetic; the speedup above is the measured real-host number.
 
 | EG-105 | Loop-aware expert placement for looped transformers | EG-45c stages experts but no loop-core placement rule | Thinking Machines Inkling 2 Mini + Unsloth b12651 loop report | `test_eg105_loop_place` | M | **DONE (placement gate)** — `src/wubu_loop_place.c/.h` pins loop core to GPU and spills only non-loop experts; real RTX 4050 Vulkan benchmark evidence above. |
 
+**EG-106 evidence (2026-11-23):** `mingw32-make -f Makefile.win test_eg106_bench_stats`
+gates the statistics half of `docs/BENCHMARK-WORKFLOW.md`: mean, sample standard
+deviation, coefficient of variation and a two-standard-error regression rule.
+Fixture baseline 126.00/sd 0.7071/CV 0.00561 detects a slow 100.00 candidate as
+a regression and accepts a 196.00 or equal-noise candidate. 30/30 stress runs
+clean. The reusable harness `tools/bench_llama.sh` writes manifest.json, raw
+llama-bench JSON, results.csv and summary.md; its parser-check run at `REPS=1`
+produced 4 rows (baseline chat pp128 126.15, tg32 16.17; loopopt pp128 194.92,
+tg32 21.61). A larger smoke run at REPS=5 recorded 24 rows including coding and
+agent profiles: pp512 44.22 -> 349.82, pp1024 40.61 -> 327.07, tg64 15.76 ->
+20.89 t/s under the same loop-aware placement change. Raw files are in
+`data/bench/20261124T010640Z-smoke/` and `20261124T012920Z-parsercheck2/`;
+these are measured local tok/s, not proxy counters.
+
+| EG-106 | Reproducible benchmark statistics + regression gate | EG-100 probes layers but no repeat-statistics decision rule | arXiv 2610.09778 sequential isolation; FMwork 2508.10251 | `test_eg106_bench_stats` | S | **DONE (statistics gate)** — `src/wubu_bench_stats.c/.h` gates mean/sd/CV and two-SE regression; `tools/bench_llama.sh` + `docs/BENCHMARK-WORKFLOW.md` give the reusable loop. |
+
 Execution order: lowest-numbered TODO with DONE dependencies. Prefer EG-87, EG-88,
 EG-91, EG-95, EG-97 (all small, pure policy/index math, no trained weights) before
 the L-sized kernel and retrieval gaps. Re-run the dedupe check (ids and gate names
 unique) before reserving any new id.
 
 Full-suite verification (2026-11-23): every `test_eg*` target in `Makefile.win`
-was rebuilt and executed in one loop: `PASS=114 FAIL=0`, no failed targets (EG-105 included). The
+was rebuilt and executed in one loop: `PASS=115 FAIL=0`, no failed targets (EG-105/106 included). The
 remaining undone rows are explicitly gated off: EG-22/31/33/46 need host-
 unavailable telemetry or a multi-GPU tier; EG-86 is checkpoint-specific and
 record-only; EG-44's trained indexer and tile-speed half needs trained weights
