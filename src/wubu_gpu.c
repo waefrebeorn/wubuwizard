@@ -643,6 +643,49 @@ int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const v
  * IQ3_S, so the single-type fused path only covered part of the layers and the rest fell
  * back to three separate round trips (2.5 device calls per layer, measured). One
  * quantisation of the shared input, three kernels, one submission. */
+/* Per-shape matvec accounting. Every prefill token runs about ten of these calls per layer, and the
+ * aggregate rate (~5 GB/s of weight bytes) is nowhere near the 143 GB/s this card streams with the
+ * same access pattern, so the shape that is losing it has to be named rather than guessed. Reports
+ * calls, total ms and implied GB/s per (type, columns, K) so G4_MV_STATS=1 answers it directly. */
+typedef struct { int type, cols, K, calls, M; double ms; } mv_stat_t;
+static mv_stat_t g_mvs[64];
+static int g_mvs_n;
+static double g_mv_now(void) { return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC; }
+
+static void mv_stat_add(int type, int cols, int K, int M, double ms)
+{
+    for (int i = 0; i < g_mvs_n; ++i)
+        if (g_mvs[i].type == type && g_mvs[i].cols == cols && g_mvs[i].K == K) {
+            g_mvs[i].calls++; g_mvs[i].ms += ms; return;
+        }
+    if (g_mvs_n < 64) {
+        g_mvs[g_mvs_n].type = type; g_mvs[g_mvs_n].cols = cols; g_mvs[g_mvs_n].K = K;
+        g_mvs[g_mvs_n].M = M; g_mvs[g_mvs_n].calls = 1; g_mvs[g_mvs_n].ms = ms; g_mvs_n++;
+    }
+}
+
+void wubu_gpu_mv_stats(void)
+{
+    if (!g_mvs_n) return;
+    fprintf(stderr, "[MV] type cols    K      calls   total ms   ms/call   GB/s\n");
+    for (int i = 0; i < g_mvs_n; ++i) {
+        const mv_stat_t *s = &g_mvs[i];
+        /* bytes per pass over the tensor, times the number of M tiles is not known here; the
+         * rate below is the lower bound: one full read of the tensor per call. */
+        /* Weight bytes actually moved: whole tensor per row-tile, tiles = ceil(M/MT), MT = 16 for
+         * IQ2_S and 4 for IQ3_S. Bits per weight ~2.5 (IQ2_S) and ~3.2 (IQ3_S). An earlier version
+         * of this line assumed one pass and a flat 0.42 bytes/weight, which under-reported the rate
+         * by 6x and made IQ3_S look 4.8x slower than IQ2_S. It is not; both sit at ~11 GB/s. */
+        const int mt = (s->type == 22) ? 16 : 4;
+        const int tiles = (s->M + mt - 1) / mt;
+        const double bpw = (s->type == 22) ? 2.5 / 8.0 : 3.2 / 8.0;
+        const double bytes = (double)s->cols * (double)s->K * bpw * (double)tiles;
+        fprintf(stderr, "[MV] %-4d %-6d %-6d M=%-4d calls=%-4d %8.1f ms %8.3f ms/call %7.1f GB/s\n",
+                s->type, s->cols, s->K, s->M, s->calls, s->ms, s->ms / s->calls,
+                bytes * s->calls / (s->ms / 1e3) / 1e9);
+    }
+}
+
 typedef int (*fn_qkv_mrow_t)(const void *, int, const void *, int, const void *, int,
                             const float *, int, int, int, int, int,
                             long long, long long, long long, float *, float *, float *);
@@ -771,7 +814,10 @@ int wubu_gpu_matvec_iq2s_mrow(const void *d_w, const float *x, int K, int n_cols
                               long long col_stride, int M, float *y)
 {
     if (!wubu_gpu_init() || !G.mrow) return -1;
-    return G.mrow(d_w, x, K, n_cols, col_stride, M, y);
+    const double _t0 = g_mv_now();
+    const int rc = G.mrow(d_w, x, K, n_cols, col_stride, M, y);
+    mv_stat_add(22, n_cols, K, M, g_mv_now() - _t0);
+    return rc;
 }
 
 typedef int (*fn_attn_causal)(const float *, const float *, const float *, float *, const int *,
@@ -802,7 +848,10 @@ int wubu_gpu_matvec_iq3s_mrow(const void *d_w, const float *x, int K, int n_cols
                               long long col_stride, int M, float *y)
 {
     if (!wubu_gpu_init() || !G.mrow3) return -1;
-    return G.mrow3(d_w, x, K, n_cols, col_stride, M, y);
+    const double _t0 = g_mv_now();
+    const int rc = G.mrow3(d_w, x, K, n_cols, col_stride, M, y);
+    mv_stat_add(21, n_cols, K, M, g_mv_now() - _t0);
+    return rc;
 }
 
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,

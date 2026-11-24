@@ -455,6 +455,10 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Prefill: %d tok in %.2fs (%.1f tok/s)\n", n_prompt, t_prefill, n_prompt / t_prefill);
     if (generated > 0 && t_decode > 0)
         fprintf(stderr, "Decode:  %d tok in %.2fs (%.1f tok/s)\n", generated, t_decode, generated / t_decode);
+    if (getenv("G4_MV_STATS")) {
+        extern void wubu_gpu_mv_stats(void);
+        wubu_gpu_mv_stats();
+    }
     if (getenv("G4_POOL_STATS")) {
         extern void wubu_gpu_pool_stats(void);
         wubu_gpu_pool_stats();

@@ -320,6 +320,37 @@ of the kernel, and when it disagrees with the shipped kernel by 4x the benchmark
 wrong. The instrument was corrected before the conclusion was written down, which is the only reason
 this section is useful rather than actively misleading.
 
+### Per-shape accounting: every matvec runs at ~11 GB/s and I cannot yet say why
+
+`G4_MV_STATS=1` times every M-row call and prints the shape, the call count and the rate computed
+from the bytes actually moved (whole tensor per row-tile, tiles = ceil(M/MT)):
+
+    type 21  3840x4096    M=87  calls=40   12.13 ms/call   11.4 GB/s     o-projection
+    type 22  15360x3840   M=87  calls=86   10.28 ms/call   10.8 GB/s     ffn gate/up
+    type 21  3840x15360   M=87  calls=7    45.43 ms/call   11.4 GB/s     ffn down
+    type 21  3840x8192    M=87  calls=8    21.13 ms/call   13.1 GB/s     attn q
+    type 21  2048x3840    M=87  calls=7     7.00 ms/call    9.9 GB/s     attn k/v
+    type 22  4096x3840    M=87  calls=5     3.80 ms/call    7.8 GB/s
+
+**Uniform, 8-13 GB/s, every shape, both quant types.** There is no pathological tensor. Against the
+143 GB/s this card delivers for the identical 110-byte-per-lane access pattern, that is a 13x gap, and
+it has survived every intervention: MT at 4/8/16/32, split-K, block-loop unrolling, the IQ3_S lane
+remap, codebook staging in shared memory, and one-launch fused QKV.
+
+An earlier version of this same print reported IQ3_S at 3 GB/s against IQ2_S's 14.4 and I nearly
+believed it; it had assumed a single pass and a flat 0.42 bytes per weight, which under-reports by the
+tile count. The instrument is now computed from bytes actually moved, and both types agree. The lesson
+repeats: check the arithmetic in the measuring instrument before believing what it says about the
+kernel.
+
+**What this rules out.** Not the access pattern (143 GB/s measured on it), not the codebook gather
+(staging it in shared is neutral, so it was hitting cache and costing no HBM traffic), not occupancy
+(full at MT=16), not memory-level parallelism (unrolling by two is neutral), not lane utilisation
+(remap is neutral), not instruction width (byte loads hit 143 GB/s). What is left needs kernel-level
+stall attribution - `ncu` - which is not installed on this machine. Guessing past this point has a
+measured record of about one hit in ten, so the next step here is to get the profiler rather than to
+try an eleventh variant.
+
 ### The memory system is not the limit, and neither is the codebook
 
 Two direct measurements, both negative, both worth more than the guesses they replace.
