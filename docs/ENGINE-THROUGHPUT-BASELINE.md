@@ -67,6 +67,14 @@ Confirmed by measurement, not assumed:
 
 - fusing q/k/v into one submission (one upload, one quantisation, one download of q|k|v)
   changed the qkv section by 0.2 ms/token — the number of *transfers* is not the limit;
+- per-stage split of every matvec call (`wubu_gpu_stage_report`, printed with `G4_PROF=1`):
+  over 6666 calls (33 tokens x 202) upload 72.6 ms, Q8_K quantise 89.8 ms,
+  launch+download **1445.3 ms** — i.e. 0.011 / 0.014 / **0.217 ms per call**. Total
+  48.7 ms/token, which is what the sum of the weights implies (2.7 GB of FFN + 1.2 GB of
+  head + 0.5 GB of attention projections at ~95 GB/s = ~45 ms). So the matvec path as a
+  whole is bandwidth-bound and close to its floor; the section charges (o-proj 12.5 ms for
+  48 x 3.8 MB) are inconsistent with their own isolated measurement and with this split,
+  which is a profiler accounting problem to resolve before optimising anything inside it;
 - o-projection shape end to end (`wubu_cuda_bench_oproj`, K=2560 x N=3840, 30 iters):
   upload 0.008 + q8k 0.035 + kernel 0.040 + download 0.026 = **0.110 ms/call**, so 48 calls
   per token should cost **5.3 ms** — against the 12.6 ms the engine charges for the same

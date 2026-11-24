@@ -472,6 +472,19 @@ int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_
     return 0;
 }
 
+/* Per-stage wall time inside the matvec path, so the difference between the isolated
+ * bench (0.110 ms for the o-projection shape) and what the engine charges can be split
+ * into upload / quantise / launch+download / sync instead of guessed at. */
+double wubu_gpu_t_upload, wubu_gpu_t_q8, wubu_gpu_t_call;
+long wubu_gpu_n_matvec;
+
+void wubu_gpu_stage_report(void)
+{
+    if (wubu_gpu_n_matvec <= 0) return;
+    printf("[GPU] %ld matvecs: upload %.1f ms, q8k %.1f ms, launch+download %.1f ms\n",
+           wubu_gpu_n_matvec, wubu_gpu_t_upload, wubu_gpu_t_q8, wubu_gpu_t_call);
+}
+
 int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
                     int K, int n_cols, long long col_stride, float *y)
 {
@@ -482,11 +495,16 @@ int wubu_gpu_matvec(const void *d_w, int ggml_type, const float *x,
     const int brc = gpu_ensure_buffers(K, n_cols);
     if (brc != 0) return brc;
 
+    double _s0 = gpu_now_ms();
     if (G.upload(d_x, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
+    double _s1 = gpu_now_ms(); wubu_gpu_t_upload += _s1 - _s0;
     if (G.q8k(d_x, d_q8, K) != 0) return -5;
+    double _s2 = gpu_now_ms(); wubu_gpu_t_q8 += _s2 - _s1;
     g_staged_K = K;
     const int lrc = gpu_launch_and_download(d_w, ggml_type, K, n_cols, col_stride, y);
     if (lrc != 0) return lrc;
+    wubu_gpu_t_call += gpu_now_ms() - _s2;
+    ++wubu_gpu_n_matvec;
     if (ggml_type >= 0 && ggml_type < 32) {
         S[ggml_type].calls++;
         S[ggml_type].ms += gpu_now_ms() - t0;

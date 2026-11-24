@@ -630,6 +630,8 @@ static double g4_now_ms(void)
 #endif
 }
 
+void wubu_gpu_stage_report(void);
+
 static void g4_cpu_stats_dump(void)
 {
     if (!getenv("WUBU_GPU_STATS")) return;
@@ -1277,6 +1279,7 @@ static void g4_prof_dump(void)
             fprintf(stderr, "[PROF]   type %2d: %.1f calls/token, %.1f on GPU\n", t,
                     (double)G4_DEC_TYPE_CALLS[t] / (double)G4_P_TOKENS,
                     (double)G4_DEC_TYPE_GPU[t] / (double)G4_P_TOKENS);
+    wubu_gpu_stage_report();
 }
 
 void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
