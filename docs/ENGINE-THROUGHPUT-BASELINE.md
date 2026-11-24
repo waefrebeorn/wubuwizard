@@ -18,11 +18,18 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 
 | metric | value |
 |---|---|
-| decode, sustained over 65 tokens | **11.4 tok/s** |
+| decode at 65 tokens of context | **11.4 tok/s** |
+| decode at 129 tokens of context | 10.6 tok/s |
+| decode at 257 tokens of context | **9.1 tok/s** |
 | prefill, 21-token prompt | **6.8 tok/s** |
 | prefill, 72-token prompt | **15.0 tok/s** |
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
 | CPU path vs GPU path | identical tokens |
+
+Decode degrades with context and the profiler says why: the attention section is 7.3 ms at
+32 tokens, **29.0 ms at 256 tokens**, and the layer total goes 76 -> 98 ms. Attention is
+the only section that scales with context, and it is entirely on the CPU. At 257 tokens it
+is the second largest cost after the FFN.
 
 Decode matvecs: **202 per token, all 202 on the GPU, none on the CPU.**
 Per type: IQ3_S 95, IQ2_S 83, IQ3_XXS 14, IQ2_XS 5, IQ4_XS 4, Q3_K 1 (the LM head).
