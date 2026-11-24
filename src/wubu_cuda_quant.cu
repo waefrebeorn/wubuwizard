@@ -702,11 +702,18 @@ __global__ void quantize_q8k_kernel(const float * __restrict__ x, c_q8_k * __res
     }
     const float iscale = -127.0f / max_val;
     for (int i = lane; i < QK_K; i += blockDim.x) {
-        float v = iscale * x[base + i];
-        v = (x[base + i] >= 0.0f) ? floorf(v + 0.5f) : ceilf(v - 0.5f);
-        if (v > 127.0f) v = 127.0f;
-        if (v < -128.0f) v = -128.0f;
-        y[blk].qs[i] = (int8_t)v;
+        /* Mirror quantize_row_q8_K() exactly:
+         *   int v = (int)(iscale * x + (x >= 0 ? 0.5f : -0.5f));
+         * The cast truncates toward zero. Using floorf/ceilf here rounded the other way
+         * whenever iscale*x was negative (iscale carries the sign of max_val), which made
+         * the device quantiser differ from the CPU one by +-1 on many elements - measured
+         * as a 2.5e-02 disagreement on q/k/v between the two paths (EG-124). */
+        const float xv = x[base + i];
+        float v = iscale * xv + (xv >= 0.0f ? 0.5f : -0.5f);
+        int q = (int)v;
+        if (q > 127) q = 127;
+        if (q < -128) q = -128;
+        y[blk].qs[i] = (int8_t)q;
     }
     if (lane == 0) y[blk].d = -max_val / 127.0f;
 }
@@ -1478,6 +1485,135 @@ done:
     if (dq) cudaFree(dq);
     if (dk) cudaFree(dk);
     if (dv) cudaFree(dv);
+    return rc;
+}
+
+/* ---- composite attention half-layer, gated standalone ---------------------------
+ * q,k,v -> per-head RMS norms -> RoPE -> KV append -> attention -> o-projection in one
+ * submission. Compared against a CPU sequence of the same steps by EG-124 before anything
+ * in the engine is allowed to call it. */
+WUBU_EXPORT int wubu_cuda_attn_half_dev(
+        const void *d_wq, const void *d_wk, const void *d_wv, const void *d_wo,
+        int tq, int tk, int tv, int to,
+        const float *d_x, float *d_q, float *d_k, float *d_v,
+        float *d_kc, float *d_vc, float *d_attn, float *d_out,
+        const float *d_qn, const float *d_kn,
+        int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+        int pos, int kv_start, int kv_len,
+        long long sq, long long sk, long long sv, long long so,
+        float pos_f, int n_rot, float theta_scale, const float *d_freqs)
+{
+    if (!d_wq || !d_wk || !d_wv || !d_wo || !d_x || !d_out) return -1;
+    if (ensure_q8_scratch(hidden) != 0) return -2;
+
+    quantize_q8k_kernel<<<hidden / QK_K, 32>>>(d_x, g_q8_scratch, hidden);
+    int rc;
+    if (tq == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (tq == 18) rc = wubu_cuda_matvec_iq3xxs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else if (tq == 23) rc = wubu_cuda_matvec_iq4xs(d_wq, g_q8_scratch, d_q, hidden, qd, sq);
+    else               rc = wubu_cuda_quant_matvec(d_wq, tq, g_q8_scratch, d_q, hidden, qd, sq);
+    if (rc != 0) return -3;
+    if (tk == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (tk == 18) rc = wubu_cuda_matvec_iq3xxs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else if (tk == 23) rc = wubu_cuda_matvec_iq4xs(d_wk, g_q8_scratch, d_k, hidden, kvd, sk);
+    else               rc = wubu_cuda_quant_matvec(d_wk, tk, g_q8_scratch, d_k, hidden, kvd, sk);
+    if (rc != 0) return -4;
+    if (tv == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (tv == 18) rc = wubu_cuda_matvec_iq3xxs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else if (tv == 23) rc = wubu_cuda_matvec_iq4xs(d_wv, g_q8_scratch, d_v, hidden, kvd, sv);
+    else               rc = wubu_cuda_quant_matvec(d_wv, tv, g_q8_scratch, d_v, hidden, kvd, sv);
+    if (rc != 0) return -5;
+
+    rms_norm_row_kernel<<<n_heads, 256>>>(d_q, d_qn, d_q, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_k, d_kn, d_k, hd, 1e-6f, 1);
+    rms_norm_row_kernel<<<n_kv_heads, 256>>>(d_v, NULL, d_v, hd, 1e-6f, 0);
+
+    rope_kernel<<<dim3(1, n_heads, n_kv_heads), 128>>>(
+        d_q, d_k, pos_f, hd, qd, kvd, n_rot, theta_scale, d_freqs, n_heads, n_kv_heads);
+
+    kv_append_kernel<<<(kvd + 255) / 256, 256>>>(d_kc, d_vc, d_k, d_v, pos, kvd);
+
+    if (wubu_cuda_attn_dev(d_q, d_kc, d_vc, d_attn, n_heads, n_kv_heads, hd,
+                           kv_start, kv_len, kvd) != 0) return -6;
+
+    if (ensure_q8_scratch(qd) != 0) return -2;
+    quantize_q8k_kernel<<<qd / QK_K, 32>>>(d_attn, g_q8_scratch, qd);
+    if (to == 22)      rc = wubu_cuda_matvec_iq2s_v3(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else if (to == 18) rc = wubu_cuda_matvec_iq3xxs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else if (to == 23) rc = wubu_cuda_matvec_iq4xs(d_wo, g_q8_scratch, d_out, qd, hidden, so);
+    else               rc = wubu_cuda_quant_matvec(d_wo, to, g_q8_scratch, d_out, qd, hidden, so);
+    if (rc != 0) return -7;
+    return cudaGetLastError() == cudaSuccess ? 0 : -8;
+}
+
+/* Host wrapper: everything on the host side, device KV owned here, so EG-124 can compare
+ * the composite against a CPU sequence without the engine in the loop. */
+WUBU_EXPORT int wubu_cuda_attn_half_host(
+        const void *h_wq, const void *h_wk, const void *h_wv, const void *h_wo, int type,
+        const void *h_x, const void *h_qn, const void *h_kn, const void *h_freqs,
+        const float *h_kc, const float *h_vc, int kvd, int cap,
+        const void *h_kappend, const void *h_vappend,
+        float *h_q, float *h_k, float *h_v, float *h_attn, float *h_out,
+        int hidden, int qd, int hd, int n_heads, int n_kv_heads,
+        int pos, int kv_start, int kv_len, int n_rot, float theta_scale)
+{
+    void *dwq = NULL, *dwk = NULL, *dwv = NULL, *dwo = NULL;
+    void *dx = NULL, *dqn = NULL, *dkn = NULL, *df = NULL;
+    void *dkc = NULL, *dvc = NULL, *dka = NULL, *dva = NULL;
+    float *dq = NULL, *dk = NULL, *dv = NULL, *dattn = NULL, *dout = NULL;
+    const long long sq = (long long)(hidden / QK_K) * 82;
+    const long long sk = sq, sv = sq, so = sq;
+    int rc = -1;
+    const size_t wb = (size_t)qd * sq;              /* qd columns for q; k/v/o sized below */
+    if (cudaMalloc(&dwq, (size_t)qd * sq) != cudaSuccess) goto done;
+    if (cudaMalloc(&dwk, (size_t)kvd * sk) != cudaSuccess) goto done;
+    if (cudaMalloc(&dwv, (size_t)kvd * sv) != cudaSuccess) goto done;
+    if (cudaMalloc(&dwo, (size_t)hidden * (size_t)(qd / QK_K) * 82) != cudaSuccess) goto done;
+    if (cudaMalloc(&dx, sizeof(float) * hidden) != cudaSuccess) goto done;
+    if (cudaMalloc(&dq, sizeof(float) * qd) != cudaSuccess) goto done;
+    if (cudaMalloc(&dk, sizeof(float) * kvd) != cudaSuccess) goto done;
+    if (cudaMalloc(&dv, sizeof(float) * kvd) != cudaSuccess) goto done;
+    if (cudaMalloc(&dattn, sizeof(float) * qd) != cudaSuccess) goto done;
+    if (cudaMalloc(&dout, sizeof(float) * hidden) != cudaSuccess) goto done;
+    if (cudaMalloc(&dkc, (size_t)cap * kvd * sizeof(float)) != cudaSuccess) goto done;
+    if (cudaMalloc(&dvc, (size_t)cap * kvd * sizeof(float)) != cudaSuccess) goto done;
+    if (cudaMalloc(&dqn, sizeof(float) * hd) != cudaSuccess) goto done;
+    if (cudaMalloc(&dkn, sizeof(float) * hd) != cudaSuccess) goto done;
+    if (cudaMalloc(&df, sizeof(float) * (n_rot / 2)) != cudaSuccess) goto done;
+    (void)wb;
+
+    if (cudaMemcpy(dwq, h_wq, (size_t)qd * sq, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dwk, h_wk, (size_t)kvd * sk, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dwv, h_wv, (size_t)kvd * sv, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dwo, h_wo, (size_t)hidden * (size_t)(qd / QK_K) * 82, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dx, h_x, sizeof(float) * hidden, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dqn, h_qn, sizeof(float) * hd, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(dkn, h_kn, sizeof(float) * hd, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(df, h_freqs, sizeof(float) * (n_rot / 2), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    /* prime the device KV with the rows before `pos`, exactly as the engine does */
+    if (pos > 0) {
+        if (cudaMemcpy(dkc, h_kc, (size_t)pos * kvd * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+        if (cudaMemcpy(dvc, h_vc, (size_t)pos * kvd * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    }
+    (void)h_kappend; (void)h_vappend; (void)dka; (void)dva;
+
+    if (wubu_cuda_attn_half_dev(dwq, dwk, dwv, dwo, type, type, type, type, (const float *)dx, dq, dk, dv,
+                                (float *)dkc, (float *)dvc, dattn, dout, (const float *)dqn,
+                                (const float *)dkn, hidden, qd, kvd, hd, n_heads, n_kv_heads,
+                                pos, kv_start, kv_len, sq, sk, sv, so, (float)pos, n_rot,
+                                theta_scale, (const float *)df) != 0) goto done;
+    if (cudaMemcpy(h_q, dq, sizeof(float) * qd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(h_k, dk, sizeof(float) * kvd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(h_v, dv, sizeof(float) * kvd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(h_attn, dattn, sizeof(float) * qd, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    if (cudaMemcpy(h_out, dout, sizeof(float) * hidden, cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+    rc = 0;
+done:
+    if (dwq) cudaFree(dwq); if (dwk) cudaFree(dwk); if (dwv) cudaFree(dwv); if (dwo) cudaFree(dwo);
+    if (dx) cudaFree(dx); if (dq) cudaFree(dq); if (dk) cudaFree(dk); if (dv) cudaFree(dv);
+    if (dattn) cudaFree(dattn); if (dout) cudaFree(dout);
+    if (dkc) cudaFree(dkc); if (dvc) cudaFree(dvc);
+    if (dqn) cudaFree(dqn); if (dkn) cudaFree(dkn); if (df) cudaFree(df);
     return rc;
 }
 

@@ -315,6 +315,124 @@ int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
     return 0;
 }
 
+/* ---- device attention half-layer -----------------------------------------------
+ * One submission: q,k,v matvecs -> per-head RMS norms -> RoPE -> KV append -> attention
+ * -> o-projection. Owns a per-layer device KV cache of MAX_KV_POS positions; the caller
+ * primes it from the CPU cache and keeps its own cache current with the k/v that come
+ * back, so falling back past capacity stays correct. */
+#define MAX_LAYERS_DEV 128
+#define MAX_KV_POS 512
+
+static void *g_kv_k[MAX_LAYERS_DEV];
+static void *g_kv_v[MAX_LAYERS_DEV];
+static void *g_qn_dev[MAX_LAYERS_DEV];
+static void *g_kn_dev[MAX_LAYERS_DEV];
+static const float *g_qn_src[MAX_LAYERS_DEV];
+static const float *g_kn_src[MAX_LAYERS_DEV];
+static void *g_freqs_dev;
+static const float *g_freqs_src;
+
+typedef int (*fn_half_t)(const void *, const void *, const void *, const void *,
+                         int, int, int, int, const float *,
+                         float *, float *, float *, float *, float *, float *, float *,
+                         const float *, const float *,
+                         int, int, int, int, int, int, int, int, int,
+                         long long, long long, long long, long long,
+                         float, int, float, const float *);
+static fn_half_t g_half_fn;
+static int g_half_looked;
+
+int wubu_gpu_attn_half_capacity(void) { return MAX_KV_POS; }
+
+int wubu_gpu_attn_half_prime(int layer_id, const float *cpu_k, const float *cpu_v,
+                             int n, int kvd)
+{
+    if (layer_id < 0 || layer_id >= MAX_LAYERS_DEV || !cpu_k || !cpu_v || kvd <= 0) return -1;
+    if (n <= 0 || n > MAX_KV_POS) return -1;
+    if (!g_kv_k[layer_id]) {
+        g_kv_k[layer_id] = G.alloc((unsigned long long)((size_t)MAX_KV_POS * kvd * sizeof(float)));
+        g_kv_v[layer_id] = G.alloc((unsigned long long)((size_t)MAX_KV_POS * kvd * sizeof(float)));
+        if (!g_kv_k[layer_id] || !g_kv_v[layer_id]) return -2;
+    }
+    if (G.upload(g_kv_k[layer_id], cpu_k, (unsigned long long)((size_t)n * kvd * sizeof(float))) != 0) return -3;
+    if (G.upload(g_kv_v[layer_id], cpu_v, (unsigned long long)((size_t)n * kvd * sizeof(float))) != 0) return -3;
+    return 0;
+}
+
+int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const void *d_wv,
+                       const void *d_wo, int tq, int tk, int tv, int to, const float *x,
+                       int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+                       int pos, int kv_start, int kv_len,
+                       long long sq, long long sk, long long sv, long long so,
+                       const float *qn, const float *kn, const float *freqs,
+                       int n_rot, float rope_base, float *out, float *k_out, float *v_out)
+{
+    if (!wubu_gpu_init() || layer_id < 0 || layer_id >= MAX_LAYERS_DEV) return -1;
+    if (pos >= MAX_KV_POS || kv_len <= 0) return -1;
+    if (!g_half_looked) {
+        g_half_looked = 1;
+        g_half_fn = (fn_half_t)(void *)GetProcAddress(G.h, "wubu_cuda_attn_half_dev");
+    }
+    if (!g_half_fn) return -2;
+    if (!g_kv_k[layer_id]) {
+        g_kv_k[layer_id] = G.alloc((unsigned long long)((size_t)MAX_KV_POS * kvd * sizeof(float)));
+        g_kv_v[layer_id] = G.alloc((unsigned long long)((size_t)MAX_KV_POS * kvd * sizeof(float)));
+        if (!g_kv_k[layer_id] || !g_kv_v[layer_id]) return -3;
+    }
+    static float *scratch, *dx;
+    static int cap_scratch, cap_x;
+    const int total = qd + kvd + kvd + qd + hidden;
+    if (cap_scratch < total) {
+        if (scratch) G.free_dev(scratch);
+        scratch = (float *)G.alloc((unsigned long long)((size_t)total * sizeof(float)));
+        if (!scratch) { cap_scratch = 0; return -3; }
+        cap_scratch = total;
+    }
+    if (cap_x < hidden) {
+        if (dx) G.free_dev(dx);
+        dx = (float *)G.alloc((unsigned long long)((size_t)hidden * sizeof(float)));
+        if (!dx) { cap_x = 0; return -3; }
+        cap_x = hidden;
+    }
+    float *d_q = scratch, *d_k = d_q + qd, *d_v = d_k + kvd, *d_attn = d_v + kvd;
+    float *d_out = d_attn + qd;
+
+    if (g_qn_src[layer_id] != qn || !g_qn_dev[layer_id]) {
+        if (g_qn_dev[layer_id]) G.free_dev(g_qn_dev[layer_id]);
+        g_qn_dev[layer_id] = G.alloc((unsigned long long)((size_t)hd * sizeof(float)));
+        if (!g_qn_dev[layer_id]) return -4;
+        if (G.upload(g_qn_dev[layer_id], qn, (unsigned long long)((size_t)hd * sizeof(float))) != 0) return -4;
+        g_qn_src[layer_id] = qn;
+    }
+    if (g_kn_src[layer_id] != kn || !g_kn_dev[layer_id]) {
+        if (g_kn_dev[layer_id]) G.free_dev(g_kn_dev[layer_id]);
+        g_kn_dev[layer_id] = G.alloc((unsigned long long)((size_t)hd * sizeof(float)));
+        if (!g_kn_dev[layer_id]) return -4;
+        if (G.upload(g_kn_dev[layer_id], kn, (unsigned long long)((size_t)hd * sizeof(float))) != 0) return -4;
+        g_kn_src[layer_id] = kn;
+    }
+    if (freqs && (g_freqs_src != freqs || !g_freqs_dev)) {
+        if (g_freqs_dev) G.free_dev(g_freqs_dev);
+        g_freqs_dev = G.alloc((unsigned long long)((size_t)(n_rot / 2) * sizeof(float)));
+        if (!g_freqs_dev) return -4;
+        if (G.upload(g_freqs_dev, freqs, (unsigned long long)((size_t)(n_rot / 2) * sizeof(float))) != 0) return -4;
+        g_freqs_src = freqs;
+    }
+
+    if (G.upload(dx, x, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -5;
+    const double theta_scale = pow((double)rope_base, -2.0 / (double)n_rot);
+    if (g_half_fn(d_wq, d_wk, d_wv, d_wo, tq, tk, tv, to, dx, d_q, d_k, d_v,
+                  (float *)g_kv_k[layer_id], (float *)g_kv_v[layer_id], d_attn, d_out,
+                  (const float *)g_qn_dev[layer_id], (const float *)g_kn_dev[layer_id],
+                  hidden, qd, kvd, hd, n_heads, n_kv_heads, pos, kv_start, kv_len,
+                  sq, sk, sv, so, (float)pos, n_rot, (float)theta_scale,
+                  (const float *)g_freqs_dev) != 0) return -6;
+    if (G.download(out, d_out, (unsigned long long)((size_t)hidden * sizeof(float))) != 0) return -7;
+    if (k_out && G.download(k_out, d_k, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -8;
+    if (v_out && G.download(v_out, d_v, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -8;
+    return 0;
+}
+
 /* Fused q/k/v: one upload, one quantisation, three kernels, one download of q|k|v. */
 int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_type,
                  const float *x, int K, int qd, int kvd,

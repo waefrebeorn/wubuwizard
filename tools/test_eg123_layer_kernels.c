@@ -97,6 +97,25 @@ int main(int argc, char **argv)
         CHECK(worst < 1e-4);
     }
 
+    /* ---- RMS norm at a small row length (n < blockDim, idle warps) ---- */
+    {
+        enum { ROWS = 4, N = 64 };
+        static float xs[ROWS][N], ws[N], refs[ROWS][N], gots[ROWS][N];
+        for (int i = 0; i < N; ++i) ws[i] = 1.0f + 0.2f * rnd();
+        for (int r = 0; r < ROWS; ++r)
+            for (int i = 0; i < N; ++i) xs[r][i] = rnd();
+        for (int r = 0; r < ROWS; ++r) cpu_rms_norm(xs[r], ws, N, 1e-6f, refs[r], 1);
+        CHECK(rms(xs, ws, &gots[0][0], ROWS, N, 1e-6f, 1) == 0);
+        double w2 = 0.0;
+        for (int r = 0; r < ROWS; ++r)
+            for (int i = 0; i < N; ++i) {
+                const double d = fabs((double)gots[r][i] - (double)refs[r][i]);
+                if (d > w2) w2 = d;
+            }
+        printf("EG-123 rms_norm n=64: worst_abs=%.3e\n", w2);
+        CHECK(w2 < 1e-4);
+    }
+
     /* ---- residual add ---- */
     {
         enum { N2 = 3840 };

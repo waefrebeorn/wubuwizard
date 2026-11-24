@@ -79,6 +79,23 @@ Confirmed by measurement, not assumed:
 What did move a kernel: replacing the hand-written fp16 decoder (branch plus a normalise
 loop for subnormals) with `__half2float` took IQ2_S from 78 to 100 GB/s.
 
+## Device attention half-layer (opt-in, `G4_ATTN_DEV=1`)
+
+`q,k,v -> per-head RMS norms -> RoPE -> KV append -> attention -> o-projection` in one
+submission, with a per-layer device KV cache (512 positions, primed from the CPU cache).
+
+| mode | decode, 65 tokens |
+|---|---|
+| default (CPU attention, per-tensor matvecs) | **11.4 tok/s** |
+| `G4_ATTN_DEV=1` | **13.5 tok/s** |
+
+It is opt-in because it does not hold the identical-token bar: the fused order changes the
+accumulation. EG-124 (synthetic weights, same inputs) measures the divergence explicitly -
+q/k/v/attn 4e-07, o-projection output 1.5e-05 - and at that size a near-tie flips by the
+third token (45518, 107, then 140 instead of 236775). The direction is the same one that
+already moved this engine from F32 to Q8_K activations; it is a different computation, not
+a defect, but the default path keeps the bar.
+
 ## Constraint: device KV memory
 
 `kvd` is 2048 floats (8 KB) per position per layer, twice (K and V). A 4096-position context

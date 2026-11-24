@@ -31,6 +31,19 @@ int wubu_gpu_stage_input(const float *x, int K);
 int wubu_gpu_matvec_cached(const void *d_w, int ggml_type, int K, int n_cols,
                            long long col_stride, float *y);
 
+/* Device attention half-layer. Prime the per-layer device KV once before the first decode
+ * token; returns non-zero when pos is past wubu_gpu_attn_half_capacity() so the caller can
+ * stay on the CPU path. */
+int wubu_gpu_attn_half_capacity(void);
+int wubu_gpu_attn_half_prime(int layer_id, const float *cpu_k, const float *cpu_v, int n, int kvd);
+int wubu_gpu_attn_half(int layer_id, const void *d_wq, const void *d_wk, const void *d_wv,
+                       const void *d_wo, int tq, int tk, int tv, int to, const float *x,
+                       int hidden, int qd, int kvd, int hd, int n_heads, int n_kv_heads,
+                       int pos, int kv_start, int kv_len,
+                       long long sq, long long sk, long long sv, long long so,
+                       const float *qn, const float *kn, const float *freqs,
+                       int n_rot, float rope_base, float *out, float *k_out, float *v_out);
+
 /* Fused decode q/k/v: one upload, one quantisation, one download of q|k|v. */
 int wubu_gpu_qkv(const void *d_wq, const void *d_wk, const void *d_wv, int ggml_type,
                  const float *x, int K, int qd, int kvd,

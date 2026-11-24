@@ -1301,6 +1301,64 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         g4_rms_norm(x + (size_t)t * G4_HIDDEN, layer->attn_norm_weight,
                     G4_HIDDEN, G4_RMS_EPS, normed + (size_t)t * G4_HIDDEN);
 
+    /* ===== Device attention half-layer (decode) =====
+     * q,k,v -> head norms -> RoPE -> KV append -> attention -> o-projection in one
+     * submission, gated by EG-124 against a CPU sequence of the same steps. k and v come
+     * back so the CPU cache stays current and a fallback past capacity stays correct. */
+    int half_done = 0;
+    {
+        static int half_enabled = -1;
+        if (half_enabled < 0) {
+            /* Opt-in. Measured 13.5 tok/s against 11.4, but the fused order changes the
+             * accumulation: q/k/v/attn match the CPU sequence to 4e-07 and the o-projection
+             * output to 1.5e-05 (EG-124), which is enough to flip a near-tie by the third
+             * token (45518, 107, then 140 instead of 236775). The default path keeps the
+             * identical-token bar; this one is for measuring the ceiling. */
+            const char *e = getenv("G4_ATTN_DEV");
+            half_enabled = (e != NULL && *e != '0');
+        }
+        if (half_enabled && N == 1 && !layer->share_kv && layer->attn_q.dev &&
+            layer->attn_k.dev && layer->attn_v.dev && layer->attn_out.dev) {
+            g4_kv_cache_t *cache_h = g4_kv_get(model, layer);
+            const int pos_h = positions[0];
+            int kv_start_h = 0, kv_len_h = 0;
+            if (layer->is_full) {
+                int kv_end_h = cache_h->size - 1;
+                if (kv_end_h > pos_h) kv_end_h = pos_h;
+                kv_len_h = kv_end_h + 1;
+            } else {
+                kv_start_h = (pos_h >= G4_SLIDING_WINDOW) ? pos_h - G4_SLIDING_WINDOW + 1 : 0;
+                kv_len_h = pos_h - kv_start_h + 1;
+                if (kv_len_h > cache_h->size) kv_len_h = cache_h->size;
+            }
+            static int primed[128];
+            if (pos_h == 0) primed[il] = 1;
+            else if (!primed[il] &&
+                     wubu_gpu_attn_half_prime(il, cache_h->k, cache_h->v, pos_h, kvd) == 0)
+                primed[il] = 1;
+            if (primed[il] && kv_len_h > 0) {
+                const long long sq_h = (long long)(layer->attn_q.raw_bytes / qd);
+                const long long sk_h = (long long)(layer->attn_k.raw_bytes / kvd);
+                const long long sv_h = (long long)(layer->attn_v.raw_bytes / kvd);
+                const long long so_h = (long long)(layer->attn_out.raw_bytes / G4_HIDDEN);
+                if (wubu_gpu_attn_half(il, layer->attn_q.dev, layer->attn_k.dev,
+                                       layer->attn_v.dev, layer->attn_out.dev,
+                                       layer->attn_q.ggml_type, layer->attn_k.ggml_type,
+                                       layer->attn_v.ggml_type, layer->attn_out.ggml_type,
+                                       normed, G4_HIDDEN, qd, kvd, hd, G4_HEADS, kvh,
+                                       pos_h, kv_start_h, kv_len_h,
+                                       sq_h, sk_h, sv_h, so_h,
+                                       layer->attn_q_norm_weight, layer->attn_k_norm_weight,
+                                       layer->rope_freqs, layer->n_rot, layer->rope_base,
+                                       normed, k, v) == 0) {
+                    g4_kv_store(cache_h, pos_h, k, v);
+                    half_done = 1;
+                }
+            }
+        }
+    }
+
+    if (!half_done) {
     /* ===== Q, K, V projections =====
      * All three read the same normalised input, so stage it on the device once and run
      * the three kernels against the staged Q8_K row (decode only). */
@@ -1410,6 +1468,7 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
     const double _po0 = g4_now_ms();
     g4_batched_qmatmul(attn_out, &layer->attn_out, N, G4_HIDDEN, qd, normed);
     if (N == 1) { const double _t = g4_now_ms(); G4_P[G4P_OPROJ] += _t - _po0; _pk = _t; }
+    }   /* end: !half_done */
 
     /* ===== Post-attention norm + residual ===== */
     #pragma omp parallel for if(N > 1)
