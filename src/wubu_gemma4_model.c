@@ -1398,27 +1398,23 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
         static int half_enabled = -1;
         static int half_mode = 0;
         if (half_enabled < 0) {
-            /* Opt-in, and the reason is quality, not bookkeeping. It is the faster path -
-             * 14.1-14.3 tok/s against 12.8-12.9 at 65 tokens of context and 13.5 against
-             * 12.0 at 257 - and its arithmetic matches the CPU sequence closely (q/k/v/attn
-             * to 4e-07, o-projection to 1.5e-05, EG-124). But the continuation it produces
-             * on this model is not a paraphrase of the default one: measured over 40 tokens
-             * it collapses into a loop of control tokens (237542, 236779, 236756 repeating)
-             * and decodes to "_", where the CPU-attention path reaches
-             * "This is a classic philosophical question". Same weights, same prompt, a
-             * 1.5e-05 deviation per layer compounding into a degenerate loop - so this stays
-             * opt-in for measurement, not default. */
-            /* Default: full-attention layers only. Measured token-identical to the CPU path
-             * over 64 tokens (the whole sequence, not just the first few), because on those
-             * layers the composite reproduces q, k, v, the KV rows and the span exactly.
-             * G4_ATTN_DEV=all also fuses the sliding layers, which is another 8.5% but still
-             * parts from the reference around generated token 2 - that is the open bug.
-             * G4_ATTN_DEV=slide fuses only the sliding layers, G4_ATTN_DEV=0 disables. */
+            /* Default: all layers fused. It was kept opt-in for the whole session because the
+             * sliding layers produced a control-token loop, and the cause turned out not to be
+             * precision at all: the composite's own q/k/v dispatch listed types 22/18/23 and
+             * sent everything else to the generic kernel, which does not implement IQ2_XS and
+             * answers with zeros and rc=0. The five layers with an IQ2_XS attn_k attended on an
+             * all-zero K. With that fixed (mv_any), the fused continuation is identical to the
+             * CPU path on five different prompts over 24 tokens each, measured.
+             * G4_ATTN_DEV=full keeps the old behaviour (full-attention layers only),
+             * =slide fuses only the sliding layers, =0 disables.
+             * Known limit: past roughly 30 generated tokens the two part ways (measured: first
+             * difference at token 31 of a 40-token run) - the per-layer residue accumulates. */
             const char *e = getenv("G4_ATTN_DEV");
             half_enabled = !(e != NULL && *e == '0');
+            if (half_enabled && (e == NULL || !*e)) half_mode = 0;
             if (e && strcmp(e, "all") == 0) half_mode = 0;
             else if (e && strcmp(e, "slide") == 0) half_mode = 2;
-            else half_mode = 1;
+            else if (e && strcmp(e, "full") == 0) half_mode = 1;
         }
         const int mode_ok = (half_mode == 0) || (half_mode == 1 && layer->is_full) ||
                             (half_mode == 2 && !layer->is_full);

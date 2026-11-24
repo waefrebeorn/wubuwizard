@@ -258,6 +258,27 @@ of 300x that magnitude cancels; a *coherent* bias does not - 40 sliding layers a
 rounding difference in the same direction, so it accumulates linearly instead of as sqrt(n).
 That is why "the error is only 1.5e-07" and "the continuation changes" are both true.
 
+### All-layer fusion is now the default: 14.3 tok/s at 65, 13.4-13.6 at 257
+
+With `mv_any()` in place the sliding layers are correct, so fusing them is no longer a
+quality trade. Measured on the same machine, same model, one after the other:
+
+| path | decode @65 | decode @257 | prefill |
+|---|---|---|---|
+| previous default (full-attention layers only) | 13.1 | 12.4 | 13.7 |
+| **new default (all 48 layers)** | **14.3** | **13.5** | **14.4** |
+
+`G4_ATTN_DEV=full` restores the old behaviour, `=slide` fuses only the sliding layers, `=0`
+disables the fused path entirely.
+
+Token identity against the previous default: identical for 24 tokens on every prompt tried
+(six prompts, including code, arithmetic and factual questions). Past roughly 30 generated
+tokens the two part ways - the 40-token run first differs at token 31 - because the per-layer
+residue still accumulates once every layer contributes it. That limit is documented rather than
+hidden: the default is chosen on 24-token identity, which is the gate this engine has used
+throughout, and long single-shot generations should be re-checked before relying on the last few
+tokens of a 100-token continuation.
+
 ### Root cause: the composite's q/k/v dispatch had a silent hole, and IQ2_XS fell into it
 
 The two contradictory measurements resolved to one bug. `wubu_cuda_attn_half_dev` spelled its own
