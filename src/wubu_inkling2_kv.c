@@ -119,11 +119,16 @@ void in2_kv_conv_row(const float *hist3, const float *xrow, int channels, const 
 {
     const float scale = 1.0f / sqrtf((float)(k + 1));
     for (int c = 0; c < channels; ++c) {
-        /* Tap index i multiplies in[t+i] in the reference, so the LAST tap is the current row and tap 0 is
-         * the oldest cached row. hist3 holds three rows, oldest first. */
-        float acc = w[(size_t)c * (size_t)k + (size_t)(k - 1)] * xrow[c];
-        for (int tap = 0; tap < k - 1; ++tap) {
-            const int age = k - 1 - tap;                          /* 3, 2, 1 for k = 4 */
+        /* Accumulate in the SAME order as in2_shortconv - tap 0 (oldest) first, the current row last. The earlier
+         * version seeded acc with the current row and then added taps 0..k-2, which is a different summation order
+         * and therefore a few ULP different: kt differed from the batch conv by 3.8e-6 with kraw bit-exact, and the
+         * recurrent loop turned that 1e-6 into ~1e-1 over 48 visits x 3 passes. Skipping a term whose source is
+         * before the start of the sequence is also what the batch version does, so an unfilled hist slot (zeros)
+         * contributes exactly nothing in both. */
+        float acc = 0.0f;
+        for (int tap = 0; tap < k; ++tap) {
+            const int age = k - 1 - tap;                          /* 3, 2, 1, 0 for k = 4 */
+            if (age == 0) { acc += w[(size_t)c * (size_t)k + (size_t)tap] * xrow[c]; continue; }
             if (!hist3 || age > 3) continue;
             acc += w[(size_t)c * (size_t)k + (size_t)tap] * hist3[(size_t)(3 - age) * (size_t)channels + (size_t)c];
         }

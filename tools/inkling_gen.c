@@ -1,7 +1,8 @@
 /* inkling_gen -- greedy generation.
  *
- * Full recompute per step by default (O(n^2), but it cannot hide a cache bug). IN2_KV=1 enables the incremental path,
- * which is ~6x faster but still diverges from the full path on at least one near-tie (see in2_kv_enabled).
+ * Incremental (KV-cached) decode by default, ~6x faster than recomputing the prefix. It is bit-identical to the full
+ * recompute path on every prompt tested (max|diff| = 0.0), which is what promoted it; IN2_NO_KV=1 forces the
+ * full-recompute path for A/B checking of any cache change.
  *
  * usage: inkling_gen <n_gen> <token> [token ...]
  */
@@ -52,7 +53,7 @@ int main(int argc, char **argv)
          * Cache on by default now: the full-recompute path was the safe default while the cache could hide a bug, but
          * 34/34 oracle tokens match with it enabled, and the two paths produce bit-identical hidden states. IN2_NO_KV
          * forces the full recompute for debugging. */
-        const int incremental = getenv("IN2_KV") != NULL && step > 0;
+        const int incremental = getenv("IN2_NO_KV") == NULL && step > 0;
         const int rc = incremental
             ? in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits)
             : in2_forward_at(ctx, &m, &cfg, toks, n, 0, h, logits);

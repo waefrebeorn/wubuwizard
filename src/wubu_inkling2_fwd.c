@@ -103,11 +103,10 @@ static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
  * tool and the engine each used to test IN2_KV separately, and a caller asking for an incremental step while the
  * engine declined to attach a cache failed at the second token with rc=-6. */
 int in2_kv_enabled(void);
-/* Opt-in, NOT default: with the cache attached the greedy decode of the second oracle prompt flips a near-tie at
- * token 9 (198 instead of 68014), deterministically and at every thread count, so the cache path is numerically
- * different from the full-recompute path. It reproduces the 10/10 oracle tokens on that prompt only sometimes, which
- * is exactly the kind of "works until it doesn't" that a default must not have. Investigating before promoting. */
-int in2_kv_enabled(void) { return getenv("IN2_KV") != NULL; }
+/* On by default: the incremental path is bit-identical to full recompute (max|diff| = 0.0 over the hidden state of
+ * every token tested) once in2_kv_conv_row summed its taps in the batch conv's order. IN2_NO_KV forces the O(n^2)
+ * full recompute, which is still the honest way to check a cache change. */
+int in2_kv_enabled(void) { return getenv("IN2_NO_KV") == NULL; }
 static int g_force_cache;
 int  in2_dq_force_begin(void) { const int s = g_force_cache; g_force_cache = 1; return s; }
 void in2_dq_force_end(int s) { g_force_cache = s; }
