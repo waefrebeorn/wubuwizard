@@ -1,0 +1,245 @@
+/* wubu_inkling2_fullseq.c -- the full-attention layer over a token sequence.
+ *
+ * Same maths as in2_layer_full but generalised to n_tok with causal masking, so prefill and generation
+ * share one code path. Differences from the sliding layer: three depth-mixed states with their own input
+ * norms, tau-scaled q, dynamic k/v short convs, and attention over every earlier key (the relative bias
+ * still dies outside 0..1023).
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#include "wubu_inkling2.h"
+
+void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
+void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
+void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y);
+void in2_shortconv(const float *x, int n_tok, int channels, const float *w, int k, float *out);
+void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float *stat,
+                           const float *dyn_proj, const float *dyn_input, int hidden,
+                           int n_head, int k, float *out);
+void in2_l2_clip(float *x, const float *scale, int n_head, int dim, float threshold);
+void in2_rel_bias_table(const float *rel_states, const float *P, int n_head, int d_rel, int extent, float *bias);
+void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *queries, int n_q,
+             int d, float eps, float *out);
+void in2_message_gate(const float *h, const float *message, const float *down, const float *forget,
+                      const float *msgp, int d, int rank, float eps, float *out);
+int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+             int il, const float *x, int n_tok, float *out);
+float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out);
+
+int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                       const float *msgs)
+{
+    const wubu_in2_layer_t *L = &m->layer[il];
+    const int d = cfg->d_model, NH = cfg->n_head, NKV = cfg->n_kv_head, HD = cfg->head_dim;
+    const int qdim = NH * HD, kdim = NKV * HD, DREL = 16, EXT = 1024;
+    const float eps = cfg->rms_eps;
+    const size_t ND = (size_t)n_tok * d;
+
+    float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    float *qn = in2_tensor_to_f32(ctx, &L->q_inp_norm, NULL);
+    float *kn = in2_tensor_to_f32(ctx, &L->k_inp_norm, NULL);
+    float *vn = in2_tensor_to_f32(ctx, &L->v_inp_norm, NULL);
+    if (!arq || !qn || !kn || !vn) {
+        free(arq); free(qn); free(kn); free(vn);
+        return WUBU_INKLING2_ERR_IO;
+    }
+
+    /* 1. three depth-mixed states per position (q, k, v inputs), then the message gates. */
+    float *state = (float *)calloc((size_t)3 * ND, sizeof(float));
+    if (!state) { free(arq); free(qn); free(kn); free(vn); return WUBU_INKLING2_ERR_IO; }
+    for (int t = 0; t < n_tok; ++t)
+        in2_mix(blocks, n_blocks, h + (size_t)t * d, arq, 3, d, eps,
+                state + (size_t)t * 3 * d);
+
+    for (int sl = 0; sl < 3 && msgs; ++sl) {
+        float *dw = in2_tensor_to_f32(ctx, &L->loop_down[sl], NULL);
+        float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[sl], NULL);
+        float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[sl], NULL);
+        if (dw && fw && gw) {
+            for (int t = 0; t < n_tok; ++t) {
+                float *dst = state + (size_t)t * 3 * d + (size_t)sl * d;
+                float *gated = (float *)calloc((size_t)d, sizeof(float));
+                in2_message_gate(dst, msgs + (size_t)sl * d, dw, fw, gw, d, cfg->loop_gate_rank, eps, gated);
+                memcpy(dst, gated, sizeof(float) * d);
+                free(gated);
+            }
+        }
+        free(dw); free(fw); free(gw);
+    }
+
+    float *xq = (float *)calloc(ND, sizeof(float));
+    float *xk = (float *)calloc(ND, sizeof(float));
+    float *xv = (float *)calloc(ND, sizeof(float));
+    if (!xq || !xk || !xv) {
+        free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+        return WUBU_INKLING2_ERR_IO;
+    }
+    for (int t = 0; t < n_tok; ++t) {
+        const float *s = state + (size_t)t * 3 * d;
+        in2_rmsnorm(s,         qn, d, eps, xq + (size_t)t * d);
+        in2_rmsnorm(s + d,     kn, d, eps, xk + (size_t)t * d);
+        in2_rmsnorm(s + 2 * d, vn, d, eps, xv + (size_t)t * d);
+    }
+
+    /* 2. q with scaled clip and tau (tau is 1.0 at positions below 8192, so it only bites on long context) */
+    float *Wq = in2_tensor_to_f32(ctx, &L->wq, NULL);
+    float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
+    float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
+    if (!Wq || !q) { free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+                     free(Wq); free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
+    for (int t = 0; t < n_tok; ++t) {
+        float *qt = q + (size_t)t * qdim;
+        in2_matvec(Wq, xq + (size_t)t * d, d, qdim, qt);
+        in2_l2_clip(qt, qcl, NH, HD, 22.6274166f);
+        const float tau = 1.0f + 0.1f * logf(fmaxf(((float)(pos0 + t) + 1.0f) / 8192.0f, 1.0f));
+        for (int i = 0; i < qdim; ++i) qt[i] *= tau;
+    }
+
+    /* 3. k and v with the dynamic short conv */
+    float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
+    float *Wv = in2_tensor_to_f32(ctx, &L->wv, NULL);
+    float *kc = in2_tensor_to_f32(ctx, &L->k_conv, NULL);
+    float *vc = in2_tensor_to_f32(ctx, &L->v_conv, NULL);
+    float *kp = in2_tensor_to_f32(ctx, &L->k_conv_proj, NULL);
+    float *vp = in2_tensor_to_f32(ctx, &L->v_conv_proj, NULL);
+    float *kraw = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
+    float *vraw = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
+    float *kt = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
+    float *vt = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
+    float *k = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
+    float *v = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
+    int rc = WUBU_INKLING2_OK;
+    if (!Wk || !Wv || !kc || !vc || !kp || !vp || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
+    if (rc == WUBU_INKLING2_OK) {
+        for (int t = 0; t < n_tok; ++t) {
+            in2_matvec(Wk, xk + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
+            in2_matvec(Wv, xv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
+        }
+        in2_shortconv_dynamic(kraw, n_tok, kdim, kc, kp, xk, d, NKV, 4, kt);
+        in2_shortconv_dynamic(vraw, n_tok, kdim, vc, vp, xv, d, NKV, 4, vt);
+        for (int t = 0; t < n_tok; ++t) {
+            memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);
+            in2_l2_clip(k + (size_t)t * kdim, NULL, NKV, HD, 22.6274166f);
+            memcpy(v + (size_t)t * kdim, vt + (size_t)t * kdim, sizeof(float) * kdim);
+            for (int hh = 0; hh < NKV; ++hh) {
+                float *row = v + (size_t)t * kdim + hh * HD;
+                in2_rmsnorm_unweighted(row, HD, eps, row);
+            }
+        }
+    }
+
+    /* 4. attention: causal, over every earlier key (no window), with the per-query relative bias and sink */
+    float *Wrel = in2_tensor_to_f32(ctx, &L->wrel, NULL);
+    float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
+    float *P = in2_tensor_to_f32(ctx, &L->rel_bias, NULL);
+    float *Wsk = in2_tensor_to_f32(ctx, &L->sink, NULL);
+    float *rs = (float *)calloc((size_t)NH * DREL, sizeof(float));
+    float *bias = (float *)calloc((size_t)NH * EXT, sizeof(float));
+    float *sink = (float *)calloc((size_t)n_tok * NH, sizeof(float));
+    float *logit = (float *)malloc(sizeof(float) * (size_t)n_tok);
+    float *alpha = (float *)malloc(sizeof(float) * (size_t)n_tok);
+    float *attn_out = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
+    if (!(Wrel && rcl && P && Wsk && rs && bias && sink && logit && alpha && attn_out)) rc = WUBU_INKLING2_ERR_IO;
+
+    if (rc == WUBU_INKLING2_OK) {
+        for (int t = 0; t < n_tok; ++t) {
+            in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs);
+            in2_l2_clip(rs, rcl, NH, DREL, 8.0f);
+            in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
+            in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
+            for (int hh = 0; hh < NH; ++hh) {
+                const int kvh = hh / (NH / NKV);
+                int n_key = 0;
+                for (int j = 0; j <= t; ++j) {           /* causal */
+                    const int dist = t - j;
+                    double acc = 0.0;
+                    for (int e = 0; e < HD; ++e)
+                        acc += (double)q[(size_t)t * qdim + hh * HD + e] * k[(size_t)j * kdim + kvh * HD + e];
+                    logit[n_key] = (float)acc * (1.0f / sqrtf((float)HD))
+                                 + (dist < EXT ? bias[hh * EXT + dist] : 0.0f);
+                    ++n_key;
+                }
+                /* sink-aware softmax: the weights sum to less than 1 by the sink's share */
+                float mx = sink[(size_t)t * NH + hh];
+                for (int i = 0; i < n_key; ++i) if (logit[i] > mx) mx = logit[i];
+                double tot = exp((double)(sink[(size_t)t * NH + hh] - mx));
+                for (int i = 0; i < n_key; ++i) { alpha[i] = expf(logit[i] - mx); tot += alpha[i]; }
+                const float inv = (float)(1.0 / tot);
+                for (int i = 0; i < n_key; ++i) alpha[i] *= inv;
+                float *o = attn_out + (size_t)t * qdim + hh * HD;
+                for (int j = 0; j < n_key; ++j)
+                    for (int e = 0; e < HD; ++e) o[e] += alpha[j] * v[(size_t)j * kdim + kvh * HD + e];
+            }
+        }
+    }
+
+    /* 5. gated output projection */
+    float *Wg = in2_tensor_to_f32(ctx, &L->wgate, NULL);
+    float *Wo = in2_tensor_to_f32(ctx, &L->wo, NULL);
+    float *gate = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
+    float *ao = (float *)calloc(ND, sizeof(float));
+    if (Wg && Wo && gate && ao && rc == WUBU_INKLING2_OK) {
+        for (int t = 0; t < n_tok; ++t) {
+            float *gt = gate + (size_t)t * qdim;
+            in2_matvec(Wg, xq + (size_t)t * d, d, qdim, gt);
+            for (int i = 0; i < qdim; ++i)
+                gt[i] = attn_out[(size_t)t * qdim + i] * (1.0f / (1.0f + expf(-gt[i])));
+            in2_matvec(Wo, gt, qdim, d, ao + (size_t)t * d);
+        }
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    /* 6. post-attn conv + the boundary rule */
+    float *pc = in2_tensor_to_f32(ctx, &L->attn_post_conv, NULL);
+    float *res = (float *)calloc(ND, sizeof(float));
+    if (pc && res && rc == WUBU_INKLING2_OK) {
+        in2_shortconv(ao, n_tok, d, pc, 4, res);
+        const int boundary = (cfg->attn_res_block > 0) && (il % cfg->attn_res_block == 0);
+        if (!boundary) for (size_t i = 0; i < ND; ++i) res[i] = h[i] + res[i];
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    /* 7. mlp_input mix (+ mlp message gate), ffn norm, MoE, post-mlp conv, residual */
+    float *fq = in2_tensor_to_f32(ctx, &L->ffn_res_q, NULL);
+    float *mixed = (float *)calloc(ND, sizeof(float));
+    float *fn = in2_tensor_to_f32(ctx, &L->ffn_norm, NULL);
+    float *moein = (float *)calloc(ND, sizeof(float));
+    float *moeout = (float *)calloc(ND, sizeof(float));
+    if (fq && mixed && fn && moein && moeout && rc == WUBU_INKLING2_OK) {
+        for (int t = 0; t < n_tok; ++t) {
+            in2_mix(blocks, n_blocks, res + (size_t)t * d, fq, 1, d, eps, mixed + (size_t)t * d);
+            if (msgs) {
+                float *dw = in2_tensor_to_f32(ctx, &L->loop_down[3], NULL);
+                float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[3], NULL);
+                float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[3], NULL);
+                if (dw && fw && gw) {
+                    float *gated = (float *)calloc((size_t)d, sizeof(float));
+                    in2_message_gate(mixed + (size_t)t * d, msgs + (size_t)3 * d, dw, fw, gw,
+                                     d, cfg->loop_gate_rank, eps, gated);
+                    memcpy(mixed + (size_t)t * d, gated, sizeof(float) * d);
+                    free(gated);
+                }
+                free(dw); free(fw); free(gw);
+            }
+            in2_rmsnorm(mixed + (size_t)t * d, fn, d, eps, moein + (size_t)t * d);
+        }
+        rc = in2_moe(ctx, m, cfg, il, moein, n_tok, moeout);
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
+    float *mo = (float *)calloc(ND, sizeof(float));
+    if (pm && mo && rc == WUBU_INKLING2_OK) {
+        in2_shortconv(moeout, n_tok, d, pm, 4, mo);
+        for (size_t i = 0; i < ND; ++i) h[i] = res[i] + mo[i];
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+    free(Wq); free(qcl); free(q); free(Wk); free(Wv); free(kc); free(vc); free(kp); free(vp);
+    free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
+    free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
+    free(logit); free(alpha); free(attn_out); free(Wg); free(Wo); free(gate); free(ao);
+    free(pc); free(res); free(fq); free(mixed); free(fn); free(moein); free(moeout); free(pm); free(mo);
+    return rc;
+}

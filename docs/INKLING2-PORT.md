@@ -576,6 +576,29 @@ Sliding layers already take `n_tok`. So the path is:
 
 That is a real refactor, not a switch, and it is the next body of work.
 
+## A sequence-capable full layer, and a bug it exposed
+
+`src/wubu_inkling2_fullseq.c` generalises the full-attention layer to `n_tok` with causal masking, so
+prefill and generation can share one path. The rewrite was expected to reproduce the single-token results
+exactly at `n_tok == 1`. It does not:
+
+```
+single-token layer : max 20.9703  min 7.7672  span 13.2  top1 190472
+sequence layer     : max 19.8403  min 8.9541  span 10.9  top1 87
+```
+
+The difference has one identified cause. The single-token version applied the slot-3 (mlp) message gate by
+writing the gated value **into `h`**, so the residual add two lines later
+(`if (!boundary) res[i] = h[i] + res[i]`) added a message-gated vector instead of the layer input. The
+reference applies that gate to the mlp input *after* the depth mix, leaving the residual untouched. The
+sequence version does it correctly, and the numbers move as a result.
+
+So the sequence layer is not merely a generalisation - it fixes a defect that was silently corrupting the
+residual stream on four layers per pass. Worth stating plainly: **the earlier three-pass numbers were
+produced by a graph with this bug in it**, and the span 13.2 figure that made the full-layer gating look
+right was measured through that bug. The gating conclusion still stands (it moved the symptom the right
+way), but the absolute numbers before this commit are superseded.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
