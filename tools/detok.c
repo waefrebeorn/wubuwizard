@@ -28,6 +28,8 @@ static void emit(const char *s)
     while (*p) {
         if (p[0] == 0xE2 && p[1] == 0x96 && p[2] == 0x81) { putchar(' '); p += 3; }   /* U+2581 SentencePiece */
         else if (p[0] == 0xC4 && p[1] == 0xA0) { putchar(' '); p += 2; }                /* U+0120 byte-level BPE */
+        else if (p[0] == 0xC4 && p[1] == 0x8A) { putchar('\n'); p += 2; }      /* U+010A byte-level newline */
+        else if (p[0] == 0xC4 && p[1] == 0x89) { putchar('\t'); p += 2; }      /* U+0109 byte-level tab */
         else { putchar(*p++); }
     }
 }

@@ -12,11 +12,32 @@
 #include <math.h>
 #include "gguf_reader.h"
 #include "wubu_inkling2.h"
+#include "wubu_gguf_tokenizer.h"
 
 int in2_forward_seq(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
                     const int *, int, float *, float *);
 int in2_forward_at(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
                    const int *, int, int, float *, float *);
+
+/* SentencePiece marks a leading space with U+2581, byte-level BPE with U+0120; a byte-fallback token is <0xNN>.
+ * Same rules as tools/detok.c so the text a run prints is the text detok would print for the same ids. */
+static void emit_piece(const char *s)
+{
+    if (!s) return;
+    if (s[0] == '<' && s[1] == '0' && s[2] == 'x') {
+        char *end = NULL;
+        const long b = strtol(s + 3, &end, 16);
+        if (end && *end == '>' && b >= 0 && b < 256) { putchar((int)b); return; }
+    }
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if (p[0] == 0xE2 && p[1] == 0x96 && p[2] == 0x81) { putchar(' '); p += 3; }   /* U+2581 SentencePiece */
+        else if (p[0] == 0xC4 && p[1] == 0xA0) { putchar(' '); p += 2; }                /* U+0120 byte-level BPE */
+        else if (p[0] == 0xC4 && p[1] == 0x8A) { putchar('\n'); p += 2; }      /* U+010A byte-level newline */
+        else if (p[0] == 0xC4 && p[1] == 0x89) { putchar('\t'); p += 2; }      /* U+0109 byte-level tab */
+        else { putchar(*p++); }
+    }
+}
 
 int main(int argc, char **argv)
 {
@@ -88,6 +109,25 @@ int main(int argc, char **argv)
     if (n_gen > 0 && t_total > 0)
         fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (%s)\n",
                 n_gen, t_total, (double)n_gen / t_total, used_cache ? "KV cache" : "full recompute");
+    /* The ids alone do not say whether the output is coherent, which is the whole question a generation run is
+     * asking. Decode with the vocab inside the same .gguf, in detok's rules, so a human can judge the result here. */
+    {
+        wubu_gguf_tokenizer_data_t tk;
+        memset(&tk, 0, sizeof tk);
+        if (wubu_gguf_tokenizer_extract(path, &tk)) {
+            printf("GEN_TEXT: ");
+            for (int i = n_prompt; i < n_prompt + n_gen; ++i)
+                if (toks[i] >= 0 && toks[i] < tk.n_tokens) emit_piece(tk.tokens[toks[i]]);
+            printf("\n");
+            printf("FULL_TEXT: ");
+            for (int i = 0; i < n_prompt + n_gen; ++i)
+                if (toks[i] >= 0 && toks[i] < tk.n_tokens) emit_piece(tk.tokens[toks[i]]);
+            printf("\n");
+            wubu_gguf_tokenizer_free(&tk);
+        } else {
+            fprintf(stderr, "tokenizer extract failed; only ids available\n");
+        }
+    }
     printf("IDS:");
     for (int i = 0; i < n_prompt + n_gen; ++i) printf(" %d", toks[i]);
     printf("\n");
