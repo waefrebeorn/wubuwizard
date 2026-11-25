@@ -100,3 +100,24 @@ is carried through all 48 layer visits: the same edit in the full-attention laye
 The AVX2 float version was measured in the sliding layer and **bought nothing**: 8,021 vs 8,041 ms at a 5-token
 prefix. It was reverted. Rule: the attention core stays double until attention is measured to be the bottleneck at
 a realistic prefix length; the projections are where the time goes, and those are already integer kernels.
+
+## Full-attention conversion: open bug (2026-11-25)
+
+Sliding layer is cache-capable and verified. The 4 full-attention layers are NOT; the attempt was reverted twice.
+
+Found and fixed in the attempt:
+- `logit`/`alpha` in `in2_layer_full_seq` were sized `n_tok`. Once a cache is attached `n_key = pos0 + t + 1`, so
+  the first incremental step writes past a 3-element buffer. That is what "no output at all" looks like. Now sized
+  `n_tok + pos0 + 1`.
+
+Still crashing with the cache attached, so at least one more cause exists. Leads, in the order worth checking:
+- `in2_layer_full_seq` stores V into the cache **after** attention, but attention reads V from the cache. For the
+  new positions that reads calloc'd zeros on the first pass - wrong numbers, and if the read happens for a slot the
+  visit never wrote, `in2_kv_v` can hand back a row that is not the one intended.
+- visit numbering: sliding and full both call `in2_kv_advance` once per visit for 72 total against a 72-slot test
+  allocation. Any path that calls a layer twice, or skips the advance on an early `rc` return, puts later rows in
+  the wrong visit - and an off-by-one in the last layer walks off the end of the array.
+- the `continue` on a NULL `in2_kv_k` result shrinks `n_key` without telling the sink softmax why.
+
+Current verified baseline (double QK accumulation, no cache): 3-token prompt 26.9567, top1 149876; 5-token 29.2490,
+top1 151451, 8,043/8,045 ms. IN2_KV=1 is safe today only because the sliding store path is a no-op on the numbers.
