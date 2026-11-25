@@ -24,6 +24,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 static int in2_kv_row_slot(const in2_kv_t *kv, int pos)
 {
@@ -103,6 +104,28 @@ const float *in2_kv_hist_v(const in2_kv_t *kv, int visit, int back)
 {
     if (!kv || visit < 0 || visit >= kv->n_visit || back < 1 || back > 3) return NULL;
     return kv->vraw + (size_t)visit * 3u * (size_t)kv->dim + (size_t)(3 - back) * (size_t)kv->dim;
+}
+
+/* One position of the 4-tap causal conv, using cached raw rows for the taps that reach into the past.
+ *
+ * in2_shortconv() only knows about the batch it is handed, so when decode processes a single new position the
+ * first taps see zero padding and the keys silently change. This is the same arithmetic (tap 0 = current, then
+ * the three cached rows, left-padded with zeros at the start of a sequence) applied one row at a time.
+ *
+ * hist3 is the base of a three-row window in time order (oldest first, like in2_kv_hist_*(.., 3)), so tap 1
+ * reads hist3[(3-1)*channels + c] and tap 3 reads hist3[0 + c]. At the start of a sequence the unfilled slots are
+ * the zeros calloc left there, which is exactly the left padding the batch version applies. */
+void in2_kv_conv_row(const float *hist3, const float *xrow, int channels, const float *w, int k, float *out)
+{
+    const float scale = 1.0f / sqrtf((float)(k + 1));
+    for (int c = 0; c < channels; ++c) {
+        float acc = w[(size_t)c * (size_t)k] * xrow[c];            /* tap 0 = current */
+        for (int tap = 1; tap < k; ++tap) {
+            if (!hist3 || tap > 3) continue;
+            acc += w[(size_t)c * (size_t)k + (size_t)tap] * hist3[(size_t)(3 - tap) * (size_t)channels + (size_t)c];
+        }
+        out[c] = (acc + xrow[c]) * scale;
+    }
 }
 
 void in2_kv_tick(in2_kv_t *kv)

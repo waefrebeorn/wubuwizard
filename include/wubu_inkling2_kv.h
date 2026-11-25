@@ -21,5 +21,6 @@ void  in2_kv_store_raw(in2_kv_t *kv, int visit, const float *krow, const float *
 const float *in2_kv_hist_k(const in2_kv_t *kv, int visit, int back);
 const float *in2_kv_hist_v(const in2_kv_t *kv, int visit, int back);
 void  in2_kv_tick(in2_kv_t *kv);
+void  in2_kv_conv_row(const float *hist3, const float *xrow, int channels, const float *w, int k, float *out);
 
 #endif
