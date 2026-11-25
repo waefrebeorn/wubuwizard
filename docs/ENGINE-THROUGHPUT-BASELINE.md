@@ -595,6 +595,15 @@ single compile-time tile width cannot serve both, so the next change is a per-sh
 kernel launched with the wide tile and the attention projections with the narrow one - rather than
 another global sweep. Values above are all token-identical to the reference.
 
+
+Why tile width barely moves it, and what would: per warp, the prefill kernel reads 8 columns x 15 blocks
+(9.8 KB) against decode's 1 column x 15 blocks (1.2 KB). Both decode the block byte-wise with grid
+lookups, so the cost is per-block latency; decode hides it behind 15360 warps and prefill has 1920. Tile
+width changes how those 9.8 KB are grouped, not how much latency is exposed, which is why the sweep moved
+5% and not 5x. The structural fix is more independent work per byte read - split K across blocks and
+reduce with atomics, or load each 82-byte block with wide aligned reads instead of per-byte - not another
+tile shape.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
