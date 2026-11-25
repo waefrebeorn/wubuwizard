@@ -105,6 +105,8 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     }
     free(en); free(emb);
     if (rc != WUBU_INKLING2_OK) return rc;
+    extern double in2_wall_now(void);
+    const double _fw0 = in2_wall_now();
 
     if (getenv("IN2_DUMP_EMBD")) {
         FILE *ef = fopen("C:/Users/eman5/AppData/Local/Temp/our_embd.bin", "wb");
@@ -161,7 +163,8 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             memcpy(blocks + (size_t)_slot * ND, _br, sizeof(float) * ND);                \
             if (_slot + 1 > n_blocks) n_blocks = _slot + 1;                              \
         }                                                                               \
-        const clock_t _L0 = clock();                                                    \
+        extern double in2_wall_now(void);                                     \
+        const double _L0 = in2_wall_now();                                    \
         const float *_bs = blocks;                                                      \
         const int _bn = use_pass_bank ? pass_bank_n : n_blocks;                          \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
@@ -195,7 +198,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         }                                                                               \
         if (getenv("IN2_TIMETY")) {                                                     \
             extern double in2_lay_sec, in2_moe_sec, in2_full_sec, in2_slide_sec;        \
-            const double _dt = (double)(clock() - _L0) / (double)CLOCKS_PER_SEC;        \
+            const double _dt = in2_wall_now() - _L0;                                    \
             in2_lay_sec += _dt;                                                         \
             if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1) in2_full_sec += _dt; \
             else                                                       in2_slide_sec += _dt; \
@@ -290,6 +293,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *fq = global_f32(ctx, "output_res_query.weight");
     if (!fin) { free(blocks); free(fq); return WUBU_INKLING2_ERR_IO; }
     /* logits are only meaningful for the last position */
+    const double _fw1 = in2_wall_now();
     const float *last = h + (size_t)(n_tok - 1) * d;
     if (fq) in2_mix(blocks, n_blocks, n_tok * d, (n_tok - 1) * d, last, fq, d, eps, fin);
     else    memcpy(fin, last, sizeof(float) * d);
@@ -373,6 +377,9 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         in2_matvec(Wo, fin, d, cfg->vocab_size, logits);
         free(Wo);
     }
+    const double _fw2 = in2_wall_now();
+    if (getenv("IN2_TIMETY"))
+        fprintf(stderr, "FWD wall: embed+layers=%.3f s  head=%.3f s  (ntok=%d)\n", _fw1 - _fw0, _fw2 - _fw1, n_tok);
     const float cap = 30.0f;
     for (int i = 0; i < cfg->vocab_size; ++i) logits[i] = tanhf(logits[i] / cap) * cap;
 

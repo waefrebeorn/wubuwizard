@@ -249,6 +249,7 @@ static int in2_try_map(gguf_ctx *ctx)
 {
     if (g_map_state) return g_map_state > 0;
     g_map_state = -1;
+    if (getenv("IN2_NO_MAP")) return 0;   /* A/B: sequential read into a buffer instead of faulting mapped pages */
     if (getenv("IN2_MAPTRACE")) fprintf(stderr, "MAP attempt file=%p\n", (void *)ctx->file);
     if (!ctx->file) return 0;
     const int fd = _fileno(ctx->file);
