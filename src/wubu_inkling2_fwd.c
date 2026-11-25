@@ -540,7 +540,11 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step8 failed fn=%p moein=%p moeout=%p (moe rc=%d)\n", il, (void*)fn, (void*)moein, (void*)moeout, rc); }
     if (DBG) fprintf(stderr, "[L%d] step8 rc=%d\n", il, rc);
 
-    if (getenv("IN2_DUMPX") && n_tok == 1) {
+    /* IN2_DUMPX_LAYER selects one layer; without it every layer overwrites the same files and only the
+     * last survives - which is why the MoE had only ever been checked on blk.22, the one layer with no
+     * expert .scale. Layers 0..19 carry one and had never been verified. */
+    const char *dl = getenv("IN2_DUMPX_LAYER");
+    if (getenv("IN2_DUMPX") && n_tok == 1 && (!dl || atoi(dl) == il)) {
         FILE *r1 = fopen("d_res.bin","wb"); if (r1) { fwrite(res,sizeof(float),(size_t)n_tok*d,r1); fclose(r1); }
         FILE *r2 = fopen("d_moein.bin","wb"); if (r2) { fwrite(moein,sizeof(float),(size_t)n_tok*d,r2); fclose(r2); }
         FILE *r3 = fopen("d_moe.bin","wb"); if (r3) { fwrite(moeout,sizeof(float),(size_t)n_tok*d,r3); fclose(r3); }

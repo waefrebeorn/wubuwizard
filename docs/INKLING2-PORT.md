@@ -1357,3 +1357,32 @@ was the gate's normalisation, which is now the reference's form.
 Other documented facts checked against the port's config and all agreeing: 24 layers with 6..17 run three times
 (48 visits a token), 128 experts with 8 a token and F 1152, a 1024-key window in every layer but 5/11/17/23,
 softcap 30, and 200,058 of 201,024 rows real.
+
+## The expert scale is load-bearing, and the MoE is now verified on both kinds of layer
+
+Maya's validation section lists the failure modes that break their reference, and one of them is **"an expert's
+scale dropped"**. The port had only ever checked the MoE on blk.22 - the one group of layers (20-23) that has
+**no** `.scale` tensor at all. Layers 0-19 carry two: `ffn_gate_up_exps.scale[128]` and
+`ffn_down_exps.scale[128]`, both F32, one value an expert.
+
+Layer 10 was chosen as the target because its expert types are the two the port's decoders have already been
+proven bit-exact on - `ffn_gate_up_exps` type 17 (IQ2_XS) and `ffn_down_exps` type 42 (Q2_0) - while still
+carrying both scales. (The file mixes types per layer: 16 IQ2_XXS, 17 IQ2_XS, 19 IQ1_S, 22 IQ2_S for gate/up and
+40 NVFP4, 42 Q2_0 for down.)
+
+Recomputing the 8-expert MoE four ways against the engine's own output:
+
+```
+no scale at all   max|diff| 6.6454e+06   corr 0.4814
+gate/up only      max|diff| 5.9718e+04   corr 0.9568
+down only         max|diff| 7.2472e+02   corr 0.4921
+both (the doc)    max|diff| 2.8610e-06   corr 1.0000000
+```
+
+The scales are tiny - gate/up 0.0000..0.0002, down 0.0001..0.0003 - and they are the difference between
+correlation 0.48 (unrelated) and 1.0000000. Applied to gate and up **before** the activation and to down after
+its product, exactly as `docs/INKLING2.md:45-47` states, and exactly what the engine does.
+
+So the MoE is verified on a layer **with** scales (blk.10, 2.9e-06) and on a layer **without** them (blk.22,
+2.7e-06). The router was computed independently in the same check: picks 15, 16, 21, 56, 57, 83, 84, 97 with
+weights summing to exactly 8.0000 (the file's `expert_weights_scale`).
