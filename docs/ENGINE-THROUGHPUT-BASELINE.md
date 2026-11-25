@@ -2062,3 +2062,27 @@ stride is `DFF = 1152` and `1152 % 256 = 128`. Every expert's down row was rejec
 `-6 (ERR_SHAPE)`, and the first fused run printed no top1 at all. The alignment that matters is the **type's own
 block size** — `Q2_0`'s is 64 — so the guard is now 64, which Q8_0's 32 divides and which every 256-block
 K/IQ type satisfies at the offsets this code passes (multiples of d = 2304).
+
+## NEGATIVE RESULT: the dequantise-once cache buys nothing
+
+Hypothesis: dense weights are re-dequantised on every layer visit (72 a token, ~110 MB of floats a layer), so
+caching them should dominate. `IN2_DQ_CACHE=1` keeps each dense tensor's float copy and returns a freeable
+duplicate, registering before anything else changes.
+
+```
+no cache : 61,346 ms   top1 id=151451 logit=29.6508
+cache on : 60,750 ms   top1 id=151451 logit=29.6508
+```
+
+**0.8%, inside noise on a contended box.** Output identical, which validates the cache, but the hypothesis is
+dead: dense dequantisation is **not** the hot spot. Caching 2.6 GB to save nothing would have been a bad trade
+made on a plausible story rather than a measurement — this is why the rule is measure first.
+
+Two caveats, both honest: the machine was running a 14-token generation, so absolute times are inflated (the
+ratio is still meaningful because both runs saw the same contention), and this measures a 5-token forward, not a
+deep context.
+
+Where the time must actually be, given what is now ruled out: not dense dequantisation (measured here), not the
+MoE staging buffers (fused, correctness verified). That leaves the scalar dot products themselves — 2304-wide
+rows in `double` accumulation — and the expert matvecs, which are the same arithmetic on 8x1152x2304 per layer.
+The next measurement is per-stage timing inside one layer, not another memory hypothesis.

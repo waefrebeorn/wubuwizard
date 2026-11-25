@@ -1016,14 +1016,53 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
 }
 
 /* Dequantise a whole tensor into f32. Caller frees. Returns NULL on failure. */
+/* Dequantise-once cache for the dense weights.
+ *
+ * A dense weight never changes, yet in2_tensor_to_f32 re-dequantised it on EVERY layer visit: wq/wo/wgate are
+ * 2304x3072 and wk/wv 2304x1024, so a layer pulls ~110 MB of floats through scalar dequantisation, and 24
+ * layers x 3 passes = 72 visits do it again every token - roughly 8 GB of redundant dequantisation per token.
+ *
+ * The cache keeps the float copy and returns a malloc'd DUPLICATE, so every existing caller's free() stays
+ * correct and no call site changes. The duplicate costs a memcpy (a few ms at 28 MB) against the
+ * dequantisation it replaces (tens of ms), which is the whole trade. Off by default; IN2_DQ_CACHE=1 enables.
+ * Memory: the dense set is ~2.6 GB for this file, so it is opt-in rather than always-on. */
+typedef struct { const gguf_tensor_info *key; float *buf; int64_t n; } in2_dq_ent;
+static in2_dq_ent in2_dq_tab[512];
+static int in2_dq_n;
+
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
 {
     if (!ctx || !t || !t->info) return NULL;
     int64_t ne = 1;
     for (int d = 0; d < t->info->n_dims; ++d) ne *= t->info->dims[d];
+
+    const int cache_on = getenv("IN2_DQ_CACHE") != NULL;
+    if (cache_on) {
+        for (int i = 0; i < in2_dq_n; ++i) {
+            if (in2_dq_tab[i].key == t->info) {
+                float *cp = (float *)malloc((size_t)in2_dq_tab[i].n * sizeof(float));
+                if (!cp) return NULL;
+                memcpy(cp, in2_dq_tab[i].buf, (size_t)in2_dq_tab[i].n * sizeof(float));
+                if (n_out) *n_out = in2_dq_tab[i].n;
+                return cp;
+            }
+        }
+    }
+
     float *buf = (float *)malloc((size_t)ne * sizeof(float));
     if (!buf) return NULL;
     if (wubu_inkling2_read_f32(ctx, t, buf, ne) != WUBU_INKLING2_OK) { free(buf); return NULL; }
+
+    if (cache_on && in2_dq_n < 512) {
+        float *keep = (float *)malloc((size_t)ne * sizeof(float));
+        if (keep) {
+            memcpy(keep, buf, (size_t)ne * sizeof(float));
+            in2_dq_tab[in2_dq_n].key = t->info;
+            in2_dq_tab[in2_dq_n].buf = keep;
+            in2_dq_tab[in2_dq_n].n   = ne;
+            ++in2_dq_n;
+        }
+    }
     if (n_out) *n_out = ne;
     return buf;
 }
