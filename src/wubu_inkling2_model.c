@@ -290,7 +290,10 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                   { extern double in2_arq_sec; extern long in2_arq_calls;
                     extern double in2_mixfn_sec, in2_alloc_sec;
                     fprintf(stderr, "  arq load   %.3f s  %ld calls\n", in2_arq_sec, in2_arq_calls);
+                    extern double in2_tail_sec;
                     fprintf(stderr, "  in2_mix    %.3f s   mixh calloc %.3f s\n", in2_mixfn_sec, in2_alloc_sec);
+                    fprintf(stderr, "  tailconv   %.3f s\n", in2_tail_sec);
+                    in2_tail_sec = 0;
                     in2_arq_sec = 0; in2_arq_calls = 0; in2_mixfn_sec = 0; in2_alloc_sec = 0; }
                   fprintf(stderr, "PHASE layers=%.3f s\n", in2_lay_sec);
                   for (int _i = 0; _i < 8; ++_i)

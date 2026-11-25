@@ -83,7 +83,7 @@ static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
 }
 #endif
 
-double in2_arq_sec, in2_mixfn_sec; long in2_arq_calls;
+double in2_arq_sec, in2_mixfn_sec, in2_tail_sec; long in2_arq_calls;
 double in2_alloc_sec;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
 static clock_t _tk;    /* file scope so the phase macro works in every layer body */
@@ -1151,8 +1151,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
     float *mo = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (pm && mo && rc == WUBU_INKLING2_OK) {
+        const clock_t _tl0 = clock();
         in2_conv_stream(g_kv2, vvis, 1, moeout, n_tok, d, pm, 4, mo);
         for (size_t i = 0; i < (size_t)n_tok * d; ++i) h[i] = res[i] + mo[i];
+        in2_tail_sec += (double)(clock() - _tl0) / (double)CLOCKS_PER_SEC;
     } else rc = WUBU_INKLING2_ERR_IO;
 
     free(an); free(xn); free(qcl); free(q);

@@ -529,3 +529,25 @@ State of play after this stretch, with every number measured through tools/bench
 - moe is 41% and is kernel volume, not memory stalls (corrected)
 - the layer's own accounting now sums to 0.432 s of 0.640 s, and the remaining 0.208 s is real work in the
   untimed block, not overhead
+
+### Stop the tick method: it has produced three contradictory answers (2026-11-25)
+
+Sequence of measurements on the same span of the same build:
+1. "mix is 81% of layer time" - artefact of the origin being set after the first tick fired.
+2. "the 0.208 s is the allocator teardown" - artefact; the tick sat before the teardown, so it was never timed,
+   and the arena then measured exactly zero.
+3. Now: `tailconv` (post-mlp conv + residual, timed directly) = **0.000 s**, `in2_mix` = 0.000 s, `arq` = 0.000 s,
+   `calloc` = 0.000 s - while the phases still sum to 0.430 s of 0.642 s of layer time.
+
+Every directly-instrumented region reports zero, and the phase table insists a third of the layer is somewhere. One of
+the two is lying and I cannot tell which from outside. `clock()` on Windows/MSYS counts process CPU time at a
+coarse granularity, which is a plausible reason a 5 ms region reads as 0.000 - but that is a hypothesis, not a
+measurement, and I have already been wrong four times in this stretch by preferring hypotheses.
+
+**The next step is a sampling profiler** (or a coarse many-iteration loop that amplifies the span until `clock()` can
+see it), not another tick. Repeating tick placement a fourth time would be the same mistake with a different label.
+
+Where the engine actually stands, all through tools/bench.py at 0% spread:
+- prefill 3.00 s (was 42,774 ms at the start of the kernel work)
+- decode 1.00 s/step, 0.90 s at prefix 5, exact logits, vs 2.60 s recompute at prefix 4 and 25.8 s at prefix 20
+- all 12 formats 144/144 bit-identical to ggml; NVFP4 1.59 -> 7.96 GOPS
