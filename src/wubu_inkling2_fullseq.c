@@ -47,6 +47,10 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     if (kv && getenv("IN2_KV_TRACE")) fprintf(stderr, "FULL il=%d visit=%d pos0=%d n_tok=%d\n", il, vvis, kv_pos0, n_tok);
     const float eps = cfg->rms_eps;
     const size_t ND = (size_t)n_tok * d;
+    extern double in2_wall_now(void);
+    extern double in2_fph[8];
+    double _fph = in2_wall_now();
+    #define FP2(i) do { const double _n = in2_wall_now(); in2_fph[i] += _n - _fph; _fph = _n; } while (0)
 
     float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
     float *qn = in2_tensor_to_f32(ctx, &L->q_inp_norm, NULL);
@@ -57,6 +61,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         return WUBU_INKLING2_ERR_IO;
     }
 
+    FP2(0); /* loads */
     /* 1. three depth-mixed states per position (q, k, v inputs), then the message gates. */
     float *state = (float *)calloc((size_t)3 * ND, sizeof(float));
     if (!state) { free(arq); free(qn); free(kn); free(vn); return WUBU_INKLING2_ERR_IO; }
@@ -116,6 +121,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         }
     }
 
+    FP2(1); /* mix+gates */
     /* 2. q with scaled clip and tau (tau is 1.0 at positions below 8192, so it only bites on long context) */
     const float *Wq = in2_tensor_borrow(ctx, &L->wq);   /* table-owned, never freed */
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
@@ -134,6 +140,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         for (int i = 0; i < qdim; ++i) qt[i] *= tau;
     }
 
+    FP2(2); /* q */
     /* 3. k and v with the dynamic short conv */
     float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
     float *Wv = in2_tensor_to_f32(ctx, &L->wv, NULL);
@@ -227,6 +234,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         }
     }
 
+    FP2(3); /* kv+conv */
     /* 4. attention: causal, over every earlier key (no window), with the per-query relative bias and sink */
     const float *Wrel = in2_tensor_borrow(ctx, &L->wrel);
     float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
@@ -295,6 +303,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         }
     }
 
+    FP2(4); /* attention */
     /* 5. gated output projection */
     const float *Wg = in2_tensor_borrow(ctx, &L->wgate);
     const float *Wo = in2_tensor_borrow(ctx, &L->wo);
@@ -323,6 +332,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         }
     }
 
+    FP2(5); /* gate_after */
     /* 6. post-attn conv + the boundary rule */
     float *pc = in2_tensor_to_f32(ctx, &L->attn_post_conv, NULL);
     float *res = (float *)calloc(ND, sizeof(float));
@@ -379,5 +389,6 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     free(logit); free(alpha); free(attn_out); free(gate); free(ao);
     free(pc); free(res); free(fq); free(mixed); free(fn); free(moein); free(moeout); free(pm); free(mo);
     if (kv) in2_kv_advance();
+    FP2(6); /* mlp+moe+postconv */
     return rc;
 }

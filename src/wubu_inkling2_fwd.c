@@ -92,6 +92,7 @@ void in2_dq_force_end(int s) { g_force_cache = s; }
 
 double in2_arq_sec, in2_mixfn_sec, in2_tail_sec; long in2_arq_calls;
 double in2_alloc_sec;
+double in2_full_sec, in2_slide_sec;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
 static clock_t _tk;    /* file scope so the phase macro works in every layer body */
 
@@ -112,6 +113,9 @@ static double in2_now(void)
 }
 static double _tkh;    /* high-res companion to _tk */
 #define TKPH(i) do { const double _n = in2_now(); in2_phase[i] += _n - _tkh; _tkh = _n; } while (0)
+double in2_wall_now(void) { return in2_now(); }
+/* full-attention layer sections: state/mix, q, kv+conv, attention, gate+wo, mlp+moe */
+double in2_fph[8];
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
 #include "wubu_dequant_fp4.h"
@@ -1856,11 +1860,18 @@ const float *in2_tensor_borrow(gguf_ctx *ctx, const wubu_in2_tensor_t *t)
     extern int in2_dq_force_begin(void);
     extern void in2_dq_force_end(int);
     if (!ctx || !t || !t->info) return NULL;
+    /* Hit path must NOT go through in2_tensor_to_f32: that contract is "return a copy the caller owns", so it
+     * memcpy's the whole matrix (28 MB for a 3072x2304 path) and the copy is dropped immediately after. That copy
+     * was ~448 MB of pure memcpy per decode token, 11 ms per full-layer visit, and it made the full-attention
+     * layers look 10x more expensive than sliding ones doing identical arithmetic. Look the table up directly. */
+    for (int i = 0; i < in2_dq_n; ++i)
+        if (in2_dq_tab[i].key == t->info) return in2_dq_tab[i].buf;
+
     const int saved = in2_dq_force_begin();
     float *v = in2_tensor_to_f32(ctx, t, NULL);
     in2_dq_force_end(saved);
     if (!v) return NULL;
-    /* if the table now owns it, free our copy and hand back the table's pointer */
+    /* first touch: the cache now owns a copy of its own, so drop ours and hand back the table's pointer */
     for (int i = 0; i < in2_dq_n; ++i)
         if (in2_dq_tab[i].key == t->info) { free(v); return in2_dq_tab[i].buf; }
     return v;   /* table full: caller owns it after all, and that is a leak risk we accept only in that case */

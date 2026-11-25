@@ -194,8 +194,11 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             ++n_src_next;                                                               \
         }                                                                               \
         if (getenv("IN2_TIMETY")) {                                                     \
-            extern double in2_lay_sec, in2_moe_sec;                                     \
-            in2_lay_sec += (double)(clock() - _L0) / (double)CLOCKS_PER_SEC;            \
+            extern double in2_lay_sec, in2_moe_sec, in2_full_sec, in2_slide_sec;        \
+            const double _dt = (double)(clock() - _L0) / (double)CLOCKS_PER_SEC;        \
+            in2_lay_sec += _dt;                                                         \
+            if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1) in2_full_sec += _dt; \
+            else                                                       in2_slide_sec += _dt; \
         }                                                                               \
         free(_br);                                                                      \
     } while (0)
@@ -335,7 +338,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     fprintf(stderr, "TY %3d calls=%5ld  %.3f s  %5.1f%%  %6.2f GOPS\n", _t, in2_ty_calls[_t],
                             in2_ty_sec[_t], 100.0 * in2_ty_sec[_t] / (tot > 0 ? tot : 1.0),
                             in2_ty_macs[_t] / (in2_ty_sec[_t] > 0 ? in2_ty_sec[_t] : 1.0) / 1e9);
-                { extern double in2_lay_sec, in2_phase[8];
+                { extern double in2_lay_sec, in2_phase[8], in2_full_sec, in2_slide_sec;
                   static const char *_pn[8] = {"mix","q","k+v+conv","rel+sink","attn","gate+wo","resconv","moe"};
                   { extern double in2_arq_sec; extern long in2_arq_calls;
                     extern double in2_mixfn_sec, in2_alloc_sec;
@@ -345,7 +348,13 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     fprintf(stderr, "  tailconv   %.3f s\n", in2_tail_sec);
                     in2_tail_sec = 0;
                     in2_arq_sec = 0; in2_arq_calls = 0; in2_mixfn_sec = 0; in2_alloc_sec = 0; }
-                  fprintf(stderr, "PHASE layers=%.3f s\n", in2_lay_sec);
+                  fprintf(stderr, "PHASE layers=%.3f s   full=%.3f s  sliding=%.3f s\n", in2_lay_sec, in2_full_sec, in2_slide_sec);
+                  in2_full_sec = 0; in2_slide_sec = 0;
+                  { extern double in2_fph[8];
+                    static const char *_fn2[7] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe"};
+                    for (int _i = 0; _i < 7; ++_i) if (in2_fph[_i] > 0.0)
+                        fprintf(stderr, "  %-11s %.3f s\n", _fn2[_i], in2_fph[_i]);
+                    for (int _i = 0; _i < 8; ++_i) in2_fph[_i] = 0; }
                   for (int _i = 0; _i < 8; ++_i)
                       fprintf(stderr, "  %-10s %.3f s  %5.1f%%\n", _pn[_i], in2_phase[_i],
                               100.0 * in2_phase[_i] / (in2_lay_sec > 0 ? in2_lay_sec : 1.0));
