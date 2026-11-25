@@ -76,8 +76,10 @@ static void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos
     free(st); free(nr); free(al);
 }
 
-int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                    const int *tokens, int n_tok, float *h, float *logits)
+/* pos0 = index of the first token in `tokens`. With a cache attached the layers only compute those positions and
+ * read everything earlier from the cache; with pos0 = 0 and no cache this is the original full recompute. */
+int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                   const int *tokens, int n_tok, int pos0, float *h, float *logits)
 {
     /* IN2_SINGLE_PASS runs pass 1 only. It exists to exercise the depth path before the message gates
      * land; anything it prints is a 1-of-3-pass number and must be labelled as such. */
@@ -124,9 +126,9 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
             memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
         }                                                                               \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
-            rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, 0, blocks, n_blocks, (MSG)); \
+            rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
         else                                                                            \
-            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, 0, blocks, n_blocks, (MSG)); \
+            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
         if (rc == WUBU_INKLING2_OK && getenv("IN2_DUMP_LAYERS")) {                     \
             char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d.bin", getenv("IN2_DUMP_LAYERS"), (IL)); \
             FILE *_lf = fopen(_lp, "wb");                                              \
@@ -251,4 +253,11 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
 
     free(blocks); free(fin); free(fq);
     return WUBU_INKLING2_OK;
+}
+
+/* Full-prefix entry point: unchanged contract, so every existing caller keeps working. */
+int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                    const int *tokens, int n_tok, float *h, float *logits)
+{
+    return in2_forward_at(ctx, m, cfg, tokens, n_tok, 0, h, logits);
 }
