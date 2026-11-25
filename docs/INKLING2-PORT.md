@@ -1333,3 +1333,27 @@ felt like evidence; it was a coincidence of one token in a graph that still has 
 this model says otherwise, and it says so in two places.
 
 From here the reference chain is **project-maya / Strata / atomic-engine**. llama.cpp is not read again.
+
+## The message wiring now matches the reference's own naming
+
+`docs/INKLING2.md:228-233` describes four messages a layer - **q, k, v and the MoE** - each "an attention
+residual over the earlier pass's block states and its final stream (`loop_res_query`, `loop_kv_res_query`),
+let into the layer's input by a gate of rank 64".
+
+The file has exactly two message-query tensors, both `[2304, 24]`, and 24 = **12 core layers x 2**:
+
+```
+loop_res_query.weight     [2304,24]   -> slot 0 (q)   and slot 3 (MoE)
+loop_kv_res_query.weight  [2304,24]   -> slot 1 (k)   and slot 2 (v)
+```
+
+which is the port's existing wiring (`src[0]=qres[2*li]`, `src[3]=qres[2*li+1]`, `src[1..2]` from `qkv`), and
+the doc's ordering - q first, then k, v, then the MoE - is the port's default. `IN2_MSG_ORDER` swaps the two
+`loop_res_query` rows for the A/B that has been outstanding since the beginning.
+
+So the message *skeleton* is right and always was: four slots, two tensors, 2 rows a layer each. What was wrong
+was the gate's normalisation, which is now the reference's form.
+
+Other documented facts checked against the port's config and all agreeing: 24 layers with 6..17 run three times
+(48 visits a token), 128 experts with 8 a token and F 1152, a 1024-key window in every layer but 5/11/17/23,
+softcap 30, and 200,058 of 201,024 rows real.
