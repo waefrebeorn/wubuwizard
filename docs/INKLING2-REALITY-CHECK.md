@@ -380,3 +380,27 @@ evidence was meaningless.
 
 Real targets now: **moe (40%)** and the **unmeasured tail (33%)**. The tail needs its own tick before anything else
 can be said about it.
+
+### The missing third is allocator traffic (2026-11-25)
+
+With the timer origin fixed AND a tick added for the post-mlp tail, the phases sum to **0.432 s of 0.640 s** of layer
+time, and the tail itself measures **0.000 s**. So 0.208 s - a third of the step - sits inside the layer call but
+after the last tick, and the only code there is the teardown:
+
+```
+free(an); free(xn); free(qcl); free(q);
+free(kc); free(vc); free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
+free(rcl); free(P); free(rs_all); free(bias); free(sink);
+free(attn_out); free(alpha); free(logits); free(gate); free(ao);
+free(pc); free(res); free(fn); free(moein); free(moeout); free(pm); free(mo); free(mixh);
+free(xkk); free(xvv);
+```
+
+~25 alloc/free pairs per visit, 40 visits per decode step, several of them hundreds of KB.
+
+Fix specified but NOT landed: a bump arena reset per layer visit. First attempt rewrote the function body with a
+regex that cut the function boundary at the wrong brace and broke the file; reverted rather than left half-done.
+The next attempt should do it by hand, function by function, starting with the sliding layer only.
+
+Expected: ~0.2 s of the 1.0 s step, i.e. ~20%, if the allocation traffic is what it looks like - and this time the
+measurement that motivates it is a phase total that does not add up, not a guess.
