@@ -682,7 +682,18 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         else if (in2_matvec_nt(ctx, &L->wv, xvv, n_tok, d, kdim, vraw) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
     }
     if (rc == WUBU_INKLING2_OK) {
-        in2_shortconv(kraw, n_tok, kdim, kc, 4, kt);
+        if (g_kv) {
+            /* Cache mode: conv each row against the cached raw neighbours and push the raw row immediately, so
+             * the next row in this same batch sees it. The batch conv cannot do this - it only knows the rows it
+             * was handed, so a single new position would pad the first taps with zeros. */
+            for (int t = 0; t < n_tok; ++t) {
+                in2_kv_conv_row(in2_kv_hist_k(g_kv, vvis, 3), kraw + (size_t)t * kdim, kdim, kc, 4, kt + (size_t)t * kdim);
+                in2_kv_conv_row(in2_kv_hist_v(g_kv, vvis, 3), vraw + (size_t)t * kdim, kdim, vc, 4, vt + (size_t)t * kdim);
+                in2_kv_store_raw(g_kv, vvis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
+            }
+        } else {
+            in2_shortconv(kraw, n_tok, kdim, kc, 4, kt);
+        }
         if (il == 1 && getenv("IN2_DUMP_KV")) {
             /* kraw then post-conv k, so the conv formula can be checked in isolation from the matvec */
             FILE *kf = fopen(getenv("IN2_DUMP_KV"), "wb");
@@ -693,7 +704,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                 fclose(kf);
             }
         }
-        in2_shortconv(vraw, n_tok, kdim, vc, 4, vt);
+        if (!g_kv) in2_shortconv(vraw, n_tok, kdim, vc, 4, vt);
         if (il == 1 && getenv("IN2_DUMP_V")) {
             FILE *vf = fopen(getenv("IN2_DUMP_V"), "wb");
             if (vf) { fwrite(vraw, sizeof(float), (size_t)n_tok*kdim, vf);
@@ -708,7 +719,6 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                 const int gp = g_kv_pos + t, vis = vvis;
                 float *ck = in2_kv_k(g_kv, vis, gp);
                 if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
-                in2_kv_store_raw(g_kv, vis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
             }
             memcpy(v + (size_t)t * kdim, vt + (size_t)t * kdim, sizeof(float) * kdim);
             float *row = v + (size_t)t * kdim;
