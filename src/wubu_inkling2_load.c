@@ -249,6 +249,7 @@ static int in2_try_map(gguf_ctx *ctx)
 {
     if (g_map_state) return g_map_state > 0;
     g_map_state = -1;
+    if (getenv("IN2_MAPTRACE")) fprintf(stderr, "MAP attempt file=%p\n", (void *)ctx->file);
     if (!ctx->file) return 0;
     const int fd = _fileno(ctx->file);
     if (fd < 0) return 0;
@@ -263,6 +264,7 @@ static int in2_try_map(gguf_ctx *ctx)
     if (!g_view) { CloseHandle(g_map_h); g_map_h = NULL; return 0; }
     g_view_size = size;
     g_map_state = 1;
+    if (getenv("IN2_MAPTRACE")) fprintf(stderr, "MAP ok size=%lld view=%p\n", (long long)size, (void *)g_view);
     return 1;
 }
 #endif
