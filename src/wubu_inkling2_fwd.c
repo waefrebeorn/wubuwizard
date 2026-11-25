@@ -8,6 +8,9 @@
  * dims (n_in, n_out) is row-major as W[o * n_in + i].
  */
 #include <stdio.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1318,6 +1321,38 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     return rc;
 }
 
+/* Parallel row-split of the quant matvec.
+ *
+ * Splitting the OUTPUT ROWS is race-free by construction (each row of y is written by exactly one chunk) and needs
+ * no per-thread scratch beyond what the kernel already allocates locally. Row granularity keeps the weight walk
+ * contiguous: chunk r reads elements [off + r*n_in, off + (r+chunk)*n_in), so the split is a partition of the same
+ * byte range the serial call would have read.
+ *
+ * IN2_THREADS overrides the count; 1 restores the serial call exactly (same code path, bit-identical output). */
+int in2_matvec_quant_mt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+                        const float *x, int n_out, int n_in, float *y)
+{
+    int nt = 0;
+#ifdef _OPENMP
+    nt = omp_get_max_threads();
+#endif
+    if (getenv("IN2_THREADS")) nt = atoi(getenv("IN2_THREADS"));
+    if (nt <= 1 || n_out < 2 * nt) return in2_matvec_quant(ctx, t, elem_off, x, n_out, n_in, y);
+
+    int chunk = (n_out + nt - 1) / nt;
+    chunk = (chunk + 15) & ~15;              /* keep chunks on 16-row boundaries for the row kernels */
+    if (chunk < 16) chunk = 16;
+    int bad = 0;
+#ifdef _OPENMP
+    #pragma omp parallel for num_threads(nt) schedule(static) reduction(|:bad)
+#endif
+    for (int r = 0; r < n_out; r += chunk) {
+        const int n = (r + chunk <= n_out) ? chunk : (n_out - r);
+        if (in2_matvec_quant(ctx, t, elem_off + (int64_t)r * n_in, x, n, n_in, y + r) != WUBU_INKLING2_OK) bad = 1;
+    }
+    return bad ? WUBU_INKLING2_ERR_IO : WUBU_INKLING2_OK;
+}
+
 /* MoE over n_tok tokens: route, then accumulate the selected experts. */
 int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
             int il, const float *x, int n_tok, float *out)
@@ -1357,15 +1392,15 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
              * did not materialise because element count was never the binding cost. Kept unconditional, since
              * the measurement beat the reasoning. */
             if (!getenv("IN2_STAGE")) {
-                const int ra = in2_matvec_quant(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
-                                                x + (size_t)t * d, 2 * DFF, d, g);
+                const int ra = in2_matvec_quant_mt(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
+                                                   x + (size_t)t * d, 2 * DFF, d, g);
                 if (ra != WUBU_INKLING2_OK) {
                     if (getenv("IN2_DEBUG")) fprintf(stderr, "[moe L%d] fused gate_up e%d rc=%d\n", il, e, ra);
                     rc = WUBU_INKLING2_ERR_IO; break;
                 }
                 for (int i = 0; i < 2 * DFF; ++i) g[i] *= gsc;
                 in2_expert_act(g, g + DFF, DFF, act);
-                if (in2_matvec_quant(ctx, &L->down, (int64_t)e * d * DFF, act, d, DFF, eo) != WUBU_INKLING2_OK) {
+                if (in2_matvec_quant_mt(ctx, &L->down, (int64_t)e * d * DFF, act, d, DFF, eo) != WUBU_INKLING2_OK) {
                     rc = WUBU_INKLING2_ERR_IO; break;
                 }
                 for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * eo[i] * dsc;

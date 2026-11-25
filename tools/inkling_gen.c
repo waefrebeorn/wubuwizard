@@ -28,6 +28,10 @@ int main(int argc, char **argv)
     if (!ctx) { fprintf(stderr, "open failed\n"); return 1; }
     wubu_inkling2_cfg_t cfg;
     if (wubu_inkling2_probe(ctx, &cfg) != WUBU_INKLING2_OK) { fprintf(stderr, "probe failed\n"); return 2; }
+    if (getenv("IN2_CFG"))
+        fprintf(stderr, "CFG d=%d layers=%d core=[%d,%d) loops=%d n_expert=%d used=%d d_ff=%d d_ff_expert=%d vocab=%d\n",
+                cfg.d_model, cfg.n_layer, cfg.loop_core_start, cfg.loop_core_end, cfg.n_loops,
+                cfg.n_expert, cfg.n_expert_used, cfg.d_ff, cfg.d_ff_expert, cfg.vocab_size);
     static wubu_inkling2_model_t m;
     if (wubu_inkling2_load(ctx, &cfg, &m) != WUBU_INKLING2_OK) { fprintf(stderr, "load failed\n"); return 3; }
 
