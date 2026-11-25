@@ -71,3 +71,30 @@ the model's own `transformers` implementation. If none of them answers it, it is
 not a reason to bring the clone back.
 
 Agents working in this repo: **do not re-clone llama.cpp, do not cite it, do not benchmark against it.**
+
+## 6. Building maya without fetching llama.cpp
+
+Maya's CPU path declares its ggml as a `FetchContent` clone of llama.cpp upstream:
+
+```cmake
+FetchContent_Declare(strata_llamacpp
+  GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+  GIT_TAG 3cf03257f219afbe7334045ff7c6a06ac68c627d)
+```
+
+That fetch fails in this environment (`CMake step for strata_llamacpp failed: 1`) and, more importantly, it
+would pull the banned engine back onto the box. Point it at the local `ik_llama.cpp` instead:
+
+```
+cmake -B build-ik2 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DFETCHCONTENT_SOURCE_DIR_STRATA_LLAMACPP=C:/Users/eman5/WuBu/research/engine-sources/ik_llama.cpp
+```
+
+**Measured 2026-11-25: `configure exit=0`, `NINJA_OK`.** So the standard engine builds against the ggml we
+keep for quant formats, with no llama.cpp checkout anywhere. `-DMAYA_GGML_DIR=<...>` is the other documented
+knob for the same purpose.
+
+Two things that made this fail before were both mine, not maya's:
+
+- the clone was a **sparse checkout** (1,358 absent files, `git status` clean), and
+- the default fetch has no network path here.

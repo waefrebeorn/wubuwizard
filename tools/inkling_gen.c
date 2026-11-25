@@ -6,6 +6,7 @@
  * usage: inkling_gen <n_gen> <token> [token ...]
  */
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <math.h>
 #include "gguf_reader.h"
@@ -33,19 +34,28 @@ int main(int argc, char **argv)
     for (int i = 0; i < n_prompt; ++i) toks[i] = atoi(argv[2 + i]);
     for (int i = 0; i < n_prompt; ++i) printf("prompt[%d]=%d\n", i, toks[i]);
 
+    clock_t t_step = clock(); double t_total = 0.0;
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
 
     for (int step = 0; step < n_gen; ++step) {
+        const clock_t t_step0 = clock(); (void)t_step0;
         const int n = n_prompt + step;
         const int rc = in2_forward_seq(ctx, &m, &cfg, toks, n, h, logits);
         if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "step %d rc=%d\n", step, rc); return rc; }
         int best = 0; float bv = -1e30f;
         for (int i = 0; i < cfg.vocab_size; ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
         toks[n] = best;
-        printf("gen[%d] id=%d logit=%.4f\n", step, best, bv);
+        const double dt = (double)(clock() - t_step) / (double)CLOCKS_PER_SEC;
+        t_step = clock();
+        t_total += dt;
+        printf("gen[%d] id=%d logit=%.4f  %.1fs  (%.2f tok/s at prefix %d)\n",
+               step, best, bv, dt, dt > 0 ? 1.0 / dt : 0.0, n);
         fflush(stdout);
     }
+    if (n_gen > 0 && t_total > 0)
+        fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (full recompute, no KV cache)\n",
+                n_gen, t_total, (double)n_gen / t_total);
     printf("IDS:");
     for (int i = 0; i < n_prompt + n_gen; ++i) printf(" %d", toks[i]);
     printf("\n");
