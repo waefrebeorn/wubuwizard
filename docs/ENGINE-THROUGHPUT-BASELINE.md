@@ -638,6 +638,19 @@ The sliding-window path never had this problem - it already uses a kp-outer vect
 contiguous row - which is why only the full-attention layers were affected.
 
 
+### expf on the CPU softmax: measured neutral
+
+The softmax pass called double `exp` per score (~1.08M per token at 1407 context) while the device
+attention uses the project's deterministic float `wubu_expf`. Three interleaved pairs at 1407 context:
+
+    pair   double exp   wubu_expf
+     1       44.6         44.0
+     2       43.9         43.9
+     3       43.8         43.6
+
+No difference beyond this box's noise, and token-identical, so `G4_EXPF` exists but stays off by default.
+The exp calls are not what the attention time is made of - the V-row stride was, per the section above.
+
 ### The linked KV-cache note, assessed against this model
 
 Benjamin Marie's note on Inkling 2 Mini describes two things, and only one of them applies here.
