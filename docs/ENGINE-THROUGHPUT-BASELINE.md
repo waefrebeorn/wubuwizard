@@ -20,9 +20,9 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 |---|---|
 | decode at 33 tokens of context | **13.2 tok/s** |
 | decode at 257 tokens of context | **12.2 tok/s** |
-| prefill, 87 tokens, batched (`G4_PREFILL_BATCH`), `G4_XXS_MMA=1` | **55.3 tok/s** (1.57 s) |
-| prefill, 87 tokens, batched, XXS kernels off | 31.0 tok/s (2.81 s) |
-| prefill, 1407 tokens, batched, `G4_XXS_MMA=1` | **47.2 tok/s** (29.81 s) |
+| prefill, 87 tokens, batched (`G4_PREFILL_BATCH`), default kernels | **56.2 tok/s** (1.55 s) |
+| prefill, 87 tokens, batched, `G4_XXS_MMA=0` | 31.0 tok/s (2.81 s) |
+| prefill, 1407 tokens, batched, default kernels | **47.2 tok/s** (29.81 s) |
 | prefill, 87 tokens, per-token loop (the slow reference path) | 14.3 tok/s (6.10 s) |
 | prefill, 1407 tokens, per-token loop | 8.5 tok/s (164.7 s) |
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
@@ -59,9 +59,18 @@ Two caveats, both measured rather than assumed:
   made bit-identical without giving up the tensor cores, and which eventually flips a token at IQ2
   precision. The batched path is therefore numerically equivalent to float rounding, not bit-identical,
   and `G4_PREFILL_BATCH` stays opt-in.
-- `G4_XXS_MMA` produced identical tokens to the kernels-off path at every length tried and is a straight
-  1.8x on prefill, but it stays opt-in as well until it has the same track record the rest of the path
-  has.
+
+The XXS M-row kernels are now the default (`G4_XXS_MMA=0` disables them). They were held opt-in through
+several investigations as "sound but end-to-end broken"; the end-to-end breakage was the `dg`/`du`
+argument and nothing else. Measured against the unbatched per-token reference over 8 prompts at 8 and 24
+tokens, they reproduce it in **13 of 16** cases against **9 of 16** with them off - every case the
+kernels-off path gets right, they get right too - while being 1.8x faster on prefill. Defaulting them is
+therefore both a speed and a fidelity decision, not a trade.
+
+`G4_PREFILL_BATCH` itself stays opt-in, because batching moves the arithmetic from dp4a to tensor cores
+and the summation order cannot be made bit-identical; it agrees with the reference in 13 of 16 cases and
+differs thereafter only by that rounding.
+
 
 ## CORRECTION: the batched prefill path is fast and wrong
 

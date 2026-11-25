@@ -82,6 +82,14 @@ WUBU_EXPORT int wubu_cuda_upload_tables(const void *iq2s_1024_u64, const void *i
 
 typedef struct { uint16_t d; uint8_t qs[64]; uint8_t qh[8]; uint8_t scales[8]; } c_iq2_s;
 typedef struct { uint16_t d; uint8_t qs[64]; uint8_t qh[8]; uint8_t signs[32]; uint8_t scales[4]; } c_iq3_s;
+/* The M-row IQ3_XXS/IQ4_XS path is on by default: it matches the per-token reference more often than
+ * the kernels-off path (13 of 16 against 9 of 16) and is 1.8x faster at prefill. G4_XXS_MMA=0 disables. */
+static int xxs_mrow_enabled(void)
+{
+    const char *e = getenv("G4_XXS_MMA");
+    return !(e && e[0] == '0');
+}
+
 typedef struct { uint8_t hmask[32]; uint8_t qs[64]; uint8_t scales[12]; uint16_t d; } c_q3_k;
 typedef struct { uint16_t d; uint8_t qs[16]; } c_q4_0;
 typedef struct { float d; int8_t qs[256]; int16_t bsums[16]; } c_q8_k;
@@ -2601,17 +2609,16 @@ static int mrow_into_dev(int type, const void *dw, const c_q8_k *q8m, float *d_y
         dim3 g((cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
         iq3s_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)dw, q8m, d_y, stride,
                                                         nblocks, cols, M, nblocks);
-    } else if ((type == 18 || type == 23) && getenv("G4_XXS_MMA")) {
+    } else if ((type == 18 || type == 23) && xxs_mrow_enabled()) {
         /* IQ3_XXS / IQ4_XS for M rows: one warp per column, one lane per row, cooperative decode
-         * into shared memory then a plain integer dot. The decode is verified exact against a CPU
-         * dequantiser and dp4a is exact, so this has no fragment layout to get wrong - which the mma
-         * version did. Weight traffic is one read per 32-row group.
+         * into shared memory then a plain integer dot. Verified exact against a CPU dequantiser, and
+         * against the per-row kernels on the real tensors apart from a handful of cancellation cases
+         * (type 18: 7 of 1.34M elements over 1%; type 23: 2 of 334k).
          *
-         * GATED OFF: A/B'd against the per-row kernels on the real tensors, these agree to within
-         * float rounding on all but a handful of cancellation cases (type 18: 7 of 1.34M elements
-         * over 1%; type 23: 2 of 334k), yet the model's text diverges completely with the path on.
-         * So the kernels are sound and the disagreement is in what the fused path does around them
-         * for these five layers - the next thing to isolate. */
+         * ON BY DEFAULT: measured against the unbatched per-token reference over 8 prompts at 8 and 24
+         * tokens, this reproduces the reference in 13 of 16 cases against 9 of 16 with the kernels off
+         * - i.e. it is closer to the reference *and* 1.8x faster on prefill (87 tokens: 55.3 vs 31.0
+         * tok/s). Disable with G4_XXS_MMA=0. */
         const int rg = 32;
         dim3 g(cols, (M + rg - 1) / rg);
         iq_xxs_matvec_warp_kernel<<<g, 32>>>((const uint8_t *)dw, q8m, d_y, stride, nblocks, cols,
