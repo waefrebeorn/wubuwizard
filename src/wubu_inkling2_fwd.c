@@ -1870,7 +1870,8 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
  * Memory: the dense set is ~2.6 GB for this file, so it is opt-in rather than always-on. */
 typedef struct { const gguf_tensor_info *key; float *buf; int64_t n; } in2_dq_ent;
 static in2_dq_ent in2_dq_tab[512];
-static int in2_dq_n;
+int in2_dq_n;
+size_t in2_dq_bytes;   /* bytes currently held by the dequant cache */
 
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
 {
@@ -1899,13 +1900,19 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
     if (!buf) return NULL;
     if (wubu_inkling2_read_f32(ctx, t, buf, ne) != WUBU_INKLING2_OK) { free(buf); return NULL; }
 
-    if (cache_on && in2_dq_n < 512) {
+    /* Byte budget, not just an entry count: 512 entries of "whatever was touched" is unbounded in practice, and the
+     * model is 8.5 GB on a 16 GB box. Measured peak working set of a 24-token run was 10.1 GB; the cache is a pure
+     * speed cache, so capping it changes no arithmetic. IN2_DQ_MB overrides. */
+    const char *_dqmb = getenv("IN2_DQ_MB");
+    const size_t dq_budget = (size_t)(_dqmb ? atoi(_dqmb) : 512) * 1024u * 1024u;
+    if (cache_on && in2_dq_n < 512 && in2_dq_bytes + (size_t)ne * sizeof(float) <= dq_budget) {
         float *keep = (float *)malloc((size_t)ne * sizeof(float));
         if (keep) {
             memcpy(keep, buf, (size_t)ne * sizeof(float));
             in2_dq_tab[in2_dq_n].key = t->info;
             in2_dq_tab[in2_dq_n].buf = keep;
             in2_dq_tab[in2_dq_n].n   = ne;
+            in2_dq_bytes += (size_t)ne * sizeof(float);
             ++in2_dq_n;
         }
     }

@@ -41,7 +41,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < n_prompt; ++i) toks[i] = atoi(argv[2 + i]);
     for (int i = 0; i < n_prompt; ++i) printf("prompt[%d]=%d\n", i, toks[i]);
 
-    clock_t t_step = clock(); double t_total = 0.0;
+    clock_t t_step = clock(); double t_total = 0.0; int used_cache = 0;
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
 
@@ -58,6 +58,7 @@ int main(int argc, char **argv)
             ? in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits)
             : in2_forward_at(ctx, &m, &cfg, toks, n, 0, h, logits);
         if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "step %d rc=%d\n", step, rc); return rc; }
+        used_cache |= incremental;
         int best = 0; float bv = -1e30f;
         for (int i = 0; i < cfg.vocab_size; ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
         toks[n] = best;
@@ -85,8 +86,8 @@ int main(int argc, char **argv)
         fflush(stdout);
     }
     if (n_gen > 0 && t_total > 0)
-        fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (full recompute, no KV cache)\n",
-                n_gen, t_total, (double)n_gen / t_total);
+        fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (%s)\n",
+                n_gen, t_total, (double)n_gen / t_total, used_cache ? "KV cache" : "full recompute");
     printf("IDS:");
     for (int i = 0; i < n_prompt + n_gen; ++i) printf(" %d", toks[i]);
     printf("\n");
