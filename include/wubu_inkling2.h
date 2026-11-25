@@ -84,6 +84,59 @@ int wubu_inkling2_tensor_f32(gguf_ctx *ctx, const char *name, float *out,
  * Returns the number of problems, and prints the first 8 of them. */
 int wubu_inkling2_validate(gguf_ctx *ctx, const wubu_inkling2_cfg_t *cfg);
 
+/* ------------------------------------------------------------------------- */
+/* Step 2: the runtime model.                                                */
+/*                                                                           */
+/* The 8.5 GB data blob is not mapped (gguf_buffer_data refuses it), so a    */
+/* tensor here is "where it lives in the file", not a pointer to RAM. That   */
+/* is deliberate: it is the SSD->RAM->VRAM staging the engine wants anyway,  */
+/* and it keeps the loader honest about how much is resident.                */
+/* ------------------------------------------------------------------------- */
+
+typedef struct {
+    gguf_tensor_info *info;   /* NULL when the family is absent for this layer */
+    int64_t file_offset;      /* absolute offset of the tensor's data           */
+    int required;             /* 1 = the forward pass cannot run without it     */
+} wubu_in2_tensor_t;
+
+typedef struct {
+    wubu_in2_tensor_t attn_norm, ffn_norm;
+    wubu_in2_tensor_t wq, wk, wv, wo, wgate, wrel, rel_bias;
+    wubu_in2_tensor_t q_clip, rel_clip, sink;
+    wubu_in2_tensor_t k_conv, v_conv, attn_post_conv, ffn_post_conv;
+    wubu_in2_tensor_t attn_res_q, ffn_res_q;
+    wubu_in2_tensor_t gate_up, down, gate_up_scale, down_scale, router, exp_bias;
+    /* full-attention layers only */
+    wubu_in2_tensor_t q_inp_norm, k_inp_norm, v_inp_norm, k_conv_proj, v_conv_proj;
+    /* loop layers only: 4 control slots x {down, gain, forget} */
+    wubu_in2_tensor_t loop_down[4], loop_gain[4], loop_forget[4];
+    int is_full_attn;
+    int is_loop_layer;
+} wubu_in2_layer_t;
+
+typedef struct {
+    wubu_in2_tensor_t tok_embd, out_w, out_norm, out_res_q;
+    wubu_in2_tensor_t msg_query;      /* [loop_layers, 4, hidden] learned loop queries */
+    wubu_in2_tensor_t final_res_q;
+    wubu_in2_layer_t layer[64];       /* physical blocks, 24 in this file       */
+    int n_layer;
+    int n_missing_required;
+    int n_optional_absent;
+} wubu_inkling2_model_t;
+
+/* Resolves every tensor the forward needs. Returns WUBU_INKLING2_OK, or
+ * WUBU_INKLING2_ERR_MISSING_TENSOR when a required family is absent (the model
+ * struct is still filled so a caller can print the census). */
+int  wubu_inkling2_load(gguf_ctx *ctx, const wubu_inkling2_cfg_t *cfg,
+                        wubu_inkling2_model_t *m);
+void wubu_inkling2_model_print(const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg);
+
+/* Reads a tensor's raw bytes. Used by the dequantising readers below. */
+int  wubu_inkling2_read(gguf_ctx *ctx, const wubu_in2_tensor_t *t, void *dst, int64_t nbytes);
+
+/* Reads a tensor as F32 (dequantising if needed) into a caller buffer. */
+int  wubu_inkling2_read_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, float *dst, int64_t max_elems);
+
 #ifdef __cplusplus
 }
 #endif

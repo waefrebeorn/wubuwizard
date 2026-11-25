@@ -154,6 +154,34 @@ Layer input selection matches the tensor census: sliding layers use one `input_l
 full-attention layers have separate `attn_{q,k,v}_inp_norm` - and those exist on exactly the 4 full
 layers (5, 11, 17, 23).
 
+## Step 2 done: the runtime tensor map resolves with 0 missing
+
+`src/wubu_inkling2_load.c` + `include/wubu_inkling2.h` (step 2), probe `tools/inkling_load.c`:
+**`load rc = 0`, 0 missing required, 12 optional absent** over all 24 physical blocks.
+
+Three things the census corrected, each of which would have produced a silently wrong forward pass:
+
+1. **The 4 full-attention layers have no `attn_norm`.** blk.5/11/17/23 are the only blocks without
+   `blk.N.attn_norm.weight`; their `attn_{q,k,v}_inp_norm` replace it. My first loader marked
+   `attn_norm` required on every layer and reported exactly those 4 as missing, which is how it surfaced.
+2. **`attn_res_query` exists on layers 1..23**, not only in the loop core (only blk.0 lacks it). So the
+   depth mix runs from layer 1 onward; resolving it only for 6..17 would have dropped the mix across
+   layers 1..5 and 18..23 - 11 layers of wrong maths that no shape check would catch.
+3. **The per-expert `.scale` companions stop at layer 19** (0..19 have them, 20..23 do not).
+
+Measured shapes with a still-open mapping question:
+
+```
+loop_res_query.weight     [2304, 24]  F32
+loop_kv_res_query.weight  [2304, 24]  F32
+```
+
+The reference declares one query tensor of shape `[loop_layers, 4, hidden]` = `[12, 4, 2304]`, i.e. 48
+rows. The file splits that into 24 + 24 = 48 rows, so the total matches but the slot order does not.
+By name, `loop_res_query` likely covers the query and mlp slots and `loop_kv_res_query` the key and
+value slots - **inferred from the names and the 24+24 split, not yet verified** against a reference
+forward pass. This is the first thing to pin down before the block residual is implemented.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
