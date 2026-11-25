@@ -290,6 +290,59 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
     return WUBU_INKLING2_OK;
 }
 
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+__attribute__((target("avx2,fma")))
+static float in2_dot_f32_avx2(const float *a, const float *b, int n)
+{
+    __m256 s0 = _mm256_setzero_ps(), s1 = _mm256_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= n; i += 16) {
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),     _mm256_loadu_ps(b + i),     s0);
+        s1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8), s1);
+    }
+    for (; i + 8 <= n; i += 8)
+        s0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), s0);
+    __m256 s = _mm256_add_ps(s0, s1);
+    __m128 lo = _mm256_castps256_ps128(s), hi = _mm256_extractf128_ps(s, 1);
+    lo = _mm_add_ps(lo, hi);
+    lo = _mm_hadd_ps(lo, lo);
+    lo = _mm_hadd_ps(lo, lo);
+    float r = _mm_cvtss_f32(lo);
+    for (; i < n; ++i) r += a[i] * b[i];
+    return r;
+}
+__attribute__((target("avx2,fma")))
+static void in2_saxpy_avx2(float *y, const float *x, float a, int n)
+{
+    const __m256 av = _mm256_set1_ps(a);
+    int i = 0;
+    for (; i + 8 <= n; i += 8)
+        _mm256_storeu_ps(y + i, _mm256_fmadd_ps(av, _mm256_loadu_ps(x + i), _mm256_loadu_ps(y + i)));
+    for (; i < n; ++i) y[i] += a * x[i];
+}
+static int in2_avx2(void) { static int c = -1; if (c < 0) c = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"); return c; }
+#endif
+
+/* attention core: QK dot and the weighted value sum, both 8-wide when AVX2 is present */
+static float in2_attn_dot(const float *a, const float *b, int n)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    if (in2_avx2()) return in2_dot_f32_avx2(a, b, n);
+#endif
+    double acc = 0.0;
+    for (int i = 0; i < n; ++i) acc += (double)a[i] * (double)b[i];
+    return (float)acc;
+}
+static void in2_attn_accum(float *y, const float *x, float a, int n)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    if (in2_avx2()) { in2_saxpy_avx2(y, x, a, n); return; }
+#endif
+    for (int i = 0; i < n; ++i) y[i] += a * x[i];
+}
+
 /* y[o] = dot(W + o*n_in, x) for o in [0, n_out). */
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y)
 {
@@ -667,9 +720,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                     if (dist >= EXT) continue;                    /* sliding window + rel extent */
                     const float *qa = q + (size_t)t * qdim + hh * HD;
                     const float *kb = k + (size_t)j * kdim + kvh * HD;
-                    double acc = 0.0;
-                    for (int e = 0; e < HD; ++e) acc += (double)qa[e] * kb[e];
-                    logits[n_key] = (float)acc * (1.0f / sqrtf((float)HD)) + bias[hh * EXT + dist];
+                    logits[n_key] = in2_attn_dot(qa, kb, HD) * (1.0f / sqrtf((float)HD)) + bias[hh * EXT + dist];
                     ++n_key;
                 }
                 in2_softmax_sink(logits, n_key, sink[(size_t)t * NH + hh], alpha);
@@ -679,7 +730,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                     (void)dist;
                     const float a = alpha[j];
                     const float *vb = v + (size_t)j * kdim + kvh * HD;
-                    for (int e = 0; e < HD; ++e) o[e] += a * vb[e];
+                    in2_attn_accum(o, vb, a, HD);
                 }
             }
         }
