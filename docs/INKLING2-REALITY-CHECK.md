@@ -100,3 +100,30 @@ rewrite, not a tuning exercise, and pretending otherwise would waste another str
   tier — SSD streaming on *this* machine is for headroom, not necessity.
 
 The engine is correct and 500x slow. Those are independent facts and only the second one blocks use.
+
+## 7. Kernel results (measured, C11 + AVX2 intrinsics)
+
+All of these are C11 with `immintrin.h`, `__attribute__((target("avx2,fma")))` and a
+`__builtin_cpu_supports` dispatch, so the rest of the binary stays baseline. No C++ - the project rule is C11
+only, so maya's `iq_avx2.cpp` is a source of *algorithms*, never a translation unit to link.
+
+| change | gate | result |
+|---|---|---|
+| `dot_row_q2_0` AVX2 (broadcast quant word, `srlv` by 2j, mask, `fmadd`) | 64 random block sets | **12.64x** on a 2304-element row (0.028 s vs 0.354 s / 120k), worst rel err **5.934e-08** |
+| same, end to end | logits | 42,774 -> **38,475 ms**, `151451 / 29.6508` identical |
+| fused **scalar** IQ2_XS dot | A/B twice | **SLOWER**: 48,014 / 48,121 ms vs 42,230 / 42,227 ms. Kept behind `IN2_FAST`, default off |
+| IQ2_XS **int8 AVX2** (`maddubs` of grid magnitudes against `sign(act_i8)`) | A/B twice | 38,460 / 38,399 -> **35,800 / 35,738 ms**; top1 identical, logit 29.6508 -> **29.6436** (int8 activation) |
+| both kernels, default | logits + wall clock | **35,655 ms** from 42,774 ms = **1.20x** |
+
+Two lessons that cost real time here:
+
+1. **Skipping the float buffer is not a speedup.** The scalar fused IQ2_XS dot removed the 2304-float row and
+   was 14% slower, because it serialised eight dependent `double` adds per 32-element group while the
+   materialised dot interleaved two accumulators over a contiguous row.
+2. **The amortisation is the win, not the kernel.** Quantising the activation to int8 *once per matvec* and
+   reusing it across all 2,304 rows of the expert is what made the vector path pay; a per-row quantisation
+   would have thrown that away.
+
+Still uncovered by a vector kernel: IQ2_XXS (16, blk.5's gate/up), IQ1_S (19), IQ2_S (22), NVFP4 (40). Those
+still materialise floats, which is why 1.20x and not 5x. The 899-line C++ kernel set covers 16/17/18/22/23 and
+is being translated 1:1 into C11 (`src/wubu_iq_c11.c`) rather than re-derived.
