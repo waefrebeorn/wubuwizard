@@ -1310,3 +1310,26 @@ Both fixed: `log_scale_alpha`, `log_scale_floor`, `qk_clip`, `rel_clip`, `rel_ex
 read from the metadata and carried in the config, and `R` carries the same tau as `q`. Single-token output is
 unchanged (top1 220, logit 19.8970) precisely because tau is 1 there - which is the expected result, not
 evidence that nothing happened.
+
+### CORRECTION OF THE CORRECTION - separate norms were right; llama.cpp was the wrong source
+
+I changed the message gate to one joint `rms_norm` over `concat([cur; message])` on the authority of
+llama.cpp's `inkling2.cpp:257-258`, measured a prettier top-1 token, and wrote it up as a fix. That was wrong
+on both counts, and the second-order error matters more than the first.
+
+**project-maya states the rule twice**, in `src/ik2/ik2_kernels.cuh:194-197` and again in `docs/INKLING2.md:232`:
+
+```
+g = D [rms(x); rms(m)]                       // the norms WITHOUT a weight, each vector its own, eps
+y = (1 - tanh(F g)) x + tanh(G g) m          // F = forget, G = gain, rank 64
+```
+
+Separate norms. My original code was right. `IN2_JOINT_GATE=1` keeps the llama.cpp form reachable for A/B, but
+it is not the model's arithmetic.
+
+The lesson is not "the joint form was a mistake I caught" - it is that **I adopted a reference the project had
+already ruled out, and then let a more plausible-looking token overrule a written spec.** `' '` beating `'ä¸Ī'`
+felt like evidence; it was a coincidence of one token in a graph that still has defects. The engine that ships
+this model says otherwise, and it says so in two places.
+
+From here the reference chain is **project-maya / Strata / atomic-engine**. llama.cpp is not read again.

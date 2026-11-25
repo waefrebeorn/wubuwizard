@@ -746,21 +746,26 @@ void in2_message_gate(const float *h, const float *message, const float *down, c
     float *rh = (float *)malloc((size_t)d * sizeof(float));
     float *rm = (float *)malloc((size_t)d * sizeof(float));
     if (!cat || !g || !rh || !rm) { free(cat); free(g); free(rh); free(rm); return; }
-    /* The gate reads cur and message as TWO ROWS OF ONE rms_norm over all 2d values, not as two separate
-     * norms. That distinction is load-bearing: separate norms destroy the relative magnitude between the
-     * layer input and the message, which is precisely what a forget/gain pair exists to weigh. The joint
-     * form is what llama.cpp does (inkling2.cpp:257-258: concat then one ggml_rms_norm over 2*n_embd).
-     * IN2_SEPARATE_GATE=1 restores the old per-vector form for A/B only. */
-    if (getenv("IN2_SEPARATE_GATE")) {
-        in2_rmsnorm_unweighted(h, d, eps, rh);
-        in2_rmsnorm_unweighted(message, d, eps, rm);
-        memcpy(cat, rh, sizeof(float) * d);
-        memcpy(cat + d, rm, sizeof(float) * d);
-    } else {
+    /* Separate unweighted RMS norms of x and m, concatenated as g = [rms(x); rms(m)] - x's columns first.
+     * Authority: project-maya src/ik2/ik2_kernels.cuh:194-197, the loop_gates spec:
+     *     g = D [rms(x); rms(m)] ;  y = (1 - tanh(F g)) x + tanh(G g) m
+     * with the norms taken WITHOUT a weight at eps.
+     *
+     * An experiment that followed llama.cpp's inkling2.cpp:257-258 instead - one joint rms_norm over the
+     * 2d concatenation - was measured and then REVERTED: it moved the single-token top-1 from 14776 to 220
+     * (' '), which looked like an improvement, but the reference implementation of this model disagrees
+     * with that form. A plausible-looking token is not evidence about which formula the model was trained
+     * with. IN2_JOINT_GATE=1 keeps that form reachable for A/B only. */
+    if (getenv("IN2_JOINT_GATE")) {
         double ss = 0.0;
         for (int i = 0; i < d; ++i) { ss += (double)h[i] * h[i]; ss += (double)message[i] * message[i]; }
         const float sc = 1.0f / sqrtf((float)(ss / (2.0 * d)) + eps);
         for (int i = 0; i < d; ++i) { cat[i] = h[i] * sc; cat[d + i] = message[i] * sc; }
+    } else {
+        in2_rmsnorm_unweighted(h, d, eps, rh);
+        in2_rmsnorm_unweighted(message, d, eps, rm);
+        memcpy(cat, rh, sizeof(float) * d);
+        memcpy(cat + d, rm, sizeof(float) * d);
     }
     in2_matvec(down, cat, 2 * d, rank, g);
     for (int i = 0; i < d; ++i) {
