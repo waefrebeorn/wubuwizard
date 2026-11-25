@@ -122,6 +122,34 @@ the strong-vs-weak difference is what looping improved, so `logits = pass3 + alp
 reachable**, not just the final ones. In a 24-layer model with a 12-layer core that is cheap - the head
 can be run twice, once per pass of interest.
 
+
+## Step 1 done: the engine's own GGUF reader opens the file
+
+`tools/gguf_probe.c` (built against `src/gguf_reader.c`, `src/wubu_win.c`, `src/wubu_dequant_fp4.c`) opens
+the IQ2_XXS and resolves every probe:
+
+```
+734 tensors, 62 KV pairs, arch fields: block_count 48, embd 2304, experts 128, used 8, loops 3
+tokens (unpadded vocab) 200058
+
+token_embd.weight            IQ4_XS  [2304, 201024]
+blk.0.attn_q.weight          Q6_K    [2304, 3072]        3072 = 24 heads x 128
+blk.0.attn_rel_bias.weight   F32     [16, 1024]          distance table: rel_len x extent
+blk.0.ffn_gate_up_exps       Q5_K    [2304, 2304, 128]   fused gate+up per expert
+blk.0.ffn_gate_inp.weight    F32     [2304, 128]         router
+blk.0.attn_k_conv.weight     F32     [4, 1024]           shortconv: 4 taps x (8 kv heads x 128)
+blk.6.loop_attn_down.weight  F32     [4608, 64]          loop gate: concat(rms,rms) -> rank 64
+blk.6.loop_mlp_gain.weight   F32     [64, 2304]
+blk.23.attn_k_conv_proj      (30)    [2304, 32]          dynamic taps: 4 x 8 heads, full layers only
+output.weight                IQ4_XS  [2304, 201024]
+output_res_query.weight      F32     [2304]
+```
+
+So the reader is not the blocker: the 734-tensor map, the MoE expert blocks and the loop gates all resolve
+by name. What the engine lacks is the *math* - MoE routing at 128 experts (the existing
+`wubu_gpu_moe_forward_experts` is hard-wired to 8), relative attention with the bias table and sinks (no
+RoPE), shortconv with its recurrent state, the attn_res `mix` blocks, and the loop driver.
+
 ## Port order
 
 1. GGUF loader for `inkling2`: config fields above, 734-tensor map, MoE expert blocks.
