@@ -20,7 +20,8 @@ double in2_ty_sec[256];
 long   in2_ty_calls[256];
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
-double in2_arq_sec; long in2_arq_calls;
+double in2_arq_sec, in2_mixfn_sec; long in2_arq_calls;
+double in2_alloc_sec;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
 static clock_t _tk;    /* file scope so the phase macro works in every layer body */
 #define TKPH(i) do { clock_t _n = clock(); in2_phase[i] += (double)(_n - _tk) / (double)CLOCKS_PER_SEC; _tk = _n; } while (0)
@@ -700,6 +701,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     const float eps = cfg->rms_eps;
 
     const int DBG = getenv("IN2_DEBUG") != NULL;
+    /* Timer origin for the phase split. It MUST be set at function entry: it was previously set further down,
+     * after the first TKPH had already fired, so the "mix" phase was timing the PREVIOUS layer's uninstrumented
+     * tail and reporting 81% of layer time for code that measured 0.000 s when instrumented directly. */
+    _tk = clock();
     float *an = in2_tensor_to_f32(ctx, &L->attn_norm, NULL);
     if (!an) { if (DBG) fprintf(stderr, "[L%d] attn_norm failed\n", il); return WUBU_INKLING2_ERR_IO; }
     if (DBG) fprintf(stderr, "[L%d] step1 ok\n", il);
@@ -707,7 +712,9 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* 0. attention_input: the depth mix that runs on every layer above 0 (blk.0 has no attn_res_query).
      *    The layer was previously norming the raw hidden state and skipping this entirely, which is why
      *    the sliding and full layers disagreed about what they were looking at. */
+    const clock_t _al0 = clock();
     float *mixh = (float *)calloc((size_t)n_tok * d, sizeof(float));
+    in2_alloc_sec += (double)(clock() - _al0) / (double)CLOCKS_PER_SEC;
     if (!mixh) { free(an); return WUBU_INKLING2_ERR_IO; }
     const clock_t _a0 = clock();
     float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
@@ -719,8 +726,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         const int n_attn = (cfg->attn_res_block > 0 && il % cfg->attn_res_block == 0)
                          ? n_blocks - 1 : n_blocks;
         for (int t = 0; t < n_tok; ++t) {
+            const clock_t _m0 = clock();
             in2_mix(blocks, n_attn, n_tok * d, t * d, h + (size_t)t * d, arq, 1, d, eps,
                     mixh + (size_t)t * d);
+            in2_mixfn_sec += (double)(clock() - _m0) / (double)CLOCKS_PER_SEC;
         }
     } else {
         memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
@@ -790,7 +799,6 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
      * would attend to the next visit's empty rows */
     const int vvis = g_visit;
-    _tk = clock();
     if (il == 6 && getenv("IN2_VTRACE")) fprintf(stderr, "VISIT il=6 vvis=%d pos0=%d ntok=%d\n", vvis, pos0, n_tok);
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));

@@ -352,3 +352,31 @@ this engine measured wrong, and the phase split has now disagreed with the arith
 
 What is solid regardless: total layer time is 0.64 s, kernels inside it sum to 0.32 s, moe is 0.26 s, and the
 engine does 1.00 s per decode step with the cache, exact.
+
+### RETRACTION: "mix is 81% of layer time" was a timer bug (2026-11-25)
+
+`_tk = clock()` was placed at line 798 while the first `TKPH(0)` fires at line 745 - before the origin was set. So
+the "mix" phase was charging each layer with the **previous layer's uninstrumented tail**, and reported 0.517 s of
+0.638 s for code that measures **0.000 s** when instrumented directly (`in2_mix` 0.002 s, `arq` load 0.000 s over
+40 calls, `mixh` calloc 0.000 s).
+
+With the origin moved to function entry, the true split of 0.633 s of layer time is:
+
+| phase | time | share |
+|---|---|---|
+| moe | 0.255 s | 40.3% |
+| tail (residual, block banking, mlp_input mix, post-mlp conv - not instrumented) | ~0.21 s | ~33% |
+| k+v+conv | 0.091 s | 14.4% |
+| q | 0.045 s | 7.1% |
+| gate+wo | 0.021 s | 3.3% |
+| attn | 0.005 s | 0.8% |
+| rel+sink | 0.005 s | 0.8% |
+| mix | 0.002 s | 0.3% |
+
+Every conclusion drawn from the previous table is withdrawn: the gates were never the hot spot, and the two
+`in2_mix` experiments that "showed no gain" were measured against a phase that did not contain the code being
+changed. They were reverted for other reasons (one did not build, one leaked), which stands, but their timing
+evidence was meaningless.
+
+Real targets now: **moe (40%)** and the **unmeasured tail (33%)**. The tail needs its own tick before anything else
+can be said about it.
