@@ -637,6 +637,27 @@ contiguous 8-float chunks:
 The sliding-window path never had this problem - it already uses a kp-outer vectorised AXPY over a
 contiguous row - which is why only the full-attention layers were affected.
 
+
+### The linked KV-cache note, assessed against this model
+
+Benjamin Marie's note on Inkling 2 Mini describes two things, and only one of them applies here.
+
+**Shared KV across repeated layer passes (`last_loop`)** - not applicable. Inkling runs 12 of its 24
+layers three times and caches 48 layer histories; sharing one cache per repeated layer halves that. This
+model has no repeated layers, and its GGUF declares `gemma4.attention.shared_kv_layers = 0`, so
+`g4_layer_shares_kv()` returns 0 for every layer and each of the 48 owns its K and V. There is no
+repeated pass to share a cache between.
+
+**8-bit KV quantisation** - applicable, and it targets the largest remaining term at long context. The
+cache is `float *k, *v` throughout, and at 1407 tokens it holds ~1.04 GB:
+
+    8 full layers   x 1407 tokens x 8 heads x 512 dim x k,v x 4 B  =  369 MB
+    40 sliding      x 1024 window x 8 heads x 256 dim x k,v x 4 B  =  671 MB
+
+With attention still 37.5 ms of a 100.5 ms decode step at that length - it was 102.9 before the
+register-blocking fix above - halving those bytes is the next thing worth measuring, and the same
+register-blocked loops are where the conversion has to pay for itself.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
