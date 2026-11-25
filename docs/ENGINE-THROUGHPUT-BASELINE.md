@@ -20,10 +20,11 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 |---|---|
 | decode at 33 tokens of context | **13.2 tok/s** |
 | decode at 257 tokens of context | **12.2 tok/s** |
-| prefill, 87-token prompt (per-token loop, reference-exact) | **14.3 tok/s** |
-| prefill, 1407-token prompt (per-token loop, reference-exact) | **8.5 tok/s** |
-| prefill, 87 tokens via `G4_PREFILL_BATCH` | 31.3 tok/s - **wrong output, see below** |
-| prefill, 1717 tokens via `G4_PREFILL_BATCH` | 28.7 tok/s - **wrong output, see below** |
+| prefill, 87 tokens, batched (`G4_PREFILL_BATCH`), `G4_XXS_MMA=1` | **55.3 tok/s** (1.57 s) |
+| prefill, 87 tokens, batched, XXS kernels off | 31.0 tok/s (2.81 s) |
+| prefill, 1407 tokens, batched, `G4_XXS_MMA=1` | **47.2 tok/s** (29.81 s) |
+| prefill, 87 tokens, per-token loop (the slow reference path) | 14.3 tok/s (6.10 s) |
+| prefill, 1407 tokens, per-token loop | 8.5 tok/s (164.7 s) |
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
 | CPU path vs GPU path | identical tokens |
 

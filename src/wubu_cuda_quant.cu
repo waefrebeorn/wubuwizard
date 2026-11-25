@@ -2713,6 +2713,11 @@ static void ffn_stage_mark(int slot)
     cudaEventRecord(g_ffn_ev[slot], 0);
 }
 
+WUBU_EXPORT int wubu_cuda_ffn_dev3(const void *d_wg, const void *d_wu, const void *d_wd,
+                                   int tg, int tu, int td,
+                                   const float *d_x, float *d_gate, float *d_up, float *d_out,
+                                   int hidden, int ff, long long sg, long long su, long long sd);
+
 int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
                                      const void *d_wd, int td, const float *h_x, int K, int M,
                                      int hidden, int ff, long long sg, long long su, long long sd,
@@ -2785,7 +2790,11 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
     const size_t elems = (size_t)ff * (size_t)M;
     gelu_mul_kernel<<<(elems + 255) / 256, 256>>>(dg, du, (int)elems);
     ffn_stage_mark(4);
-    quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(dg, qf, ff, ff, nbf);
+    /* gelu_mul_kernel(g, u, n) writes its product into u, so the gated values are in du. This
+     * quantised dg - the raw gate - and the down projection consumed it, which is why the batched
+     * FFN disagreed with the per-token path by ~110% on every row while each matvec, the
+     * quantisation and the gelu all verified correct in isolation. */
+    quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(du, qf, ff, ff, nbf);
     ffn_stage_mark(5);
     if (getenv("G4_IQ2S_CHECK") && td == 22) {
         static int done_i2d;
@@ -2803,6 +2812,41 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
         }
     }
     if (mrow_into_dev(td, d_wd, qf, dout, sd, nbf, hidden, M) != 0) return -9;
+    if (getenv("G4_FFN_ROWCHECK")) {
+        static int done_rc;
+        if (!done_rc) {
+            done_rc = 1;
+            /* The M=1 fused path is the one that reproduces the reference tokens. Run it on row 0 and
+             * compare against row 0 of the M-row result: same weights, same input row, same quantisation,
+             * so any difference is the wiring of ffn_mrow_impl and nothing else. */
+            float *tg_ = (float *)pool_get("chk.fg", (size_t)ff * sizeof(float));
+            float *tu_ = (float *)pool_get("chk.fu", (size_t)ff * sizeof(float));
+            float *to_ = (float *)pool_get("chk.fo", (size_t)hidden * sizeof(float));
+            if (tg_ && tu_ && to_) {
+                const int rc = wubu_cuda_ffn_dev3(d_wg, d_wu, d_wd, tg, tu, td, dx, tg_, tu_, to_,
+                                                  hidden, ff, sg, su, sd);
+                float *hr = (float *)malloc((size_t)hidden * sizeof(float));
+                float *hm = (float *)malloc((size_t)hidden * sizeof(float));
+                if (rc == 0 && hr && hm) {
+                    cudaMemcpy(hr, to_, (size_t)hidden * sizeof(float), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(hm, dout, (size_t)hidden * sizeof(float), cudaMemcpyDeviceToHost);
+                    double worst = 0.0, sc = 0.0; int over1 = 0;
+                    for (int i = 0; i < hidden; ++i) if (fabs(hr[i]) > sc) sc = fabs(hr[i]);
+                    if (sc <= 0.0) sc = 1.0;
+                    for (int i = 0; i < hidden; ++i) {
+                        const double dv = fabs((double)hr[i] - (double)hm[i]);
+                        if (dv > worst) worst = dv;
+                        if (dv > 0.01 * sc) ++over1;
+                    }
+                    fprintf(stderr, "[FFN-ROWCHECK] row0 M-row vs M=1 fused: max abs %.6g scale %.6g rel %.4g ->1%% %d of %d (rc=%d)\n",
+                            worst, sc, worst / sc, over1, hidden, rc);
+                } else {
+                    fprintf(stderr, "[FFN-ROWCHECK] M=1 path returned %d\n", rc);
+                }
+                free(hr); free(hm);
+            }
+        }
+    }
     ffn_stage_mark(6);
     if (cudaMemcpy(h_out, dout, (size_t)hidden * M * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
         return -13;
