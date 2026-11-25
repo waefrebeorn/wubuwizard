@@ -942,6 +942,22 @@ What this rules out: the data-section base (proven by two tensors), the 74-byte 
 consistent), and the field order. What remains: the type at that offset is not IQ2_XS as the tensor directory
 claims, or my reading of the 12-bit packing is wrong in a way two attempts did not expose.
 
+**Stride resolved, packing still not.** Reading the f16 exponent field of the presumed block scale at several
+candidate strides over 200 blocks of that tensor:
+
+```
+stride  66 (IQ2_XXS): exponent std 9.443   min 0 max 31
+stride  74 (IQ2_XS) : exponent std 0.207   min 3 max  4    <- all scales the same magnitude
+stride  82 (IQ2_S)  : exponent std 9.013   min 0 max 31
+stride 110 (IQ3_XS) : exponent std 8.975   min 0 max 31
+```
+
+74 bytes is not a guess any more - it is the only stride under which every block's scale has a coherent
+exponent, which is what a real quantised weight matrix must look like. So the offset, the data base and the
+block size are all confirmed, and the remaining discrepancy is purely in the **internal bit packing**: the
+extracted `IQ2_XS` decoder defines a 9-bit grid index plus a 3-bit sign index (12 bits used of 16), while the
+bytes contain full 16-bit entropy.
+
 **Not resolved, and deliberately not guessed at.** The engine's own type-17 decoder produces sane MoE output
 (rms 1.0, 46.6% of the residual, router healthy), so the file is fine and the fault is in the check. Five
 attempts at this check failed in this stretch; the next one starts from dumping the engine's first 8
