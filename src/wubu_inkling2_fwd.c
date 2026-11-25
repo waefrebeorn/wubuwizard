@@ -642,6 +642,9 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         static in2_kv_t boot;
         if (in2_kv_init(&boot, 72, kdim, 0, 64) == 0) g_kv = &boot;
     }
+    /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
+     * would attend to the next visit's empty rows */
+    const int vvis = g_visit;
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if (!q) { if (DBG) fprintf(stderr, "[L%d] q alloc failed\n", il);
@@ -702,7 +705,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);
             in2_l2_clip(k + (size_t)t * kdim, NULL, NKV, HD, 22.6274166f);
             if (g_kv) {
-                const int gp = g_kv_pos + t, vis = g_visit;
+                const int gp = g_kv_pos + t, vis = vvis;
                 float *ck = in2_kv_k(g_kv, vis, gp);
                 if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
                 in2_kv_store_raw(g_kv, vis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
@@ -711,7 +714,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             float *row = v + (size_t)t * kdim;
             for (int hh = 0; hh < NKV; ++hh) in2_rmsnorm_unweighted(row + hh * HD, HD, eps, row + hh * HD);
             if (g_kv) {
-                float *cv = in2_kv_v(g_kv, g_visit, g_kv_pos + t);
+                float *cv = in2_kv_v(g_kv, vvis, g_kv_pos + t);
                 if (cv) memcpy(cv, row, sizeof(float) * (size_t)kdim);
             }
         }
@@ -721,8 +724,8 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
              * or the visit identity is wrong, which is the failure a later read path would silently inherit. */
             float worst = 0.0f;
             for (int t = 0; t < n_tok; ++t) {
-                const float *ck = in2_kv_k(g_kv, g_visit, g_kv_pos + t);
-                const float *cv = in2_kv_v(g_kv, g_visit, g_kv_pos + t);
+                const float *ck = in2_kv_k(g_kv, vvis, g_kv_pos + t);
+                const float *cv = in2_kv_v(g_kv, vvis, g_kv_pos + t);
                 if (!ck || !cv) { worst = 1e30f; break; }
                 for (int e = 0; e < kdim; ++e) {
                     float e1 = fabsf(ck[e] - k[(size_t)t * kdim + e]);
@@ -731,8 +734,8 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                     if (e2 > worst) worst = e2;
                 }
             }
-            if (worst > 1e-6f) fprintf(stderr, "KV STORE MISMATCH L%d visit=%d worst=%.3e\n", il, g_visit, worst);
-            else if (il == 0 && n_tok > 0) fprintf(stderr, "KV store ok L%d visit=%d n_tok=%d worst=%.3e\n", il, g_visit, n_tok, worst);
+            if (worst > 1e-6f) fprintf(stderr, "KV STORE MISMATCH L%d visit=%d worst=%.3e\n", il, vvis, worst);
+            else if (il == 0 && n_tok > 0) fprintf(stderr, "KV store ok L%d visit=%d n_tok=%d worst=%.3e\n", il, vvis, n_tok, worst);
         }
         if (g_kv) {
             if (g_kv->n_stored < g_kv_pos + n_tok) g_kv->n_stored = g_kv_pos + n_tok;
@@ -769,22 +772,38 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             in2_rel_bias_table(rs_all + (size_t)t * NH * DREL, P, NH, DREL, EXT, bias);
             for (int hh = 0; hh < NH; ++hh) {
                 const int kvh = hh / kvh_stride;
+                /* Positions are addressed globally so the same loop serves a full recompute (pos0 = 0, every key
+                 * local) and an incremental step (pos0 = already-cached prefix, keys read from the cache). With no
+                 * cache attached the lookup is the local array and the arithmetic is bit-identical to before. */
+                const int gp = pos0 + t;
+                const int j0 = (gp + 1 > EXT) ? (gp + 1 - EXT) : 0;
                 int n_key = 0;
-                for (int j = 0; j <= t; ++j) {
-                    const int dist = (pos0 + t) - (pos0 + j);
-                    if (dist >= EXT) continue;                    /* sliding window + rel extent */
+                for (int j = j0; j <= gp; ++j) {
+                    const int dist = gp - j;
                     const float *qa = q + (size_t)t * qdim + hh * HD;
-                    const float *kb = k + (size_t)j * kdim + kvh * HD;
+                    const float *kb;
+                    if (g_kv) {
+                        kb = in2_kv_k(g_kv, vvis, j);
+                        if (!kb) continue;
+                        kb += kvh * HD;
+                    } else {
+                        kb = k + (size_t)(j - pos0) * kdim + kvh * HD;
+                    }
                     logits[n_key] = in2_attn_dot(qa, kb, HD) * (1.0f / sqrtf((float)HD)) + bias[hh * EXT + dist];
                     ++n_key;
                 }
                 in2_softmax_sink(logits, n_key, sink[(size_t)t * NH + hh], alpha);
                 float *o = attn_out + (size_t)t * qdim + hh * HD;
                 for (int j = 0; j < n_key; ++j) {
-                    const int dist = t - j;   /* keys are consecutive, so index maps directly */
-                    (void)dist;
                     const float a = alpha[j];
-                    const float *vb = v + (size_t)j * kdim + kvh * HD;
+                    const float *vb;
+                    if (g_kv) {
+                        vb = in2_kv_v(g_kv, vvis, j0 + j);
+                        if (!vb) continue;
+                        vb += kvh * HD;
+                    } else {
+                        vb = v + (size_t)(j0 + j - pos0) * kdim + kvh * HD;
+                    }
                     in2_attn_accum(o, vb, a, HD);
                 }
             }
