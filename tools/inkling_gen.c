@@ -10,9 +10,11 @@
 #include <time.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
 #include "gguf_reader.h"
 #include "wubu_inkling2.h"
 #include "wubu_gguf_tokenizer.h"
+#include "wubu_tokenizer.h"
 
 int in2_forward_seq(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
                     const int *, int, float *, float *);
@@ -44,7 +46,6 @@ int main(int argc, char **argv)
     const char *path = "C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf";
     if (argc < 3) { fprintf(stderr, "usage: %s <n_gen> <token> [token ...]\n", argv[0]); return 2; }
     const int n_gen = atoi(argv[1]);
-    const int n_prompt = argc - 2;
 
     gguf_ctx *ctx = gguf_open(path);
     if (!ctx) { fprintf(stderr, "open failed\n"); return 1; }
@@ -57,9 +58,28 @@ int main(int argc, char **argv)
     static wubu_inkling2_model_t m;
     if (wubu_inkling2_load(ctx, &cfg, &m) != WUBU_INKLING2_OK) { fprintf(stderr, "load failed\n"); return 3; }
 
+    /* Two ways in: a list of token ids, or --text and a prompt encoded with the .gguf's own tokenizer. The ids a text
+     * prompt produces are the ones llama.cpp's /tokenize returns, so the tokenizer is testable against the oracle
+     * instead of assumed. */
+    const int text_mode = (argc >= 4 && strcmp(argv[2], "--text") == 0);
+    int n_prompt = text_mode ? 0 : argc - 2;
+    int *toks = NULL;
+    wubu_tokenizer_t tok_text;
+    memset(&tok_text, 0, sizeof tok_text);
+    if (text_mode) {
+        if (!wubu_tokenizer_init_from_gguf(&tok_text, path)) { fprintf(stderr, "tokenizer init failed\n"); return 5; }
+        const int cap0 = 4096;
+        toks = (int *)calloc((size_t)cap0 + (size_t)n_gen, sizeof(int));
+        if (!toks) return 6;
+        n_prompt = wubu_tokenizer_encode(&tok_text, argv[3], toks, cap0);
+        if (n_prompt <= 0) { fprintf(stderr, "prompt encode failed (%d)\n", n_prompt); return 7; }
+        for (int i = 0; i < n_prompt; ++i) printf("tok[%d]=%d\n", i, toks[i]);
+    }
     const int cap = n_prompt + n_gen;
-    int *toks = (int *)calloc((size_t)cap, sizeof(int));
-    for (int i = 0; i < n_prompt; ++i) toks[i] = atoi(argv[2 + i]);
+    if (!text_mode) {
+        toks = (int *)calloc((size_t)cap, sizeof(int));
+        for (int i = 0; i < n_prompt; ++i) toks[i] = atoi(argv[2 + i]);
+    }
     for (int i = 0; i < n_prompt; ++i) printf("prompt[%d]=%d\n", i, toks[i]);
 
     clock_t t_step = clock(); double t_total = 0.0; int used_cache = 0;
