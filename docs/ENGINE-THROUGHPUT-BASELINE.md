@@ -558,6 +558,30 @@ not a shortage of resident warps. Reaching llama.cpp's implied ~97 GB/s means re
 aligned layout, which costs a second copy of the weights and does not fit alongside the model in
 6 GB, so it is a layout decision rather than a tuning one.
 
+
+### Prefill: the kernels run at 3.4 GB/s where decode reaches 65
+
+Every prefill layer is on the device (`fused=48 fallback=0`), so this is kernel efficiency, not a silent
+fallback. The per-stage accounting, per layer at M=87:
+
+    upload 0.16   q8(x) 0.04   gate+up 9.00   gelu 0.04   q8(gu) 0.03   down 4.31   total 13.57 ms
+
+gate+up reads 30.4 MB in 9.00 ms and down reads 15.2 MB in 4.31 ms - **3.4 GB/s each**, against the 65
+GB/s the decode matvecs reach on the same weights. Whole-prompt: 1678 ms for 700 GFLOP is 0.5 TFLOP/s,
+about 1.7% of this GPU's int8 throughput, and it is why prefill sits at 52 tok/s while llama.cpp's
+tensor-core path reaches 477.
+
+The prefill totals, for the next pass:
+
+    layer total  1678.3 ms      ffn all      685.1 ms  (ffn proj 678.4)
+    norm+qkv      641.0 ms      attn out     250.5 ms  (o proj 54.1)
+    qk+rope        28.2 ms      attention     15.7 ms  (head 6.2)
+
+Both the FFN (3.2 GB/s on 2.19 GB) and the qkv projection (1.1 GB/s on 720 MB) are in the same regime,
+so one cause covers both: the M-row tensor-core kernels decode each 82-byte weight block with per-byte
+loads and grid lookups, and at 480 column-blocks for a 15360-wide matrix there is not enough concurrent
+work to hide it. Decode hides the same work behind 15360 warps; prefill has 480 blocks.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
