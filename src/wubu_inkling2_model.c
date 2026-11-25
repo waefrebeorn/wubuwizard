@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>
 
+#include <time.h>
 #include "wubu_inkling2.h"
 #include "wubu_inkling2_kv.h"
 int in2_matvec_quant(gguf_ctx *, const wubu_in2_tensor_t *, int64_t, const float *, int, int, float *);
@@ -263,6 +264,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             ot.file_offset = (int64_t)ctx->data_blob_offset + (int64_t)oinfo->data_offset;
             const int CHUNK = 8192;
             head_done = 1;
+            const clock_t _h0 = clock();
             for (int r = 0; r < cfg->vocab_size; r += CHUNK) {
                 const int n = (r + CHUNK <= cfg->vocab_size) ? CHUNK : (cfg->vocab_size - r);
                 if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits + r) != WUBU_INKLING2_OK) {
@@ -270,6 +272,8 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     break;
                 }
             }
+            if (getenv("IN2_TIME")) fprintf(stderr, "HEAD %.3f s for %d rows x %d\n",
+                    (double)(clock() - _h0) / (double)CLOCKS_PER_SEC, cfg->vocab_size, d);
             if (!head_done) fprintf(stderr, "lm_head kernel path failed at vocab %d, falling back\n", cfg->vocab_size);
         }
     }

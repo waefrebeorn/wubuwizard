@@ -240,11 +240,11 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                 const void *ap[1] = { (const void *)act };
                 float *op[1] = { y };
                 wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);
-                free(act); free(whole);
+                free(act);
                 return WUBU_INKLING2_OK;
             }
         }
-        free(act); free(whole);
+        free(act);
     }
     /* Types with a fused row kernel: Q2_0 (`down`) and IQ2_XS (gate/up). Everything else still materialises. */
     /* Both types now have a vectorised path (Q2_0 float AVX2, IQ2_XS int8 AVX2 against a once-per-matvec
@@ -318,7 +318,18 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
         wubu_iq_supported(ty) && in2_ty_verified(ty)) {
         const size_t ablk = q8_0_act ? sizeof(in2_q8_0_blk) : sizeof(in2_q8k_blk);
         const int nab = n_in / be;
-        unsigned char *whole = (unsigned char *)malloc((size_t)rb * (size_t)n_out);
+        /* Reused across calls. A decode token makes ~1150 of these calls (48 visits x 8 experts x 3 matrices), and
+         * each was a fresh malloc+free of ~1.5 MB - the allocation traffic cost more than the arithmetic. Grown
+         * once to the largest matrix seen; the buffer is only ever read from the mapping into itself. */
+        static unsigned char *g_whole;
+        static size_t g_whole_cap;
+        const size_t need = (size_t)rb * (size_t)n_out;
+        unsigned char *whole = g_whole;
+        if (need > g_whole_cap) {
+            unsigned char *nb = (unsigned char *)realloc(g_whole, need);
+            if (nb) { g_whole = nb; g_whole_cap = need; whole = nb; }
+            else whole = NULL;
+        }
         void *act = malloc(ablk * (size_t)nab * (size_t)nt);
         if (whole && act) {
             if (wubu_inkling2_read(ctx, t, whole, rb * n_out) == WUBU_INKLING2_OK) {
@@ -339,11 +350,11 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                     }
                     wubu_iq_rows(ty, whole, (size_t)rb, n_in, ap, nn, op, 0, n_out);
                 }
-                free(act); free(whole);
+                free(act);
                 return WUBU_INKLING2_OK;
             }
         }
-        free(act); free(whole);
+        free(act);
     }
 
     /* Exact fallback: materialise once, dot per position. */
