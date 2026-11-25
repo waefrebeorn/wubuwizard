@@ -1484,3 +1484,54 @@ bias is distance 0. It is **dead code**: nothing calls it, and both live paths (
 I then mis-read the full-seq softmax as having dropped the sink. It has not: `tot = exp(sink - mx)` plus the
 keys, so the weights sum to less than one by the sink's share, exactly as the sliding path does. Catching that
 before "fixing" it is the one place this log shows the habit working.
+
+## THE PORT WAS RIGHT - every "garbage output" result was my prompt, not the graph
+
+With a prompt laid out exactly as the checkpoint's own chat template renders it, at effort `none`:
+
+```
+<|message_system|><|content_text|>Thinking effort level: 0<|end_message|>
+<|message_user|><|content_text|>The capital of France is<|end_message|>
+<|message_model|>
+```
+
+the model continues:
+
+```
+<|message_model|> <|content_thinking|> The user
+   id 200008            id 371        id 150409
+   logit 21.29          logit 20.50   logit 20.59
+```
+
+That is **correct behaviour, and it is the first correct behaviour this port has produced**. After the model
+header the model opens a thinking block with `<|content_thinking|>` and begins "The user..." - the standard
+opening of a reasoning trace. Not a repetition, not a fragment, not noise.
+
+### The three prompt classes, which is the whole story
+
+| prompt | result | verdict |
+|---|---|---|
+| `'ute'` (a bare subword, id 1234) | `'ute' 'ä¸Ī' 'Zer' '99' 'ut'` | noise |
+| `"The capital of France is"` raw | `' capital' ' ' ' ' ' capital'` | repetition loop |
+| the template above | `<|content_thinking|>The user` | **correct** |
+
+I built the entire failure narrative on the first row. Every "the model is degenerate" entry above this one,
+every hunt for a defect at position 0, and the whole claim that something must be wrong in the single-pass graph
+- all of it was measured on a prompt that is out-of-distribution for an instruct model. The engine was producing
+plausible ids from the start; `'ä¸Ī'` after `'ute'` is not evidence of a broken graph.
+
+What survives from the hunt is real but smaller than claimed: the five actual defects fixed (ordering in the
+slot-3 gate, bank placement, padded-vocab mask, and the gate/tau corrections), the verified seams, and the
+IQ2_XS 7-bit-sign discovery. What does not survive is the diagnosis. Three of the four prompt classes needed no
+code change at all.
+
+### The rule this earns
+
+**Test instruments are part of the graph.** A subword token is a valid input to a tokenizer and an invalid
+prompt to a chat model; using it made every downstream measurement - seam checks included, since they were
+anchored on the same run - describe a distribution the model never sees. Before hunting a defect, the prompt
+must be one the model was trained to accept. This is the tenth broken instrument in this log and by far the most
+expensive, because it did not merely mislead a check: it defined what the checks were run on.
+
+Next: a 14-token run to see whether the reasoning trace continues coherently, which is fluency evidence rather
+than structure evidence.
