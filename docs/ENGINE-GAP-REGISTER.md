@@ -1,3 +1,7 @@
+> **STANDARDS:** `docs/ENGINE-STANDARDS.md` is authoritative. **Maya v1.1.78** and **Strata v0.2.21.1** are the
+> standard; **atomic-engine (atomicchat)** is the workflow replacement; **llama.cpp is removed** from this
+> workspace and from every workflow. Where this document cites it, the citation is history.
+
 # Engine Gap Register — ordered hops across the pond
 
 This is the **TODO** side of engine absorption. Each row is one crossable technique with a
@@ -1448,3 +1452,9 @@ record-only; EG-44's trained indexer and tile-speed half needs trained weights
 and kernel telemetry this host cannot produce. Every other row and sub-gate
 carries a named target and measured evidence.
 
+### Source status (2026-11-25)
+
+The `source` column of every entry that names llama.cpp is **orphaned**: the clone is deleted. The gaps,
+their implementations and their gates stand — they are this repo's code and tests. What changes is that the
+`source` cell is now `re-source pending` and must be re-attributed to **project-maya** or **Strata** before it
+is cited again. Do not re-clone llama.cpp to fill the blank.

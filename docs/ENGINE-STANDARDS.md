@@ -1,0 +1,73 @@
+# ENGINE-STANDARDS — what we build against, and what is banned
+
+**Status: authoritative.** Where any other document in this repo names a different reference engine, that
+document is stale and this one wins. Last set: 2026-11-25.
+
+## 1. The standard
+
+| role | engine | pinned | why it is the standard |
+|---|---|---|---|
+| **Model semantics** | **project-maya** | `v1.1.78` (`1530120`) | Ships `docs/INKLING2.md`, a 508-line spec for this exact model, plus `src/ik2/` kernels and a float64 reference validated to `max|dlogp| 4.7e-5`, KL `2.6e-12`, **top-1 100% of positions** against transformers over 256 tokens and all 48 layers. |
+| **Product + gates** | **Strata** | `v0.2.21.1` (`2af30cc`) | The deepest Inkling 2 Mini integration by file count (247), and the only engine with a **per-family CI gate suite** for it: `b70_gate.sh`, `chat_check.py`, `longctx_chat.py`, `serve_chat.py`. |
+
+If maya and Strata disagree on a formula, that is a real finding, not a menu — measure which one reproduces the
+checkpoint's own outputs and record the result.
+
+## 2. The workflow replacement: atomicchat
+
+**atomic-engine** (`dev-latest`, `fa190d7b5`) replaces the entire llama.cpp-shaped workflow. It is not a
+reference for arithmetic; it is the operational pattern:
+
+- **SSD expert streaming** with model, state, compute and expert buffers under **one shared budget with an
+  explicit runtime reserve**. That is the staging hierarchy this project wants, already built.
+- **KL-divergence gates.** Its benchmark tree compares streaming against baseline by `kld` on logits with
+  separate coherence/f16/nofa checks (`benchmarks/results/kv-stream-pr-evidence/`). This is the measurement
+  standard for anything that changes the memory path — not "tok/s went up".
+- **Provenance discipline.** Every result carries the file, the flags and the machine.
+
+Adopt those three things; do not copy its code.
+
+## 3. Banned
+
+**llama.cpp is removed from this workspace and from every workflow.** The clone at
+`research/engine-sources/llama.cpp` (351 MB) is deleted. It is not:
+
+- a comparative spec (it cannot even load this checkpoint without rewriting its metadata — it wants *physical*
+  `block_count` and physical-length per-layer arrays, while the file ships *logical* `block_count 48`),
+- a quality bar,
+- a throughput target,
+- a semantics source.
+
+The one thing it was still being consulted for — ggml quant **block formats** — moves to
+**`ik_llama.cpp`** (`ad217a2`), which carries the same `ggml-common.h` / `ggml-quants.c` under active
+maintenance. A format definition is a data-layout fact, not an engine opinion, and that is the only role
+any llama.cpp lineage has here.
+
+`FlexGen` was already deleted: it is a 2014 Java map generator, not an offloading engine.
+
+## 4. What this changes in the existing documents
+
+These documents reference llama.cpp and are **superseded on that point**; their measurements stand, their
+provenance does not:
+
+- `ENGINE-SPECS.md` — the pull inventory and the maya/Strata/atomic readings stand. Every llama.cpp citation in
+  it is now historical.
+- `ENGINE-SOURCE-INDEX.md` — the llama.cpp rows describe techniques worth having, but the source is gone.
+  Re-source each from maya or Strata, or drop it. The tombstone row marks the block.
+- `ENGINE-GAP-REGISTER.md` — EG-01/EG-02/EG-03 name llama.cpp files as their reference. Their **gates and
+  implementations stand** (they are this repo's code and this repo's tests); only the "source" column is
+  orphaned. Mark them `re-source pending`.
+- `ENGINE-THROUGHPUT-BASELINE.md` — the "remaining 1.75x against llama.cpp" framing is void. The absolute
+  numbers (tok/s, ms/token, GB/s in the FFN) stand as measurements of **this** engine. Restate any ratio
+  against Strata or maya, or leave it as an absolute.
+- `INKLING2-PORT.md` — records several llama.cpp-derived findings. They are kept as history and each is
+  re-attributed where maya or transformers confirms it. The corrections log already shows one case where
+  llama.cpp disagreed with maya and **llama.cpp was wrong for this model**: the loop message gate.
+
+## 5. Standing rule
+
+Anything that only llama.cpp could answer, by being deleted, is now answered by maya, Strata, atomic-engine, or
+the model's own `transformers` implementation. If none of them answers it, it is an open question to measure —
+not a reason to bring the clone back.
+
+Agents working in this repo: **do not re-clone llama.cpp, do not cite it, do not benchmark against it.**

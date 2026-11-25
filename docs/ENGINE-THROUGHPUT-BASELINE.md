@@ -1,3 +1,7 @@
+> **STANDARDS:** `docs/ENGINE-STANDARDS.md` is authoritative. **Maya v1.1.78** and **Strata v0.2.21.1** are the
+> standard; **atomic-engine (atomicchat)** is the workflow replacement; **llama.cpp is removed** from this
+> workspace and from every workflow. Where this document cites it, the citation is history.
+
 # Engine throughput baseline
 
 Measured on this host (Ryzen 5 8645HS, RTX 4050 6 GB, 16 GB RAM, Win11) with the model this

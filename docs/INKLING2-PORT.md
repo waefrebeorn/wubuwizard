@@ -1,3 +1,7 @@
+> **STANDARDS:** `docs/ENGINE-STANDARDS.md` is authoritative. **Maya v1.1.78** and **Strata v0.2.21.1** are the
+> standard; **atomic-engine (atomicchat)** is the workflow replacement; **llama.cpp is removed** from this
+> workspace and from every workflow. Where this document cites it, the citation is history.
+
 # Inkling 2 Mini: port specification
 
 Derived from the GGUF this box actually has and from llama.cpp's `src/models/inkling2.cpp`

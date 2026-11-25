@@ -1,3 +1,7 @@
+> **STANDARDS:** `docs/ENGINE-STANDARDS.md` is authoritative. **Maya v1.1.78** and **Strata v0.2.21.1** are the
+> standard; **atomic-engine (atomicchat)** is the workflow replacement; **llama.cpp is removed** from this
+> workspace and from every workflow. Where this document cites it, the citation is history.
+
 # Engine Source Index — where to read, what to take
 
 Navigation for the "acquire and learn all inference engines" work. This is a **reading
@@ -18,7 +22,7 @@ means the mechanism helps that machine; "tier-gated" means it waits for a higher
 | **`docs/ENGINE-GAP-REGISTER.md`** | **Ordered TODO: each gap, gate name, dependency, next action** |
 | **`docs/ENGINE-SOURCE-INDEX.md`** | This file: engine catalog and exact upstream pointers |
 | `docs/research/engine-sweeps/` | Full cited reports (front A/B/C + local audit) |
-| `llama/README.md` | Existing local reference files (ggml-cpu, ggml-cuda, llama-model) |
+| ~~llama.cpp~~ | **REMOVED** | — | Source deleted from the workspace (351 MB). The techniques these rows described must be re-sourced from **project-maya** or **Strata**, or dropped. See `ENGINE-STANDARDS.md`. ggml quant block formats now come from `ik_llama.cpp`. | | | |
 
 Build reality on Windows: `make` is not on PATH. Use
 `mingw32-make -f Makefile.win <gate>` from the repo root.
@@ -57,13 +61,6 @@ it is not a work order.
 
 | Engine | Upstream | Language / license | Signature mechanism | Exact pointer | T1 fit | Local landing zone |
 |---|---|---|---|---|---|---|
-| llama.cpp | github.com/ggml-org/llama.cpp | C/C++ / MIT | Packed per-block-scale quantized dot kernels | `ggml/src/ggml-cpu/quants.c` | HIGH | `src/quantized_dot_generic.c`, `src/wubu_simd_quant.c` |
-| llama.cpp | same | same | Runtime per-type `vec_dot` table + multi-row GEMV | `ggml/src/ggml-cpu/ggml-cpu.c`: `type_traits_cpu[].vec_dot/nrows/ncols`, `num_rows_per_vec_dot` | HIGH (biggest decode win) | `src/quantized_dot_generic.c` |
-| llama.cpp | same | same | GGUF metadata-first sizing, alignment, shard validation | `src/llama-mmap.cpp` | HIGH | `src/gguf_reader.c` |
-| llama.cpp | same | same | mmap prefetch policy — **do not add `MADV_SEQUENTIAL`** | github issue #91 | HIGH | `src/gguf_reader.c`, weight streaming |
-| llama.cpp | same | same | Tokenizer families + per-model regex pre-tokenizer registry | `src/llama-vocab.cpp/.h`, `src/unicode.cpp` | HIGH | `src/wubu_gguf_tokenizer.c` |
-| llama.cpp | same | same | GBNF stack machine, JSON-Schema→GBNF, lazy patterns | `src/llama-grammar.cpp/.h`, `common/json-schema-to-grammar.cpp` | HIGH | `src/wubu_spec_constrained.c` |
-| llama.cpp | same | same | minja Jinja-subset chat templates | `common/jinja/`, `src/llama-chat.cpp` | MEDIUM | `src/wubu_tokenizer.c` |
 | mistral.rs | github.com/EricLBuehler/mistral.rs | Rust (license verify) | Hardware-aware auto tuning; in-situ quantization before GPU load to avoid VRAM spikes | repo README, `CLAUDE.md` crate layout | HIGH | `src/wubu_mem_budget.c`, safetensors bridge |
 | candle | github.com/huggingface/candle | Rust (verify) | Packed-weight `QMatMul` with explicit per-process dequantize-all escape hatch | `candle-core/src/quantized/mod.rs` | MEDIUM | `src/quantized_matmul.c` |
 | llama.swift | github.com/profclaw/swift-llama | Swift (verify) | Thin wrapper around llama.cpp; no new engine mechanism | repo README | LOW | reference only |
