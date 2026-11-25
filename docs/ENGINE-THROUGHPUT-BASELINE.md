@@ -20,10 +20,39 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 |---|---|
 | decode at 33 tokens of context | **13.2 tok/s** |
 | decode at 257 tokens of context | **12.2 tok/s** |
-| prefill, 21-token prompt | **6.8 tok/s** |
-| prefill, 72-token prompt | **15.0 tok/s** |
+| prefill, 87-token prompt (per-token loop, reference-exact) | **14.3 tok/s** |
+| prefill, 1407-token prompt (per-token loop, reference-exact) | **8.5 tok/s** |
+| prefill, 87 tokens via `G4_PREFILL_BATCH` | 31.3 tok/s - **wrong output, see below** |
+| prefill, 1717 tokens via `G4_PREFILL_BATCH` | 28.7 tok/s - **wrong output, see below** |
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
 | CPU path vs GPU path | identical tokens |
+
+## CORRECTION: the batched prefill path is fast and wrong
+
+The M-row (batched) FFN path does not reproduce the reference tokens. Same prompt, same binary, only
+the prefill mode differs:
+
+    default (per-token loop)   45518 107 236775 818 6590 529 1972 563 24002 107 140 236829
+    G4_PREFILL_STEPS           45518 107 236775 818 6590 529 1972 563 24002 107 140 236829
+    G4_PREFILL_BATCH           197512 22379 8823 240129 168130 58383 198053 1844 3292 236751
+
+Two of the three are bit-identical to the reference. The batched path - the one that produces every
+"31.3 tok/s at 87" and "59.7 s at 1717" number this file has recorded - is not.
+
+That single fact re-frames a large part of this document. Every throughput figure attributed to the
+batched path was measured on a path whose output is wrong, while every correctness check ("tokens
+identical, 7 of 7") ran the per-token loop, which never exercises the M-row kernels. The two were never
+measured in the same configuration. Everything this stretch chased follows from that one bug:
+
+- the IQ3_XXS/IQ4_XS M-row kernels' degenerate output - the M-row path was already wrong without them;
+- "fusing one known-good layer breaks the model" - whenever the M-row path runs, the output is wrong;
+- the 3% per-layer FFN deltas and the logits divergence - those were M-row versus per-token, not two
+  correct paths differing by rounding.
+
+Faithful performance, measured with the per-token loop that reproduces the reference: **14.3 tok/s at 87
+tokens and 8.5 tok/s at 1407** (164.7 s). That is the honest baseline. The batched path is ~2.2x faster
+and unusable until its kernels match. Making it match is now the top-priority correctness task, and the
+test is exact: `G4_PREFILL_BATCH` must produce the same greedy tokens as the per-token loop.
 
 Decode degrades with context and the profiler says why: the attention section is 7.3 ms at
 32 tokens, **29.0 ms at 256 tokens**, and the layer total goes 76 -> 98 ms. Attention is

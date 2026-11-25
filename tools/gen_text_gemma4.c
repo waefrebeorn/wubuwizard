@@ -359,6 +359,18 @@ int main(int argc, char **argv) {
     dbg_logits("prefill-last", logits + last_idx, G4_VOCAB);
     dbg_logits("prefill-row0", logits, G4_VOCAB);
     mask_unused(logits + last_idx, tok_type, G4_VOCAB, have_types, suppress, n_suppress);
+    /* Dump exactly the row the sampler consumes, AFTER masking, and report its argmax. The argmax must
+     * equal the token the engine prints; if it does not, the dump is not the sampled row and its numbers
+     * are not evidence (see the instrument rule in docs/ENGINE-THROUGHPUT-BASELINE.md). */
+    if (getenv("G4_DUMP_LOGITS")) {
+        const char *lp = getenv("G4_DUMP_LOGITS");
+        FILE *lf = fopen(lp, "wb");
+        if (lf) { fwrite(logits + last_idx, sizeof(float), (size_t)G4_VOCAB, lf); fclose(lf); }
+        int am = 0; float bv = logits[last_idx];
+        for (int i = 1; i < G4_VOCAB; i++)
+            if (logits[last_idx + i] > bv) { bv = logits[last_idx + i]; am = i; }
+        fprintf(stderr, "[LOGITS] dumped %s argmax=%d\n", lp, am);
+    }
     int token = sample_topk(logits + last_idx, G4_VOCAB, top_k, 1.0f);
     int first_token = token;
 
