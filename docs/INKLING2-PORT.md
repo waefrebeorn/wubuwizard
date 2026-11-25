@@ -1124,3 +1124,22 @@ query 2: weights [0.06438900, 0.93561101]  max|diff| 4.768e-07
 
 Three genuinely different blends of the same two states, all matching. First piece of the full-layer path ever
 verified: the three depth-mixed q/k/v input states are correct.
+
+## blk.5's three input norms: the state->norm mapping is right
+
+The full layer is the only place three depth-mixed states get three different input norms, so the mapping
+from `state[i]` to `attn_{q,k,v}_inp_norm` is an ordering assumption that nothing had tested. Dumping all
+three states, all three normed outputs and `q`, then trying every (state row, norm) pairing:
+
+```
+target xq:  state[0] with attn_q_inp_norm   max|diff| 9.537e-07   MATCH
+target xk:  state[1] with attn_k_inp_norm   max|diff| 9.537e-07   MATCH
+target xv:  state[2] with attn_v_inp_norm   max|diff| 2.384e-07   MATCH
+```
+
+Exactly one pairing reproduces each target, and no other combination comes within 1e-4. So the ordering is
+not merely self-consistent - it is the only assignment that fits the numbers. The three norms are applied to
+the right states.
+
+Verified in the full layer so far: the 3-query depth mix (4e-07) and the state->norm->q/k/v input mapping
+(1e-07). Remaining: the dynamic convs, and the IQ2_XXS/NVFP4 MoE.

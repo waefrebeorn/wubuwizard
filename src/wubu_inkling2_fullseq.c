@@ -94,6 +94,19 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
         in2_rmsnorm(s + 2 * d, vn, d, eps, xv + (size_t)t * d);
     }
 
+    if (il == 5 && getenv("IN2_DUMP_FULLQ")) {
+        /* the three depth-mixed states, their norms' outputs, and q - so the state->norm->q/k/v mapping
+         * (an ordering assumption) can be checked rather than trusted */
+        FILE *qf = fopen(getenv("IN2_DUMP_FULLQ"), "wb");
+        if (qf) {
+            fwrite(state, sizeof(float), 3 * (size_t)n_tok * d, qf);
+            fwrite(xq, sizeof(float), (size_t)n_tok * d, qf);
+            fwrite(xk, sizeof(float), (size_t)n_tok * d, qf);
+            fwrite(xv, sizeof(float), (size_t)n_tok * d, qf);
+            fclose(qf);
+        }
+    }
+
     /* 2. q with scaled clip and tau (tau is 1.0 at positions below 8192, so it only bites on long context) */
     float *Wq = in2_tensor_to_f32(ctx, &L->wq, NULL);
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
