@@ -121,3 +121,25 @@ Still crashing with the cache attached, so at least one more cause exists. Leads
 
 Current verified baseline (double QK accumulation, no cache): 3-token prompt 26.9567, top1 149876; 5-token 29.2490,
 top1 151451, 8,043/8,045 ms. IN2_KV=1 is safe today only because the sliding store path is a no-op on the numbers.
+
+## Conv replacement diverges (2026-11-25)
+
+With the batch conv left in place, the cache path is exact: 26.9567 / top1 149876 with and without IN2_KV.
+Both attempts to make the conv position-local broke it:
+
+| attempt | result |
+|---|---|
+| `in2_kv_conv_row_dyn` per row | **process died**, no output |
+| prepend 3 cached raw rows to the batch, keep only new outputs | ran, but **22.0042 / top1 220** vs 26.9567 |
+
+The prepend case is the informative one: with a fresh cache the history rows are zeros, which is exactly the
+padding the batch conv applies, so the two must agree for the first forward - and they do not. Either the
+prepended buffer is not what the batch path would have seen (dyn input `hx` rows, tap order, or the fact that
+`in2_shortconv_dynamic` derives `dw` per row from `dyn_input`), or the cache path has a second divergence that
+only surfaces once the conv reads anything at all.
+
+Next step is therefore an isolated test, not an integration attempt: the same comparison the static-conv selftest
+does (whole-sequence vs prepended-history, both against `in2_shortconv_dynamic`), with a non-zero history so a
+tap-order bug cannot hide behind zeros.
+
+The batch conv stays. It is correct for any full recompute, and full recompute is what runs today.
