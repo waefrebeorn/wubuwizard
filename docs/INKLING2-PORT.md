@@ -206,10 +206,10 @@ The first run of that check disagreed completely (relative diffs of 0.6 to 2.9).
 second 128-element half. Worth recording because the reflex on seeing a mismatch is to suspect the code
 under test.
 
-**Not yet validated:** the embedding path itself (IQ4_XS dequant plus the strided gather). Both sides of
-the check above consumed the same dumped activation, so that step is currently self-consistent rather
-than independently confirmed. Same treatment next: dequantise a column of `token_embd` in Python and
-compare against the engine's gather.
+**Embedding path: now validated too.** Dequantising token 1234's column of `token_embd` with an
+independent IQ4_XS implementation reproduces the engine's gather exactly (all four printed components
+match to six decimals) and gives a column RMS of 1.002, which is where trained embeddings sit. So the
+IQ4_XS path, the 136-byte block layout and the strided gather are confirmed, not merely self-consistent.
 
 ## Expert magnitudes: resolved
 
