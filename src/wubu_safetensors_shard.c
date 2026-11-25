@@ -37,9 +37,15 @@ static int scan_shards(const char *dir, char paths[SHARD_MAX][1024]) {
     for (int i = 0; i < n - 1; i++)
         for (int j = i + 1; j < n; j++)
             if (strcmp(paths[i], paths[j]) > 0) {
-                char tmp[1024]; strncpy(tmp, paths[i], 1023); tmp[1023]=0;
-                strncpy(paths[i], paths[j], 1023); paths[i][1023]=0;
-                strncpy(paths[j], tmp, 1023); paths[j][1023]=0;
+                /* memcpy of the actual length, not strncpy(.., 1023). strncpy does not stop at the
+                 * terminator: it pads the whole 1023-byte field with zeros, so this inner loop used to
+                 * zero ~3 KB per comparison, i.e. ~3 KB * n^2/2 before copying a single useful byte.
+                 * Shard filenames are ~40 bytes, so the real copy is ~2% of that work. */
+                char tmp[1024];
+                const size_t li = strlen(paths[i]) + 1, lj = strlen(paths[j]) + 1;
+                memcpy(tmp,      paths[i], li);
+                memcpy(paths[i], paths[j], lj);
+                memcpy(paths[j], tmp,      li);
             }
     return n;
 }

@@ -182,6 +182,12 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
     const float cap = 30.0f;
     for (int i = 0; i < cfg->vocab_size; ++i) logits[i] = tanhf(logits[i] / cap) * cap;
 
+    /* The output matrix has 201024 rows but only 200058 are real tokens; the rest are padding rows whose
+     * embeddings are meaningless. The reference drops the padded vocab before sampling, and without this
+     * the first generation run selected id 200567 - an empty padding row - as its second token. */
+    if (cfg->vocab_size_unpadded > 0 && cfg->vocab_size_unpadded < cfg->vocab_size)
+        for (int i = cfg->vocab_size_unpadded; i < cfg->vocab_size; ++i) logits[i] = -1e30f;
+
     free(Wo); free(blocks); free(fin); free(fq);
     return WUBU_INKLING2_OK;
 }
