@@ -855,6 +855,15 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                 free(vv);
             }
         }
+        /* the k/v short-conv kernels, to test whether the conv state is zeroed per pass */
+        {
+            float *kc = in2_tensor_to_f32(ctx, &((wubu_in2_layer_t *)L)->k_conv, NULL);
+            float *vc = in2_tensor_to_f32(ctx, &((wubu_in2_layer_t *)L)->v_conv, NULL);
+            if (kc) { FILE *_f = fopen("C:/Users/eman5/AppData/Local/Temp/ctrl_kconv.bin", "wb");
+                      if (_f) { fwrite(kc, sizeof(float), 4u * 1024u, _f); fclose(_f); } free(kc); }
+            if (vc) { FILE *_f = fopen("C:/Users/eman5/AppData/Local/Temp/ctrl_vconv.bin", "wb");
+                      if (_f) { fwrite(vc, sizeof(float), 4u * 1024u, _f); fclose(_f); } free(vc); }
+        }
     }
     free(arq);
 
@@ -876,19 +885,18 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *xvv = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (msgs) {
         float *g_k = getenv("IN2_DUMP_MSG2") ? (float *)calloc((size_t)n_tok * d, sizeof(float)) : NULL;
-        for (int s = 0; s < 4; ++s) {
+        for (int s = 0; s < 3; ++s) {   /* slot 3 (mlp) is gated later, on the MLP depth mix, not on mixh */
             float *dw = in2_tensor_to_f32(ctx, &L->loop_down[s], NULL);
             float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[s], NULL);
             float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[s], NULL);
-            float *dst = (s == 0) ? xn : (s == 1 ? xkk : (s == 2 ? xvv : NULL));
+            float *dst = (s == 0) ? xn : (s == 1 ? xkk : xvv);
             for (int t = 0; t < n_tok; ++t) {
                 float *gated = (float *)calloc((size_t)d, sizeof(float));
                 if (dw && fw && gw) in2_message_gate(mixh + (size_t)t * d, msgs + ((size_t)t * 4 + s) * d, dw, fw, gw,
                                                      d, cfg->loop_gate_rank, eps, gated);
                 else                memcpy(gated, mixh + (size_t)t * d, sizeof(float) * d);
                 if (g_k && s == 1) memcpy(g_k + (size_t)t * d, gated, sizeof(float) * d);
-                if (dst) in2_rmsnorm(gated, an, d, eps, dst + (size_t)t * d);
-                else     in2_rmsnorm(gated, an, d, eps, mixh + (size_t)t * d);  /* slot 3: mlp input */
+                in2_rmsnorm(gated, an, d, eps, dst + (size_t)t * d);
                 free(gated);
             }
             free(dw); free(fw); free(gw);
@@ -1242,15 +1250,42 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     if (fn && moein && moeout && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             float *tmp = (float *)calloc((size_t)d, sizeof(float));
+            float *g2 = (float *)calloc((size_t)d, sizeof(float));
             float *frq = in2_tensor_to_f32(ctx, &L->ffn_res_q, NULL);
             if (frq) in2_mix(blocks, n_blocks, n_tok * d, t * d, res + (size_t)t * d, frq, 1, d, eps, tmp);
             else      in2_rmsnorm_unweighted(res + (size_t)t * d, d, eps, tmp);
             free(frq);
-            in2_rmsnorm(tmp, fn, d, eps, moein + (size_t)t * d);
+            /* the mlp slot's message gate acts on THIS mix (the reference's node_3652 = [mlp mix, msg]),
+             * and its output is normalised with ffn_norm - not attn_norm. */
+            if (msgs && g2) {
+                float *dw = in2_tensor_to_f32(ctx, &L->loop_down[3], NULL);
+                float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[3], NULL);
+                float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[3], NULL);
+                if (dw && fw && gw) in2_message_gate(tmp, msgs + ((size_t)t * 4 + 3) * d, dw, fw, gw,
+                                                     d, cfg->loop_gate_rank, eps, g2);
+                else                memcpy(g2, tmp, sizeof(float) * d);
+                free(dw); free(fw); free(gw);
+                in2_rmsnorm(g2, fn, d, eps, moein + (size_t)t * d);
+            } else {
+                in2_rmsnorm(tmp, fn, d, eps, moein + (size_t)t * d);
+            }
+            free(g2);
             free(tmp);
         }
         rc = in2_moe(ctx, m, cfg, il, moein, n_tok, moeout);
         TKPH(7);
+        if (il == cfg->loop_core_start && getenv("IN2_DUMP_MSG2")) {
+            static int _vr = 0;
+            char _p[512];
+            const char *_dn = getenv("IN2_DUMP_MSG2");
+            snprintf(_p, sizeof _p, "%s/res_v%d.bin", _dn, _vr);
+            FILE *_f = fopen(_p, "wb"); if (_f) { fwrite(res, sizeof(float), (size_t)n_tok * d, _f); fclose(_f); }
+            snprintf(_p, sizeof _p, "%s/moein_v%d.bin", _dn, _vr);
+            _f = fopen(_p, "wb"); if (_f) { fwrite(moein, sizeof(float), (size_t)n_tok * d, _f); fclose(_f); }
+            snprintf(_p, sizeof _p, "%s/moeout_v%d.bin", _dn, _vr);
+            _f = fopen(_p, "wb"); if (_f) { fwrite(moeout, sizeof(float), (size_t)n_tok * d, _f); fclose(_f); }
+            ++_vr;
+        }
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step8 failed fn=%p moein=%p moeout=%p (moe rc=%d)\n", il, (void*)fn, (void*)moein, (void*)moeout, rc); }
     if (DBG) fprintf(stderr, "[L%d] step8 rc=%d\n", il, rc);
 

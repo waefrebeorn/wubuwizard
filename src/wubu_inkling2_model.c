@@ -155,8 +155,11 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
         memcpy(_br, h, sizeof(float) * ND);                                            \
-        if (rc == WUBU_INKLING2_OK && !use_pass_bank && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
-            memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
+        if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 &&                 \
+            (IL) / cfg->attn_res_block < 4) {                                           \
+            const int _slot = (IL) / cfg->attn_res_block;                               \
+            memcpy(blocks + (size_t)_slot * ND, _br, sizeof(float) * ND);                \
+            if (_slot + 1 > n_blocks) n_blocks = _slot + 1;                              \
         }                                                                               \
         const clock_t _L0 = clock();                                                    \
         const float *_bs = blocks;                                                      \
