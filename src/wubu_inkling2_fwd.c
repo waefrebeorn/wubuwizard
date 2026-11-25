@@ -1970,12 +1970,17 @@ int in2_embed(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2
     if (ti->n_dims != 2 || ti->dims[0] != (int64_t)cfg->d_model) return WUBU_INKLING2_ERR_SHAPE;
     if (token < 0 || token >= cfg->vocab_size) return WUBU_INKLING2_ERR_SHAPE;
 
-    /* The quantised rows are per-token columns; the cheapest correct path is to dequantise the whole
-     * tensor once. A streaming reader will replace this, but correctness first. */
+    /* One row, not the whole matrix. This used to dequantise all 201024 x 2304 embedding values (1.85 GB, past any
+     * cache budget, so it happened again on every single token) to copy out 2304 floats. The row path reads 1.2 MB of
+     * quantised bytes when the row is block-aligned and produces exactly the same floats; if it is not aligned (a
+     * file-dependent property) fall back to the whole-tensor path rather than reading shifted blocks. */
+    const int64_t stride = ti->dims[0];
+    if (wubu_inkling2_read_row_f32(ctx, &m->tok_embd, (int64_t)token, out, stride) == WUBU_INKLING2_OK)
+        return WUBU_INKLING2_OK;
+
     int64_t ne = 0;
     float *emb = in2_tensor_to_f32(ctx, &m->tok_embd, &ne);
     if (!emb) return WUBU_INKLING2_ERR_IO;
-    const int64_t stride = ti->dims[0];
     for (int64_t i = 0; i < stride; ++i) out[i] = emb[(int64_t)token * stride + i];
     free(emb);
     return WUBU_INKLING2_OK;

@@ -41,8 +41,23 @@ static void emit_piece(const char *s)
     }
 }
 
+/* clock() is CPU time and sums across threads, so under a 4-thread build it reports ~2.6x the wall time and its
+ * per-step rows cannot be summed against an external `date +%s%N`. Use a monotonic wall clock for everything the
+ * user reads. */
+static double wall_now(void)
+{
+#if defined(_WIN32)
+    return (double)GetTickCount64() / 1000.0;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
+}
+
 int main(int argc, char **argv)
 {
+    const double t_proc = wall_now();
     const char *path = "C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf";
     if (argc < 3) { fprintf(stderr, "usage: %s <n_gen> <token> [token ...]\n", argv[0]); return 2; }
     const int n_gen = atoi(argv[1]);
@@ -82,7 +97,8 @@ int main(int argc, char **argv)
     }
     for (int i = 0; i < n_prompt; ++i) printf("prompt[%d]=%d\n", i, toks[i]);
 
-    clock_t t_step = clock(); double t_total = 0.0; int used_cache = 0;
+    double t_step = wall_now(); double t_total = 0.0; int used_cache = 0;
+    fprintf(stderr, "LOAD wall: %.2f s (open+probe+load, before first token)\n", t_step - t_proc);
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
 
@@ -95,19 +111,22 @@ int main(int argc, char **argv)
          * 34/34 oracle tokens match with it enabled, and the two paths produce bit-identical hidden states. IN2_NO_KV
          * forces the full recompute for debugging. */
         const int incremental = getenv("IN2_NO_KV") == NULL && step > 0;
+        const double t_f0 = wall_now();
         const int rc = incremental
             ? in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits)
             : in2_forward_at(ctx, &m, &cfg, toks, n, 0, h, logits);
+        const double t_f1 = wall_now();
         if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "step %d rc=%d\n", step, rc); return rc; }
         used_cache |= incremental;
         int best = 0; float bv = -1e30f;
         for (int i = 0; i < cfg.vocab_size; ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
         toks[n] = best;
-        const double dt = (double)(clock() - t_step) / (double)CLOCKS_PER_SEC;
-        t_step = clock();
+        const double t_after = wall_now();
+        const double dt = t_after - t_step;
+        t_step = t_after;
         t_total += dt;
-        printf("gen[%d] id=%d logit=%.4f  %.1fs  (%.2f tok/s at prefix %d)\n",
-               step, best, bv, dt, dt > 0 ? 1.0 / dt : 0.0, n);
+        printf("gen[%d] id=%d logit=%.4f  %.3fs wall (fwd %.3fs + %.3fs other)  (%.2f tok/s at prefix %d)\n",
+               step, best, bv, dt, t_f1 - t_f0, dt - (t_f1 - t_f0), dt > 0 ? 1.0 / dt : 0.0, n);
         if (getenv("IN2_TOPK")) {
             /* Top-k of the same distribution, so a near-tie can be judged against llama-server's
              * completion_probabilities instead of only by the argmax. */

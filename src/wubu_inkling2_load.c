@@ -303,6 +303,54 @@ int wubu_inkling2_read(gguf_ctx *ctx, const wubu_in2_tensor_t *t, void *dst, int
     return WUBU_INKLING2_OK;
 }
 
+/* Read at a byte offset inside a tensor. Same mmap/seek rules as the whole-tensor reader, which is 64-bit on
+ * purpose: offsets in this file exceed 2 GB. */
+static int in2_read_off(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t off, void *dst, int64_t nbytes)
+{
+    if (!ctx || !t || !t->info) return WUBU_INKLING2_ERR_MISSING_TENSOR;
+    const int64_t base = t->file_offset + off;
+#ifdef _WIN32
+    if (t->file_offset >= 0 && in2_try_map(ctx)) {
+        if (base < 0 || nbytes < 0 || base + nbytes > g_view_size) return WUBU_INKLING2_ERR_IO;
+        memcpy(dst, g_view + base, (size_t)nbytes);
+        return WUBU_INKLING2_OK;
+    }
+#endif
+    if (_fseeki64(ctx->file, (long long)base, SEEK_SET) != 0) return WUBU_INKLING2_ERR_IO;
+    if (fread(dst, 1, (size_t)nbytes, ctx->file) != (size_t)nbytes) return WUBU_INKLING2_ERR_IO;
+    return WUBU_INKLING2_OK;
+}
+
+/* Dequantise ONE row of a 2-D tensor. Row `r` of a ggml block format starts on a block boundary whenever the row
+ * length is a multiple of the block size, so this produces exactly the floats the whole-tensor dequant would put in
+ * that slice - it is a memory-traffic change, not an arithmetic one. Embedding lookups used to dequantise the entire
+ * 201024 x 2304 matrix (1.85 GB) to read a single 2304-float row, on every token, and it could never be cached
+ * because it is far past any sane cache budget. */
+int wubu_inkling2_read_row_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t row, float *dst, int64_t max_elems)
+{
+    if (!ctx || !t || !t->info || !dst || row < 0) return WUBU_INKLING2_ERR_MISSING_TENSOR;
+    const gguf_tensor_info *ti = t->info;
+    if (ti->n_dims != 2) return WUBU_INKLING2_ERR_SHAPE;
+    const int64_t n = ti->dims[0];
+    if (n > max_elems || row >= ti->dims[1]) return WUBU_INKLING2_ERR_SHAPE;
+
+    if (ti->ggml_type == 0)   /* F32: the row is a plain slice */
+        return in2_read_off(ctx, t, row * n * 4, dst, n * 4);
+
+    /* Row-addressability without a block-size table: the tensor's total raw size must be exactly rows x row_bytes. If
+     * the row length were not a whole number of blocks, gguf_raw_size would round up and that identity would fail, so
+     * the caller falls back to the whole-tensor path instead of reading misaligned blocks. */
+    const int64_t row_bytes = gguf_raw_size(ti->ggml_type, n);
+    const int64_t total_bytes = gguf_raw_size(ti->ggml_type, n * ti->dims[1]);
+    if (row_bytes <= 0 || total_bytes != row_bytes * ti->dims[1]) return WUBU_INKLING2_ERR_SHAPE;
+    unsigned char *raw = (unsigned char *)malloc((size_t)row_bytes);
+    if (!raw) return WUBU_INKLING2_ERR_IO;
+    int rc = in2_read_off(ctx, t, row * row_bytes, raw, row_bytes);
+    if (rc == WUBU_INKLING2_OK) gguf_dequantize(raw, ti->ggml_type, n, dst);
+    free(raw);
+    return rc;
+}
+
 int wubu_inkling2_read_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, float *dst, int64_t max_elems)
 {
     if (!ctx || !t || !t->info || !dst) return WUBU_INKLING2_ERR_MISSING_TENSOR;
