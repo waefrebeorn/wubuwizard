@@ -99,6 +99,47 @@ int main(int argc, char **argv)
         free(wrel); free(rclip); free(P);
     }
 
+    /* MoE check: router selection/weights, then one expert end-to-end. */
+    {
+        extern int in2_router(const float *, const float *, const float *, int, int, int, float, int *, float *);
+        extern int in2_dequant_slice(gguf_ctx *, const wubu_in2_tensor_t *, int64_t, int64_t, float *);
+        extern void in2_expert_act(const float *, const float *, int, float *);
+        const int NE = 128, TOPK = 8, DFF = 1152;
+        float *Wr = in2_tensor_to_f32(ctx, &m.layer[0].router, NULL);
+        float *cb = in2_tensor_to_f32(ctx, &m.layer[0].exp_bias, NULL);
+        int idx[8]; float w[8];
+        int got = in2_router(xn, Wr, cb, NE, d, TOPK, 8.0f, idx, w);
+        printf("router: %d experts ->", got);
+        for (int k = 0; k < got; ++k) printf(" e%d=%.6f", idx[k], w[k]);
+        printf("\n");
+        double wsum = 0; for (int k = 0; k < got; ++k) wsum += w[k];
+        printf("router weight sum (expect 8.0): %.6f\n", wsum);
+
+        const int e = idx[0];
+        float *gu = (float *)calloc((size_t)2 * DFF * d, sizeof(float));
+        float *dn = (float *)calloc((size_t)d * DFF, sizeof(float));
+        float *g  = (float *)calloc(2 * DFF, sizeof(float));
+        float *act = (float *)calloc(DFF, sizeof(float));
+        float *eo = (float *)calloc(d, sizeof(float));
+        float *dsc = in2_tensor_to_f32(ctx, &m.layer[0].down_scale, NULL);
+        float *gsc = in2_tensor_to_f32(ctx, &m.layer[0].gate_up_scale, NULL);
+        if (gu && dn && g && act && eo) {
+            in2_dequant_slice(ctx, &m.layer[0].gate_up, (int64_t)e * 2 * DFF * d, (int64_t)2 * DFF * d, gu);
+            in2_dequant_slice(ctx, &m.layer[0].down,    (int64_t)e * d * DFF,    (int64_t)d * DFF,    dn);
+            const float gs = gsc ? gsc[e] : 1.0f, ds = dsc ? dsc[e] : 1.0f;
+            in2_matvec(gu, xn, d, 2 * DFF, g);
+            for (int i = 0; i < 2 * DFF; ++i) g[i] *= gs;          /* per-expert quant scale */
+            in2_expert_act(g, g + DFF, DFF, act);
+            in2_matvec(dn, act, DFF, d, eo);
+            for (int i = 0; i < d; ++i) eo[i] *= ds;
+            printf("expert e%d scale %.8g/%.8g  gate_up[0..2]=%.6f %.6f %.6f  out[0..3]=%.6f %.6f %.6f %.6f\n",
+                   e, (double)gs, (double)ds, g[0], g[1], g[2], eo[0], eo[1], eo[2], eo[3]);
+            FILE *mf = fopen("moe.bin", "wb");
+            if (mf) { fwrite(act, sizeof(float), DFF, mf); fwrite(eo, sizeof(float), d, mf); fclose(mf); }
+        }
+        free(gu); free(dn); free(g); free(act); free(eo); free(dsc); free(gsc); free(Wr); free(cb);
+    }
+
     free(wq); free(x); free(xn); free(an);
     gguf_close(ctx);
     return 0;

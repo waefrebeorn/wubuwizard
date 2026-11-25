@@ -1611,7 +1611,11 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_Q5_K:  return n_blocks * 176;  // d[2] + dmin[2] + scales[12] + qh[32] + qs[128] (verified from model file)
         case GGML_TYPE_Q8_0:  return ((n_elems + 31) / 32) * 34;  // d[2] + qs[32]
         case GGML_TYPE_Q4_0:  return ((n_elems + 31) / 32) * 18;  // d[2] + qs[16] nibbles
-        case GGML_TYPE_IQ1_S: return n_blocks * 42;   // d[2] + qs[32] + qh[8]
+        /* 50, not 42: qh is uint16_t qh[8] = 16 bytes, so 2 + 32 + 16 = 50. The 42 came from counting
+         * qh as 8 bytes, which under-allocates 8 bytes per block. It stayed invisible on 256-element
+         * probes (the overrun lands inside a padded buffer) and segfaulted the first time a 5.3M-element
+         * expert slice was read. ggml's block_iq1_s agrees with 50. */
+        case GGML_TYPE_IQ1_S: return n_blocks * 50;   // d[2] + qs[32] + qh[16]
         case GGML_TYPE_IQ1_M: return n_blocks * 56;   // d[2] + qs[32] + qh[16] + scales[6]
         case GGML_TYPE_IQ2_XXS: return n_blocks * 66; // d[2] + qs[64] = 66 (NOT 72 — verified empirically)
         case GGML_TYPE_IQ2_XS: return n_blocks * 74;  // d[2] + qs[32]*u16 + scales[8] (canonical; NOTE: dequantize_iq2_xs_row still assumes the old 108B layout -- needs rewrite)

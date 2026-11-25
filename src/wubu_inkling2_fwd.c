@@ -112,6 +112,78 @@ void in2_rel_bias_table(const float *rel_states, const float *P, int n_head, int
     }
 }
 
+/* Read a block-aligned element range of a tensor and dequantise it. The MoE expert blocks are
+ * (2*d_ff, d_model, n_expert) with expert slices contiguous and 256-aligned, so one expert can be read
+ * without touching the other 127 (2.7 GB if dequantised whole). */
+int in2_dequant_slice(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off, int64_t n_elems, float *dst)
+{
+    if (!ctx || !t || !t->info || !dst) return WUBU_INKLING2_ERR_MISSING_TENSOR;
+    if (elem_off % 256 != 0) return WUBU_INKLING2_ERR_SHAPE;
+    const int ty = t->info->ggml_type;
+    const int64_t byte_off = gguf_raw_size(ty, elem_off);
+    const int64_t nbytes   = gguf_raw_size(ty, n_elems);
+    if (byte_off < 0 || nbytes <= 0) return WUBU_INKLING2_ERR_UNKNOWN_TYPE;
+    unsigned char *raw = (unsigned char *)malloc((size_t)nbytes);
+    if (!raw) return WUBU_INKLING2_ERR_IO;
+    wubu_in2_tensor_t shifted = *t;
+    shifted.file_offset = t->file_offset + byte_off;
+    int rc = wubu_inkling2_read(ctx, &shifted, raw, nbytes);
+    if (rc == WUBU_INKLING2_OK) gguf_dequantize(raw, ty, n_elems, dst);
+    free(raw);
+    return rc;
+}
+
+/* Softcap: tanh(x / c) * c. Bounds a value into (-c, c) without a hard clip. */
+static float in2_softcap(float x, float c) { return tanhf(x / c) * c; }
+
+/* Softcapped SwiGLU: the sigmoid sees the RAW gate; only the linear factor and `up` are softcapped.
+ *   act = softcap(gate, 4.0) * sigmoid(gate) * softcap(up, 25.0)
+ * Applying the softcap inside the sigmoid as well is a common misreading and changes the gate
+ * non-linearly, so it is spelled out here. */
+void in2_expert_act(const float *gate, const float *up, int n, float *out)
+{
+    for (int i = 0; i < n; ++i) {
+        const float g = gate[i];
+        const float sig = 1.0f / (1.0f + expf(-g));
+        out[i] = in2_softcap(g, 4.0f) * sig * in2_softcap(up[i], 25.0f);
+    }
+}
+
+/* Router: sigmoid scores, selection by score + correction bias, weights from the UNBIASED scores
+ * renormalised to sum 1 and then multiplied by the routed scaling factor (8.0).
+ *
+ * The distinction matters: the correction bias only changes which experts are picked, never how much
+ * they contribute. Returns the number of experts selected. */
+int in2_router(const float *x, const float *W, const float *corr_bias, int n_expert, int d_model,
+               int top_k, float scale, int *idx, float *w)
+{
+    float *scores = (float *)malloc((size_t)n_expert * sizeof(float));
+    float *adj    = (float *)malloc((size_t)n_expert * sizeof(float));
+    if (!scores || !adj) { free(scores); free(adj); return 0; }
+    for (int e = 0; e < n_expert; ++e) {
+        const float *row = W + (size_t)e * d_model;
+        double acc = 0.0;
+        for (int i = 0; i < d_model; ++i) acc += (double)row[i] * x[i];
+        const float s = 1.0f / (1.0f + expf(-(float)acc));
+        scores[e] = s;
+        adj[e] = s + (corr_bias ? corr_bias[e] : 0.0f);
+    }
+    /* partial selection sort for top_k */
+    char *taken = (char *)calloc((size_t)n_expert, 1);
+    for (int k = 0; k < top_k; ++k) {
+        int best = -1; float bestv = -1e30f;
+        for (int e = 0; e < n_expert; ++e) if (!taken[e] && adj[e] > bestv) { bestv = adj[e]; best = e; }
+        if (best < 0) break;
+        taken[best] = 1; idx[k] = best;
+    }
+    double sum = 0.0;
+    for (int k = 0; k < top_k; ++k) sum += scores[idx[k]];
+    const float inv = (float)(1.0 / (sum + 1e-20));
+    for (int k = 0; k < top_k; ++k) w[k] = scores[idx[k]] * inv * scale;
+    free(scores); free(adj); free(taken);
+    return top_k;
+}
+
 /* Dequantise a whole tensor into f32. Caller frees. Returns NULL on failure. */
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
 {

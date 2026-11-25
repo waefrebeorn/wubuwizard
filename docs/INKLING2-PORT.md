@@ -284,6 +284,49 @@ and the profile-bank transpose together.
   model both resolve to 128 / 24 / 8 kv heads, which is why the q/k/v tensors have identical shapes on
   sliding and full layers.
 
+## A real engine bug found on the way: IQ1_S raw size was 8 bytes short
+
+Reading a 5.3M-element IQ1_S expert slice segfaulted inside `dequantize_iq1_s_row`. The cause was not
+the new code:
+
+```
+gguf_raw_size(GGML_TYPE_IQ1_S) -> n_blocks * 42      // counted qh as 8 bytes
+#define IQ1_S_BLOCK_SIZE 50                          // the dequantiser's own comment: 2 + 32 + 16
+```
+
+`qh` is `uint16_t qh[8]` = **16** bytes, so a block is 2 + 32 + 16 = 50, which is what ggml's
+`block_iq1_s` says. `gguf_raw_size` under-allocated 8 bytes per block. This was invisible on
+256-element probes because the overrun landed inside a padded buffer; at 20,736 blocks it overruns by
+165 KB and crashes. Any IQ1_S tensor read through that path was being read into a buffer that was too
+small - the values decoded correctly, then the heap was corrupted. Fixed to 50.
+
+## MoE: routing and the expert path
+
+Read from the reference and implemented:
+
+```
+logits  = ffn_gate_inp @ x                     # 128 experts, fp32
+scores  = sigmoid(logits)
+pick    = topk(scores + exp_probs_b, 8)        # bias affects SELECTION only
+weights = scores[pick] / sum(scores[pick]) * 8.0
+per expert: gu = gate_up[e] @ x * gate_up_scale[e]
+            gate, up = gu[:1152], gu[1152:]    # chunk(2, -1): gate first
+            act = tanh(gate/4)*4 * sigmoid(gate) * tanh(up/25)*25
+            out += weights[k] * (down[e] @ act) * down_scale[e]
+```
+
+Two details that are easy to get wrong: the sigmoid sees the **raw** gate (only the linear factor and
+`up` are softcapped), and the correction bias never touches the contribution weights.
+
+**Verified** for token 1234 at blk.0: selection `e112 e6 e116 e95 e9 e108 e51 e111` and weights
+`1.487772 1.109196 0.987676 0.947753 0.924911 0.916767 0.823771 0.802153` match an independent
+implementation to six decimals, and the weights sum to exactly 8.000000. The per-expert scales land in
+the expected band (`gate_up 7.06e-05`, `down 1.01e-04`).
+
+Note: `exp_probs_b` is non-zero on all 128 experts (max 0.065), but for this token the biased and
+unbiased top-8 agree, so this check does not yet discriminate the correction-bias rule. A token where
+the two selections differ is needed for that.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
