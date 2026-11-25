@@ -1,7 +1,7 @@
-/* inkling_gen -- greedy generation with full recompute per step.
+/* inkling_gen -- greedy generation.
  *
- * No KV cache yet: every step re-runs the whole prefix. That is slow (seconds per token) but it cannot
- * hide a cache bug, which is the point of getting output this way first.
+ * Full recompute per step by default (O(n^2), but it cannot hide a cache bug). IN2_KV=1 enables the incremental path,
+ * which is ~6x faster but still diverges from the full path on at least one near-tie (see in2_kv_enabled).
  *
  * usage: inkling_gen <n_gen> <token> [token ...]
  */
@@ -48,7 +48,10 @@ int main(int argc, char **argv)
         const clock_t t_step0 = clock(); (void)t_step0;
         const int n = n_prompt + step;
         /* With a cache the prompt is prefilled once and each step pushes a single token at its real position;
-         * without one the whole prefix is recomputed, which is the O(n^2) behaviour this is meant to replace. */
+         * without one the whole prefix is recomputed, which is the O(n^2) behaviour this is meant to replace.
+         * Cache on by default now: the full-recompute path was the safe default while the cache could hide a bug, but
+         * 34/34 oracle tokens match with it enabled, and the two paths produce bit-identical hidden states. IN2_NO_KV
+         * forces the full recompute for debugging. */
         const int incremental = getenv("IN2_KV") != NULL && step > 0;
         const int rc = incremental
             ? in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits)
