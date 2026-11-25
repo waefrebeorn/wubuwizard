@@ -981,6 +981,28 @@ probe silently failed to seek until it used `_fseeki64` - the identical trap tha
 values from `gguf_probe`. A pattern worth remembering: every 64-bit file offset in this codebase needs the
 64-bit seek, and the failure mode is plausible-looking data rather than an error.
 
+**Solved from the test vector - the engine is correct, my check was not.** Solving `|out|/d` against
+`db = d*(0.5+ls)*0.25` with a grid value confined to 8..43:
+
+```
+i   out/d      candidates (ls, grid)
+0   +27.0000   (4,24) (13,8)
+...
+6   +84.3750   (12,27) (13,25)
+```
+
+Each element alone is ambiguous, but `ls` must be identical for the whole 32-element sub-block, so only the
+intersection survives: **ls = 13**, grid **8** for elements 0..5 and grid **25** for 6..7, signs
+`+ + - - - - + +`. That is `3.375 * 8 = 27` and `3.375 * 25 = 84.375`, both exact, and the 3.125 group ratio
+is just `25/8`. The engine's IQ2_XS arithmetic is right.
+
+So the failure was never the arithmetic - it was my assumption about the **sign-index width**. Canonical ggml
+`IQ2_XS` uses a 3-bit sign index (9-bit grid + 3-bit sign = 12 of 16 bits), but this file's `qs` words carry
+full 16-bit entropy and `q >> 9` reaches 127. The engine's own comment says
+`ksigns_iq2xs[128]` - it was written for a **7-bit sign variant**, and this file is that variant. That is why
+both my 12-bit readings failed, and it means the format here is not byte-identical to canonical IQ2_XS, which
+is itself worth knowing before making any correctness claim about expert weights.
+
 **Not resolved, and deliberately not guessed at.** The engine's own type-17 decoder produces sane MoE output
 (rms 1.0, 46.6% of the residual, router healthy), so the file is fine and the fault is in the check. Five
 attempts at this check failed in this stretch; the next one starts from dumping the engine's first 8
