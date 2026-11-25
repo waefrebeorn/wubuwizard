@@ -15,6 +15,7 @@ typedef struct {
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */
 in2_kv_t *in2_kv_current(int *visit, int *pos0);
 void      in2_kv_advance(void);
+void      in2_kv_begin(int pos0);
 
 int   in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap);
 void  in2_kv_free(in2_kv_t *kv);

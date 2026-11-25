@@ -79,6 +79,11 @@ in2_kv_t *in2_kv_current(int *visit, int *pos0)
 }
 void in2_kv_advance(void) { ++g_visit; }
 
+/* Called once per forward: visits always start at zero for a step, and the step's first token sits at pos0.
+ * Without this a second step would number its visits 45..90 and every lookup past the allocation would return
+ * NULL, which the attention loops skip - a silently truncated context rather than a loud failure. */
+void in2_kv_begin(int pos0) { g_visit = 0; g_kv_pos = pos0; }
+
 void in2_kv_attach(in2_kv_t *kv, int pos0)
 {
     g_kv = kv;
@@ -785,8 +790,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* 5. attention per head. The bias table is token-dependent, so it is recomputed per token; the
      *    loop below therefore walks queries and rebuilds only the distances it needs. */
     float *attn_out = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
-    float *alpha = (float *)calloc((size_t)n_tok, sizeof(float));
-    float *logits = (float *)calloc((size_t)n_tok, sizeof(float));
+    /* sized for the visible window, not the batch: with a cache n_key = min(pos0+t+1, EXT) and a 1-token step at
+     * pos0 = 3 writes four entries into a one-element buffer (that is the silent death on step 1). */
+    float *alpha = (float *)calloc((size_t)n_tok + (size_t)pos0 + 1u, sizeof(float));
+    float *logits = (float *)calloc((size_t)n_tok + (size_t)pos0 + 1u, sizeof(float));
     if (attn_out && alpha && logits && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             const int kvh_stride = NH / NKV;

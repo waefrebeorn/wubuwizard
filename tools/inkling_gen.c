@@ -14,6 +14,8 @@
 
 int in2_forward_seq(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
                     const int *, int, float *, float *);
+int in2_forward_at(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
+                   const int *, int, int, float *, float *);
 
 int main(int argc, char **argv)
 {
@@ -41,7 +43,12 @@ int main(int argc, char **argv)
     for (int step = 0; step < n_gen; ++step) {
         const clock_t t_step0 = clock(); (void)t_step0;
         const int n = n_prompt + step;
-        const int rc = in2_forward_seq(ctx, &m, &cfg, toks, n, h, logits);
+        /* With a cache the prompt is prefilled once and each step pushes a single token at its real position;
+         * without one the whole prefix is recomputed, which is the O(n^2) behaviour this is meant to replace. */
+        const int incremental = getenv("IN2_KV") != NULL && step > 0;
+        const int rc = incremental
+            ? in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits)
+            : in2_forward_at(ctx, &m, &cfg, toks, n, 0, h, logits);
         if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "step %d rc=%d\n", step, rc); return rc; }
         int best = 0; float bv = -1e30f;
         for (int i = 0; i < cfg.vocab_size; ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }

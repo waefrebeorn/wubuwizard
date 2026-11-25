@@ -15,6 +15,7 @@
 #include <math.h>
 
 #include "wubu_inkling2.h"
+#include "wubu_inkling2_kv.h"
 int in2_matvec_quant(gguf_ctx *, const wubu_in2_tensor_t *, int64_t, const float *, int, int, float *);
 
 void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
@@ -81,6 +82,7 @@ static void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos
 int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                    const int *tokens, int n_tok, int pos0, float *h, float *logits)
 {
+    in2_kv_begin(pos0);
     /* IN2_SINGLE_PASS runs pass 1 only. It exists to exercise the depth path before the message gates
      * land; anything it prints is a 1-of-3-pass number and must be labelled as such. */
     /* IN2_SINGLE_PASS=1 still forces one pass, which is useful for A/B against the pre-message graph. */
