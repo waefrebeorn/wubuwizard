@@ -31,8 +31,8 @@ static int in2_ty_verified(int ty)
     const char *only = getenv("IN2_TY_ONLY");   /* isolate one type when a new kernel disagrees end to end */
     if (only) return ty == atoi(only);
     switch (ty) {
-        case 12: case 13: case 16: case 17: case 18: case 19: case 21: case 22: case 23:
-        case 29: case 40: case 42: return 1;
+        case 8: case 12: case 13: case 14: case 16: case 17: case 18: case 19: case 21: case 22:
+        case 23: case 29: case 40: case 42: return 1;
         default: return 0;
     }
 }
@@ -227,6 +227,66 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
     free(actq);
     free(rawrow);
     free(row);
+    return WUBU_INKLING2_OK;
+}
+
+
+/* Batched dense projection: Y[i] = W . X[i] for i in [0, nt).
+ *
+ * This replaces "materialise the weight matrix as floats, then dot it once per position". Two costs disappear:
+ * the f32 copy (wq is 3072 x 2304 = 28 MB, rebuilt on every layer visit, so ~2 GB of dequantisation per token
+ * across 24 layers x 3 passes) and the per-position scalar dot. The kernel decodes each weight row ONCE and
+ * applies it to all nt tokens, which is the whole reason batching matters: per-position calls would re-read the
+ * matrix and lose the reuse.
+ *
+ * nt is grouped in eights because the kernels take an array of activation pointers. Falls back to the exact
+ * per-position float path, materialising only when the kernels cannot take the type. */
+int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
+                  const float *X, int nt, int n_in, int n_out, float *Y)
+{
+    const int ty = (t && t->info) ? t->info->ggml_type : -1;
+    const int q8_0_act = (ty == 8 || ty == 40 || ty == 42);
+    const int be = q8_0_act ? 32 : 256;
+    const int64_t rb = (ty >= 0 && (n_in % be) == 0) ? gguf_raw_size(ty, n_in) : -1;
+
+    if (getenv("IN2_NOFAST") == NULL && rb > 0 && t && t->info &&
+        wubu_iq_supported(ty) && in2_ty_verified(ty)) {
+        const size_t ablk = q8_0_act ? sizeof(in2_q8_0_blk) : sizeof(in2_q8k_blk);
+        const int nab = n_in / be;
+        unsigned char *whole = (unsigned char *)malloc((size_t)rb * (size_t)n_out);
+        void *act = malloc(ablk * (size_t)nab * (size_t)nt);
+        if (whole && act) {
+            if (wubu_inkling2_read(ctx, t, whole, rb * n_out) == WUBU_INKLING2_OK) {
+                for (int i = 0; i < nt; ++i) {
+                    const float *x = X + (size_t)i * n_in;
+                    void *a = (unsigned char *)act + ablk * (size_t)nab * (size_t)i;
+                    if (q8_0_act) in2_q8_0_quantise(x, nab, (in2_q8_0_blk *)a);
+                    else          in2_q8k_quantise(x, nab, (in2_q8k_blk *)a);
+                }
+                int done = 1;
+                for (int g = 0; g < nt && done; g += 8) {
+                    const int nn = (nt - g < 8) ? (nt - g) : 8;
+                    const void *ap[8];
+                    float *op[8];
+                    for (int i = 0; i < nn; ++i) {
+                        ap[i] = (unsigned char *)act + ablk * (size_t)nab * (size_t)(g + i);
+                        op[i] = Y + (size_t)(g + i) * n_out;
+                    }
+                    wubu_iq_rows(ty, whole, (size_t)rb, n_in, ap, nn, op, 0, n_out);
+                }
+                free(act); free(whole);
+                return WUBU_INKLING2_OK;
+            }
+        }
+        free(act); free(whole);
+    }
+
+    /* Exact fallback: materialise once, dot per position. */
+    float *W = in2_tensor_to_f32(ctx, t, NULL);
+    if (!W) return WUBU_INKLING2_ERR_IO;
+    for (int i = 0; i < nt; ++i)
+        in2_matvec(W, X + (size_t)i * n_in, n_in, n_out, Y + (size_t)i * n_out);
+    free(W);
     return WUBU_INKLING2_OK;
 }
 
@@ -507,16 +567,16 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 
     /* 2. q: project, scale+clip per head. */
     const int qdim = NH * HD, kdim = NKV * HD;
-    float *Wq = in2_tensor_to_f32(ctx, &L->wq, NULL);
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
-    if (!Wq || !q) { if (DBG) fprintf(stderr, "[L%d] q alloc/proj failed Wq=%p q=%p\n", il, (void*)Wq, (void*)q);
-        free(an); free(xn); free(Wq); free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
+    if (!q) { if (DBG) fprintf(stderr, "[L%d] q alloc failed\n", il);
+        free(an); free(xn); free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
     if (DBG) fprintf(stderr, "[L%d] step2 ok (qcl=%p)\n", il, (void*)qcl);
-    for (int t = 0; t < n_tok; ++t) {
-        in2_matvec(Wq, xn + (size_t)t * d, d, qdim, q + (size_t)t * qdim);
-        in2_l2_clip(q + (size_t)t * qdim, qcl, NH, HD, 22.6274166f);
+    if (in2_matvec_nt(ctx, &L->wq, xn, n_tok, d, qdim, q) != WUBU_INKLING2_OK) {
+        free(an); free(xn); free(qcl); free(q); return WUBU_INKLING2_ERR_IO;
     }
+    for (int t = 0; t < n_tok; ++t)
+        in2_l2_clip(q + (size_t)t * qdim, qcl, NH, HD, 22.6274166f);
     if (il == 1 && getenv("IN2_DUMP_Q")) {
         FILE *qf = fopen(getenv("IN2_DUMP_Q"), "wb");
         if (qf) {
@@ -538,10 +598,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *k = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     float *v = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     int rc = WUBU_INKLING2_OK;
-    if (!Wk || !Wv || !kc || !vc || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
-    for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
-        in2_matvec(Wk, xkk + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
-        in2_matvec(Wv, xvv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
+    if (!kc || !vc || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
+    if (rc == WUBU_INKLING2_OK) {
+        if (in2_matvec_nt(ctx, &L->wk, xkk, n_tok, d, kdim, kraw) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
+        else if (in2_matvec_nt(ctx, &L->wv, xvv, n_tok, d, kdim, vraw) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
     }
     if (rc == WUBU_INKLING2_OK) {
         in2_shortconv(kraw, n_tok, kdim, kc, 4, kt);
@@ -573,22 +633,20 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     }
 
     /* 4. relative bias table from the normed input, plus sinks. */
-    float *Wrel = in2_tensor_to_f32(ctx, &L->wrel, NULL);
     float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
     float *P = in2_tensor_to_f32(ctx, &L->rel_bias, NULL);
-    float *Wsk = in2_tensor_to_f32(ctx, &L->sink, NULL);
     const int DREL = 16, EXT = cfg->swa_window;
-    float *rs = (float *)calloc((size_t)NH * DREL, sizeof(float));
+    /* Relative-position vectors are kept for every token instead of being recomputed inside the query loop:
+     * the old code called this same projection once in the pre-pass and AGAIN for each query, n_tok times over,
+     * on weights that do not depend on the query. */
+    float *rs_all = (float *)calloc((size_t)n_tok * NH * DREL, sizeof(float));
     float *bias = (float *)calloc((size_t)NH * EXT, sizeof(float));
     float *sink = (float *)calloc((size_t)n_tok * NH, sizeof(float));
-    if (Wrel && rcl && P && Wsk && rs && bias && sink) {
-        for (int t = 0; t < n_tok; ++t) {
-            in2_matvec(Wrel, xn + (size_t)t * d, d, NH * DREL, rs);
-            in2_l2_clip(rs, rcl, NH, DREL, 8.0f);
-            in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);        /* per token; see note below */
-            in2_matvec(Wsk, xn + (size_t)t * d, d, NH, sink + (size_t)t * NH);
-        }
-    } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] rel/sink failed Wrel=%p rcl=%p P=%p Wsk=%p\n", il, (void*)Wrel, (void*)rcl, (void*)P, (void*)Wsk); }
+    if (rcl && P && rs_all && bias && sink && rc == WUBU_INKLING2_OK) {
+        if (in2_matvec_nt(ctx, &L->wrel, xn, n_tok, d, NH * DREL, rs_all) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
+        else if (in2_matvec_nt(ctx, &L->sink, xn, n_tok, d, NH, sink) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
+        for (int t = 0; t < n_tok; ++t) in2_l2_clip(rs_all + (size_t)t * NH * DREL, rcl, NH, DREL, 8.0f);
+    } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] rel/sink failed rcl=%p P=%p\n", il, (void*)rcl, (void*)P); }
     if (DBG) fprintf(stderr, "[L%d] step4 rc=%d\n", il, rc);
 
     /* 5. attention per head. The bias table is token-dependent, so it is recomputed per token; the
@@ -599,10 +657,8 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     if (attn_out && alpha && logits && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             const int kvh_stride = NH / NKV;
-            /* rebuild this token's bias table (same weights, same xn) */
-            in2_matvec(Wrel, xn + (size_t)t * d, d, NH * DREL, rs);
-            in2_l2_clip(rs, rcl, NH, DREL, 8.0f);
-            in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
+            /* bias table from the already-clipped per-token relative vector */
+            in2_rel_bias_table(rs_all + (size_t)t * NH * DREL, P, NH, DREL, EXT, bias);
             for (int hh = 0; hh < NH; ++hh) {
                 const int kvh = hh / kvh_stride;
                 int n_key = 0;
@@ -641,25 +697,21 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 
     /* 6. gated output projection into its own buffer: h still holds the layer input, which the
      *    residual needs. sigmoid(attn_gate(xn)) * attn_out, then attn_output. */
-    float *Wg = in2_tensor_to_f32(ctx, &L->wgate, NULL);
-    float *Wo = in2_tensor_to_f32(ctx, &L->wo, NULL);
     float *gate = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     float *ao = (float *)calloc((size_t)n_tok * d, sizeof(float));
-    if (Wg && Wo && gate && ao && rc == WUBU_INKLING2_OK) {
-        for (int t = 0; t < n_tok; ++t) {
-            in2_matvec(Wg, xn + (size_t)t * d, d, qdim, gate + (size_t)t * qdim);
-            for (int i = 0; i < qdim; ++i) {
-                const float gv = 1.0f / (1.0f + expf(-gate[(size_t)t * qdim + i]));
-                gate[(size_t)t * qdim + i] = attn_out[(size_t)t * qdim + i] * gv;
-            }
-            /* attn_output is (qdim, d): out[o] = sum_u W[o*qdim + u] * gate[u] */
-            for (int o = 0; o < d; ++o) {
-                double acc = 0.0;
-                for (int u = 0; u < qdim; ++u) acc += (double)Wo[(size_t)o * qdim + u] * gate[(size_t)t * qdim + u];
-                ao[(size_t)t * d + o] = (float)acc;
-            }
+    if (gate && ao && rc == WUBU_INKLING2_OK) {
+        /* gated output projection: batch the gate across positions, apply sigmoid*attn_out elementwise, then batch
+         * attn_output over the gated buffer. attn_output is (qdim, d), so out[o] = sum_u W[o*qdim+u] * gate[u]. */
+        if (in2_matvec_nt(ctx, &L->wgate, xn, n_tok, d, qdim, gate) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
+        else {
+            for (int t = 0; t < n_tok; ++t)
+                for (int i = 0; i < qdim; ++i) {
+                    const float gv = 1.0f / (1.0f + expf(-gate[(size_t)t * qdim + i]));
+                    gate[(size_t)t * qdim + i] = attn_out[(size_t)t * qdim + i] * gv;
+                }
+            if (in2_matvec_nt(ctx, &L->wo, gate, n_tok, qdim, d, ao) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
         }
-    } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step6 failed Wg=%p Wo=%p gate=%p ao=%p\n", il, (void*)Wg, (void*)Wo, (void*)gate, (void*)ao); }
+    } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step6 failed gate=%p ao=%p\n", il, (void*)gate, (void*)ao); }
     if (DBG) fprintf(stderr, "[L%d] step6 rc=%d\n", il, rc);
 
     if (getenv("IN2_DUMPX") && n_tok == 1) {
@@ -731,10 +783,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         for (size_t i = 0; i < (size_t)n_tok * d; ++i) h[i] = res[i] + mo[i];
     } else rc = WUBU_INKLING2_ERR_IO;
 
-    free(an); free(xn); free(Wq); free(qcl); free(q);
-    free(Wk); free(Wv); free(kc); free(vc); free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
-    free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
-    free(attn_out); free(alpha); free(logits); free(Wg); free(Wo); free(gate); free(ao);
+    free(an); free(xn); free(qcl); free(q);
+    free(kc); free(vc); free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
+    free(rcl); free(P); free(rs_all); free(bias); free(sink);
+    free(attn_out); free(alpha); free(logits); free(gate); free(ao);
     free(pc); free(res); free(fn); free(moein); free(moeout); free(pm); free(mo); free(mixh);
     free(xkk); free(xvv);
     return rc;
