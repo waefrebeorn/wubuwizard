@@ -282,3 +282,19 @@ delta larger than the observed spread. Fix the harness before optimising further
 noise floor is how time disappears.
 
 Steady state at prefix 4 is ~1.2 s/step, not the 2.0 s a cold single run reports.
+
+### Trustworthy baseline (tools/bench.py, warm + median of 4)
+
+```
+step       median      min      max   spread
+0           3.70s    3.70s    3.70s      0%      <- prefill of a 3-token prompt
+1           1.20s    1.20s    1.20s      0%
+2           1.10s    1.10s    1.10s      0%
+```
+
+Once the file is warmed the spread collapses to zero, so the earlier 2.0 / 1.5 / 1.2 s triple was entirely
+page-cache state. **The real numbers for this engine are 3.70 s prefill and 1.1-1.2 s per decode step**, and
+`tools/bench.py` is now the only thing that should produce a timing claim: it warms once, runs N times and prints
+median/min/max/spread, so a delta inside the spread is visible as such instead of being reported as a win.
+
+Every delta recorded before this harness must be re-measured through it before it is believed.
