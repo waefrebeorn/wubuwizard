@@ -142,6 +142,17 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
             in2_matvec(Wv, xv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
         }
         in2_shortconv_dynamic(kraw, n_tok, kdim, kc, kp, xk, d, NKV, 4, kt);
+        if (il == 5 && getenv("IN2_DUMP_DYNCONV")) {
+            FILE *df = fopen(getenv("IN2_DUMP_DYNCONV"), "wb");
+            if (df) {
+                fwrite(kraw, sizeof(float), (size_t)n_tok * kdim, df);   /* pre-conv k */
+                fwrite(kt,   sizeof(float), (size_t)n_tok * kdim, df);   /* post-conv k */
+                fwrite(kc,   sizeof(float), 4 * (size_t)kdim, df);       /* static filter */
+                fwrite(xk,   sizeof(float), (size_t)n_tok * d, df);      /* dynamic input */
+                fwrite(kp,   sizeof(float), 32 * (size_t)d, df);         /* the [2304,32] projection */
+                fclose(df);
+            }
+        }
         in2_shortconv_dynamic(vraw, n_tok, kdim, vc, vp, xv, d, NKV, 4, vt);
         for (int t = 0; t < n_tok; ++t) {
             memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);

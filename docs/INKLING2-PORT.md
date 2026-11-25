@@ -1143,3 +1143,32 @@ the right states.
 
 Verified in the full layer so far: the 3-query depth mix (4e-07) and the state->norm->q/k/v input mapping
 (1e-07). Remaining: the dynamic convs, and the IQ2_XXS/NVFP4 MoE.
+
+## The dynamic conv does not reproduce - first unexplained stage
+
+Dumping blk.5's k path (pre-conv, post-conv, static filter, normed input, and the `[2304,32]` projection
+weights) and testing the candidate compositions at position 0, where only tap 0 has history:
+
+```
+A proj[h*4+t]    max|diff| 3.7187e+00   mean 3.862e-01
+B proj[t*8+h]    max|diff| 1.8513e+01   mean 1.645e+00
+static only      max|diff| 7.5599e+00   mean 7.120e-01
+```
+
+**Nothing matches, and this is the first stage in the whole port where that is true.** Two conclusions follow
+immediately:
+
+- The engine definitely applies a **dynamic** term - A is twice as close as static-only (3.72 vs 7.56), so the
+  projection is in the path, not ignored.
+- My model of *how* it is applied is wrong. `proj` spans -2.55..+10.06 against a static tap-0 range of
+  -2.22..+3.66, so it is a large perturbation, not a rounding-level detail - which means a wrong composition
+  here would materially corrupt every full layer.
+
+Possible explanations, not yet distinguished: the projection may take the pre-norm state rather than `xk`; a
+nonlinearity may be applied to it; or the per-head tap vector may be combined per tap rather than per channel.
+This is worth resolving before anything downstream of the full layers is trusted, since it is the one
+mechanism where the engine and my reading of the reference disagree numerically.
+
+Note the asymmetry in what this means: every previous mismatch turned out to be my instrument. That is still
+the more likely explanation here, but it has not been demonstrated, and the dynamic conv is precisely the
+mechanism that `tau`-adjacent position-dependence lives in - the remaining suspect class.
