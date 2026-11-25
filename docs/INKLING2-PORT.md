@@ -922,6 +922,32 @@ values an IQ1 grid can contain. A misparse would produce values outside that set
 `Q2_0` is trivial to decode (`((q) - 1) * d` with `q` a 2-bit field per element, 4 per byte), so the remaining
 work is `IQ2_XS` for the layers that use it - a 256-entry grid with per-32 scales, more involved than IQ1_S.
 
+## BLOCKED: the IQ2_XS bytes at blk.22's expert offset do not decode
+
+Attempting the expert-matvec check, the IQ2_XS read fails and the cause is not yet identified. Diagnostics:
+
+```
+tensor      blk.22.ffn_gate_up_exps.weight  type=17  dims=[2304,2304,128]  off=7946178816
+data base   11978688  (this base is proven - output.weight and token_embd decode to 1e-7 through it)
+file size   8486236352, so the offset is in range and the tensor ends around 8.15e9
+block stride 74 bytes - consistent: d values across 64 blocks span 0.00029..0.00051 with no NaN
+BUT  qs >> 9 reaches 127, where the format defines a 3-bit sign index (0..7)
+     qs max 65343, where a 12-bit grid+sign index caps at 4095
+```
+
+Tried both internal field orders (`qs` at bytes 2..66 per `block_iq2_xs`, and scales-first at 10..74); both
+give `qs >> 9` up to 127. So the field order is not the explanation.
+
+What this rules out: the data-section base (proven by two tensors), the 74-byte stride (d statistics are
+consistent), and the field order. What remains: the type at that offset is not IQ2_XS as the tensor directory
+claims, or my reading of the 12-bit packing is wrong in a way two attempts did not expose.
+
+**Not resolved, and deliberately not guessed at.** The engine's own type-17 decoder produces sane MoE output
+(rms 1.0, 46.6% of the residual, router healthy), so the file is fine and the fault is in the check. Five
+attempts at this check failed in this stretch; the next one starts from dumping the engine's first 8
+dequantised values for that expert and matching raw bytes against them, which pins the packing without any
+layout assumption.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
