@@ -2029,3 +2029,36 @@ ordering* inside the composite. The next attempt should diff the device attentio
 against a CPU attention computed from the **device-downloaded KV**, not from the CPU cache;
 if those agree, the fault is in the device KV view (a stale row or an offset), and if they
 disagree the fault is in the call itself.
+
+## Fusing dequantisation into the dot product (verified, timing pending)
+
+The MoE materialised each expert as float32 before multiplying it:
+
+```c
+float *gu = malloc(2*DFF*d*4);        // 1152*2*2304*4 = 21.2 MB
+in2_dequant_slice(&L->gate_up, e*2*DFF*d, 2*DFF*d, gu);
+in2_matvec(gu, x, d, 2*DFF, g);       // reads it all back
+```
+
+An expert's gate_up is ~1.5 MB of IQ2_XS and its down is ~0.8 MB of Q2_0, so 32 MB of float buffer is a
+**14x amplification** written and re-read per expert: 8 experts x 20 sliding layers = ~5 GB of transient traffic
+per token carrying no information.
+
+`in2_matvec_quant()` dequantises **one row at a time** into a 9 KB buffer that stays in L1 and dots it
+immediately. Selectable with `IN2_STAGE=1` for A/B.
+
+**Correctness gate: identical output.** Same prompt, both paths:
+
+```
+staged : top1 id=151451 logit=29.6508
+fused  : top1 id=151451 logit=29.6508
+```
+
+Timing is deliberately not recorded yet: the box is running a 14-token generation, and this project's rule is
+interleaved A/B on a quiet machine or nothing.
+
+**A real bug found by building it:** `in2_dequant_slice` required `elem_off % 256 == 0`, but a `down` row
+stride is `DFF = 1152` and `1152 % 256 = 128`. Every expert's down row was rejected, the whole forward returned
+`-6 (ERR_SHAPE)`, and the first fused run printed no top1 at all. The alignment that matters is the **type's own
+block size** — `Q2_0`'s is 64 — so the guard is now 64, which Q8_0's 32 divides and which every 256-block
+K/IQ type satisfies at the offsets this code passes (multiples of d = 2304).

@@ -276,6 +276,11 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
     float *mo = (float *)calloc(ND, sizeof(float));
     if (pm && mo && rc == WUBU_INKLING2_OK) {
+        const char *fl = getenv("IN2_DUMPX_LAYER");
+        if (getenv("IN2_DUMPX") && n_tok == 1 && fl && atoi(fl) == il) {
+            FILE *f1 = fopen("d_fres.bin","wb"); if (f1) { fwrite(res,sizeof(float),(size_t)ND,f1); fclose(f1); }
+            FILE *f2 = fopen("d_fmoe.bin","wb"); if (f2) { fwrite(moeout,sizeof(float),(size_t)ND,f2); fclose(f2); }
+        }
         in2_shortconv(moeout, n_tok, d, pm, 4, mo);
         for (size_t i = 0; i < ND; ++i) h[i] = res[i] + mo[i];
     } else rc = WUBU_INKLING2_ERR_IO;

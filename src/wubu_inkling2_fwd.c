@@ -31,6 +31,8 @@ void in2_l2_clip(float *x, const float *scale, int n_head, int dim, float thresh
 void in2_rel_bias_table(const float *rel_states, const float *P, int n_head, int d_rel, int extent, float *bias);
 void in2_expert_act(const float *gate, const float *up, int n, float *out);
 int  in2_dequant_slice(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off, int64_t n_elems, float *dst);
+int  in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+                      const float *x, int n_out, int n_in, float *y);
 int  in2_router(const float *x, const float *W, const float *corr_bias, int n_expert, int d_model,
                 int top_k, float scale, int *idx, float *w);
 int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
@@ -60,6 +62,34 @@ void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out)
     for (int i = 0; i < n; ++i) ss += (double)x[i] * x[i];
     const float scale = 1.0f / sqrtf((float)(ss / n) + eps);
     for (int i = 0; i < n; ++i) out[i] = x[i] * scale * w[i];
+}
+
+/* y[o] = dot(dequant(tensor row o), x), dequantising ONE ROW AT A TIME into a small buffer that stays in
+ * L1 instead of materialising the whole expert as floats.
+ *
+ * The materialising path was the dominant memory cost of this port: an expert's gate_up is 2*1152*2304
+ * floats = 21 MB and its down is 10.6 MB, i.e. 32 MB written and then read back per expert, while the
+ * quantised expert itself is only ~1.5 MB (IQ2_XS) + ~0.8 MB (Q2_0). That is a 14x amplification, times 8
+ * experts times 20 sliding layers - 5 GB of transient traffic per token that carries no information.
+ * Fused, the traffic is the quant bytes plus a 9 KB row that is reused. */
+int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+                     const float *x, int n_out, int n_in, float *y)
+{
+    if (n_in <= 0 || n_out <= 0) return WUBU_INKLING2_ERR_IO;
+    float *row = (float *)malloc((size_t)n_in * sizeof(float));
+    if (!row) return WUBU_INKLING2_ERR_IO;
+    for (int o = 0; o < n_out; ++o) {
+        if (in2_dequant_slice(ctx, t, elem_off + (int64_t)o * n_in, n_in, row) != WUBU_INKLING2_OK) {
+            free(row);
+            return WUBU_INKLING2_ERR_IO;
+        }
+        double a0 = 0.0, a1 = 0.0;
+        for (int i = 0; i + 1 < n_in; i += 2) { a0 += (double)row[i] * x[i]; a1 += (double)row[i + 1] * x[i + 1]; }
+        for (int i = n_in & ~1; i < n_in; ++i) a0 += (double)row[i] * x[i];
+        y[o] = (float)(a0 + a1);
+    }
+    free(row);
+    return WUBU_INKLING2_OK;
 }
 
 /* y[o] = dot(W + o*n_in, x) for o in [0, n_out). */
@@ -152,7 +182,12 @@ void in2_rel_bias_table(const float *rel_states, const float *P, int n_head, int
 int in2_dequant_slice(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off, int64_t n_elems, float *dst)
 {
     if (!ctx || !t || !t->info || !dst) return WUBU_INKLING2_ERR_MISSING_TENSOR;
-    if (elem_off % 256 != 0) return WUBU_INKLING2_ERR_SHAPE;
+    /* Alignment must be a multiple of the TYPE's block size, not a flat 256: Q2_0's block is 64 elements,
+     * so a row stride of DFF = 1152 is legal (18 blocks) even though 1152 % 256 = 128. A flat 256 check
+     * rejected every expert's `down` row and made the fused path return ERR_SHAPE for the whole forward.
+     * 64 is the finest block in use (Q2_0); Q8_0's 32 divides it, and the 256-block K/IQ types only ever
+     * arrive here at offsets that are multiples of d = 2304. */
+    if (elem_off % 64 != 0) return WUBU_INKLING2_ERR_SHAPE;
     const int ty = t->info->ggml_type;
     /* wubu_fp4_raw_size returns -1 for n_elems <= 0, so the byte offset of element 0 has to be
      * spelled out rather than asked for. Expert 0 of every tensor hit this. */
@@ -598,6 +633,22 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
         for (int k = 0; k < got; ++k) {
             const int e = idx[k];
             const float gsc = gs ? gs[e] : 1.0f, dsc = ds ? ds[e] : 1.0f;
+            /* fused: dequantise a row, dot it, discard it (IN2_STAGE=1 restores the materialising path) */
+            if (!getenv("IN2_STAGE")) {
+                const int ra = in2_matvec_quant(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
+                                                x + (size_t)t * d, 2 * DFF, d, g);
+                if (ra != WUBU_INKLING2_OK) {
+                    if (getenv("IN2_DEBUG")) fprintf(stderr, "[moe L%d] fused gate_up e%d rc=%d\n", il, e, ra);
+                    rc = WUBU_INKLING2_ERR_IO; break;
+                }
+                for (int i = 0; i < 2 * DFF; ++i) g[i] *= gsc;
+                in2_expert_act(g, g + DFF, DFF, act);
+                if (in2_matvec_quant(ctx, &L->down, (int64_t)e * d * DFF, act, d, DFF, eo) != WUBU_INKLING2_OK) {
+                    rc = WUBU_INKLING2_ERR_IO; break;
+                }
+                for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * eo[i] * dsc;
+                continue;
+            }
             const int r1 = in2_dequant_slice(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d, (int64_t)2 * DFF * d, gu);
             const int r2 = in2_dequant_slice(ctx, &L->down,    (int64_t)e * d * DFF,    (int64_t)d * DFF,    dn);
             if (r1 != WUBU_INKLING2_OK || r2 != WUBU_INKLING2_OK) {
