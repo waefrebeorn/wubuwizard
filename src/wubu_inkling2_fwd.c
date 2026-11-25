@@ -14,6 +14,11 @@
 #include <math.h>
 
 #include "wubu_inkling2.h"
+
+/* per-type cost accounting, read out by IN2_TIMETY. Defined at file scope because both matvec paths feed it. */
+double in2_ty_sec[256];
+long   in2_ty_calls[256];
+double in2_ty_macs[256];
 #include "wubu_inkling2_kv.h"
 #include "wubu_dequant_fp4.h"
 #include "wubu_iq2q8.h"
@@ -199,7 +204,13 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                     else          in2_q8k_quantise(x, n_in / 256, (in2_q8k_blk *)actbuf);
                     const void *ap[1] = { actbuf };
                     float *op[1] = { y };
+                    { const clock_t _q0 = clock();
                     wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);
+                    if (ty_mv >= 0 && ty_mv < 256) {
+                        in2_ty_sec[ty_mv] += (double)(clock() - _q0) / (double)CLOCKS_PER_SEC;
+                        in2_ty_calls[ty_mv] += 1;
+                        in2_ty_macs[ty_mv] += (double)n_out * (double)n_in;
+                    } }
                     /* Does the kernel agree with THIS engine's own dequantiser on REAL bytes from THIS file?
                      * A kernel can be bit-identical to ggml on synthetic blocks and still disagree here, which
                      * would mean the file's encoding of that type is not ggml's canonical struct. */
@@ -306,6 +317,11 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
  *
  * nt is grouped in eights because the kernels take an array of activation pointers. Falls back to the exact
  * per-position float path, materialising only when the kernels cannot take the type. */
+/* per-type cost accounting, filled when IN2_TIMETY is set */
+double in2_ty_sec[256];
+long   in2_ty_calls[256];
+double in2_ty_macs[256];
+
 int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                   const float *X, int nt, int n_in, int n_out, float *Y)
 {
@@ -348,7 +364,13 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                         ap[i] = (unsigned char *)act + ablk * (size_t)nab * (size_t)(g + i);
                         op[i] = Y + (size_t)(g + i) * n_out;
                     }
+                    const clock_t _k0 = clock();
                     wubu_iq_rows(ty, whole, (size_t)rb, n_in, ap, nn, op, 0, n_out);
+                    if (ty >= 0 && ty < 256) {
+                        in2_ty_sec[ty] += (double)(clock() - _k0) / (double)CLOCKS_PER_SEC;
+                        in2_ty_calls[ty] += 1;
+                        in2_ty_macs[ty] += (double)nn * (double)n_out * (double)n_in;
+                    }
                 }
                 free(act);
                 return WUBU_INKLING2_OK;

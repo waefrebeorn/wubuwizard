@@ -272,6 +272,16 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     break;
                 }
             }
+            if (getenv("IN2_TIMETY")) {
+                extern double in2_ty_sec[256]; extern long in2_ty_calls[256]; extern double in2_ty_macs[256];
+                double tot = 0.0;
+                for (int _t = 0; _t < 256; ++_t) tot += in2_ty_sec[_t];
+                for (int _t = 0; _t < 256; ++_t) if (in2_ty_sec[_t] > 0.0)
+                    fprintf(stderr, "TY %3d calls=%5ld  %.3f s  %5.1f%%  %6.2f GOPS\n", _t, in2_ty_calls[_t],
+                            in2_ty_sec[_t], 100.0 * in2_ty_sec[_t] / (tot > 0 ? tot : 1.0),
+                            in2_ty_macs[_t] / (in2_ty_sec[_t] > 0 ? in2_ty_sec[_t] : 1.0) / 1e9);
+                for (int _t = 0; _t < 256; ++_t) { in2_ty_sec[_t] = 0; in2_ty_calls[_t] = 0; in2_ty_macs[_t] = 0; }
+            }
             if (getenv("IN2_TIME")) fprintf(stderr, "HEAD %.3f s for %d rows x %d\n",
                     (double)(clock() - _h0) / (double)CLOCKS_PER_SEC, cfg->vocab_size, d);
             if (!head_done) fprintf(stderr, "lm_head kernel path failed at vocab %d, falling back\n", cfg->vocab_size);

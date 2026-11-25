@@ -199,3 +199,34 @@ What it took, in the order the failures taught it:
 
 Decode is now flat cost per token regardless of prefix length. The remaining per-token cost at 2.2 s is the
 projections themselves (and the 463M-MAC LM head), which is where GPU offload belongs - not more cache work.
+
+## 10. Where a decode step actually goes (2026-11-25)
+
+`IN2_TIMETY` accumulates per-type kernel time and MACs. One decode step, all 12 types active:
+
+| type | calls | time | share | throughput |
+|---|---|---|---|---|
+| 40 NVFP4 | 120 | **0.200 s** | **50.6%** | **1.59 GOPS** |
+| 16 IQ2_XXS | 136 | 0.037 s | 9.4% | 19.5 GOPS |
+| 17 IQ2_XS | 128 | 0.037 s | 9.4% | 18.4 GOPS |
+| 42 Q2_0 | 264 | 0.025 s | 6.3% | 28.0 GOPS |
+| 8 Q8_0 | 169 | 0.021 s | 5.3% | 34.6 GOPS |
+| 22 IQ2_S | 56 | 0.027 s | 6.8% | 11.0 GOPS |
+| 19 IQ1_S | 64 | 0.018 s | 4.6% | 18.9 GOPS |
+| 23 IQ4_XS | 25 | 0.018 s | 4.6% | 25.7 GOPS |
+| 14 Q6_K | 42 | 0.004 s | 1.0% | 49.4 GOPS |
+| 12/13/18 | 29 | 0.008 s | 2.1% | 10-25 GOPS |
+
+Two findings, both actionable and neither of them the thing I had assumed:
+
+1. **NVFP4 is 12x off the pack.** 1.59 GOPS against 19-49 for every other type, and it alone is half the
+   kernel time while being 1 of 12 formats. This is a kernel defect, not a memory limit - the other types read
+   the same mapping at 20-50 GOPS.
+2. **The kernels are only 18% of the step.** 0.395 s of 2.2 s. The remaining ~1.8 s is outside the matvecs
+   entirely: per-visit norms, the mixing, and `in2_tensor_to_f32` calls for the small per-layer tensors
+   (q_clip, the conv weights, rel_clip, rel_bias, sink, the message gates) that were never converted to the
+   batched path. 48 visits x several tensors each, every one a fresh allocation and dequantisation.
+
+So the next two moves are, in order: fix NVFP4 (half the kernel time, one function), then kill the per-visit
+small-tensor materialisation (the 1.8 s that is not kernels at all). GPU offload is not the answer to a step that
+spends 82% of its time outside the arithmetic.
