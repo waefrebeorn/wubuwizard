@@ -596,13 +596,20 @@ kernel launched with the wide tile and the attention projections with the narrow
 another global sweep. Values above are all token-identical to the reference.
 
 
-Why tile width barely moves it, and what would: per warp, the prefill kernel reads 8 columns x 15 blocks
-(9.8 KB) against decode's 1 column x 15 blocks (1.2 KB). Both decode the block byte-wise with grid
-lookups, so the cost is per-block latency; decode hides it behind 15360 warps and prefill has 1920. Tile
-width changes how those 9.8 KB are grouped, not how much latency is exposed, which is why the sweep moved
-5% and not 5x. The structural fix is more independent work per byte read - split K across blocks and
-reduce with atomics, or load each 82-byte block with wide aligned reads instead of per-byte - not another
-tile shape.
+**CORRECTION to the paragraph that was here**: it claimed the prefill cost was fixed tile-load latency
+and that split-K or wide block loads would fix it. The measurement says otherwise. Scaling the prompt
+scales the FFN stage almost linearly:
+
+    prompt     36 tok   56 tok   104 tok
+    gate+up     6.54     8.79     16.30  ms per layer
+    down        2.94     4.21      7.55  ms per layer
+
+A latency-bound tile load would be flat in M; this is not. So the cost is the tensor-core loop itself:
+gate+up moves 10.3 GMAC at M=87 in 9.0 ms, about **1.1 TOPS, or 4% of this GPU's int8 peak**. Split-K
+adds blocks but not throughput here, and wide block loads would only shave the small fixed component
+(~1.4 ms of the 9.0). What is left is the mma loop's own efficiency - the shared-tile reads and the
+float scaling per fragment - which is a different piece of work than the one this paragraph originally
+proposed, and it is the one to profile with counters rather than by shape sweeping.
 
 ## Rule: an instrument must be checked against a known answer before it is believed
 
