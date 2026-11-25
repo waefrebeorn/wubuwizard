@@ -106,6 +106,12 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     free(en); free(emb);
     if (rc != WUBU_INKLING2_OK) return rc;
 
+    if (getenv("IN2_DUMP_EMBD")) {
+        FILE *ef = fopen("C:/Users/eman5/AppData/Local/Temp/our_embd.bin", "wb");
+        if (ef) { fwrite(h, sizeof(float), (size_t)ND, ef); fclose(ef);
+                  fprintf(stderr, "dumped post-embedding stream (%d x %d)\n", n_tok, d); }
+    }
+
     /* block states hold a whole sequence per entry: 16 entries x n_tok positions */
     float *blocks = (float *)calloc((size_t)16 * ND, sizeof(float));
     int n_blocks = 0;
@@ -134,6 +140,13 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
         else                                                                            \
             rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
+        { const char *_dp = getenv("IN2_DUMP_L");                                       \
+          if (_dp && atoi(_dp) == (IL)) {                                               \
+              char _p[512]; snprintf(_p, sizeof _p,                                     \
+                  "C:/Users/eman5/AppData/Local/Temp/our_l%d.bin", (IL));               \
+              FILE *_df = fopen(_p, "wb");                                              \
+              if (_df) { fwrite(h, sizeof(float), (size_t)ND, _df); fclose(_df);        \
+                         fprintf(stderr, "dumped l_out-%d to %s\n", (IL), _p); } } }    \
         if (rc == WUBU_INKLING2_OK && getenv("IN2_LTRACE")) {                           \
             const int _t = n_tok - 1;                                                   \
             double _s = 0.0;                                                            \
@@ -214,6 +227,15 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                 }
             }
             RUN_LAYER(il, (qres && qkv) ? msgs : NULL);
+            /* Bisect hook: dump the residual stream after a chosen layer, in the same layout as llama.cpp's
+             * eval-callback node dump (l_out-<il>): d floats per token, token-major. */
+            { const char *dp = getenv("IN2_DUMP_L");
+              if (dp && atoi(dp) == il) {
+                  char path[512];
+                  snprintf(path, sizeof path, "C:/Users/eman5/AppData/Local/Temp/our_l%d.bin", il);
+                  FILE *df = fopen(path, "wb");
+                  if (df) { fwrite(h, sizeof(float), (size_t)ND, df); fclose(df);
+                            fprintf(stderr, "dumped l_out-%d (%d x %d) to %s\n", il, n_tok, d, path); } } }
         }
     }
 

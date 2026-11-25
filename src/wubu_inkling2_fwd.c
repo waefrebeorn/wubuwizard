@@ -1104,7 +1104,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step6 failed gate=%p ao=%p\n", il, (void*)gate, (void*)ao); }
     if (DBG) fprintf(stderr, "[L%d] step6 rc=%d\n", il, rc);
 
-    if (getenv("IN2_DUMPX") && n_tok == 1) {
+    if (getenv("IN2_DUMPX")) {
         FILE *q1 = fopen("d_xn.bin","wb"); if (q1) { fwrite(xn,sizeof(float),(size_t)n_tok*d,q1); fclose(q1); }
         FILE *q2 = fopen("d_q.bin","wb");  if (q2) { fwrite(q,sizeof(float),(size_t)n_tok*qdim,q2); fclose(q2); }
         FILE *q3 = fopen("d_k.bin","wb");  if (q3) { fwrite(k,sizeof(float),(size_t)n_tok*kdim,q3); fclose(q3); }
