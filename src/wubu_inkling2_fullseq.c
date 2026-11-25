@@ -51,9 +51,13 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     /* 1. three depth-mixed states per position (q, k, v inputs), then the message gates. */
     float *state = (float *)calloc((size_t)3 * ND, sizeof(float));
     if (!state) { free(arq); free(qn); free(kn); free(vn); return WUBU_INKLING2_ERR_IO; }
-    for (int t = 0; t < n_tok; ++t)
-        in2_mix(blocks, n_blocks, n_tok * d, t * d, h + (size_t)t * d, arq, 3, d, eps,
+    /* boundary: exclude the entry this layer's caller already appended (see the sliding layer) */
+    const int n_attn = (cfg->attn_res_block > 0 && il % cfg->attn_res_block == 0)
+                     ? n_blocks - 1 : n_blocks;
+    for (int t = 0; t < n_tok; ++t) {
+        in2_mix(blocks, n_attn, n_tok * d, t * d, h + (size_t)t * d, arq, 3, d, eps,
                 state + (size_t)t * 3 * d);
+    }
 
     for (int sl = 0; sl < 3 && msgs; ++sl) {
         float *dw = in2_tensor_to_f32(ctx, &L->loop_down[sl], NULL);

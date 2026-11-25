@@ -707,6 +707,35 @@ nothing collapses, and the resets land on 0/6/12/18 - the boundaries the census 
 This is a structural sanity check, not a correctness proof. It rules out "a layer is scaling itself to
 death", which is the cheapest failure to spot and the one most likely to be behind degenerate output.
 
+## The boundary bank was in the wrong place
+
+Reading the reference's layer forward settled a placement question my code had guessed at:
+
+```python
+block_residual = hidden_states
+if self.attention_input is not None:
+    hidden_states = self.attention_input(block_states, hidden_states)[0]   # mix WITHOUT the new entry
+...
+if self.is_block_boundary:
+    block_states = torch.cat([block_states, block_residual.unsqueeze(-2)], dim=-2)   # bank HERE
+else:
+    residual = hidden_states = block_residual.float() + hidden_states
+hidden_states = self.mlp_input(block_states, hidden_states)[0]             # mix WITH the new entry
+```
+
+The bank sits **between** the two mixes: the attention mix must not see the entry, the mlp mix must. Mine
+banked in the model *after* the layer returned, so on boundary layers 6, 12 and 18 the mlp mix was one state
+short - it was mixing over the previous segment's block states but not the one that layer had just banked.
+Every boundary layer, every pass.
+
+Fixed by banking before the layer call and passing `n_blocks - 1` to the attention mix when
+`il % attn_res_block == 0`. Result: `top1 87 -> 14776`, span 10.9 -> 11.9. A placement bug, found by
+reading the reference rather than by experiment, and it changed the output when fixed.
+
+Also confirmed while reading: the mix really is attention (`scaling = hidden_size ** -0.5`) over
+unweighted-RMS-normalised states with the values being those same states - which is what `in2_mix` does, so
+the formula was right and only the input set was wrong.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

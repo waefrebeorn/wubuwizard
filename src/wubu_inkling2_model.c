@@ -118,6 +118,9 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
         float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
         memcpy(_br, h, sizeof(float) * ND);                                            \
+        if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
+            memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
+        }                                                                               \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
             rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, 0, blocks, n_blocks, (MSG)); \
         else                                                                            \
@@ -126,9 +129,6 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
             char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d.bin", getenv("IN2_DUMP_LAYERS"), (IL)); \
             FILE *_lf = fopen(_lp, "wb");                                              \
             if (_lf) { fwrite(h, sizeof(float), (size_t)ND, _lf); fclose(_lf); }        \
-        }                                                                               \
-        if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
-            memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
         }                                                                               \
         free(_br);                                                                      \
     } while (0)

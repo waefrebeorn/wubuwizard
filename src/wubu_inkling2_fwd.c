@@ -277,9 +277,15 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     if (!mixh) { free(an); return WUBU_INKLING2_ERR_IO; }
     float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
     if (arq && il > 0) {
-        for (int t = 0; t < n_tok; ++t)
-            in2_mix(blocks, n_blocks, n_tok * d, t * d, h + (size_t)t * d, arq, 1, d, eps,
+        /* At a boundary the reference banks this layer's input between the two mixes, so the
+         * attention_input mix must exclude the entry the caller has already appended, while the
+         * mlp_input mix below must include it. */
+        const int n_attn = (cfg->attn_res_block > 0 && il % cfg->attn_res_block == 0)
+                         ? n_blocks - 1 : n_blocks;
+        for (int t = 0; t < n_tok; ++t) {
+            in2_mix(blocks, n_attn, n_tok * d, t * d, h + (size_t)t * d, arq, 1, d, eps,
                     mixh + (size_t)t * d);
+        }
     } else {
         memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
     }
