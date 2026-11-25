@@ -1530,7 +1530,11 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
     int64_t ne = 1;
     for (int d = 0; d < t->info->n_dims; ++d) ne *= t->info->dims[d];
 
-    const int cache_on = getenv("IN2_DQ_CACHE") != NULL;
+    /* On by default. It was a 0.8%% effect when the big matrices still went through the float path, which is why it
+     * was left behind a flag; now the per-visit tensors are the hot spot (attn_res_q alone is a full 2304x2304
+     * dequantisation on every layer visit) and it is worth ~30%% of a decode step. It returns a copy, so every
+     * caller's ownership contract is unchanged. IN2_NO_DQ_CACHE disables it. */
+    const int cache_on = getenv("IN2_NO_DQ_CACHE") == NULL;
     if (cache_on) {
         for (int i = 0; i < in2_dq_n; ++i) {
             if (in2_dq_tab[i].key == t->info) {
