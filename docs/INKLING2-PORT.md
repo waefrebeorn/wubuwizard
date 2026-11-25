@@ -1096,3 +1096,31 @@ another engine's loader.
 8. LoopCD at decode: pass-1 vs pass-3 logits.
 9. Decode/prefill kernel reuse from the existing engine (IQ quant matvecs, mma) once the CPU reference
    is token-stable.
+
+## blk.5: the full layer's shapes, and its 3-query mix verified
+
+The full layers differ from the sliding ones in four ways, all now confirmed from the tensor directory rather
+than assumed:
+
+```
+blk.5.attn_res_query.weight   [2304, 3]        <- THREE queries, not one
+blk.5.attn_{q,k,v}_inp_norm   [2304]           <- three input norms; no attn_norm at all
+blk.5.attn_{k,v}_conv_proj    [2304,32] BF16   <- dynamic convs, full layers only
+blk.5.ffn_gate_up_exps type 16 (IQ2_XXS)   blk.5.ffn_down_exps type 40 (NVFP4)
+```
+
+Two of those matter immediately. `attn_res_query` is `[2304,3]`, so the `n_q = 3` path is legitimate and not
+an out-of-bounds read against a `[2304]` tensor - worth checking before trusting the mix at all. And the full
+layers use **yet different expert quants** (IQ2_XXS / NVFP4) from the sliding layers (IQ2_XS / Q2_0), so the
+MoE check suite needs types 16 and 40 as well as 17 and 42.
+
+The 3-query mix, recomputed independently from `L04.bin` plus the normed embedding and `attn_res_query`:
+
+```
+query 0: weights [0.23110900, 0.76889098]  max|diff| 4.768e-07
+query 1: weights [0.27463499, 0.72536498]  max|diff| 2.384e-07
+query 2: weights [0.06438900, 0.93561101]  max|diff| 4.768e-07
+```
+
+Three genuinely different blends of the same two states, all matching. First piece of the full-layer path ever
+verified: the three depth-mixed q/k/v input states are correct.
