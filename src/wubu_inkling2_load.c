@@ -226,9 +226,58 @@ void wubu_inkling2_model_print(const wubu_inkling2_model_t *m, const wubu_inklin
     printf("missing required: %d   optional absent: %d\n", m->n_missing_required, m->n_optional_absent);
 }
 
+/* Map the whole GGUF once instead of seeking and reading per call.
+ *
+ * The engine was reading the model from disk PER ROW: in2_dequant_slice mallocs, _fseeki64 + fread, dequantises,
+ * frees. Fusing dequantisation into the dot made that worse, not better - one read per row means 8 experts x
+ * (2304 + 2304) rows = 36,864 reads per layer, x 20 sliding layers x 3 loop passes = 2,211,840 seek+read pairs
+ * plus mallocs for every single token. At 20-50 us per pair that is 44-111 s, which is the measured 77 s/token:
+ * the engine was never compute-bound, it was syscall-bound, and it delivered 0.17 GFLOP/s (0.2% of one core's
+ * AVX2 peak) with an effective 14 MB/s of weight bandwidth against 40-60 GB/s of DDR5.
+ *
+ * A read-only mapping turns every one of those into a memcpy from the page cache. The file is 8.4 GB and the box
+ * has 16 GB, so after the first pass it stays resident; if the OS does evict, it faults back a 4 KB page rather
+ * than paying a seek. Falls back to the seek/fread path if mapping is unavailable, so behaviour is unchanged
+ * where it cannot work. */
+#ifdef _WIN32
+static HANDLE  g_map_h = NULL;
+static const unsigned char *g_view = NULL;
+static int64_t g_view_size = 0;
+static int     g_map_state = 0;   /* 0 = untried, 1 = mapped, -1 = unavailable */
+
+static int in2_try_map(gguf_ctx *ctx)
+{
+    if (g_map_state) return g_map_state > 0;
+    g_map_state = -1;
+    if (!ctx->file) return 0;
+    const int fd = _fileno(ctx->file);
+    if (fd < 0) return 0;
+    const intptr_t osf = _get_osfhandle(fd);
+    if (osf == -1) return 0;
+    const int64_t size = _filelengthi64(fd);
+    if (size <= 0) return 0;
+    g_map_h = CreateFileMappingA((HANDLE)osf, NULL, PAGE_READONLY,
+                                 (DWORD)((uint64_t)size >> 32), (DWORD)((uint64_t)size & 0xffffffffu), NULL);
+    if (!g_map_h) return 0;
+    g_view = (const unsigned char *)MapViewOfFile(g_map_h, FILE_MAP_READ, 0, 0, 0);
+    if (!g_view) { CloseHandle(g_map_h); g_map_h = NULL; return 0; }
+    g_view_size = size;
+    g_map_state = 1;
+    return 1;
+}
+#endif
+
 int wubu_inkling2_read(gguf_ctx *ctx, const wubu_in2_tensor_t *t, void *dst, int64_t nbytes)
 {
     if (!ctx || !t || !t->info) return WUBU_INKLING2_ERR_MISSING_TENSOR;
+#ifdef _WIN32
+    if (t->file_offset >= 0 && in2_try_map(ctx)) {
+        if (t->file_offset > g_view_size || nbytes < 0 || t->file_offset + nbytes > g_view_size)
+            return WUBU_INKLING2_ERR_IO;
+        memcpy(dst, g_view + t->file_offset, (size_t)nbytes);
+        return WUBU_INKLING2_OK;
+    }
+#endif
     /* 64-bit seek: offsets in this file exceed 2 GB and a 32-bit seek silently reads the wrong bytes. */
     if (_fseeki64(ctx->file, (long long)t->file_offset, SEEK_SET) != 0) return WUBU_INKLING2_ERR_IO;
     if (fread(dst, 1, (size_t)nbytes, ctx->file) != (size_t)nbytes) return WUBU_INKLING2_ERR_IO;

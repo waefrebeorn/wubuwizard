@@ -636,6 +636,11 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
             const int e = idx[k];
             const float gsc = gs ? gs[e] : 1.0f, dsc = ds ? ds[e] : 1.0f;
             /* fused: dequantise a row, dot it, discard it (IN2_STAGE=1 restores the materialising path) */
+            /* Fused everywhere. I predicted staged would win at n_tok > 1 because it dequantises each expert
+             * once for all positions, so this was made conditional on n_tok == 1 - and measured the opposite:
+             * 5-token forward 47,495 ms staged against 42,774 ms fused. The predicted 5x saving in element work
+             * did not materialise because element count was never the binding cost. Kept unconditional, since
+             * the measurement beat the reasoning. */
             if (!getenv("IN2_STAGE")) {
                 const int ra = in2_matvec_quant(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
                                                 x + (size_t)t * d, 2 * DFF, d, g);
