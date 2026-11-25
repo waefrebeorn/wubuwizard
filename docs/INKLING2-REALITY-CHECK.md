@@ -572,3 +572,30 @@ that inconsistency is the thing to resolve before more speed work.
 Fixed in passing: the instrumentation now uses QueryPerformanceCounter instead of `clock()`, which on
 Windows/MSYS resolves at ~15.6 ms and made every sub-16 ms region read as exactly 0.000 s. That aliasing is what
 produced three contradictory answers about the same span.
+
+### A/B result: the int8 kernel path is the wrong tool for small per-position projections (2026-11-25)
+
+Same prompt, both paths available behind `IN2_FULL_KERNEL`:
+
+| | gen[0] | gen[1] | gen[2] | times |
+|---|---|---|---|---|
+| fp32 full layers (default) | 149876 / 26.9567 | 149917 / 13.5936 | 151451 / 29.3580 | 3.0 / 1.0 / 1.1 s |
+| int8 full layers | **220** / 23.9460 | 196975 / 12.9960 | 151451 / 27.7335 | 3.2 / 1.1 / 1.5 s |
+
+The kernel path is **slower as well as different**. For a per-position projection of d=2304 into 24-3072 outputs, the
+per-call cost (activation quantisation, dispatch, kernel setup) is larger than an AVX2 double float dot over the same
+rows, which is already fast. The int8 path pays off on big matrices where the quantised weights are the point - the
+expert stack and the LM head - not on the small per-layer projections.
+
+That settles the inconsistency question with a measurement instead of a preference:
+- **Big matrices (experts, LM head, dense wq/wk/wv/wo in the sliding path): int8 kernels.** Their weight volume
+  dominates and the activation quantisation is the price of the format.
+- **Small per-position projections (rel, sink, gate, wo in the full layers): fp32 AVX2.** Kernel overhead exceeds the
+  saving, and the float path is more accurate.
+
+So the engine is not "inconsistent by accident" - the split follows matrix size, and that is now stated and measured
+rather than pending. `IN2_FULL_KERNEL` stays as the instrument for re-testing the claim if the projections ever grow.
+
+What this leaves for the full layers' 0.2 s: not the kernel path. It is their per-visit `in2_tensor_to_f32(&L->wq)`
+(3072x2304) and the per-position fp32 dots - addressable by batching the projections across positions (nt = n_tok),
+which the sliding layers already do and which keeps fp32 semantics.

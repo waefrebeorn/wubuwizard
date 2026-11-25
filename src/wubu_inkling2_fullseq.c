@@ -30,7 +30,10 @@ int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_
              int il, const float *x, int n_tok, float *out);
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out);
 
-int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
+                  const float *X, int nt, int n_in, int n_out, float *Y);
+
+int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                        int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
                        const float *msgs)
 {
@@ -229,7 +232,12 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
 
     if (rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
-            in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs);
+            /* IN2_FULL_KERNEL: the int8 kernel path the sliding layers already use, instead of the fp32 float path.
+             * Behind a flag because it changes top1 (149876 -> 220) when applied: the engine is inconsistent today -
+             * sliding int8, full fp32 - and which contract it keeps is a decision that needs a text-level A/B, not a
+             * one-token comparison. Default keeps the fp32 path so nothing silently changes. */
+            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wrel, xq + (size_t)t * d, 1, d, NH * DREL, rs);
+            else                        in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs);
             in2_l2_clip(rs, rcl, NH, DREL, cfg->rel_clip);
             /* the relative-bias query carries the same log-position tau as q (inkling2.cpp:357-358).
              * No effect below the 8192 floor, which is why it survived every short-context check. */
@@ -239,7 +247,8 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
                 if (tau != 1.0f) for (int i = 0; i < NH * DREL; ++i) rs[i] *= tau;
             }
             in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
-            in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
+            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->sink, xq + (size_t)t * d, 1, d, NH, sink + (size_t)t * NH);
+            else                          in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
             for (int hh = 0; hh < NH; ++hh) {
                 const int kvh = hh / (NH / NKV);
                 int n_key = 0;
@@ -283,10 +292,12 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     if (Wg && Wo && gate && ao && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             float *gt = gate + (size_t)t * qdim;
-            in2_matvec(Wg, xq + (size_t)t * d, d, qdim, gt);
+            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wgate, xq + (size_t)t * d, 1, d, qdim, gt);
+            else                          in2_matvec(Wg, xq + (size_t)t * d, d, qdim, gt);
             for (int i = 0; i < qdim; ++i)
                 gt[i] = attn_out[(size_t)t * qdim + i] * (1.0f / (1.0f + expf(-gt[i])));
-            in2_matvec(Wo, gt, qdim, d, ao + (size_t)t * d);
+            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wo, gt, 1, qdim, d, ao + (size_t)t * d);
+            else                          in2_matvec(Wo, gt, qdim, d, ao + (size_t)t * d);
         }
     } else rc = WUBU_INKLING2_ERR_IO;
 
