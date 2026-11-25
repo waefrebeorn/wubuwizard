@@ -127,3 +127,51 @@ Two lessons that cost real time here:
 Still uncovered by a vector kernel: IQ2_XXS (16, blk.5's gate/up), IQ1_S (19), IQ2_S (22), NVFP4 (40). Those
 still materialise floats, which is why 1.20x and not 5x. The 899-line C++ kernel set covers 16/17/18/22/23 and
 is being translated 1:1 into C11 (`src/wubu_iq_c11.c`) rather than re-derived.
+
+## 8. Second reality check (2026-11-25, after the kernel stretch)
+
+Kernel work took the 5-token forward from 42,774 ms to **8,021 ms (5.33x)**. That is real, and it is also
+still ~30x off what this class of hardware does. Sourced comparisons, all in the same units:
+
+| setup | decode | note |
+|---|---|---|
+| **RTX 4060 8 GB**, llama.cpp, UD-Q3_K_XL, 12 expert layers on CPU | **17.11 tok/s**, 101 tok/s prefill @10k | closest match to this box |
+| **8 GB NVIDIA**, project-maya | **~41 tok/s** | hot experts in VRAM, rest in ~13 GiB RAM |
+| **M5 Max 64 GB**, atomic engine, 8 GB budget | **43 tok/s** | SSD expert streaming |
+| **RTX 3090**, maya | 128 tok/s, ~200 with DSpark | 24 GB, everything resident |
+| **RTX 3060 6 GB + 32 GB RAM**, llama.cpp hot-experts fork | works | 6 GB is viable with expert residency |
+| **this engine, RTX 4050 6 GB + 16 GB RAM** | **~0.5 tok/s** (1.7-2 s/token) | CPU only, no KV cache |
+
+**Gap to the realistic ceiling on this box: ~30x.** Not 9,600x as before the kernels, and not 1x.
+The remaining gap is not arithmetic, it is architecture:
+
+1. **No KV cache.** Every generated token re-runs the entire prefix through 24 layers x 3 passes, so decode is
+   O(n^2). Every engine in the table caches. This is the single largest term and it has been deferred three times.
+2. **Three loop passes.** Documented cost is ~2.5x decode latency and half the KV capacity; the middle 12 layers
+   run three times. My cache must therefore be keyed per pass, not per layer - the literature is explicit that
+   every loop writes new KV entries, so a naive per-layer cache is wrong, not merely slow.
+3. **No GPU.** The RTX 4050 sits idle through all of this. The CPU path delivers ~0.5 GFLOP/s effective against
+   tens of TOPS available on the card. No amount of further C11 kernel work closes a 30x gap that the reference
+   class closes by putting hot experts and dense weights in VRAM.
+
+### Assumptions now at stake
+
+- **"The kernels are the lever."** They were worth 5.33x and they are exhausted as a lever: 5.33x of the 30x,
+  and what remains is algorithmic and offload. Continuing to tune CPU kernels is optimising the small term.
+- **"Match maya on this box."** Maya's floor is one 8 GB card; this box has 6 GB. The honest target is the 4060
+  figure (17 tok/s), not maya's 41.
+- **"1:1 parity with ggml numerics is the goal."** Parity means our numbers equal llama.cpp's - and llama.cpp on
+  a 4060 is 30x faster with the same numbers. Parity was necessary to trust the port; it is not the product.
+- **"int8 activation quantisation is a small change."** It changes greedy output. Every engine in the table
+  accepts it, so it is the correct contract - but it must be stated as the engine's contract, not treated as
+  a bug to be chased.
+- **"Looping is free."** It is not: 3 passes is ~2.5x the work of a 24-layer model at equal stored depth, and the
+  KV cache has to pay for it three times over.
+
+### Where the next 30x is
+
+1. **KV cache** (`docs/INKLING2-KV-CACHE.md`, written but unimplemented) - removes the O(n^2) recompute.
+2. **GPU offload of dense + hot experts** into the 6 GB - the card is idle, and every fast reference does this.
+   The C11 kernels then become the cold-expert CPU fallback, which is exactly the SSD -> RAM -> VRAM hierarchy
+   the standing goal describes.
+3. Only then, more kernel work - on the attention core, which is still scalar `double`.
