@@ -624,6 +624,17 @@ static int G4_CPU_STATS_hooked;
  * scalar inner loops in decode: hd=256 per (query head, cached position), so a 1024-token
  * sliding window is 16 heads x 1024 positions x 256 MACs per layer, and it ran at scalar
  * speed while everything else had been vectorised. */
+/* The softmax pass calls exp once per score - 1407 x 16 heads x 48 layers is ~1.08M calls per token at
+ * long context - and it was using the double exp while the device attention uses the project's
+ * deterministic float wubu_expf (wubu_expf.h exists precisely so both sides agree to the bit). Behind
+ * G4_EXPF so the token consequence is measured rather than assumed. */
+static int g4_use_expf(void)
+{
+    static int v = -1;
+    if (v < 0) v = getenv("G4_EXPF") ? 1 : 0;
+    return v;
+}
+
 static inline float g4_dotf(const float *a, const float *b, int n)
 {
     __m256 s0 = _mm256_setzero_ps(), s1 = _mm256_setzero_ps();
@@ -1255,7 +1266,8 @@ static void g4_sliding_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cach
 
             float sum_e = 0.0f;
             for (int kp = kv_start; kp <= kv_end; kp++) {
-                float e = (float)exp((double)(s[kp - kv_start] - max_s));
+                float e = g4_use_expf() ? wubu_expf(s[kp - kv_start] - max_s)
+                                        : (float)exp((double)(s[kp - kv_start] - max_s));
                 s[kp - kv_start] = e;
                 sum_e += e;
             }
@@ -1328,7 +1340,7 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
 
             float sum_e = 0.0f;
             for (int kp = 0; kp <= kv_end; kp++) {
-                float e = (float)exp((double)(s[kp] - max_s));
+                float e = g4_use_expf() ? wubu_expf(s[kp] - max_s) : (float)exp((double)(s[kp] - max_s));
                 s[kp] = e;
                 sum_e += e;
             }
