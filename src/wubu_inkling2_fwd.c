@@ -21,7 +21,8 @@ void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float 
                            const float *dyn_proj, const float *dyn_input, int hidden,
                            int n_head, int k, float *out);
 int  in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                    int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
+                    int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                    const float *msgs);
 void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
 void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y);
@@ -705,7 +706,8 @@ void in2_message_gate(const float *h, const float *message, const float *down, c
  * convs, attention over every key (the bias still dies outside 0..1023). Tail is identical to the
  * sliding layer: post-attn conv, boundary rule, mlp_input mix, MoE, post-mlp conv. */
 int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                   int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks)
+                   int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                   const float *msgs)
 {
     const wubu_in2_layer_t *L = &m->layer[il];
     const int d = cfg->d_model, NH = cfg->n_head, NKV = cfg->n_kv_head, HD = cfg->head_dim;
@@ -726,6 +728,28 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *xq = (float *)calloc((size_t)d, sizeof(float));
     float *xk = (float *)calloc((size_t)d, sizeof(float));
     float *xv = (float *)calloc((size_t)d, sizeof(float));
+    /* blk.11 and blk.17 (full layers inside the loop core) carry all four loop-gate tensors as well as
+     * the three input norms, so the messages must gate the three mixed states here too - otherwise those
+     * 24 tensors are dead weight, which no converter emits. blk.23 has no gates and passes msgs == NULL. */
+    for (int sl = 0; sl < 4 && msgs; ++sl) {
+        float *dw = in2_tensor_to_f32(ctx, &L->loop_down[sl], NULL);
+        float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[sl], NULL);
+        float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[sl], NULL);
+        if (dw && fw && gw) {
+            float *gated = (float *)calloc((size_t)d, sizeof(float));
+            float *dst = (sl == 0) ? state : (sl == 1 ? state + d : (sl == 2 ? state + 2 * d : NULL));
+            if (dst) {
+                in2_message_gate(dst, msgs + (size_t)sl * d, dw, fw, gw, d, cfg->loop_gate_rank, eps, gated);
+                memcpy(dst, gated, sizeof(float) * d);
+            } else {
+                /* slot 3 gates the mlp input; it is applied after the depth mix, below */
+                in2_message_gate(state, msgs + (size_t)sl * d, dw, fw, gw, d, cfg->loop_gate_rank, eps, gated);
+                memcpy(h, gated, sizeof(float) * d);
+            }
+            free(gated);
+        }
+        free(dw); free(fw); free(gw);
+    }
     in2_rmsnorm(state,           qn, d, eps, xq);
     in2_rmsnorm(state + d,       kn, d, eps, xk);
     in2_rmsnorm(state + 2 * d,   vn, d, eps, xv);

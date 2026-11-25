@@ -517,6 +517,39 @@ it is not explained by anything measured so far. Two candidate causes, neither p
 Until one of those is closed, the three-pass numbers are structurally complete but numerically suspect,
 and the flat logits are the visible symptom.
 
+## The flat-logit symptom was the ungated full layers
+
+Before: three passes, logits spanning 3 points (20.28..23.27). The suspicion was the full layers ignoring
+messages. The file settled whether that mattered: **blk.11 and blk.17 carry all four loop-gate tensors as
+well as the three input norms**, while blk.23 (full but outside the loop) has norms and no gates. A
+converter does not emit 24 gate tensors per layer for decoration, so those gates have to be applied - and
+they gate the three depth-mixed states plus the mlp input.
+
+Applying them:
+
+```
+ungated full layers : rc=0  max 23.27  min 20.28  span  3.0   top1 150417
+gated full layers   : rc=0  max 20.97  min  7.77  span 13.2   top1 190472
+```
+
+The span recovers from 3 to 13 points. That is not proof of correctness - it is evidence that the flat
+distribution was caused by the ungated layers rather than by something else, because removing that one
+defect moved the symptom in the expected direction.
+
+### Message-query slot order: still an assumption, now measured
+
+`IN2_MSG_ORDER` flips the 24+24 interpretation of the split query tensor:
+
+```
+order A  res=(query, mlp) / kv=(key, value) : span 13.2  top1 190472
+order B  res=(query, key) / kv=(value, mlp) : span  4.7  top1 386
+```
+
+Order A gives the more structured distribution, which is what a working model should produce, so A stays
+the default. **Suggestive, not conclusive** - a second defect elsewhere could flatten B just as easily.
+This is exactly the kind of question that needs a reference forward pass to settle, and it remains the
+single largest unverified assumption in the port.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

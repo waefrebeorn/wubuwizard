@@ -24,7 +24,8 @@ int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
 void in2_messages(const float *prev_blocks, int n_prev, const float *prev_h,
                   const float *qres, const float *qkv, int li, int d, float eps, float *out);
 int  in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                    int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
+                    int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                    const float *msgs);
 int  in2_embed(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                int token, float *out);
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out);
@@ -111,7 +112,7 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
         memcpy(_br, h, sizeof(float) * d);                                             \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
-            rc = in2_layer_full(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks);         \
+            rc = in2_layer_full(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks, (MSG));  \
         else                                                                            \
             rc = in2_layer_sliding(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks, (MSG)); \
         if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
