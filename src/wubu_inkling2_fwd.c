@@ -24,6 +24,16 @@
 /* in2_q8k_quantise() now lives in wubu_act_quant.c: one definition, testable against ggml's ref. */
 void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float *out);
 
+/* Types proven bit-identical by the local sweep (scratch iq_verify.c): K-quants and the IQ2/IQ3/IQ1_M families.
+ * New types are added here only after their sweep passes, never merely because wubu_iq_supported() returns 1. */
+static int in2_ty_verified(int ty)
+{
+    switch (ty) {
+        case 12: case 13: case 16: case 17: case 18: case 21: case 22: case 23: case 29: return 1;
+        default: return 0;
+    }
+}
+
 /* ---- prototypes (definitions follow in dependency order) ---- */
 void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos_off,
              const float *partial, const float *queries, int n_q, int d, float eps, float *out);
@@ -92,6 +102,43 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
      * multiply-accumulate: measured 12.64x against dequantise-then-dot on a 2304-element row, worst relative
      * error 5.9e-08 over 64 random block sets (tools/dot_test.c). The other expert types still materialise. */
     const int ty_mv = (t && t->info) ? t->info->ggml_type : -1;
+    /* Generic kernel path: any type wubu_iq_supported() knows goes through the translated AVX2 row kernels with
+     * ONE call for every row and the activation quantised once. Which activation format a type needs is a property
+     * of the ggml block layout, not a choice: Q8_0/Q2_0/NVFP4 use 32-element block_q8_0, the K-quants and the
+     * IQ2/IQ3/IQ1 families use 256-element block_q8_K. Sending the wrong one gives plausible numbers silently, so
+     * it is keyed off the type. */
+    if (getenv("IN2_TRACE_TY") && t && t->info)
+        fprintf(stderr, "matvec ty=%d n_in=%d n_out=%d supported=%d\n", ty_mv, n_in, n_out, wubu_iq_supported(ty_mv));
+    /* Only types whose bit-identical sweep I have personally re-run go through the kernels. wubu_iq_supported()
+     * reports what exists in the translation unit, which is not the same thing as what has been proven: a
+     * half-finished type returning 1 silently changed the logit from 29.67 to 22.52, and a 7-logit drift with the
+     * top token unchanged is exactly the failure a "supported=1" flag cannot catch. */
+    if (getenv("IN2_NOFAST") == NULL && t && t->info && wubu_iq_supported(ty_mv) && in2_ty_verified(ty_mv)) {
+        const int q8_0_act = (ty_mv == 8 || ty_mv == 40 || ty_mv == 42);
+        const int be = q8_0_act ? 32 : 256;
+        const int64_t rb = (n_in % be == 0) ? gguf_raw_size(ty_mv, n_in) : -1;
+        if (rb > 0) {
+            unsigned char *whole = (unsigned char *)malloc((size_t)rb * (size_t)n_out);
+            void *actbuf = q8_0_act
+                ? malloc(((size_t)n_in / 32) * sizeof(in2_q8_0_blk))
+                : malloc(((size_t)n_in / 256) * sizeof(in2_q8k_blk));
+            const int64_t boff = (elem_off == 0) ? 0 : gguf_raw_size(ty_mv, elem_off);
+            if (whole && actbuf && boff >= 0) {
+                wubu_in2_tensor_t sh = *t;
+                sh.file_offset = t->file_offset + boff;
+                if (wubu_inkling2_read(ctx, &sh, whole, rb * n_out) == WUBU_INKLING2_OK) {
+                    if (q8_0_act) in2_q8_0_quantise(x, n_in / 32, (in2_q8_0_blk *)actbuf);
+                    else          in2_q8k_quantise(x, n_in / 256, (in2_q8k_blk *)actbuf);
+                    const void *ap[1] = { actbuf };
+                    float *op[1] = { y };
+                    wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);
+                    free(actbuf); free(whole);
+                    return WUBU_INKLING2_OK;
+                }
+            }
+            free(actbuf); free(whole);
+        }
+    }
     /* Translated maya kernels (bit-identical to ggml's AVX2 dot, verified per type) cover the gate/up formats.
      * One call handles every row of the expert, so the activation is quantised once and the row loops stay inside
      * the kernel. */
