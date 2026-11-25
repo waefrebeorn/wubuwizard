@@ -19,6 +19,7 @@
 double in2_ty_sec[256];
 long   in2_ty_calls[256];
 double in2_ty_macs[256];
+double in2_lay_sec, in2_moe_sec;
 #include "wubu_inkling2_kv.h"
 #include "wubu_dequant_fp4.h"
 #include "wubu_iq2q8.h"

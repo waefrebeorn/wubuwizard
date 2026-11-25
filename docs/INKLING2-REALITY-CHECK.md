@@ -230,3 +230,26 @@ Two findings, both actionable and neither of them the thing I had assumed:
 So the next two moves are, in order: fix NVFP4 (half the kernel time, one function), then kill the per-visit
 small-tensor materialisation (the 1.8 s that is not kernels at all). GPU offload is not the answer to a step that
 spends 82% of its time outside the arithmetic.
+
+### Phase split (IN2_TIMETY, one decode step)
+
+```
+PHASE layers=1.439 s   moe=0.000 s      (step total 1.9 s)
+TY   ... sum of all kernels = 0.395 s
+```
+
+Layers hold 1.44 s; the kernels inside them are 0.395 s; so **~1.05 s is inside the layers and is not
+arithmetic at all**. With DQ-cache on, the step drops 1.9 -> 1.6 s, which removes part of it (the small per-layer
+tensors) but leaves the larger part.
+
+The largest remaining candidate, and the one the numbers fit: every expert matvec copies its whole quantised
+matrix out of the mapping before the kernel sees it - `in2_matvec_nt`/`in2_matvec_quant` both do
+`wubu_inkling2_read(ctx, t, whole, rb*n_out)`. Per visit that is 8 experts x 3 matrices x ~1.5 MB = ~36 MB, and
+over 48 visits ~1.7 GB per token of pure copying, on data that is already mapped and never modified.
+
+Next step: pass the mapped pointer straight to `wubu_iq_rows` instead of copying into `whole`. The kernels take a
+const row pointer and a row stride, so this should be a plumbing change, not an arithmetic one - and it is worth
+~1 s per token if the copy is what it looks like.
+
+Not the answer: GPU offload (82% of the step is outside arithmetic), more kernel tuning (kernels are at 19-49 GOPS),
+and the LM head (0.05-0.1 s).

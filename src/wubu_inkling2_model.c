@@ -129,6 +129,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
             memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
         }                                                                               \
+        const clock_t _L0 = clock();                                                    \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
             rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
         else                                                                            \
@@ -143,6 +144,10 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d.bin", getenv("IN2_DUMP_LAYERS"), (IL)); \
             FILE *_lf = fopen(_lp, "wb");                                              \
             if (_lf) { fwrite(h, sizeof(float), (size_t)ND, _lf); fclose(_lf); }        \
+        }                                                                               \
+        if (getenv("IN2_TIMETY")) {                                                     \
+            extern double in2_lay_sec, in2_moe_sec;                                     \
+            in2_lay_sec += (double)(clock() - _L0) / (double)CLOCKS_PER_SEC;            \
         }                                                                               \
         free(_br);                                                                      \
     } while (0)
@@ -280,6 +285,9 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     fprintf(stderr, "TY %3d calls=%5ld  %.3f s  %5.1f%%  %6.2f GOPS\n", _t, in2_ty_calls[_t],
                             in2_ty_sec[_t], 100.0 * in2_ty_sec[_t] / (tot > 0 ? tot : 1.0),
                             in2_ty_macs[_t] / (in2_ty_sec[_t] > 0 ? in2_ty_sec[_t] : 1.0) / 1e9);
+                { extern double in2_lay_sec, in2_moe_sec;
+                  fprintf(stderr, "PHASE layers=%.3f s  moe=%.3f s\n", in2_lay_sec, in2_moe_sec);
+                  in2_lay_sec = 0; in2_moe_sec = 0; }
                 for (int _t = 0; _t < 256; ++_t) { in2_ty_sec[_t] = 0; in2_ty_calls[_t] = 0; in2_ty_macs[_t] = 0; }
             }
             if (getenv("IN2_TIME")) fprintf(stderr, "HEAD %.3f s for %d rows x %d\n",
