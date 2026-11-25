@@ -430,3 +430,27 @@ and the file is mapped.
 Two scripted attempts at the arena refactor broke the function (regex and brace-counted rewrite both cut past the
 closing brace). Not trying a third scripted pass: it needs hand edits at ~25 call sites, and that is a dedicated
 piece of work, not something to squeeze in behind other changes.
+
+### The engine is single-threaded, and that is now the largest structural gap (2026-11-25)
+
+MoE moves ~36 MB of expert weights per layer visit (8 of 128 experts, ~1.5 MB each) and there are 40 visits per
+decode step, so **~1.4 GB per token of expert streaming at ~5.4 GB/s** - which is single-core memory bandwidth, not
+ALU throughput. The kernels measure 12-30 GOPS in isolation.
+
+This box has 8 cores. Nothing in this engine uses more than one of them. The expert dots are independent by
+construction: 8 selected experts, each producing its own contribution to the sum. A thread pool splitting those
+8 ways is the most direct 4-6x available, and it needs no VRAM, no new kernels and no change to the arithmetic -
+the same per-expert code, on different experts, summed at the end.
+
+Same argument applies to the dense row ranges in `in2_matvec_nt` (each row is independent) and to the LM head.
+
+Order of work, by measured value:
+1. **Threads over experts** (moe 0.264 s -> ~0.06-0.08 s on 8 cores) - ~20% of the step, no arithmetic change.
+2. **Arena for the layer buffers** (0.208 s, 33%) - 25 call sites, hand edits, must be done carefully; two scripted
+   attempts already broke the function.
+3. Expert residency (VRAM/RAM tiering) - the reference-class answer, but it is a project and the CPU side is not yet
+   using the hardware it has.
+
+I am not starting (1) at the end of this stretch: it touches the MoE accumulation path and I would rather land it
+with room to test than hand over a half-threaded engine. Both remaining items are specified above with the numbers
+that justify them.
