@@ -99,6 +99,20 @@ shared, and the two paths quantise the same way. That leaves the M-row **activat
 reproduces the reference and one that does not - and it is the next thing to measure, by quantising one
 row both ways and comparing the q8 bytes directly.
 
+Measured, and it is not that either:
+
+    [Q8-CHECK] blocks=15 differing blocks=0 differing values=0 worst d delta=0
+
+The M-row quantisation launch and the M=1 launch produce **byte-identical** Q8_K for the same row. So
+every component of the fused M-row FFN is now individually verified on the real tensors - the activation
+quantisation is byte-identical, both matvecs agree with the proven decode path to 3e-07 and 7e-07, and
+the gelu between them is the same elementwise kernel - and the assembled path still produces wrong
+tokens. That points at how the pieces are wired together inside `ffn_mrow_impl` (which buffer feeds
+which, the pool roles, or the row mapping) rather than at any arithmetic. The next test is a row-for-row
+comparison of the M-row FFN output against the M=1 fused path for the same layer and the same input
+rows, which is the only comparison that separates wiring from arithmetic.
+
+
 
 Decode degrades with context and the profiler says why: the attention section is 7.3 ms at
 32 tokens, **29.0 ms at 256 tokens**, and the layer total goes 76 -> 98 ms. Attention is
