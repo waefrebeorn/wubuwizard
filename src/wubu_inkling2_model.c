@@ -352,6 +352,9 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     fprintf(stderr, "  tailconv   %.3f s\n", in2_tail_sec);
                     in2_tail_sec = 0;
                     in2_arq_sec = 0; in2_arq_calls = 0; in2_mixfn_sec = 0; in2_alloc_sec = 0; }
+                  { extern double in2_kvproj_sec, in2_kvconv_sec;
+                    fprintf(stderr, "  kv proj %.3f s   kv conv+clip+store %.3f s\n", in2_kvproj_sec, in2_kvconv_sec);
+                    in2_kvproj_sec = 0; in2_kvconv_sec = 0; }
                   fprintf(stderr, "PHASE layers=%.3f s   full=%.3f s  sliding=%.3f s\n", in2_lay_sec, in2_full_sec, in2_slide_sec);
                   in2_full_sec = 0; in2_slide_sec = 0;
                   { extern double in2_fph[8];

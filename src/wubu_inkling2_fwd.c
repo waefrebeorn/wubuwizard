@@ -129,6 +129,7 @@ static double _tkh;    /* high-res companion to _tk */
 double in2_wall_now(void) { return in2_now(); }
 /* full-attention layer sections: state/mix, q, kv+conv, attention, gate+wo, mlp+moe */
 double in2_fph[8];
+double in2_kvproj_sec, in2_kvconv_sec;
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
 #include "wubu_dequant_fp4.h"
@@ -445,6 +446,12 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
     const int be = q8_0_act ? 32 : 256;
     const int64_t rb = (ty >= 0 && (n_in % be) == 0) ? gguf_raw_size(ty, n_in) : -1;
 
+    const int rb_ok = (ty >= 0 && (n_in % be) == 0);
+    if (getenv("IN2_TRACE_NT"))
+        fprintf(stderr, "NT ty=%d n_in=%d n_out=%d raw=%d supported=%d verified=%d -> %s\n",
+                ty, n_in, n_out, rb_ok, wubu_iq_supported(ty), in2_ty_verified(ty),
+                (getenv("IN2_NOFAST") == NULL && rb_ok && wubu_iq_supported(ty) && in2_ty_verified(ty))
+                    ? "kernel" : "FLOAT-FALLBACK");
     if (getenv("IN2_NOFAST") == NULL && rb > 0 && t && t->info &&
         wubu_iq_supported(ty) && in2_ty_verified(ty)) {
         const size_t ablk = q8_0_act ? sizeof(in2_q8_0_blk) : sizeof(in2_q8k_blk);
@@ -995,8 +1002,9 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 
     TKPH(1);
     /* 3. k, v: project, static short conv, then bare L2 clip (k) / unweighted rms (v). */
-    float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
-    float *Wv = in2_tensor_to_f32(ctx, &L->wv, NULL);
+    /* Wk/Wv used to be materialised here as full float matrices and then never read - the projections call
+     * in2_matvec_nt on the tensors directly. At 1024x2304 that is 9.4 MB x 2 per layer visit, ~750 MB of dead
+     * memcpy per decode token (and, since neither was in the free list, a leak of the same size). */
     float *kc = in2_tensor_to_f32(ctx, &L->k_conv, NULL);
     float *vc = in2_tensor_to_f32(ctx, &L->v_conv, NULL);
     float *kraw = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
@@ -1007,10 +1015,14 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *v = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     int rc = WUBU_INKLING2_OK;
     if (!kc || !vc || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
+    extern double in2_wall_now(void);
+    const double _kp0 = in2_wall_now();
     if (rc == WUBU_INKLING2_OK) {
         if (in2_matvec_nt(ctx, &L->wk, xkk, n_tok, d, kdim, kraw) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
         else if (in2_matvec_nt(ctx, &L->wv, xvv, n_tok, d, kdim, vraw) != WUBU_INKLING2_OK) rc = WUBU_INKLING2_ERR_IO;
     }
+    in2_kvproj_sec += in2_wall_now() - _kp0;
+    const double _kc0 = in2_wall_now();
     if (rc == WUBU_INKLING2_OK) {
         if (g_kv) {
             /* Cache mode: conv each row against the cached raw neighbours and push the raw row immediately, so
@@ -1083,6 +1095,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         }
     }
 
+    in2_kvconv_sec += in2_wall_now() - _kc0;
     TKPH(2);
     /* 4. relative bias table from the normed input, plus sinks. */
     float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
