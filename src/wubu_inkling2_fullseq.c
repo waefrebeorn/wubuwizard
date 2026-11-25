@@ -52,19 +52,24 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     double _fph = in2_wall_now();
     #define FP2(i) do { const double _n = in2_wall_now(); in2_fph[i] += _n - _fph; _fph = _n; } while (0)
 
-    float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    /* Borrowed rather than copied: in2_mix takes const float*, so the dequant cache's own buffer is usable
+     * directly and the pointer must not be freed here. MEASURED SIZE: this tensor is 2304 floats (9 KB), not
+     * the 2304x2304 matrix an earlier comment claimed - reading the GGUF header shows dims=[2304] type=0 for
+     * blk.N.attn_res_query.weight. The change is therefore neutral in time (~3.00 vs 3.03 tok/s); it is kept
+     * only because it removes the per-visit allocation. */
+    const float *arq = in2_tensor_borrow(ctx, &L->attn_res_q);
     float *qn = in2_tensor_to_f32(ctx, &L->q_inp_norm, NULL);
     float *kn = in2_tensor_to_f32(ctx, &L->k_inp_norm, NULL);
     float *vn = in2_tensor_to_f32(ctx, &L->v_inp_norm, NULL);
     if (!arq || !qn || !kn || !vn) {
-        free(arq); free(qn); free(kn); free(vn);
+        free(qn); free(kn); free(vn);
         return WUBU_INKLING2_ERR_IO;
     }
 
     FP2(0); /* loads */
     /* 1. three depth-mixed states per position (q, k, v inputs), then the message gates. */
     float *state = (float *)calloc((size_t)3 * ND, sizeof(float));
-    if (!state) { free(arq); free(qn); free(kn); free(vn); return WUBU_INKLING2_ERR_IO; }
+    if (!state) { free(qn); free(kn); free(vn); return WUBU_INKLING2_ERR_IO; }
     /* boundary: exclude the entry this layer's caller already appended (see the sliding layer) */
     const int n_attn = (cfg->attn_res_block > 0 && il % cfg->attn_res_block == 0)
                      ? n_blocks - 1 : n_blocks;
@@ -98,7 +103,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     float *xk = (float *)calloc(ND, sizeof(float));
     float *xv = (float *)calloc(ND, sizeof(float));
     if (!xq || !xk || !xv) {
-        free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+        free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
         return WUBU_INKLING2_ERR_IO;
     }
     for (int t = 0; t < n_tok; ++t) {
@@ -126,7 +131,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     const float *Wq = in2_tensor_borrow(ctx, &L->wq);   /* table-owned, never freed */
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
-    if (!Wq || !q) { free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+    if (!Wq || !q) { free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
                      free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
     for (int t = 0; t < n_tok; ++t) {
         float *qt = q + (size_t)t * qdim;
@@ -386,7 +391,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         for (size_t i = 0; i < ND; ++i) h[i] = res[i] + mo[i];
     } else rc = WUBU_INKLING2_ERR_IO;
 
-    free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+    free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
     free(qcl); free(q);   /* Wk/Wv/kc/vc/kp/vp are borrowed from the dequant cache, not owned here */
     free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
     free(rcl); free(P); free(rs); free(bias); free(sink);

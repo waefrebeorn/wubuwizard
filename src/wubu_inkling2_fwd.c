@@ -258,6 +258,9 @@ void in2_messages(const float *srcs, int n_src, int n_tok,
 void in2_message_gate(const float *h, const float *message, const float *down, const float *forget,
                       const float *msgp, int d, int rank, float eps, float *out);
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out);
+/* Read-only view of the dequant cache's own buffer. Defined below; declared here because the layer paths above use it
+ * and an implicit declaration silently truncates the returned pointer to int. */
+const float *in2_tensor_borrow(gguf_ctx *ctx, const wubu_in2_tensor_t *t);
 
 /* Unweighted RMS norm: x * rsqrt(mean(x^2) + eps). Used by the loop message gates. */
 void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out)
@@ -846,7 +849,12 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     in2_alloc_sec += (double)(clock() - _al0) / (double)CLOCKS_PER_SEC;
     if (!mixh) { free(an); return WUBU_INKLING2_ERR_IO; }
     const clock_t _a0 = clock();
-    float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    /* Borrowed rather than copied: in2_mix takes const float*, so the dequant cache's own buffer is usable
+     * directly and the pointer must not be freed here. MEASURED SIZE: this tensor is 2304 floats (9 KB), not
+     * the 2304x2304 matrix an earlier comment claimed - reading the GGUF header shows dims=[2304] type=0 for
+     * blk.N.attn_res_query.weight. The change is therefore neutral in time (~3.00 vs 3.03 tok/s); it is kept
+     * only because it removes the per-visit allocation. */
+    const float *arq = in2_tensor_borrow(ctx, &L->attn_res_q);
     in2_arq_sec += (double)(clock() - _a0) / (double)CLOCKS_PER_SEC; in2_arq_calls++;
     if (arq && il > 0) {
         /* At a boundary the reference banks this layer's input between the two mixes, so the
@@ -903,7 +911,6 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                       if (_f) { fwrite(vc, sizeof(float), 4u * 1024u, _f); fclose(_f); } free(vc); }
         }
     }
-    free(arq);
 
     if (il == cfg->loop_core_start && getenv("IN2_DUMP_MSG2")) {
         /* the true depth-mix output, before any gate overwrites mixh (slot 3 reuses the buffer) */
@@ -1689,16 +1696,16 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     const float eps = cfg->rms_eps;
 
     /* 1. three depth-mixed states from the 3-query attention_input */
-    float *wq_n = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    const float *wq_n = in2_tensor_borrow(ctx, &L->attn_res_q);
     float *state = (float *)calloc((size_t)3 * d, sizeof(float));
-    if (!wq_n || !state) { free(wq_n); free(state); return WUBU_INKLING2_ERR_IO; }
+    if (!wq_n || !state) { free(state); return WUBU_INKLING2_ERR_IO; }
     /* superseded by in2_layer_full_seq, kept only for single-token reference; block_stride == d here */
     in2_mix(blocks, n_blocks, d, 0, h, wq_n, 3, d, eps, state);   /* rows: q, k, v */
 
     float *qn = in2_tensor_to_f32(ctx, &L->q_inp_norm, NULL);
     float *kn = in2_tensor_to_f32(ctx, &L->k_inp_norm, NULL);
     float *vn = in2_tensor_to_f32(ctx, &L->v_inp_norm, NULL);
-    if (!qn || !kn || !vn) { free(wq_n); free(state); free(qn); free(kn); free(vn);
+    if (!qn || !kn || !vn) { free(state); free(qn); free(kn); free(vn);
                              return WUBU_INKLING2_ERR_IO; }
     float *xq = (float *)calloc((size_t)d, sizeof(float));
     float *xk = (float *)calloc((size_t)d, sizeof(float));
@@ -1739,7 +1746,7 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         in2_l2_clip(q, qcl, NH, HD, 22.6274166f);
         const float tau = 1.0f + 0.1f * logf(fmaxf(((float)pos0 + 1.0f) / 8192.0f, 1.0f));
         for (int i = 0; i < qdim; ++i) q[i] *= tau;
-    } else { free(wq_n); free(state); free(qn); free(kn); free(vn);
+    } else { free(state); free(qn); free(kn); free(vn);
              free(xq); free(xk); free(xv); free(Wq); free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
 
     /* 3. k and v with the DYNAMIC short conv (static per channel + per-head projected taps) */
@@ -1848,7 +1855,7 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         for (int i = 0; i < d; ++i) h[i] = res[i] + mo[i];
     } else rc = WUBU_INKLING2_ERR_IO;
 
-    free(wq_n); free(state); free(qn); free(kn); free(vn); free(xq); free(xk); free(xv);
+    free(state); free(qn); free(kn); free(vn); free(xq); free(xk); free(xv);
     free(Wq); free(qcl); free(q); free(Wk); free(Wv); free(kc); free(vc); free(kp); free(vp);
     free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
     free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
@@ -1882,8 +1889,8 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
     for (int d = 0; d < t->info->n_dims; ++d) ne *= t->info->dims[d];
 
     /* On by default. It was a 0.8%% effect when the big matrices still went through the float path, which is why it
-     * was left behind a flag; now the per-visit tensors are the hot spot (attn_res_q alone is a full 2304x2304
-     * dequantisation on every layer visit) and it is worth ~30%% of a decode step. It returns a copy, so every
+     * was left behind a flag. The per-visit tensors are the hot spot, but not for the reason an earlier comment
+     * gave: attn_res_q is a 2304-float vector (9 KB), measured from the GGUF header, not a 2304x2304 matrix.
      * caller's ownership contract is unchanged. IN2_NO_DQ_CACHE disables it. */
     const int cache_on = g_force_cache || getenv("IN2_NO_DQ_CACHE") == NULL;
     if (cache_on) {
