@@ -217,6 +217,16 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         }
     }
 
+    if (il == 5 && getenv("IN2_DUMP_FULLKV")) {
+        FILE *df = fopen(getenv("IN2_DUMP_FULLKV"), "wb");
+        if (df) {
+            fwrite(q, sizeof(float), (size_t)n_tok * qdim, df);
+            fwrite(k, sizeof(float), (size_t)n_tok * kdim, df);
+            fwrite(v, sizeof(float), (size_t)n_tok * kdim, df);
+            fclose(df);
+        }
+    }
+
     /* 4. attention: causal, over every earlier key (no window), with the per-query relative bias and sink */
     const float *Wrel = in2_tensor_borrow(ctx, &L->wrel);
     float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
@@ -301,6 +311,17 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
             else                          in2_matvec(Wo, gt, qdim, d, ao + (size_t)t * d);
         }
     } else rc = WUBU_INKLING2_ERR_IO;
+
+    if (il == 5 && getenv("IN2_DUMP_FULLATTN")) {
+        FILE *af = fopen(getenv("IN2_DUMP_FULLATTN"), "wb");
+        if (af) {
+            fwrite(attn_out, sizeof(float), (size_t)n_tok * qdim, af);   /* pre-gate attention out */
+            fwrite(ao, sizeof(float), (size_t)n_tok * d, af);            /* post attn_output projection */
+            fwrite(bias, sizeof(float), (size_t)NH * EXT, af);
+            fwrite(sink, sizeof(float), (size_t)n_tok * NH, af);
+            fclose(af);
+        }
+    }
 
     /* 6. post-attn conv + the boundary rule */
     float *pc = in2_tensor_to_f32(ctx, &L->attn_post_conv, NULL);

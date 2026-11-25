@@ -1368,7 +1368,10 @@ void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float 
                     /* tap j has age (k-1-j): the current token is the LAST tap, as in the reference graph */
                     const int src = t - (k - 1 - j);
                     if (src < 0) continue;
-                    const float tap = stat[(size_t)c * k + j] + dw[((size_t)t * n_head + h) * k + j];
+                    /* The dynamic taps are ordered the OPPOSITE way to the static ones: dyn index 0 multiplies the
+                     * current row, static index k-1 does. Proven on the reference (node_961 - node_950 at ch0 =
+                     * dyn[0]*x_t = 3.4170 * -0.5006), so pairing them by the same index is wrong. */
+                    const float tap = stat[(size_t)c * k + j] + dw[((size_t)t * n_head + h) * k + (k - 1 - j)];
                     acc += tap * x[(size_t)src * channels + c];
                 }
                 const float res = x[(size_t)t * channels + c];

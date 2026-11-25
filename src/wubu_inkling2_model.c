@@ -128,6 +128,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
 
     /* helper: run one layer and bank the block residual at boundaries */
     int ltseq = 0;
+    static int in2_dump_pass = 0;   /* 0 = pre/post layers and the first loop pass; N = loop pass N */
     #define RUN_LAYER(IL, MSG) do {                                                    \
         float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
@@ -154,7 +155,8 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             fprintf(stderr, "LT seq=%d il=%02d pos0=%d ntok=%d l2_last=%.12e\n", ltseq++, (IL), pos0, n_tok, _s); \
         }                                                                               \
         if (rc == WUBU_INKLING2_OK && getenv("IN2_DUMP_LAYERS")) {                     \
-            char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d.bin", getenv("IN2_DUMP_LAYERS"), (IL)); \
+            char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d_p%d.bin",                \
+                getenv("IN2_DUMP_LAYERS"), (IL), in2_dump_pass);                        \
             FILE *_lf = fopen(_lp, "wb");                                              \
             if (_lf) { fwrite(h, sizeof(float), (size_t)ND, _lf); fclose(_lf); }        \
         }                                                                               \
@@ -193,6 +195,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     static float *msg_anchor = NULL;
     static int    msg_anchor_n = 0;
     for (int pass = 1; pass < n_loops && rc == WUBU_INKLING2_OK; ++pass) {
+        in2_dump_pass = pass;   /* per-pass layer dumps must not overwrite each other */
         memcpy(prev_h, h, sizeof(float) * ND);
         /* the reference skips the pre-loop blocks plus the first block appended by the previous pass */
         const int skip = pre_blocks + 1;

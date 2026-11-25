@@ -142,12 +142,12 @@ void in2_kv_conv_row_dyn(const float *hist3, const float *xrow, int channels, co
     for (int h = 0; h < n_head; ++h) {
         for (int d = 0; d < hd; ++d) {
             const int c = h * hd + d;
-            /* last tap = current row; tap j has age (k-1-j) */
-            float acc = (stat[(size_t)c * (size_t)k + (size_t)(k - 1)] + dwrow[(size_t)h * (size_t)k + (size_t)(k - 1)]) * xrow[c];
+            /* last tap = current row; tap j has age (k-1-j); dyn taps are ordered newest-first */
+            float acc = (stat[(size_t)c * (size_t)k + (size_t)(k - 1)] + dwrow[(size_t)h * (size_t)k]) * xrow[c];
             for (int j = 0; j < k - 1; ++j) {
                 const int age = k - 1 - j;
                 if (!hist3 || age > 3) continue;
-                acc += (stat[(size_t)c * (size_t)k + (size_t)j] + dwrow[(size_t)h * (size_t)k + (size_t)j])
+                acc += (stat[(size_t)c * (size_t)k + (size_t)j] + dwrow[(size_t)h * (size_t)k + (size_t)age])
                      * hist3[(size_t)(3 - age) * (size_t)channels + (size_t)c];
             }
             out[c] = (acc + xrow[c]) * scale;
