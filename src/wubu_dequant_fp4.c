@@ -127,7 +127,7 @@ void dequantize_row_nvfp4(const unsigned char *data, float *output, long n_elems
  * value = (q - 1) * d, so a block contributes d * (sum q_j x_j - sum x_j), which is one pass over x and the
  * quant bytes with no intermediate store. Same arithmetic, same order of accumulation per element, so the
  * result is the reference result up to float rounding - which is what the test in tools/dot_test.c checks. */
-void dot_row_q2_0(const unsigned char *data, const float *x, long n_elems, float *out)
+static void dot_row_q2_0_ref(const unsigned char *data, const float *x, long n_elems, float *out)
 {
     const long nb = (n_elems + 63) / 64;
     double acc = 0.0;
@@ -147,6 +147,66 @@ void dot_row_q2_0(const unsigned char *data, const float *x, long n_elems, float
         acc += (double)d * sum;
     }
     *out = (float)acc;
+}
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#include <immintrin.h>
+#define WUBU_X86_DISPATCH 1
+
+/* AVX2 Q2_0 dot, C11 + intrinsics (no C++ anywhere in this tree).
+ *
+ * Eight contiguous elements live in two quant bytes, so broadcasting that 16-bit word and shifting each of the
+ * eight lanes by 2j bits (srlv) turns the packed 2-bit fields into eight contiguous int32 lanes in one pass -
+ * no gather, no scratch buffer, no scalar unpack. Compile-time attribute plus a runtime CPU check keeps the rest
+ * of the binary baseline-safe. */
+__attribute__((target("avx2,fma")))
+static void dot_row_q2_0_avx2(const unsigned char *data, const float *x, long n_elems, float *out)
+{
+    const __m256i sh = _mm256_set_epi32(14, 12, 10, 8, 6, 4, 2, 0);
+    const __m256i m3 = _mm256_set1_epi32(3);
+    const __m256i one = _mm256_set1_epi32(1);
+    const long nb = n_elems / 64;
+    float total = 0.0f;
+    for (long b = 0; b < nb; ++b) {
+        const unsigned char *blk = data + b * 18;
+        uint16_t d_bits = 0;
+        memcpy(&d_bits, blk, 2);
+        const float d = f16_to_f32(d_bits);
+        const unsigned char *qs = blk + 2;
+        const float *xb = x + b * 64;
+        __m256 bacc = _mm256_setzero_ps();
+        for (int g = 0; g < 8; ++g) {
+            const unsigned u = (unsigned)qs[2 * g] | ((unsigned)qs[2 * g + 1] << 8);
+            __m256i q = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32((int)u), sh), m3);
+            q = _mm256_sub_epi32(q, one);                     /* q-1 gives -1,0,+1,+2 */
+            bacc = _mm256_fmadd_ps(_mm256_cvtepi32_ps(q), _mm256_loadu_ps(xb + g * 8), bacc);
+        }
+        __m128 s = _mm_add_ps(_mm256_castps256_ps128(bacc), _mm256_extractf128_ps(bacc, 1));
+        s = _mm_hadd_ps(s, s);
+        s = _mm_hadd_ps(s, s);
+        total += d * _mm_cvtss_f32(s);
+    }
+    /* tail that does not fill a whole 64-element block */
+    for (long i = nb * 64; i < n_elems; ++i) {
+        const unsigned char *blk = data + (i / 64) * 18;
+        uint16_t d_bits = 0;
+        memcpy(&d_bits, blk, 2);
+        const unsigned char q = (unsigned char)((blk[2 + ((i % 64) >> 2)] >> (((i % 64) & 3) * 2)) & 0x03u);
+        total += f16_to_f32(d_bits) * (float)((int)q - 1) * x[i];
+    }
+    *out = total;
+}
+#endif
+
+void dot_row_q2_0(const unsigned char *data, const float *x, long n_elems, float *out)
+{
+#ifdef WUBU_X86_DISPATCH
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) {
+        dot_row_q2_0_avx2(data, x, n_elems, out);
+        return;
+    }
+#endif
+    dot_row_q2_0_ref(data, x, n_elems, out);
 }
 
 void dequantize_row_q2_0(const unsigned char *data, float *output, long n_elems)
