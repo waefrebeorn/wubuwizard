@@ -454,3 +454,31 @@ Order of work, by measured value:
 I am not starting (1) at the end of this stretch: it touches the MoE accumulation path and I would rather land it
 with room to test than hand over a half-threaded engine. Both remaining items are specified above with the numbers
 that justify them.
+
+### CORRECTION: the MoE is not memory-starved, it is just kernel volume (2026-11-25)
+
+I wrote that moe "lands at ~10 GOPS where the same kernels measure 12-30 in isolation, which is the signature of
+waiting on memory". The per-type table from the same run contradicts that, and I should read my own data before
+asserting a cause:
+
+| type | share of kernel time | throughput |
+|---|---|---|
+| 16 IQ2_XXS | 19.2% | 11.8 GOPS |
+| 17 IQ2_XS | 15.5% | 13.9 GOPS |
+| 42 Q2_0 | 14.5% | 15.2 GOPS |
+| 40 NVFP4 | 12.6% | 8.0 GOPS |
+| 19 IQ1_S | 8.2% | 13.1 GOPS |
+
+Those five ARE the MoE's gate/up/down kernels, and they total ~0.20 s of the 0.264 s moe phase - **76% kernel, at the
+same 8-15 GOPS the type table reports in isolation**. So the MoE is not waiting on memory; it is simply the largest
+volume of work going through kernels that are themselves slow. My "memory-bound, so fix residency" conclusion was
+wrong, and it would have sent the next step at VRAM tiering to solve a problem that is arithmetic throughput.
+
+What this actually implies:
+- The lever for moe is **kernel throughput on IQ2_XXS / IQ2_XS** (11.8 and 13.9 GOPS), which together are 35% of
+  kernel time. Q6_K reaches 49 GOPS and Q8_0 34 - so the headroom exists in the same file.
+- Expert residency stays valuable for VRAM, but it is not the answer to the 0.264 s, and it should not be next.
+
+This is the fourth hypothesis in this stretch that measurement has overturned (mix hot spot, allocator as the
+whole of the tail, threading as a win, moe as memory-bound). The pattern is consistent: read the per-type and
+per-phase numbers before naming a cause.
