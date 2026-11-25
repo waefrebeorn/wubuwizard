@@ -166,6 +166,13 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     }
 
     /* each later pass restarts from the pre-loop state and carries only the messages */
+    /* Message anchor. in2_messages does memcpy(st + n_prev*d, prev_h, d) - it reads ONLY position 0 of the batch,
+     * and the same for each prev_blocks entry. In a full recompute position 0 is the first token of the prefix; on
+     * a decode step the batch is the new token, so the anchor would silently move from token 0 to token N and every
+     * later pass would be conditioned on the wrong state. Measured: messages at pass 2 were 1.695e+03 recomputed vs
+     * 1.674e+03 on a step. Cache the anchor from the first forward and reuse it. */
+    static float *msg_anchor = NULL;
+    static int    msg_anchor_n = 0;
     for (int pass = 1; pass < n_loops && rc == WUBU_INKLING2_OK; ++pass) {
         memcpy(prev_h, h, sizeof(float) * ND);
         /* the reference skips the pre-loop blocks plus the first block appended by the previous pass */
@@ -173,13 +180,25 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         n_prev = (n_blocks > skip) ? (n_blocks - skip) : 0;
         for (int i = 0; i < n_prev; ++i)
             memcpy(prev_blocks + (size_t)i * ND, blocks + (size_t)(skip + i) * ND, sizeof(float) * ND);
+        if (!msg_anchor && pos0 == 0) {
+            msg_anchor = (float *)malloc(sizeof(float) * (size_t)(n_prev + 1) * (size_t)d);
+            if (msg_anchor) msg_anchor_n = n_prev;
+        }
+        if (msg_anchor && pos0 == 0) {
+            for (int i = 0; i < n_prev; ++i) memcpy(msg_anchor + (size_t)i * d, prev_blocks + (size_t)i * ND, sizeof(float) * d);
+            memcpy(msg_anchor + (size_t)n_prev * d, prev_h, sizeof(float) * d);
+        }
 
         memcpy(h, pre_h, sizeof(float) * ND);
         n_blocks = pre_blocks;
         for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il) {
             const int li = il - cfg->loop_core_start;
             if (qres && qkv) {
-                in2_messages(prev_blocks, n_prev, prev_h, qres, qkv, li, d, eps, msgs);
+                const float *use_blk = prev_blocks;
+                const float *use_h = prev_h;
+                int use_n = n_prev;
+                if (msg_anchor && pos0 > 0 && msg_anchor_n == n_prev) { use_blk = msg_anchor; use_h = msg_anchor + (size_t)n_prev * d; use_n = n_prev; }
+                in2_messages(use_blk, use_n, use_h, qres, qkv, li, d, eps, msgs);
                 if (getenv("IN2_MTRACE") && li == 0) {
                     const int _t = n_tok - 1;
                     double _m = 0.0;
