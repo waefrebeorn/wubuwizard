@@ -958,6 +958,29 @@ block size are all confirmed, and the remaining discrepancy is purely in the **i
 extracted `IQ2_XS` decoder defines a 9-bit grid index plus a 3-bit sign index (12 bits used of 16), while the
 bytes contain full 16-bit entropy.
 
+**Test vector captured.** `tools/expert_probe.exe <gguf> <tensor> [n]` dumps the engine's own decoding of the
+first block next to its raw bytes, so the packing can be solved by construction instead of inferred:
+
+```
+blk.22.ffn_gate_up_exps.weight  type=17  dims=2304,2304,128  data_offset=7946178816
+d = f16(c8 0d) = 0.000352858
+raw  c8 0d 4b 79 7a f7 1d 3c f7 bb 65 65 15 68 65 98 d5 a0 2d 14 d1 4f 99 fa 03 c0
+     00 80 d3 d2 be 08 9f 6d 93 aa 6c 8f 02 91 6d a0 a8 e1 95 fe 4e 74 65 4a 93 98
+     ae c6 b2 c4 5e 91 ff c6 50 b9 04 09 82 9c 8d ba ab 9d f5 aa ab af
+out   0.00952720642  0.00952720642  -0.00952720642  -0.00952720642
+      -0.00952720642 -0.00952720642  0.0297725201   0.0297725201
+```
+
+Two facts fall straight out. All eight values are the **same grid magnitude** (27.0 after dividing by `d`),
+differing only in sign and in a scale multiplier - and the ratio between the two groups is exactly
+`3.125 = (0.5 + 12) * 0.25`, which is the `db` factor shape from `dequantize_row_iq2_xs`. So the decoder is
+IQ2_XS in form, and the discrepancy is only in which bits carry the grid index and which the sign.
+
+Also fixed on the way: `(long) fseek` truncates above 4 GB on Windows and this tensor sits at 7.96e9, so the
+probe silently failed to seek until it used `_fseeki64` - the identical trap that once produced garbage Q4_K
+values from `gguf_probe`. A pattern worth remembering: every 64-bit file offset in this codebase needs the
+64-bit seek, and the failure mode is plausible-looking data rather than an error.
+
 **Not resolved, and deliberately not guessed at.** The engine's own type-17 decoder produces sane MoE output
 (rms 1.0, 46.6% of the residual, router healthy), so the file is fine and the fault is in the check. Five
 attempts at this check failed in this stretch; the next one starts from dumping the engine's first 8
