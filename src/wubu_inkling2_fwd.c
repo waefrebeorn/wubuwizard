@@ -459,8 +459,11 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
         /* Reused across calls. A decode token makes ~1150 of these calls (48 visits x 8 experts x 3 matrices), and
          * each was a fresh malloc+free of ~1.5 MB - the allocation traffic cost more than the arithmetic. Grown
          * once to the largest matrix seen; the buffer is only ever read from the mapping into itself. */
-        static unsigned char *g_whole;
-        static size_t g_whole_cap;
+        /* Thread-local: the MoE runs one expert per thread, and eight of them sharing this fallback buffer meant
+         * concurrent reads/writes of the same bytes whenever the mapping was unavailable (or still being set up) -
+         * which showed up as a greedy token flipping between runs, not as a crash. */
+        static _Thread_local unsigned char *g_whole;
+        static _Thread_local size_t g_whole_cap;
         const size_t need = (size_t)rb * (size_t)n_out;
         unsigned char *whole = g_whole;
         if (need > g_whole_cap) {
