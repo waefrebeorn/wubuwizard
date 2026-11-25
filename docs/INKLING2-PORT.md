@@ -182,6 +182,35 @@ By name, `loop_res_query` likely covers the query and mlp slots and `loop_kv_res
 value slots - **inferred from the names and the 24+24 split, not yet verified** against a reference
 forward pass. This is the first thing to pin down before the block residual is implemented.
 
+## Step 3 started: primitives validated against an independent implementation
+
+`src/wubu_inkling2_fwd.c` now has unweighted/weighted RMS norm, a row-major matvec, a whole-tensor
+dequantiser and the embedding gather. Deliberately unoptimised (dequantise to f32, plain dot products):
+too slow to generate with, but checkable.
+
+**The instrument:** `tools/inkling_fwd_check.c` embeds token 1234, norms it with `blk.0.attn_norm`,
+dumps the activation, and prints `attn_q @ x` for the first four rows. An independent Q6_K
+implementation in Python then recomputes those four dot products from the same file bytes:
+
+```
+engine C           : -5.45495987e-01  +1.41292453e+00  +1.64359808e+00  +1.79610527e+00
+python independent : -5.45496014e-01  +1.41292455e+00  +1.64359807e+00  +1.79610532e+00
+relative diff       : 4.9e-08         1.3e-08          5.9e-09          2.5e-08
+```
+
+Agreement at f32 accumulation noise. That single comparison validates three things at once: our Q6_K
+dequantiser, the ggml `(n_in, n_out)` row-major interpretation, and the matvec.
+
+The first run of that check disagreed completely (relative diffs of 0.6 to 2.9). The fault was in the
+*instrument*, not the engine - my Python forgot that ggml advances the Q6_K scale pointer by 8 for the
+second 128-element half. Worth recording because the reflex on seeing a mismatch is to suspect the code
+under test.
+
+**Not yet validated:** the embedding path itself (IQ4_XS dequant plus the strided gather). Both sides of
+the check above consumed the same dumped activation, so that step is currently self-consistent rather
+than independently confirmed. Same treatment next: dequantise a column of `token_embd` in Python and
+compare against the engine's gather.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
