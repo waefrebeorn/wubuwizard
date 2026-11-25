@@ -310,3 +310,23 @@ Every delta recorded before this harness must be re-measured through it before i
 All medians with zero spread, all producing identical logits. The speedup is linear in prefix because one path is
 O(n) per token and the other O(n^2) - which is the whole point: the ratio is not a tuning result, it is the
 complexity change, and it keeps growing with context.
+
+### NVFP4 UE4M3 table: the one win that survived (2026-11-25)
+
+| | before | after |
+|---|---|---|
+| NVFP4 throughput | 1.59 GOPS | 7.96 GOPS |
+| prefill (3 tok) | 3.70 s | **3.00 s** |
+| decode step | 1.20 s | **1.00 s** |
+| parity vs ggml AVX2 | 144/144 | **144/144, max|diff| 0.000e+00** |
+
+Cause: UE4M3 sub-block scales decoded with `ldexpf` plus a division, four times per block, ~166,000 libm calls per
+matvec. Replaced by a 256-entry table filled once with the identical expression, so every entry is bit-identical by
+construction and the parity sweep confirms it rather than assuming it. First optimisation since `tools/bench.py`
+existed that clears the 0% spread and is therefore stated as a real win.
+
+Tried and reverted after measuring, all under the harness:
+- `in2_mix` dot vectorised: 1.20 s before and after - no change.
+- `in2_tensor_borrow` (hand callers the cache buffer instead of a copy): 3.00/1.00 s unchanged **and** it leaks
+  when `IN2_NO_DQ_CACHE` is set, because the returned buffer is caller-owned in that path and the call site no
+  longer frees it. No measured gain plus a real defect is not a trade worth keeping.
