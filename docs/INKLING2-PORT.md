@@ -857,6 +857,29 @@ My first attempt at this check used `res == conv(ao)` and was off by 8.4, which 
 and was my formula being wrong rather than the code. Fifth broken instrument. The rule holds: check the
 formula before the finding.
 
+## The mlp tail, and blk.1 closed except the expert matvec
+
+`IN2_DUMPX` already dumped `res`, `moein` and `moe` for the last sliding layer reached (il=22), so the tail
+could be checked with no new instrumentation against the existing per-layer dump:
+
+```
+layers/L22 == res + post_mlp_conv(moe)   max|diff| 4.768e-07   mean 1.138e-09
+rms: res 2.1995  moe 1.0250  conv 0.46480  h22 2.2516
+moe / rms(res) = 0.4660
+```
+
+The post-mlp conv and the residual add are exact, and the MoE output carries **46.6% of the residual rms** -
+a live pathway, not something silently zeroed.
+
+**blk.1 is now verified end to end except the expert matvec inside `in2_moe`**, whose router and per-expert
+arithmetic were verified in isolation earlier but not composed through the layer. Everything else - mix,
+attn_norm, q/k/v with convs and clips, rel-bias table, sink softmax, GQA, gated output, post-attn residual,
+ffn mix, post-mlp conv, residual - matches an independent implementation at float32 precision.
+
+Since sixteen of the twenty-four layers share this path, the sliding layers are very likely correct minus that
+one block. The remaining suspects for the degenerate output are therefore: the MoE composition, the four full
+layers, and the message path - which is a much shorter list than "everything above blk.0" two stretches ago.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
