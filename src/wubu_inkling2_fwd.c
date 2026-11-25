@@ -15,6 +15,13 @@
 #include "wubu_inkling2.h"
 
 /* ---- prototypes (definitions follow in dependency order) ---- */
+void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *queries, int n_q,
+             int d, float eps, float *out);
+void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float *stat,
+                           const float *dyn_proj, const float *dyn_input, int hidden,
+                           int n_head, int k, float *out);
+int  in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                    int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
 void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
 void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y);
@@ -494,6 +501,237 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
         }
     }
     free(Wr); free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
+    return rc;
+}
+
+/* Depth mix over [block_states; partial]: one learned query per requested output.
+ * With n_blocks == 0 and n_q == 1 this is exactly an unweighted RMS norm, which is why layer 0's
+ * mlp_input (and every layer's mlp_input before any block has been banked) is a norm in disguise. */
+void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *queries, int n_q,
+             int d, float eps, float *out)
+{
+    const int n = n_blocks + 1;
+    float *st = (float *)malloc((size_t)n * d * sizeof(float));
+    float *nr = (float *)malloc((size_t)n * d * sizeof(float));
+    float *al = (float *)malloc((size_t)n * sizeof(float));
+    if (!st || !nr || !al) { free(st); free(nr); free(al); return; }
+    for (int i = 0; i < n_blocks; ++i) memcpy(st + (size_t)i * d, blocks + (size_t)i * d, sizeof(float) * d);
+    memcpy(st + (size_t)n_blocks * d, partial, sizeof(float) * d);
+    for (int i = 0; i < n; ++i) in2_rmsnorm_unweighted(st + (size_t)i * d, d, eps, nr + (size_t)i * d);
+
+    const float inv = 1.0f / sqrtf((float)d);
+    for (int qi = 0; qi < n_q; ++qi) {
+        const float *q = queries + (size_t)qi * d;
+        float mx = -1e30f;
+        for (int i = 0; i < n; ++i) {
+            double acc = 0.0;
+            for (int j = 0; j < d; ++j) acc += (double)q[j] * nr[(size_t)i * d + j];
+            al[i] = (float)acc * inv;
+            if (al[i] > mx) mx = al[i];
+        }
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) { al[i] = expf(al[i] - mx); sum += al[i]; }
+        for (int i = 0; i < n; ++i) al[i] = (float)(al[i] / sum);
+        for (int j = 0; j < d; ++j) {
+            double acc = 0.0;
+            for (int i = 0; i < n; ++i) acc += (double)al[i] * nr[(size_t)i * d + j];
+            out[(size_t)qi * d + j] = (float)acc;
+        }
+    }
+    free(st); free(nr); free(al);
+}
+
+/* Dynamic short conv (full-attention k/v only).
+ *   taps[c][j] = static[c*k + j] + dyn[h][j]      dynamic per HEAD, static per channel
+ *   out = (sum_j taps[c][j] * x[t-j][c] + x[t][c]) / sqrt(2k + 1)
+ * The static post-attention/post-mlp convs divide by sqrt(k+1) instead; using the same normaliser for
+ * both is a silent 1.34x error. */
+void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float *stat,
+                           const float *dyn_proj, const float *dyn_input, int hidden,
+                           int n_head, int k, float *out)
+{
+    const int hd = channels / n_head;
+    const float scale = 1.0f / sqrtf((float)(2 * k + 1));
+    float *dw = (float *)malloc((size_t)n_tok * n_head * k * sizeof(float));
+    if (!dw) return;
+    for (int t = 0; t < n_tok; ++t) {
+        /* dyn_proj is (n_head*k, hidden): one tap set per head, shared across that head's channels */
+        in2_matvec(dyn_proj, dyn_input + (size_t)t * hidden, hidden, n_head * k,
+                   dw + (size_t)t * n_head * k);
+    }
+    for (int t = 0; t < n_tok; ++t) {
+        for (int h = 0; h < n_head; ++h) {
+            for (int d = 0; d < hd; ++d) {
+                const int c = h * hd + d;
+                float acc = 0.0f;
+                for (int j = 0; j < k; ++j) {
+                    const int src = t - j;
+                    if (src < 0) continue;
+                    const float tap = stat[(size_t)c * k + j] + dw[((size_t)t * n_head + h) * k + j];
+                    acc += tap * x[(size_t)src * channels + c];
+                }
+                const float res = x[(size_t)t * channels + c];
+                out[(size_t)t * channels + c] = (acc + res) * scale;
+            }
+        }
+    }
+    free(dw);
+}
+
+/* Full-attention layer: three depth-mixed states -> three input norms -> tau-scaled q, dynamic k/v
+ * convs, attention over every key (the bias still dies outside 0..1023). Tail is identical to the
+ * sliding layer: post-attn conv, boundary rule, mlp_input mix, MoE, post-mlp conv. */
+int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                   int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks)
+{
+    const wubu_in2_layer_t *L = &m->layer[il];
+    const int d = cfg->d_model, NH = cfg->n_head, NKV = cfg->n_kv_head, HD = cfg->head_dim;
+    const int qdim = NH * HD, kdim = NKV * HD;
+    const float eps = cfg->rms_eps;
+
+    /* 1. three depth-mixed states from the 3-query attention_input */
+    float *wq_n = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    float *state = (float *)calloc((size_t)3 * d, sizeof(float));
+    if (!wq_n || !state) { free(wq_n); free(state); return WUBU_INKLING2_ERR_IO; }
+    in2_mix(blocks, n_blocks, h, wq_n, 3, d, eps, state);   /* rows: q, k, v */
+
+    float *qn = in2_tensor_to_f32(ctx, &L->q_inp_norm, NULL);
+    float *kn = in2_tensor_to_f32(ctx, &L->k_inp_norm, NULL);
+    float *vn = in2_tensor_to_f32(ctx, &L->v_inp_norm, NULL);
+    if (!qn || !kn || !vn) { free(wq_n); free(state); free(qn); free(kn); free(vn);
+                             return WUBU_INKLING2_ERR_IO; }
+    float *xq = (float *)calloc((size_t)d, sizeof(float));
+    float *xk = (float *)calloc((size_t)d, sizeof(float));
+    float *xv = (float *)calloc((size_t)d, sizeof(float));
+    in2_rmsnorm(state,           qn, d, eps, xq);
+    in2_rmsnorm(state + d,       kn, d, eps, xk);
+    in2_rmsnorm(state + 2 * d,   vn, d, eps, xv);
+
+    /* 2. q with the scaled clip and the log-position tau (tau == 1 at position 0, so a first-token run
+     *    does not exercise it - that has to wait for multi-token runs). */
+    float *Wq = in2_tensor_to_f32(ctx, &L->wq, NULL);
+    float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
+    float *q = (float *)calloc((size_t)qdim, sizeof(float));
+    if (Wq && q) {
+        in2_matvec(Wq, xq, d, qdim, q);
+        in2_l2_clip(q, qcl, NH, HD, 22.6274166f);
+        const float tau = 1.0f + 0.1f * logf(fmaxf(((float)pos0 + 1.0f) / 8192.0f, 1.0f));
+        for (int i = 0; i < qdim; ++i) q[i] *= tau;
+    } else { free(wq_n); free(state); free(qn); free(kn); free(vn);
+             free(xq); free(xk); free(xv); free(Wq); free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
+
+    /* 3. k and v with the DYNAMIC short conv (static per channel + per-head projected taps) */
+    float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
+    float *Wv = in2_tensor_to_f32(ctx, &L->wv, NULL);
+    float *kc = in2_tensor_to_f32(ctx, &L->k_conv, NULL);
+    float *vc = in2_tensor_to_f32(ctx, &L->v_conv, NULL);
+    float *kp = in2_tensor_to_f32(ctx, &L->k_conv_proj, NULL);
+    float *vp = in2_tensor_to_f32(ctx, &L->v_conv_proj, NULL);
+    float *kraw = (float *)calloc((size_t)kdim, sizeof(float));
+    float *vraw = (float *)calloc((size_t)kdim, sizeof(float));
+    float *kt = (float *)calloc((size_t)kdim, sizeof(float));
+    float *vt = (float *)calloc((size_t)kdim, sizeof(float));
+    float *k = (float *)calloc((size_t)kdim, sizeof(float));
+    float *v = (float *)calloc((size_t)kdim, sizeof(float));
+    int rc = WUBU_INKLING2_OK;
+    if (!Wk || !Wv || !kc || !vc || !kp || !vp || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
+    if (rc == WUBU_INKLING2_OK) {
+        in2_matvec(Wk, xk, d, kdim, kraw);
+        in2_matvec(Wv, xv, d, kdim, vraw);
+        in2_shortconv_dynamic(kraw, 1, kdim, kc, kp, xk, d, NKV, 4, kt);
+        in2_shortconv_dynamic(vraw, 1, kdim, vc, vp, xv, d, NKV, 4, vt);
+        memcpy(k, kt, sizeof(float) * kdim);
+        in2_l2_clip(k, NULL, NKV, HD, 22.6274166f);
+        memcpy(v, vt, sizeof(float) * kdim);
+        for (int hh = 0; hh < NKV; ++hh) {
+            float *row = v + hh * HD;
+            in2_rmsnorm_unweighted(row, HD, eps, row);
+        }
+    }
+
+    /* 4. relative bias + sinks, both conditioned on the q input */
+    float *Wrel = in2_tensor_to_f32(ctx, &L->wrel, NULL);
+    float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
+    float *P = in2_tensor_to_f32(ctx, &L->rel_bias, NULL);
+    float *Wsk = in2_tensor_to_f32(ctx, &L->sink, NULL);
+    const int DREL = 16, EXT = 1024;
+    float *rs = (float *)calloc((size_t)NH * DREL, sizeof(float));
+    float *bias = (float *)calloc((size_t)NH * EXT, sizeof(float));
+    float *sink = (float *)calloc((size_t)NH, sizeof(float));
+    if (Wrel && rcl && P && Wsk && rs && bias && sink) {
+        in2_matvec(Wrel, xq, d, NH * DREL, rs);
+        in2_l2_clip(rs, rcl, NH, DREL, 8.0f);
+        in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
+        in2_matvec(Wsk, xq, d, NH, sink);
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    /* 5. attention over every key (single token here, so one key plus the sink) */
+    float *attn_out = (float *)calloc((size_t)qdim, sizeof(float));
+    float *logit = (float *)malloc(sizeof(float) * (size_t)n_tok);
+    float *alpha = (float *)malloc(sizeof(float) * (size_t)n_tok);
+    if (attn_out && logit && alpha && rc == WUBU_INKLING2_OK) {
+        for (int hh = 0; hh < NH; ++hh) {
+            const int kvh = hh / (NH / NKV);
+            int n_key = 0;
+            for (int j = 0; j < n_tok; ++j) {
+                const int dist = pos0 - (pos0 + j - n_tok + 1);
+                (void)dist;
+                double acc = 0.0;
+                for (int e = 0; e < HD; ++e) acc += (double)q[hh * HD + e] * k[kvh * HD + e];
+                logit[n_key] = (float)acc * (1.0f / sqrtf((float)HD)) + bias[hh * EXT + 0];
+                ++n_key;
+            }
+            in2_softmax_sink(logit, n_key, sink[hh], alpha);
+            float *o = attn_out + hh * HD;
+            for (int j = 0; j < n_key; ++j)
+                for (int e = 0; e < HD; ++e) o[e] += alpha[j] * v[kvh * HD + e];
+        }
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    /* 6. gated output projection */
+    float *Wg = in2_tensor_to_f32(ctx, &L->wgate, NULL);
+    float *Wo = in2_tensor_to_f32(ctx, &L->wo, NULL);
+    float *gate = (float *)calloc((size_t)qdim, sizeof(float));
+    float *ao = (float *)calloc((size_t)d, sizeof(float));
+    if (Wg && Wo && gate && ao && rc == WUBU_INKLING2_OK) {
+        in2_matvec(Wg, xq, d, qdim, gate);
+        for (int i = 0; i < qdim; ++i) gate[i] = attn_out[i] * (1.0f / (1.0f + expf(-gate[i])));
+        in2_matvec(Wo, gate, qdim, d, ao);
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    /* 7. same tail as the sliding layer */
+    float *pc = in2_tensor_to_f32(ctx, &L->attn_post_conv, NULL);
+    float *res = (float *)calloc((size_t)d, sizeof(float));
+    if (pc && res && rc == WUBU_INKLING2_OK) {
+        in2_shortconv(ao, 1, d, pc, 4, res);
+        const int boundary = (cfg->attn_res_block > 0) && (il % cfg->attn_res_block == 0);
+        if (!boundary) for (int i = 0; i < d; ++i) res[i] = h[i] + res[i];
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    float *fq = in2_tensor_to_f32(ctx, &L->ffn_res_q, NULL);
+    float *mixed = (float *)calloc((size_t)d, sizeof(float));
+    float *fn = in2_tensor_to_f32(ctx, &L->ffn_norm, NULL);
+    float *moein = (float *)calloc((size_t)d, sizeof(float));
+    float *moeout = (float *)calloc((size_t)d, sizeof(float));
+    if (fq && mixed && fn && moein && moeout && rc == WUBU_INKLING2_OK) {
+        in2_mix(blocks, n_blocks, res, fq, 1, d, eps, mixed);
+        in2_rmsnorm(mixed, fn, d, eps, moein);
+        rc = in2_moe(ctx, m, cfg, il, moein, 1, moeout);
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
+    float *mo = (float *)calloc((size_t)d, sizeof(float));
+    if (pm && mo && rc == WUBU_INKLING2_OK) {
+        in2_shortconv(moeout, 1, d, pm, 4, mo);
+        for (int i = 0; i < d; ++i) h[i] = res[i] + mo[i];
+    } else rc = WUBU_INKLING2_ERR_IO;
+
+    free(wq_n); free(state); free(qn); free(kn); free(vn); free(xq); free(xk); free(xv);
+    free(Wq); free(qcl); free(q); free(Wk); free(Wv); free(kc); free(vc); free(kp); free(vp);
+    free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
+    free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
+    free(attn_out); free(logit); free(alpha); free(Wg); free(Wo); free(gate); free(ao);
+    free(pc); free(res); free(fq); free(mixed); free(fn); free(moein); free(moeout); free(pm); free(mo);
     return rc;
 }
 

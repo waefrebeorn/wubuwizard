@@ -449,6 +449,31 @@ comments on the static one that it differs from Inkling by having an output scal
 The four full layers also use `LogScaledL2Clip` on q (the `tau = 1 + 0.1*log(max((pos+1)/8192, 1))` term),
 which the sliding layers do not.
 
+## Step 7: token -> logits runs end to end (24 layers, one pass)
+
+`in2_layer_full` is implemented and wired in, so the depth path now reaches the lm_head:
+
+```
+forward rc=0  token=1234  d=2304 vocab=201024
+logits: max 19.4700  nan=0  logZ 21.8288
+  top1 id=196984   top2 id=60159   top3 id=150817   top4 id=64   top5 id=31109
+```
+
+Three tokens were run to check the output is input-dependent rather than constant: top-1 came out
+`51993`, `196984` and `82` for tokens 2, 1234 and 5000, with different max logits (19.42 / 19.47 / 17.03).
+
+**These are not the model's predictions and must not be read as such.** Two known gaps sit behind them:
+
+1. **One loop pass of three.** `IN2_SINGLE_PASS=1` is set; the message gates are still unimplemented, so
+   this is the output of a shallower model with the same layers.
+2. **Sliding layers ignore `block_states`.** They still use the single-block approximation where
+   `mlp_input` degenerates to a norm. The full layers do use the real 3-query mix. That inconsistency
+   means the two layer classes see different depth information, which is wrong in a way the logits cannot
+   reveal.
+
+So: the plumbing is complete end to end, and the numbers are structurally unverified. The next steps
+close the two gaps rather than adding features.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
