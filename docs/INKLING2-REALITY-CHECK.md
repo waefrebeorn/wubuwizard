@@ -404,3 +404,29 @@ The next attempt should do it by hand, function by function, starting with the s
 
 Expected: ~0.2 s of the 1.0 s step, i.e. ~20%, if the allocation traffic is what it looks like - and this time the
 measurement that motivates it is a phase total that does not add up, not a guess.
+
+### What the remaining costs mean (2026-11-25)
+
+The layer split is now fully accounted for - every phase plus the teardown sums to the layer time:
+
+| item | time | share | nature |
+|---|---|---|---|
+| moe | 0.264 s | 41% | **memory-bound on expert weights** |
+| allocator teardown | ~0.208 s | 33% | ~25 alloc/free pairs per visit - fixable with an arena |
+| k+v+conv | 0.093 s | 15% | kernel-bound (types 16/17 at 12-19 GOPS) |
+| q | 0.049 s | 8% | kernel-bound |
+| everything else | 0.026 s | 4% | attn, rel/sink, gate/wo, mix, tail |
+
+MoE arithmetic: 8 experts x 3 matrices per visit for the selected experts, 40 visits per decode step. It lands at
+roughly 10 GOPS effective where the same kernels measure 12-30 in isolation, which is the signature of waiting on
+memory rather than on the ALUs - the expert matrices are ~1.5 MB each and every visit reads a different 8 of them,
+so each token streams a few GB through a memory-mapped file with no reuse.
+
+That is the same conclusion the reference-class research reached from the other end: atomic-engine gets 43 tok/s in
+8 GB of RAM by controlling which experts are resident, and maya pins hot experts in VRAM. **The next real lever for
+this engine is expert residency (VRAM/RAM tiering), not more arithmetic work** - the kernels are already 12-30 GOPS
+and the file is mapped.
+
+Two scripted attempts at the arena refactor broke the function (regex and brace-counted rewrite both cut past the
+closing brace). Not trying a third scripted pass: it needs hand edits at ~25 call sites, and that is a dedicated
+piece of work, not something to squeeze in behind other changes.
