@@ -15,6 +15,7 @@
 #include <math.h>
 
 #include "wubu_inkling2.h"
+int in2_matvec_quant(gguf_ctx *, const wubu_in2_tensor_t *, int64_t, const float *, int, int, float *);
 
 void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
 void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
@@ -207,9 +208,38 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
     }
 
 
-    float *Wo = global_f32(ctx, "output.weight");
-    if (!Wo) { free(blocks); free(fin); free(fq); return WUBU_INKLING2_ERR_IO; }
-    in2_matvec(Wo, fin, d, cfg->vocab_size, logits);
+    /* LM head: 201024 x 2304 = 463M MACs per token, previously done as a scalar double dot over a 1.85 GB float
+     * copy of the matrix. output.weight is Q8_0, so it goes through the translated AVX2 kernel in row chunks -
+     * chunked because the kernel path reads a whole row block at a time and one call over all 201024 rows would
+     * malloc ~492 MB. elem_off is a multiple of both the weight block (32) and the activation block, and d = 2304
+     * keeps it a multiple of 64, so every chunk is legal for the kernels. Falls back to the float path unchanged
+     * when the kernels are unavailable, so the old numbers stay reproducible with IN2_NOFAST=1. */
+    int head_done = 0;
+    if (!getenv("IN2_NOFAST")) {
+        gguf_tensor_info *oinfo = NULL;
+        if (wubu_inkling2_global_tensor(ctx, "output.weight", &oinfo) == 1 && oinfo) {
+            wubu_in2_tensor_t ot;
+            memset(&ot, 0, sizeof ot);
+            ot.info = oinfo;
+            ot.file_offset = (int64_t)ctx->data_blob_offset + (int64_t)oinfo->data_offset;
+            const int CHUNK = 8192;
+            head_done = 1;
+            for (int r = 0; r < cfg->vocab_size; r += CHUNK) {
+                const int n = (r + CHUNK <= cfg->vocab_size) ? CHUNK : (cfg->vocab_size - r);
+                if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits + r) != WUBU_INKLING2_OK) {
+                    head_done = 0;
+                    break;
+                }
+            }
+            if (!head_done) fprintf(stderr, "lm_head kernel path failed at vocab %d, falling back\n", cfg->vocab_size);
+        }
+    }
+    if (!head_done) {
+        float *Wo = global_f32(ctx, "output.weight");
+        if (!Wo) { free(blocks); free(fin); free(fq); return WUBU_INKLING2_ERR_IO; }
+        in2_matvec(Wo, fin, d, cfg->vocab_size, logits);
+        free(Wo);
+    }
     const float cap = 30.0f;
     for (int i = 0; i < cfg->vocab_size; ++i) logits[i] = tanhf(logits[i] / cap) * cap;
 
@@ -219,6 +249,6 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
     if (cfg->vocab_size_unpadded > 0 && cfg->vocab_size_unpadded < cfg->vocab_size)
         for (int i = cfg->vocab_size_unpadded; i < cfg->vocab_size; ++i) logits[i] = -1e30f;
 
-    free(Wo); free(blocks); free(fin); free(fq);
+    free(blocks); free(fin); free(fq);
     return WUBU_INKLING2_OK;
 }
