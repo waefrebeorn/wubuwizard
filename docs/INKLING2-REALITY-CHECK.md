@@ -253,3 +253,32 @@ const row pointer and a row stride, so this should be a plumbing change, not an 
 
 Not the answer: GPU offload (82% of the step is outside arithmetic), more kernel tuning (kernels are at 19-49 GOPS),
 and the LM head (0.05-0.1 s).
+
+## 11. Measurement methodology correction (2026-11-25)
+
+Same binary, same 3-step decode, three consecutive runs:
+
+```
+run1  gen[1]  2.0 s
+run2  gen[1]  1.5 s
+run3  gen[1]  1.2 s
+```
+
+**1.7x spread on identical work.** The model file is 8.4 GB and is memory-mapped; the first run after a rebuild
+faults pages in from disk, later runs hit the page cache. Every timing in this document was taken from single runs,
+so individual deltas of 10-30% are **not trustworthy** as evidence of an optimisation - several of them may have
+been cache warming (and several real ones may have been masked by it).
+
+What this does not affect:
+- Correctness. Every logit and token comparison is deterministic and unaffected by timing.
+- The large results: O(n^2) -> O(n) (11.7x at prefix 20), kernels 42,774 -> ~4,000 ms prefill, the cache being exact.
+  Those are far outside the noise band.
+
+What it does affect: the small deltas - malloc reuse (2.1 -> 2.0), mapping-direct (1.9 -> 1.7), the AVX2 matvec
+(1.7 -> 1.6), the DQ-cache default (4.0 -> 3.7 prefill). Any of those could be partly or wholly noise.
+
+Rule going forward: warm the file (one full run), then take the **median of at least three** runs, and only claim a
+delta larger than the observed spread. Fix the harness before optimising further - chasing a 10% win against a 70%
+noise floor is how time disappears.
+
+Steady state at prefix 4 is ~1.2 s/step, not the 2.0 s a cold single run reports.
