@@ -529,6 +529,12 @@ warp (lanes 0-15 and 16-31, reduction inside each half) fixes it:
 
     LM head   10.96 -> 6.53 ms per token     (385 MB/token: 36 -> 59 GB/s, token-identical)
 
+The q/k/v projections have the same shape - 15 blocks per column - and the same idle lanes, which is
+why forcing the attention onto the host changed nothing (26.04 against 26.32 ms: the cost was never the
+attention arithmetic). The same two-columns-per-warp mapping for IQ2_S and IQ3_S at 16 blocks or fewer:
+
+    attention phase   26.07 -> 23.59 ms
+
 The same file had a second, smaller waste: `wubu_gpu_qkv3` wrote q|k|v into one contiguous device slab
 and then downloaded it in three separate transfers. One download into a host staging buffer plus two
 host memcpys removed two PCIe round trips per layer, 96 per token:

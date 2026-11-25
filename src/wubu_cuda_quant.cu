@@ -294,6 +294,48 @@ __global__ void matvec_kernel(const void * __restrict__ w, int type,
 }
 
 
+
+/* Same idle-lane problem at the attention projections: q/k/v are 15 QK_K blocks per column, so the
+ * warp-per-column mapping leaves 17 of 32 lanes idle and the attention phase ran at ~28 GB/s against
+ * the FFN's 65. Two columns per warp, reduction inside each 16-lane half. */
+__global__ void iq2s_matvec_w16_kernel(const uint8_t * __restrict__ w,
+                                       const c_q8_k * __restrict__ xq8,
+                                       float * __restrict__ y,
+                                       int64_t col_stride_bytes, int nblocks, int n_cols)
+{
+    const int wid = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    const int sub = lane >> 4, blk = lane & 15;
+    const int col = wid * 2 + sub;
+    if (col >= n_cols) return;
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+    float sum = 0.0f;
+    for (int b = blk; b < nblocks; b += 16)
+        sum += iq2s_block_dot((const c_iq2_s *)wcol + b, xq8 + b);
+    for (int off = 8; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, off);
+    if (blk == 0) y[col] = sum;
+}
+
+__global__ void iq3s_matvec_w16_kernel(const uint8_t * __restrict__ w,
+                                       const c_q8_k * __restrict__ xq8,
+                                       float * __restrict__ y,
+                                       int64_t col_stride_bytes, int nblocks, int n_cols)
+{
+    const int wid = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    const int sub = lane >> 4, blk = lane & 15;
+    const int col = wid * 2 + sub;
+    if (col >= n_cols) return;
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+    float sum = 0.0f;
+    for (int b = blk; b < nblocks; b += 16)
+        sum += iq3s_block_dot((const c_iq3_s *)wcol + b, xq8 + b);
+    for (int off = 8; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xffffffffu, sum, off);
+    if (blk == 0) y[col] = sum;
+}
+
 /* Q3_K decode matvec with two columns per warp. matvec_kernel gives one warp per column, but a
  * 3840-wide row is 15 QK_K blocks, so 17 of 32 lanes sat idle and the LM head measured ~36 GB/s
  * against the FFN's ~65. Here lanes 0-15 and 16-31 take one column each, so all but two lanes are
@@ -1235,12 +1277,20 @@ WUBU_EXPORT int wubu_cuda_quant_matvec(const void *d_w, int type,
                                        int K, int n_cols, int64_t col_stride_bytes)
 {
     if (!d_w || !d_xq8 || !d_y || K <= 0 || n_cols <= 0 || (K % QK_K) != 0) return -1;
-    /* Q3_K with 16 or fewer blocks per column: two columns per warp, because the generic
-     * warp-per-column mapping leaves more than half the lanes idle at this width. */
-    if (type == 11 && (K / QK_K) <= 16) {
+    /* 16 or fewer blocks per column (the LM head at 15, the q/k/v projections at 15): two columns
+     * per warp, because the generic warp-per-column mapping leaves more than half the lanes idle at
+     * this width. The FFN's 60-block columns keep the warp-per-column kernel. */
+    if ((K / QK_K) <= 16 && (type == 11 || type == 22 || type == 21)) {
         const int warps = (n_cols + 1) / 2;
-        q3k_matvec_w16_kernel<<<(warps + 3) / 4, 128>>>((const uint8_t *)d_w, (const c_q8_k *)d_xq8,
-                                                       d_y, col_stride_bytes, K / QK_K, n_cols);
+        if (type == 11)
+            q3k_matvec_w16_kernel<<<(warps + 3) / 4, 128>>>((const uint8_t *)d_w, (const c_q8_k *)d_xq8,
+                                                            d_y, col_stride_bytes, K / QK_K, n_cols);
+        else if (type == 22)
+            iq2s_matvec_w16_kernel<<<(warps + 3) / 4, 128>>>((const uint8_t *)d_w, (const c_q8_k *)d_xq8,
+                                                            d_y, col_stride_bytes, K / QK_K, n_cols);
+        else
+            iq3s_matvec_w16_kernel<<<(warps + 3) / 4, 128>>>((const uint8_t *)d_w, (const c_q8_k *)d_xq8,
+                                                            d_y, col_stride_bytes, K / QK_K, n_cols);
         return cudaGetLastError() == cudaSuccess ? 0 : -4;
     }
     const int warps_per_block = 4;
