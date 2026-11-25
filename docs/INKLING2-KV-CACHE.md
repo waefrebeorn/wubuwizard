@@ -143,3 +143,30 @@ does (whole-sequence vs prepended-history, both against `in2_shortconv_dynamic`)
 tap-order bug cannot hide behind zeros.
 
 The batch conv stays. It is correct for any full recompute, and full recompute is what runs today.
+
+## Incremental step diverges - isolated (2026-11-25)
+
+Smallest possible case, 1-token prefill then 1 step:
+
+| | gen[0] (prefill) | gen[1] (one step) |
+|---|---|---|
+| full recompute | 220 / 27.9802 | 61840 / 19.2437 |
+| incremental | 220 / 27.9802 | **43663 / 20.6381** |
+
+`gen[0]` matching exactly is the useful part: **the prefill path is exact with the cache attached**, including the
+conv-history push. The divergence appears on the step. The 3-token run matching earlier (149876/149917/151451) was
+coincidence, not correctness - it agreed on tokens while carrying a 0.5-logit difference.
+
+So the bug is in the read path, not the store path, and it is not the four convs (those are now cached and the
+prefill proves the push order is right).
+
+Next test, in order:
+1. Dump `h` at the layer boundary (`IN2_DUMPX_LAYER`) for the step and for a 2-token recompute at the same position,
+   compare layer by layer, and find the FIRST layer that differs. That splits "everything upstream is wrong" from
+   "this layer's read is wrong" in one run, instead of guessing.
+2. With that layer known, check in order: does `in2_kv_k/v(.., j)` for j < pos0 return the row the recompute used
+   (compare against a dumped prefill row), then the bias `dist = gp - j`, then the tau/log-scale factor.
+3. Only after a layer is proven equal, remove the conv history from suspicion - it is currently proven only for the
+   prefill, where history is zeros.
+
+Do not treat the cache as working until the 1+1 case matches to 1e-4. The tokens agreeing at 3+1 is not evidence.
