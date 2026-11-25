@@ -21,6 +21,7 @@ long   in2_ty_calls[256];
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
 #include "wubu_inkling2_kv.h"
+const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
 #include "wubu_dequant_fp4.h"
 #include "wubu_iq2q8.h"
 #include "wubu_iq_c11.h"
@@ -200,13 +201,17 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
             if (whole && actbuf && boff >= 0) {
                 wubu_in2_tensor_t sh = *t;
                 sh.file_offset = t->file_offset + boff;
-                if (wubu_inkling2_read(ctx, &sh, whole, rb * n_out) == WUBU_INKLING2_OK) {
+                /* read straight from the mapping when it exists: this path runs ~1150 times per decode token over
+                 * ~1.5 MB expert matrices, so the copy was ~1.7 GB of memcpy per token on immutable mapped data */
+                const unsigned char *msrc = wubu_inkling2_map_ptr(ctx, &sh);
+                if (msrc || wubu_inkling2_read(ctx, &sh, whole, rb * n_out) == WUBU_INKLING2_OK) {
+                    const unsigned char *src = msrc ? msrc : whole;
                     if (q8_0_act) in2_q8_0_quantise(x, n_in / 32, (in2_q8_0_blk *)actbuf);
                     else          in2_q8k_quantise(x, n_in / 256, (in2_q8k_blk *)actbuf);
                     const void *ap[1] = { actbuf };
                     float *op[1] = { y };
                     { const clock_t _q0 = clock();
-                    wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);
+                    wubu_iq_rows(ty_mv, src, (size_t)rb, n_in, ap, 1, op, 0, n_out);
                     if (ty_mv >= 0 && ty_mv < 256) {
                         in2_ty_sec[ty_mv] += (double)(clock() - _q0) / (double)CLOCKS_PER_SEC;
                         in2_ty_calls[ty_mv] += 1;
@@ -348,8 +353,11 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
             else whole = NULL;
         }
         void *act = malloc(ablk * (size_t)nab * (size_t)nt);
-        if (whole && act) {
-            if (wubu_inkling2_read(ctx, t, whole, rb * n_out) == WUBU_INKLING2_OK) {
+        const unsigned char *mapped = wubu_inkling2_map_ptr(ctx, t);
+        if (act && (mapped || whole)) {
+            const int have = mapped ? 1 : (wubu_inkling2_read(ctx, t, whole, rb * n_out) == WUBU_INKLING2_OK);
+            if (have) {
+                const unsigned char *base = mapped ? mapped : whole;
                 for (int i = 0; i < nt; ++i) {
                     const float *x = X + (size_t)i * n_in;
                     void *a = (unsigned char *)act + ablk * (size_t)nab * (size_t)i;
@@ -366,7 +374,7 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                         op[i] = Y + (size_t)(g + i) * n_out;
                     }
                     const clock_t _k0 = clock();
-                    wubu_iq_rows(ty, whole, (size_t)rb, n_in, ap, nn, op, 0, n_out);
+                    wubu_iq_rows(ty, base, (size_t)rb, n_in, ap, nn, op, 0, n_out);
                     if (ty >= 0 && ty < 256) {
                         in2_ty_sec[ty] += (double)(clock() - _k0) / (double)CLOCKS_PER_SEC;
                         in2_ty_calls[ty] += 1;

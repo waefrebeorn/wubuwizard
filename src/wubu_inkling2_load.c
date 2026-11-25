@@ -267,6 +267,22 @@ static int in2_try_map(gguf_ctx *ctx)
 }
 #endif
 
+/* Direct view of a tensor in the file mapping. The kernels take a const row pointer and a stride, so they can read
+ * the mapping in place - copying each matrix out first was ~1.7 GB per decode token of pure memcpy on data that is
+ * already mapped and never modified. NULL when the mapping is unavailable, in which case callers fall back to read. */
+const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *ctx, const wubu_in2_tensor_t *t)
+{
+#ifdef _WIN32
+    if (!ctx || !t || !t->info || t->file_offset < 0) return NULL;
+    if (!in2_try_map(ctx)) return NULL;
+    if (t->file_offset > g_view_size) return NULL;
+    return g_view + t->file_offset;
+#else
+    (void)ctx; (void)t;
+    return NULL;
+#endif
+}
+
 int wubu_inkling2_read(gguf_ctx *ctx, const wubu_in2_tensor_t *t, void *dst, int64_t nbytes)
 {
     if (!ctx || !t || !t->info) return WUBU_INKLING2_ERR_MISSING_TENSOR;
