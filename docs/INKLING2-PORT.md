@@ -1256,3 +1256,34 @@ still a legitimate source for what a tensor means.
 
 Running tally, stated plainly because it matters more than the wins: **nine broken instruments, four real
 defects.** The ninth was mine, and it cost a full investigation.
+
+## The message gate: joint RMS, and the first plausible token
+
+`llama.cpp b12723`'s `inkling2.cpp:255-265` states the cross-pass control precisely:
+
+```
+gate   = rms_norm( concat([cur ; message]) )       // ONE norm over all 2*n_embd values, eps 1e-6
+gate   = ctrl_down[ctrl] @ gate                     // [rank]
+gain   = tanh(ctrl_gain[ctrl]   @ gate)             // [n_embd]
+forget = tanh(ctrl_forget[ctrl] @ gate)             // [n_embd]
+out    = cur - forget*cur + gain*message
+```
+
+The port's `in2_message_gate` did the same arithmetic but normalised `cur` and `message` **separately**.
+That destroys the relative magnitude between the layer input and the message - exactly the quantity a
+forget/gain pair exists to weigh - so it is not a rounding difference in principle.
+
+Measured, single token 1234:
+
+```
+joint    (llama.cpp's form)   top1 id=220    logit=19.8970   -> ' '
+separate (the old form)       top1 id=14776  logit=19.4018   -> 'ä¸Ī'
+```
+
+A space is one of the most likely tokens in any text; `'ä¸Ī'` is a CJK fragment that has no business leading
+a distribution after the subword `'ute'`. That is suggestive rather than conclusive - one token, no reference
+distribution - so it is recorded as evidence, not proof. `IN2_SEPARATE_GATE=1` keeps the old path for A/B.
+
+Also confirmed while reading the same file, and matching the port: `control()` is applied to the **depth-mixed
+state before the input norms** (line 322-340), and on sliding layers it yields **three distinct q/k/v inputs**,
+one per control slot, each then normed with `attn_norm` - the port does both.
