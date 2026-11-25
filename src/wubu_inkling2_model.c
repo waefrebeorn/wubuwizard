@@ -10,6 +10,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <math.h>
 
@@ -141,6 +142,17 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
     for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il)
         RUN_LAYER(il, NULL);
 
+    /* LoopCD (arXiv 2610.02185, Eq. 2): the first recurrent state h_1 is a WEAK prediction of the same next
+     * token, because it embodies less computation than h_R. Standard decoding throws it away. Keeping it lets
+     * us extrapolate away from the weak prediction before the coda, at zero extra head passes:
+     *     h' = h_R + w * (h_R - h_1)
+     * w = 0 must reproduce the baseline bit for bit - that is this feature's instrument check. */
+    float *h1 = NULL;
+    if (getenv("IN2_LOOPCD") && n_loops > 1 && rc == WUBU_INKLING2_OK) {
+        h1 = (float *)malloc(sizeof(float) * ND);
+        if (h1) memcpy(h1, h, sizeof(float) * ND);
+    }
+
     /* each later pass restarts from the pre-loop state and carries only the messages */
     for (int pass = 1; pass < n_loops && rc == WUBU_INKLING2_OK; ++pass) {
         memcpy(prev_h, h, sizeof(float) * ND);
@@ -157,6 +169,14 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
             if (qres && qkv) in2_messages(prev_blocks, n_prev, prev_h, qres, qkv, li, d, eps, msgs);
             RUN_LAYER(il, (qres && qkv) ? msgs : NULL);
         }
+    }
+
+    if (h1 && rc == WUBU_INKLING2_OK) {
+        const float w = (float)atof(getenv("IN2_LOOPCD"));
+        for (size_t i = 0; i < (size_t)ND; ++i) h[i] = h[i] + w * (h[i] - h1[i]);
+        if (getenv("IN2_VERBOSE"))
+            fprintf(stderr, "LoopCD-Hidden: w=%g over %d positions (h_R extrapolated away from h_1)\n", w, n_tok);
+        free(h1); h1 = NULL;
     }
 
     /* post-loop layers */

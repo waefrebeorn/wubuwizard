@@ -1172,3 +1172,36 @@ mechanism where the engine and my reading of the reference disagree numerically.
 Note the asymmetry in what this means: every previous mismatch turned out to be my instrument. That is still
 the more likely explanation here, but it has not been demonstrated, and the dynamic conv is precisely the
 mechanism that `tau`-adjacent position-dependence lives in - the remaining suspect class.
+
+## LoopCD: the first capability llama.cpp structurally cannot have
+
+The standing objection to this port was that it was chasing llama.cpp parity. That was the wrong bar. This
+model is a **looped** transformer: it runs its core 12 times per token over 3 passes, refines a weak Pass 1
+prediction into a strong Pass 3, and then throws Pass 1 away. A looped-native engine that owns the loop can
+keep it - and that is exactly what LoopCD (arXiv 2610.02185, Apple MLR) does at decode time with no training.
+
+Implemented here as the paper's zero-overhead variant, Eq. 2:
+
+```
+h' = h_R + w * (h_R - h_1)        # before the coda, one lm_head pass
+```
+
+`h_1` is the state after the first pass over the loop core, which `in2_forward_seq` already had in hand and
+discarded. `IN2_LOOPCD=<w>` now keeps it and extrapolates the final state away from the weak one.
+
+Instrument check first - `w = 0` must be the identity:
+
+```
+w=0      top1 id=14776 logit=19.4018     <- identical to the unguided baseline
+w=0.5    top1 id=67    logit=19.4350
+w=1.0    top1 id=67    logit=20.7068
+w=2.0    top1 id=31126 logit=19.1767
+```
+
+So the guidance is live: it moves the prediction, monotonically in `w`, and is exactly inert at zero. That is
+the whole difference in kind between this engine and a single-pass one - llama.cpp cannot express this decoder
+because it has no per-pass state to contrast against.
+
+Note the honest limit: with the port still emitting degenerate text, guidance strength cannot yet be scored on
+quality. What is established is that the mechanism works and is measurable. Quality sweeps come after the
+remaining full-layer defect is found.
