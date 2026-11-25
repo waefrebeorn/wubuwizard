@@ -106,13 +106,60 @@ Layer, in order:
 Output: `mix(blocks, cur, output_res_query)` → `rms_norm(output_norm)` → `output` → softcap 30 →
 **drop the padded vocab** (keep 200058 of 201024).
 
-## What is missing upstream and must be designed here
+## Loop semantics (authoritative)
 
-The loop driver. From the metadata and `control()`: layers 6..17 run three passes; each pass produces
-four messages per layer (q, k, v, ffn) that gate the next pass's inputs; the `loop_*` tensors are per
-layer, not per pass, so the same gates are applied each pass while the message differs. Layer-6's three
-passes share one KV cache slot history (the reason the tweet is about cache sharing: without it the 12
-core layers need 3x the KV, which is the 8.76 -> 4.38 GB claim).
+**Source of truth: the base model, `transformers/models/inkling2_loop/modular_inkling2_loop.py`.** Not
+llama.cpp - its `inkling2` is the single-pass "pure model" and has no loop driver at all, so it cannot be
+the reference for the part that matters. Recorded here because a spec taken from a partial implementation
+is how a port gets a wrong skeleton.
+
+Logical depth is **24 + (passes-1) x 12 = 48** (`model_config` computes
+`num_hidden_layers + (loop_num_passes - 1) * num_loop_layers`), which is what `block_count = 48` in the
+GGUF means. The three passes are not a chain in the naive sense:
+
+```
+pre   : layers 0..5
+pass1 : layers 6..17, block_states accumulates at block boundaries
+pass2+: hidden_states, block_states = pre_loop_hidden_states, pre_loop_block_states   <- RESTART
+        messages = message_input(previous_block_states, previous_hidden_states, loop_layer_idx)
+        each layer: gate its q/k/v/mlp inputs with those messages, using its OWN cache copies
+post  : layers 18..23
+final : final_input(block_states, hidden_states)[0] -> norm
+```
+
+Three consequences that a naive "run the layer three times" implementation gets wrong:
+
+1. **Each later pass restarts from the pre-loop state**, so the passes do not compound through the
+   residual stream - what carries over is the *messages* from the previous pass.
+2. **Messages are recomputed from the previous pass's hidden and block states** by
+   `Inkling2LoopMessageAttentionResidual`: learned queries of shape
+   `[loop_layers, 4, hidden]` (`[12, 4, 2304]`) attend over `rms_norm(concat(block_states, partial))`
+   with scaling `hidden**-0.5`, giving four messages per layer - query, key, value, mlp.
+3. **Each pass uses its own KV cache copies** (`cache.layers` is extended by
+   `deepcopy(loop_cache_layers) * (passes - 1)`, and `cache_offset` addresses them). That is the 3x KV
+   the tweet is about: 24 caches become 48 histories, and sharing them back down to 24 halves KV memory.
+
+Message gate (`Inkling2LoopMessageGate`), per input:
+
+```
+gate    = down_proj(concat(rms(h), rms(message)))      # 2*hidden -> rank 64
+forget  = tanh(forget_gate_proj(gate))                  # 64 -> hidden
+msg_gate= tanh(message_gate_proj(gate))
+out     = (1 - forget) * h + msg_gate * message
+```
+
+(Norm is unweighted RMS. The projections are float32 in the reference.)
+
+Layer input selection matches the tensor census: sliding layers use one `input_layernorm` for q, k, v;
+full-attention layers have separate `attn_{q,k,v}_inp_norm` - and those exist on exactly the 4 full
+layers (5, 11, 17, 23).
+
+## Expert magnitudes: resolved
+
+The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
+convention, not a misread: every expert tensor has a per-expert `.scale` companion (F32, one value per
+expert, ~4e-5 to 2e-4), and the product lands in the same range as everything else. The `.scale` is
+applied at runtime.
 
 ## LoopCD (arXiv 2610.02185) - where it plugs in
 
