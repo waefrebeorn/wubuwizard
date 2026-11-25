@@ -36,5 +36,8 @@ long wubu_fp4_raw_size(int ggml_type, long n_elems);
 void dequantize_row_mxfp4(const unsigned char *data, float *output, long n_elems);
 void dequantize_row_nvfp4(const unsigned char *data, float *output, long n_elems);
 void dequantize_row_q2_0(const unsigned char *data, float *output, long n_elems);
+/* Dot of a Q2_0 row against x WITHOUT materialising the row as floats.
+ * value_j = (q_j - 1) * d, q_j in 0..3, so the block contributes d * (sum q_j*x_j - sum x_j). */
+void dot_row_q2_0(const unsigned char *data, const float *x, long n_elems, float *out);
 
 #endif /* WUBU_DEQUANT_FP4_H */

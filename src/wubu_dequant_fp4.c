@@ -120,6 +120,35 @@ void dequantize_row_nvfp4(const unsigned char *data, float *output, long n_elems
     }
 }
 
+/* Fused Q2_0 dot: never builds the float row.
+ *
+ * dequantize_row_q2_0 writes 64 floats per block and the caller then reads all 64 back to dot them, so the
+ * value never leaves a 256-byte buffer. Here the 2-bit quants are unpacked and multiplied against x directly:
+ * value = (q - 1) * d, so a block contributes d * (sum q_j x_j - sum x_j), which is one pass over x and the
+ * quant bytes with no intermediate store. Same arithmetic, same order of accumulation per element, so the
+ * result is the reference result up to float rounding - which is what the test in tools/dot_test.c checks. */
+void dot_row_q2_0(const unsigned char *data, const float *x, long n_elems, float *out)
+{
+    const long nb = (n_elems + 63) / 64;
+    double acc = 0.0;
+    for (long b = 0; b < nb; ++b) {
+        const unsigned char *blk = data + b * 18;
+        uint16_t d_bits = 0;
+        memcpy(&d_bits, blk, 2);
+        const float d = f16_to_f32(d_bits);
+        const unsigned char *qs = blk + 2;
+        const float *xb = x + b * 64;
+        double sum = 0.0;
+        const long lim = (b * 64 + 64 <= n_elems) ? 64 : (n_elems - b * 64);
+        for (long j = 0; j < lim; ++j) {
+            const unsigned char q = (unsigned char)((qs[j >> 2] >> ((j & 3) * 2)) & 0x03u);
+            sum += (double)((int)q - 1) * (double)xb[j];
+        }
+        acc += (double)d * sum;
+    }
+    *out = (float)acc;
+}
+
 void dequantize_row_q2_0(const unsigned char *data, float *output, long n_elems)
 {
     const long nb = (n_elems + 63) / 64;
