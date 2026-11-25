@@ -478,7 +478,31 @@ M-row kernels agree with each other to float precision while disagreeing with th
 unproven stays gated behind `G4_XXS_MMA`, and the next step is a harness that computes both paths into
 separate buffers within one process and compares them **before** any other code touches those buffers.
 
-### Rule: an instrument must be checked against a known answer before it is believed
+#
+### Decode: where the 71 ms per token actually goes
+
+`G4_PROF` at 61 tokens of context, and then an A/B on each device path:
+
+    layer total      61.01 ms        default (device attention)   14.2 tok/s
+    ffn all          33.85 ms        attention block on the CPU   14.1 tok/s
+    attn out+resid   26.26 ms        ffn on the CPU               12.3 tok/s
+    head             10.64 ms        both on the CPU              12.3 tok/s
+    o proj            0.22 ms
+
+Two things follow. The fused FFN is worth 15% at decode (14.2 against 12.3 with `G4_FFN_CPU`). The
+**device attention block is worth nothing at decode** - 14.2 against 14.1 with `G4_ATTN_BLOCK_CPU` - which
+is consistent with its `N > 1` gate and means the attention phase is not compute-bound at this context
+length.
+
+The `attn out+resid` line is misattributed and should not be read as a norm cost: `attn_block_done`
+jumps past the timer reset, so that span actually covers the whole attention phase. The 26 ms is the
+per-layer host round trips - q, k, v and the o-projection each come back to the host, 48 layers times
+roughly four downloads at a few tenths of a millisecond each. That, not the arithmetic, is what stands
+between 14.2 tok/s and llama.cpp's 24.3: keeping q/k/v/o and the residual stream device-resident for the
+decode step is the next refactor, and unlike the prefill version of that idea (which measured neutral)
+this one has 26 of 71 ms to win.
+
+## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
 looked plausible:
