@@ -53,6 +53,15 @@ typedef struct {
     float situ_beta;
     float situ_linear_beta;
     float logit_softcap;
+    /* These four were hardcoded in the forward pass. They happen to match this checkpoint exactly, but a
+     * hardcoded constant that agrees with the file is indistinguishable from a correct one until a second
+     * file disagrees - so they are read from the metadata now. */
+    float log_scale_alpha;   /* inkling2.attention.log_scale_alpha   (0.1 here)  */
+    int   log_scale_floor;   /* inkling2.attention.log_scale_floor   (8192 here)  */
+    float qk_clip;           /* inkling2.attention.qk_clip           (16*sqrt2)   */
+    float rel_clip;          /* inkling2.attention.relative_clip     (8.0 here)   */
+    int   rel_extent;        /* inkling2.attention.relative_extent   (1024 here)  */
+    int   rel_length;        /* inkling2.attention.relative_length   (16 here)    */
 } wubu_inkling2_cfg_t;
 
 /* Fills cfg from the GGUF's inkling2.* keys. 0 on success, negative enum on error. */

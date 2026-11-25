@@ -116,8 +116,12 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     for (int t = 0; t < n_tok; ++t) {
         float *qt = q + (size_t)t * qdim;
         in2_matvec(Wq, xq + (size_t)t * d, d, qdim, qt);
-        in2_l2_clip(qt, qcl, NH, HD, 22.6274166f);
-        const float tau = 1.0f + 0.1f * logf(fmaxf(((float)(pos0 + t) + 1.0f) / 8192.0f, 1.0f));
+        in2_l2_clip(qt, qcl, NH, HD, cfg->qk_clip);
+        /* tau = 1 + alpha * log(max(1, (pos+1)/floor)); reads 1.0 for every position below the floor.
+         * It scales the relative-bias query as well as q (llama.cpp inkling2.cpp:357-358), which the
+         * port previously missed - invisible at short context, wrong past the floor. */
+        const float tau = 1.0f + cfg->log_scale_alpha *
+            logf(fmaxf(((float)(pos0 + t) + 1.0f) / (float)cfg->log_scale_floor, 1.0f));
         for (int i = 0; i < qdim; ++i) qt[i] *= tau;
     }
 
@@ -181,7 +185,14 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     if (rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs);
-            in2_l2_clip(rs, rcl, NH, DREL, 8.0f);
+            in2_l2_clip(rs, rcl, NH, DREL, cfg->rel_clip);
+            /* the relative-bias query carries the same log-position tau as q (inkling2.cpp:357-358).
+             * No effect below the 8192 floor, which is why it survived every short-context check. */
+            {
+                const float tau = 1.0f + cfg->log_scale_alpha *
+                    logf(fmaxf(((float)(pos0 + t) + 1.0f) / (float)cfg->log_scale_floor, 1.0f));
+                if (tau != 1.0f) for (int i = 0; i < NH * DREL; ++i) rs[i] *= tau;
+            }
             in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
             in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
             for (int hh = 0; hh < NH; ++hh) {

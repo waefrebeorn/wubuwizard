@@ -1287,3 +1287,26 @@ distribution - so it is recorded as evidence, not proof. `IN2_SEPARATE_GATE=1` k
 Also confirmed while reading the same file, and matching the port: `control()` is applied to the **depth-mixed
 state before the input norms** (line 322-340), and on sliding layers it yields **three distinct q/k/v inputs**,
 one per control slot, each then normed with `attn_norm` - the port does both.
+
+## tau: two gaps closed, both invisible at short context
+
+`llama.cpp inkling2.cpp:276-278` defines the log-position scale, and lines 357-358 apply it:
+
+```
+tau = 1 + log_scale_alpha * log( max(1, (pos+1) / log_scale_floor) )
+Qcur *= tau ;  Rcur *= tau          // the relative-bias query too, not just q
+```
+
+The port had the right formula but with `0.1` and `8192` hardcoded and applied **only to q**. Both constants do
+match this checkpoint (`log_scale_alpha = 0.1`, `log_scale_floor = 8192`, measured from the file), so the
+hardcoding was a fragility rather than a live bug - but a constant that agrees with the file is
+indistinguishable from a correct one until a second file disagrees.
+
+The missing `Rcur *= tau` is a real gap, and it is invisible in every check run so far because `tau == 1.0`
+for every position below 8192. That is exactly the class of defect this port keeps finding: correct on the
+only input it has ever been run with.
+
+Both fixed: `log_scale_alpha`, `log_scale_floor`, `qk_clip`, `rel_clip`, `rel_extent`, `rel_length` are now
+read from the metadata and carried in the config, and `R` carries the same tau as `q`. Single-token output is
+unchanged (top1 220, logit 19.8970) precisely because tau is 1 there - which is the expected result, not
+evidence that nothing happened.

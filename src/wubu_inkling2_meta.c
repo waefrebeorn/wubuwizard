@@ -39,6 +39,12 @@ int wubu_inkling2_probe(gguf_ctx *ctx, wubu_inkling2_cfg_t *cfg)
         !kv_i32(ctx, "inkling2.expert_count", &cfg->n_expert) ||
         !kv_i32(ctx, "inkling2.expert_used_count", &cfg->n_expert_used) ||
         !kv_i32(ctx, "inkling2.expert_feed_forward_length", &cfg->d_ff_expert) ||
+        !kv_f32(ctx, "inkling2.attention.log_scale_alpha", &cfg->log_scale_alpha) ||
+        !kv_i32(ctx, "inkling2.attention.log_scale_floor", &cfg->log_scale_floor) ||
+        !kv_f32(ctx, "inkling2.attention.qk_clip", &cfg->qk_clip) ||
+        !kv_f32(ctx, "inkling2.attention.relative_clip", &cfg->rel_clip) ||
+        !kv_i32(ctx, "inkling2.attention.relative_extent", &cfg->rel_extent) ||
+        !kv_i32(ctx, "inkling2.attention.relative_length", &cfg->rel_length) ||
         !kv_i32(ctx, "inkling2.attention.key_length", &cfg->head_dim) ||
         !kv_i32(ctx, "inkling2.num_loops", &cfg->n_loops) ||
         !kv_i32(ctx, "inkling2.loop.core_start", &cfg->loop_core_start) ||
