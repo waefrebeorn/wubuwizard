@@ -11,6 +11,7 @@
 #include <math.h>
 
 #include "wubu_inkling2.h"
+#include "wubu_inkling2_kv.h"
 
 void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
 void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
@@ -36,6 +37,10 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     const wubu_in2_layer_t *L = &m->layer[il];
     const int d = cfg->d_model, NH = cfg->n_head, NKV = cfg->n_kv_head, HD = cfg->head_dim;
     const int qdim = NH * HD, kdim = NKV * HD, DREL = 16, EXT = 1024;
+    int vvis = 0, kv_pos0 = pos0;
+    in2_kv_t *kv = in2_kv_current(&vvis, &kv_pos0);
+    if (!kv) kv_pos0 = pos0;
+    if (kv && getenv("IN2_KV_TRACE")) fprintf(stderr, "FULL il=%d visit=%d pos0=%d n_tok=%d\n", il, vvis, kv_pos0, n_tok);
     const float eps = cfg->rms_eps;
     const size_t ND = (size_t)n_tok * d;
 
@@ -166,6 +171,15 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
                 float *row = v + (size_t)t * kdim + hh * HD;
                 in2_rmsnorm_unweighted(row, HD, eps, row);
             }
+            /* Stored here, before attention: the read path serves these same rows, and the earlier attempt wrote V
+             * only at the end of the layer, so the same visit read calloc'd zeros. */
+            if (kv) {
+                float *ck = in2_kv_k(kv, vvis, kv_pos0 + t);
+                float *cv = in2_kv_v(kv, vvis, kv_pos0 + t);
+                if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
+                if (cv) memcpy(cv, v + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
+                in2_kv_store_raw(kv, vvis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
+            }
         }
     }
 
@@ -177,8 +191,9 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     float *rs = (float *)calloc((size_t)NH * DREL, sizeof(float));
     float *bias = (float *)calloc((size_t)NH * EXT, sizeof(float));
     float *sink = (float *)calloc((size_t)n_tok * NH, sizeof(float));
-    float *logit = (float *)malloc(sizeof(float) * (size_t)n_tok);
-    float *alpha = (float *)malloc(sizeof(float) * (size_t)n_tok);
+    /* sized for the visible prefix, not the batch: with a cache n_key = pos0 + t + 1 */
+    float *logit = (float *)malloc(sizeof(float) * ((size_t)n_tok + (size_t)pos0 + 1u));
+    float *alpha = (float *)malloc(sizeof(float) * ((size_t)n_tok + (size_t)pos0 + 1u));
     float *attn_out = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if (!(Wrel && rcl && P && Wsk && rs && bias && sink && logit && alpha && attn_out)) rc = WUBU_INKLING2_ERR_IO;
 
@@ -198,11 +213,14 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
             for (int hh = 0; hh < NH; ++hh) {
                 const int kvh = hh / (NH / NKV);
                 int n_key = 0;
-                for (int j = 0; j <= t; ++j) {           /* causal */
-                    const int dist = t - j;
+                const int gp = kv_pos0 + t;
+                for (int j = 0; j <= gp; ++j) {           /* causal, global positions */
+                    const int dist = gp - j;
+                    const float *kbp;
+                    if (kv) { kbp = in2_kv_k(kv, vvis, j); if (!kbp) continue; kbp += kvh * HD; }
+                    else    { kbp = k + (size_t)(j - kv_pos0) * kdim + kvh * HD; }
                     double acc = 0.0;
-                    for (int e = 0; e < HD; ++e)
-                        acc += (double)q[(size_t)t * qdim + hh * HD + e] * k[(size_t)j * kdim + kvh * HD + e];
+                    for (int e = 0; e < HD; ++e) acc += (double)q[(size_t)t * qdim + hh * HD + e] * (double)kbp[e];
                     logit[n_key] = (float)acc * (1.0f / sqrtf((float)HD))
                                  + (dist < EXT ? bias[hh * EXT + dist] : 0.0f);
                     ++n_key;
@@ -215,8 +233,12 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
                 const float inv = (float)(1.0 / tot);
                 for (int i = 0; i < n_key; ++i) alpha[i] *= inv;
                 float *o = attn_out + (size_t)t * qdim + hh * HD;
-                for (int j = 0; j < n_key; ++j)
-                    for (int e = 0; e < HD; ++e) o[e] += alpha[j] * v[(size_t)j * kdim + kvh * HD + e];
+                for (int j = 0; j < n_key; ++j) {
+                    const float *vbp;
+                    if (kv) { vbp = in2_kv_v(kv, vvis, j); if (!vbp) continue; vbp += kvh * HD; }
+                    else    { vbp = v + (size_t)(j - kv_pos0) * kdim + kvh * HD; }
+                    for (int e = 0; e < HD; ++e) o[e] += alpha[j] * vbp[e];
+                }
             }
         }
     }
@@ -291,5 +313,6 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
     free(logit); free(alpha); free(attn_out); free(Wg); free(Wo); free(gate); free(ao);
     free(pc); free(res); free(fq); free(mixed); free(fn); free(moein); free(moeout); free(pm); free(mo);
+    if (kv) in2_kv_advance();
     return rc;
 }
