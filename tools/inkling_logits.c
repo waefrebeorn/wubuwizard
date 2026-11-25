@@ -26,6 +26,10 @@ int main(int argc, char **argv)
     float *h = (float *)calloc((size_t)n_tok * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
     const int rc = in2_forward_seq(ctx, &m, &cfg, toks, n_tok, h, logits);
+    if (getenv("IN2_DUMP_LOGITS")) {
+        FILE *lf = fopen(getenv("IN2_DUMP_LOGITS"), "wb");
+        if (lf) { fwrite(logits, sizeof(float), (size_t)cfg.vocab_size, lf); fclose(lf); }
+    }
     printf("forward rc=%d  n_tok=%d  d=%d vocab=%d\n", rc, n_tok, cfg.d_model, cfg.vocab_size);
     if (rc != 0) return rc;
 

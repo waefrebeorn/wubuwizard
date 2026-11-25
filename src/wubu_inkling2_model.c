@@ -174,6 +174,12 @@ int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_in
     float out_h[1];
     (void)out_h;
     if (on) { in2_rmsnorm(fin, on, d, eps, fin); free(on); }
+    if (getenv("IN2_DUMP_H")) {
+        const char *hp = getenv("IN2_DUMP_H");
+        FILE *hf = fopen(hp, "wb");
+        if (hf) { fwrite(fin, sizeof(float), (size_t)d, hf); fclose(hf); }
+        fprintf(stderr, "dumped final h (%d floats) to %s\n", d, hp);
+    }
 
 
     float *Wo = global_f32(ctx, "output.weight");

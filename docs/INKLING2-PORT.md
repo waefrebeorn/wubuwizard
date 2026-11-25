@@ -653,6 +653,35 @@ Dump the final hidden state, dequantise the matching rows of `output.weight` ind
 logit for the top token reproduces. If it does, the head is exonerated and the defect is upstream in the
 loop; if it does not, the head or the final norm is the problem and everything above it was noise.
 
+## The LM head is correct, so the defect is upstream
+
+`tools/head_check.py` dequantises output.weight rows with a hand-written IQ4_XS decoder (canonical layout,
+kvalues_iq4nl from ggml-common.h) and dots them with the dumped final hidden state, undoing the softcap(30)
+the engine applies. Five rows, including the top token:
+
+```
+   id     python dot   engine raw        diff
+   87     +23.855974   +23.855975    -6.5e-07
+  779      +3.559044    +3.559045    -7.1e-07
+   11     +13.309932   +13.309932    -4.6e-07
+ 5195      +5.146991    +5.146991    -6.3e-08
+ 1234      +6.985292    +6.985292    -9.8e-08
+```
+
+All at float32 precision. So the final norm, the output projection, the IQ4_XS dequantiser, the row
+indexing, the dot product and the softcap are all **correct**. Every wrong logit comes from the transformer
+stack above blk.0, and the remaining suspect list is short: the depth mix, the message gating, slot order,
+block states, and the loop structure.
+
+This is the first stage above blk.0 to be compared against an independent implementation at all. It also
+shows the method works: one comparison, and the graph is split in half with no guessing.
+
+**Correction to my own first attempt at this check:** the initial run disagreed by 10-14 units on every row
+and reordered the top tokens. That was not a head defect - my Python indexed `qs[0:16]` for every
+sub-block instead of advancing 16 bytes per sub-block as `dequantize_row_iq4_xs` does. The engine was right
+and the instrument was wrong, which is the third time in this port that the check, not the code, was at
+fault.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
