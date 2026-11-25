@@ -582,6 +582,19 @@ so one cause covers both: the M-row tensor-core kernels decode each 82-byte weig
 loads and grid lookups, and at 480 column-blocks for a 15360-wide matrix there is not enough concurrent
 work to hide it. Decode hides the same work behind 15360 warps; prefill has 480 blocks.
 
+
+The tile-width sweep says the two prefill shapes want opposite things, which is why there is no single
+value to pick:
+
+    IQ2S_MMA_WPB     2       4       8
+    ffn stage ms    13.93   13.57   12.93     (larger tile reuses the decoded block across more columns)
+    prefill t/s      38.9    51.5    39.3     (the narrow qkv projection loses far more than the FFN gains)
+
+The FFN's 15360 columns reward an 8-warp tile; the qkv projections at 2048 columns are starved by it. A
+single compile-time tile width cannot serve both, so the next change is a per-shape tile - the FFN's mma
+kernel launched with the wide tile and the attention projections with the narrow one - rather than
+another global sweep. Values above are all token-identical to the reference.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
