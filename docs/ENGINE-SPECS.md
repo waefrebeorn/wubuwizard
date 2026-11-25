@@ -350,3 +350,41 @@ architecture and never a corrupt file.
 was read for *semantics* (`mix`, `control`, `convolve`, `tau`, `clip` - all extracted above and all now
 reflected in the port), and the loading attempt stops here. The file's own convention is the one the port
 already uses.
+
+## 12. CORRECTION: four of these clones were sparse checkouts
+
+The pull in §1 reported every repo `behind=0` and then counted files with `git grep`, which reads the **index**,
+not the working tree. Four clones were **sparse checkouts**, so thousands of files were never on disk while
+`git status` reported clean (skip-worktree bit set):
+
+| repo | files absent from disk |
+|---|---|
+| **project-maya** | 1,358 |
+| **atomic-engine** | 3,109 |
+| MNN | 8,592 |
+| vllm.cpp | 10,027 |
+
+All four are now materialised (`git sparse-checkout disable && git read-tree -mu HEAD`, 0 skip-worktree left).
+What this invalidates and what it does not:
+
+- **Invalidated: the Inkling-support counts in §2.** Those were index counts presented as if they described the
+  tree, and for the sparse repos the tree was missing most of its code. Re-counted on disk, `atomic-engine` goes
+  from 18 to **43** inkling-mentioning files and `project-maya` from 18 to **59**.
+- **Not invalidated: the LOC table, versions and commit hashes** — those come from git metadata.
+- **Not invalidated: the maya readings** (`docs/INKLING2.md`, `src/ik2/ik2_kernels.cuh`), which were files that
+  *were* on disk and were read in full.
+- **It does explain the maya build failure.** `cmake` then `ninja` reported
+  `include could not find requested file: cmake/maya_old_names.cmake` and, before that,
+  `CMake step for strata_llamacpp failed: 1`. Both were symptoms of a half-empty tree, not of maya.
+
+Two workflow lessons, both cheap to apply and both of which this repo has now paid for:
+
+1. **`git status` clean does not mean the tree is on disk.** Check `git config core.sparseCheckout` and
+   `git ls-files -v | grep -c '^S'` before trusting any count taken from a clone.
+2. **`git grep` reads the index; `grep -r` reads the disk.** When the question is "what does this engine
+   implement", the disk is the truth.
+
+Also recorded for honesty: maya's CPU build **fetches llama.cpp upstream as its ggml dependency**
+(`FetchContent_Declare(strata_llamacpp, GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git, GIT_TAG
+3cf03257...)`). That is a build dependency of the standard, not a reference we consult, and `MAYA_GGML_DIR` can
+point it at the local `ik_llama.cpp` instead if the fetch is ever unwanted.
