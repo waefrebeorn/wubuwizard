@@ -505,3 +505,27 @@ Remaining safe work, in order of measured value and risk:
 2. **Persistent thread pool** (moe 0.264 s) - per-call spawning measured zero gain; a pool is the only version worth
    building, and it must be pooled before it is enabled.
 3. Anything that changes the IQ2 arithmetic - only behind its own gate.
+
+### The arena gives nothing, and the reason matters (2026-11-25)
+
+Built it properly the third time (name-based matching, 23 buffers converted, build clean, logits identical) and it
+measured **exactly nothing**: 3.00 s prefill, 1.00 / 0.90 s steps, identical to before.
+
+The reason is in my own implementation: `in2_arena_alloc` zeroes with `memset`, while `calloc` for large blocks gets
+**lazily zeroed pages from the OS** - the kernel maps them zero and only faults them in on first write. So the
+allocator was never doing the work; the arena replaced cheap bookkeeping and added eager zeroing on top. That also
+explains why the earlier malloc-reuse and mapping changes each measured small: this engine is not allocator-bound.
+
+Consequence: the 0.208 s between the last phase tick and the layer return is **not allocation**, and my "teardown is
+a third of the step" claim was another measurement artefact - the tick was placed before the teardown, so the teardown
+was never actually timed; what sits there is the post-mlp conv and the residual add, which the TKPH(8) tick placed
+*differently* in the two builds.
+
+Reverted, tree clean, engine unchanged at 3.00 s prefill / 1.00 s step.
+
+State of play after this stretch, with every number measured through tools/bench.py:
+- decode 1.00 s/step, 0.90 s at prefix 5; prefill 3.00 s; logits exact; parity 144/144 on all formats
+- kernels: 8-49 GOPS by type, IQ2 family limited by format, NVFP4 fixed by a UE4M3 table
+- moe is 41% and is kernel volume, not memory stalls (corrected)
+- the layer's own accounting now sums to 0.432 s of 0.640 s, and the remaining 0.208 s is real work in the
+  untimed block, not overhead
