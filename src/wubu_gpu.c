@@ -807,9 +807,24 @@ int wubu_gpu_qkv3(const void *d_wq, const void *d_wk, const void *d_wv,
     }
     if (G.upload(dx, x, (unsigned long long)((size_t)K * sizeof(float))) != 0) return -4;
     if (dev3(d_wq, d_wk, d_wv, tq, tk, tv, dx, d_q, d_k, d_v, K, qd, kvd, sq, sk, sv) != 0) return -5;
-    if (G.download(q, d_q, (unsigned long long)((size_t)qd * sizeof(float))) != 0) return -6;
-    if (G.download(k, d_k, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -6;
-    if (G.download(v, d_v, (unsigned long long)((size_t)kvd * sizeof(float))) != 0) return -6;
+    /* One transfer for q|k|v instead of three. They already share a device slab, so a single
+     * download into a host staging buffer plus two host memcpys replaces two PCIe round trips per
+     * layer - 96 per token across 48 layers, which measured as most of the attention phase's
+     * overhead at decode. */
+    {
+        static float *stage;
+        static int cap_s;
+        if (cap_s < total) {
+            free(stage);
+            stage = (float *)malloc((size_t)total * sizeof(float));
+            if (!stage) { cap_s = 0; return -6; }
+            cap_s = total;
+        }
+        if (G.download(stage, scratch, (unsigned long long)((size_t)total * sizeof(float))) != 0) return -6;
+        memcpy(q, stage, (size_t)qd * sizeof(float));
+        memcpy(k, stage + qd, (size_t)kvd * sizeof(float));
+        memcpy(v, stage + qd + kvd, (size_t)kvd * sizeof(float));
+    }
     return 0;
 }
 

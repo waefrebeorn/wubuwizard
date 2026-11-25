@@ -520,6 +520,25 @@ token without returning to the host - device-side norms, residual and attention 
 can remove. That is a different design from the one here, where each layer crosses back to the host for
 its residual stream, and it is the honest description of the remaining 1.75x against llama.cpp.
 
+
+### Two decode kernels that were leaving lanes idle
+
+The generic matvec maps **one warp per column**, which is fine at the FFN's 60 blocks per column and
+wasteful at the LM head's 15, where 17 of 32 lanes had nothing to do. A Q3_K kernel with two columns per
+warp (lanes 0-15 and 16-31, reduction inside each half) fixes it:
+
+    LM head   10.96 -> 6.53 ms per token     (385 MB/token: 36 -> 59 GB/s, token-identical)
+
+The same file had a second, smaller waste: `wubu_gpu_qkv3` wrote q|k|v into one contiguous device slab
+and then downloaded it in three separate transfers. One download into a host staging buffer plus two
+host memcpys removed two PCIe round trips per layer, 96 per token:
+
+    attention phase   27.50 -> 26.23 ms
+    decode            13.3 -> 14.8 tok/s at 40 tokens, 14.4 at 128 (reference tokens exact)
+
+The FFN is now 34.1 ms of the 68 and runs at ~65 GB/s, so the remaining distance to llama.cpp's 41 ms
+per token is bandwidth inside the FFN kernel (llama.cpp's figure implies ~97 GB/s), not overhead.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
