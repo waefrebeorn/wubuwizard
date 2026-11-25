@@ -620,6 +620,13 @@ The span widening with context is the expected direction, not evidence of correc
 and `tau` (needs position > 8192 before `log` stops returning 0). Both are implemented and untested at
 their operating point.
 
+## Greedy generation, without a cache
+
+`tools/inkling_gen.c` prefills a prompt and takes the argmax repeatedly, re-running the whole prefix each
+step. That is seconds per token - far too slow to be the final path - but it cannot hide a cache bug,
+which is exactly why the first output should come through it. The KV cache comes after, and any divergence
+between cached and uncached decoding is then a cache bug by construction rather than a needle in the graph.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
