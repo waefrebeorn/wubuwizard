@@ -81,9 +81,23 @@ and layer 0's FFN output at M=21 measures **mean |difference| 3.2% of scale but 
 cluster in specific rows or columns, and this does not.
 
 Both the exact M=1 path (`matvec_devbuf`) and the broken M-row path quantise activations to Q8_K, so
-quantisation is not the difference; the M-row kernels' own arithmetic is. The next measurement is a
-device-side A/B of the M-row matvec against the per-row matvec on identical Q8_K input for one layer,
-which is the last untested link.
+quantisation happens on both sides. The kernels themselves were the next suspect, and they are not it:
+
+    G4_IQ2S_CHECK on the gate, layer 2, M=21, both paths on the same qx buffer
+    [IQ2S-CHECK] K=3840 cols=15360 M=21 | max abs 2.38e-06 scale 8.31 rel 2.9e-07 | >1%% of scale 0,
+                 differing 13333 of 15360 (all float rounding)
+
+    G4_IQ2S_CHECK on the down, layer 2, M=21
+    [IQ3S-CHECK] K=15360 cols=3840 M=21 | max abs 1.14e-05 scale 17.4 rel 6.6e-07 | >1%% of scale 0,
+                 differing 3546 of 3840 (all float rounding)
+
+The M-row tensor-core kernels agree with the per-row path decode uses - the path that reproduces the
+reference - to 3e-07 on the real tensors and real activations, on both the gate and the down shape. Zero
+elements over 1%% of scale. So the M-row matvecs are correct, the gelu between them is elementwise and
+shared, and the two paths quantise the same way. That leaves the M-row **activation quantisation launch**
+(`quantize_q8k_kernel<<<dim3(nbf, M), 32>>>`) as the only remaining difference between a fused FFN that
+reproduces the reference and one that does not - and it is the next thing to measure, by quantising one
+row both ways and comparing the q8 bytes directly.
 
 
 Decode degrades with context and the profiler says why: the attention section is 7.3 ms at

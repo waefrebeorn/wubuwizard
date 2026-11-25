@@ -2623,6 +2623,81 @@ static int mrow_into_dev(int type, const void *dw, const c_q8_k *q8m, float *d_y
 }
 
 WUBU_EXPORT int wubu_cuda_check_xxs(const void *, int, const void *, int, int, long long, int);
+WUBU_EXPORT int wubu_cuda_check_iq3s(const void *, const c_q8_k *, int, int, long long, int);
+
+/* Same A/B for IQ3_S, which is the down projection on almost every layer. Uses the grid from
+ * mrow_into_dev so what is tested is exactly what the fused path runs. */
+WUBU_EXPORT int wubu_cuda_check_iq3s(const void *d_w, const c_q8_k *d_qx, int K, int n_cols,
+                                     long long stride, int M)
+{
+    if (!d_w || !d_qx || M < 16) return -1;
+    const int nblocks = K / QK_K;
+    float *d_ref = (float *)pool_get("chk.ref3", (size_t)n_cols * sizeof(float));
+    float *d_mma = (float *)pool_get("chk.mma3", (size_t)n_cols * (size_t)M * sizeof(float));
+    if (!d_ref || !d_mma) return -2;
+    if (mv_any(d_w, 21, d_qx, d_ref, K, n_cols, stride) != 0) return -3;
+    dim3 g((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 15) / 16);
+    iq3s_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)d_w, d_qx, d_mma, stride,
+                                                    nblocks, n_cols, M, nblocks);
+    if (cudaGetLastError() != cudaSuccess) return -4;
+    float *hr = (float *)malloc((size_t)n_cols * sizeof(float));
+    float *hm = (float *)malloc((size_t)n_cols * sizeof(float));
+    if (!hr || !hm) return -5;
+    cudaMemcpy(hr, d_ref, (size_t)n_cols * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hm, d_mma, (size_t)n_cols * sizeof(float), cudaMemcpyDeviceToHost);
+    double worst = 0.0, sc = 0.0; int over1 = 0, nonzero = 0;
+    for (int i = 0; i < n_cols; ++i) if (fabs(hr[i]) > sc) sc = fabs(hr[i]);
+    if (sc <= 0.0) sc = 1.0;
+    for (int i = 0; i < n_cols; ++i) {
+        const double d = fabs((double)hr[i] - (double)hm[i]);
+        if (d > worst) worst = d;
+        if (d > 0.01 * sc) ++over1;
+        if (d > 0.0) ++nonzero;
+    }
+    fprintf(stderr, "[IQ3S-CHECK] K=%d cols=%d M=%d | max abs %.6g scale %.6g rel %.4g | >1%% of scale %d, differing %d of %d\n",
+            K, n_cols, M, worst, sc, worst / sc, over1, nonzero, n_cols);
+    free(hr); free(hm);
+    return 0;
+}
+
+
+/* A/B the M-row (tensor-core) IQ2_S path against the per-row path on the SAME q8 input.
+ * The per-row path is the one decode uses and decode reproduces the reference tokens exactly, so a
+ * disagreement here means the M-row kernel is wrong and not the quantisation. */
+WUBU_EXPORT int wubu_cuda_check_iq2s(const void *d_w, const c_q8_k *d_qx, int K, int n_cols,
+                                     long long stride, int M)
+{
+    if (!d_w || !d_qx || M < 16) return -1;
+    const int nblocks = K / QK_K;
+    float *d_ref = (float *)pool_get("chk.ref", (size_t)n_cols * sizeof(float));
+    float *d_mma = (float *)pool_get("chk.mma", (size_t)n_cols * (size_t)M * sizeof(float));
+    if (!d_ref || !d_mma) return -2;
+    /* proven path: one row through whichever kernel decode uses */
+    if (mv_any(d_w, 22, d_qx, d_ref, K, n_cols, stride) != 0) return -3;
+    dim3 g((n_cols + IQ2S_MMA_COLS - 1) / IQ2S_MMA_COLS, (M + 16 * IQ2S_MMA_RH - 1) / (16 * IQ2S_MMA_RH));
+    iq2s_matvec_mma_kernel<<<g, IQ2S_MMA_WPB * 32>>>((const uint8_t *)d_w, d_qx, d_mma, stride,
+                                                    nblocks, n_cols, M, nblocks);
+    if (cudaGetLastError() != cudaSuccess) return -4;
+    float *hr = (float *)malloc((size_t)n_cols * sizeof(float));
+    float *hm = (float *)malloc((size_t)n_cols * sizeof(float));
+    if (!hr || !hm) return -5;
+    cudaMemcpy(hr, d_ref, (size_t)n_cols * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hm, d_mma, (size_t)n_cols * sizeof(float), cudaMemcpyDeviceToHost);
+    double worst = 0.0; int over1 = 0, nonzero = 0; double sc = 0.0;
+    for (int i = 0; i < n_cols; ++i) if (fabs(hr[i]) > sc) sc = fabs(hr[i]);
+    if (sc <= 0.0) sc = 1.0;
+    for (int i = 0; i < n_cols; ++i) {
+        const double d = fabs((double)hr[i] - (double)hm[i]);
+        if (d > worst) worst = d;
+        if (d > 0.01 * sc) ++over1;
+        if (d > 0.0) ++nonzero;
+    }
+    fprintf(stderr, "[IQ2S-CHECK] K=%d cols=%d M=%d | max abs %.6g scale %.6g rel %.4g | >1%% of scale %d, differing %d of %d\n",
+            K, n_cols, M, worst, sc, worst / sc, over1, nonzero, n_cols);
+    free(hr); free(hm);
+    return 0;
+}
+
 
 /* Stage accounting for the fused FFN. Every claim this session made about where the 36 ms per layer
  * goes was arithmetic on transfer sizes; this measures the six stages directly and prints the average
@@ -2665,6 +2740,10 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
     ffn_stage_mark(1);
     quantize_q8k_kernel<<<dim3(nbx, M), 32>>>(dx, qx, hidden == K ? K : K, K, nbx);
     ffn_stage_mark(2);
+    if (getenv("G4_IQ2S_CHECK") && tg == 22) {
+        static int done_i2;
+        if (!done_i2) { done_i2 = 1; wubu_cuda_check_iq2s(d_wg, qx, K, ff, sg, M); }
+    }
     if (getenv("G4_XXS_CHECK") && (tg == 18 || tg == 23)) {
         static int done;
         if (!done) {
@@ -2680,6 +2759,14 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
     ffn_stage_mark(4);
     quantize_q8k_kernel<<<dim3(nbf, M), 32>>>(dg, qf, ff, ff, nbf);
     ffn_stage_mark(5);
+    if (getenv("G4_IQ2S_CHECK") && td == 22) {
+        static int done_i2d;
+        if (!done_i2d) { done_i2d = 1; wubu_cuda_check_iq2s(d_wd, qf, ff, hidden, sd, M); }
+    }
+    if (getenv("G4_IQ2S_CHECK") && td == 21) {
+        static int done_i3d;
+        if (!done_i3d) { done_i3d = 1; wubu_cuda_check_iq3s(d_wd, qf, ff, hidden, sd, M); }
+    }
     if (getenv("G4_XXS_CHECK") && (td == 18 || td == 23)) {
         static int done_d;
         if (!done_d) {
