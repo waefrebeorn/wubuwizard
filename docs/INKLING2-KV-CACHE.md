@@ -90,3 +90,13 @@ Remaining, and it is one coherent change, not a set of independent ones:
    activation mode** (both int8 or both fp32), not across them.
 4. Size the real cache: 60 sliding visits x 1024 pos x 1024 dim x 4 B x 2 = ~504 MB, plus 12 full visits growing
    with context. The store-path test allocation is deliberately tiny (72 x 64) and must not be mistaken for it.
+
+## Numerics that are not free (measured 2026-11-25)
+
+The attention QK dot must accumulate in double. Products reach ~1e5 before the 1/sqrt(HD) scale, and the error
+is carried through all 48 layer visits: the same edit in the full-attention layer moved the final logit from
+**27.1610 to 25.0769** - a 2-logit shift from a change that looks purely mechanical.
+
+The AVX2 float version was measured in the sliding layer and **bought nothing**: 8,021 vs 8,041 ms at a 5-token
+prefix. It was reverted. Rule: the attention core stays double until attention is measured to be the bottleneck at
+a realistic prefix length; the projections are where the time goes, and those are already integer kernels.

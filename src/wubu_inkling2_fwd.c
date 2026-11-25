@@ -352,11 +352,13 @@ static int in2_avx2(void) { static int c = -1; if (c < 0) c = __builtin_cpu_supp
 #endif
 
 /* attention core: QK dot and the weighted value sum, both 8-wide when AVX2 is present */
+/* Double accumulation is deliberate, not conservatism. QK products here reach ~1e5 before the 1/sqrt(HD) scale,
+ * so a 128-term float dot loses ~1 order more than the double sum, and the error is carried through every one of
+ * the 48 layer visits. Measured: the same edit in the full-attention layer moved the final logit from 27.1610 to
+ * 25.0769. The AVX2 float version was reverted because it bought nothing - 8,021 vs 8,041 ms at a 5-token prefix -
+ * and this dot is not where the time goes. */
 static float in2_attn_dot(const float *a, const float *b, int n)
 {
-#if defined(__x86_64__) || defined(_M_X64)
-    if (in2_avx2()) return in2_dot_f32_avx2(a, b, n);
-#endif
     double acc = 0.0;
     for (int i = 0; i < n; ++i) acc += (double)a[i] * (double)b[i];
     return (float)acc;
