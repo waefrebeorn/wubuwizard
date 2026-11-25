@@ -489,6 +489,34 @@ blk.0 therefore still stands rather than being invalidated by the refactor.
 The model-level output does change, as it should: top-1 moves from 196984 to 66 for the same token, since
 every layer above 0 now mixes depth instead of ignoring it.
 
+## The three-pass loop runs
+
+`in2_messages` (four learned queries over the previous pass's `[block_states; hidden]`) and
+`in2_message_gate` are implemented, the layer takes messages into its q/k/v/mlp inputs, and the model
+forward now does the real structure: pre 0..5 -> pass 1 over 6..17 -> passes 2 and 3 restarting from the
+pre-loop state with messages -> post 18..23. `IN2_SINGLE_PASS=1` still forces one pass for A/B.
+
+```
+3 passes : rc=0  max logit 23.27  min 20.28  top1 150417
+1 pass   : rc=0  max logit 20.31  min  6.73  top1 66
+```
+
+The loop materially changes the output, which is the point - but **the logit spread collapsed** from
+14 points to 3. A near-constant logit vector is not what a working model of this size should produce, and
+it is not explained by anything measured so far. Two candidate causes, neither proven:
+
+1. **The message-query slot order is an assumption.** The file splits the reference's `[12, 4, 2304]`
+   query tensor into `loop_res_query` and `loop_kv_res_query`, 24 rows each. I assumed res = (query, mlp)
+   and kv = (key, value). If that is wrong, all four messages are permuted every pass after the first.
+   `IN2_MSG_ORDER=1` flips the alternative so the two can be compared once there is a reference to compare
+   against.
+2. **Full-attention layers ignore messages.** `in2_layer_full` takes no message argument, so in passes 2
+   and 3 the four full layers (5, 11, 17, 23 - which are inside the core three times) run ungated while
+   their sliding neighbours are gated. That is a known hole, not a subtlety.
+
+Until one of those is closed, the three-pass numbers are structurally complete but numerically suspect,
+and the flat logits are the visible symptom.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

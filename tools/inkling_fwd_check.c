@@ -143,12 +143,12 @@ int main(int argc, char **argv)
     /* Full sliding layer (blk.0) over 1 and 2 tokens. */
     {
         extern int in2_layer_sliding(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
-                                     int, float *, int, int, const float *, int);
+                                     int, float *, int, int, const float *, int, const float *);
         for (int N = 1; N <= 2; ++N) {
             float *hh = (float *)calloc((size_t)N * d, sizeof(float));
             for (int t = 0; t < N; ++t)
                 for (int i = 0; i < d; ++i) hh[(size_t)t * d + i] = x[i] * (1.0f + 0.1f * t);
-            int rc2 = in2_layer_sliding(ctx, &m, &cfg, 0, hh, N, 0, NULL, 0);
+            int rc2 = in2_layer_sliding(ctx, &m, &cfg, 0, hh, N, 0, NULL, 0, NULL);
             double ss = 0, mx = 0; int bad = 0;
             for (int i = 0; i < N * d; ++i) {
                 double vq = hh[i];

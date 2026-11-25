@@ -19,7 +19,10 @@ void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
 void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y);
 int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
+                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                       const float *msgs);
+void in2_messages(const float *prev_blocks, int n_prev, const float *prev_h,
+                  const float *qres, const float *qkv, int li, int d, float eps, float *out);
 int  in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                     int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
 int  in2_embed(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
@@ -74,11 +77,9 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 {
     /* IN2_SINGLE_PASS runs pass 1 only. It exists to exercise the depth path before the message gates
      * land; anything it prints is a 1-of-3-pass number and must be labelled as such. */
-    if (cfg->n_loops > 1 && !getenv("IN2_SINGLE_PASS")) {
-        fprintf(stderr, "in2_forward_token: n_loops=%d, message gates not implemented (single pass only)\n",
-                cfg->n_loops);
-        return WUBU_INKLING2_ERR_NO_LOOP;
-    }
+    /* IN2_SINGLE_PASS=1 still forces one pass, which is useful for A/B against the pre-message graph. */
+    const int n_loops = getenv("IN2_SINGLE_PASS") ? 1 : cfg->n_loops;
+    (void)n_loops;
     const int d = cfg->d_model;
     const float eps = cfg->rms_eps;
 
@@ -95,24 +96,63 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     int n_blocks = 0;
     if (!blocks) return WUBU_INKLING2_ERR_IO;
 
-    for (int il = 0; il < cfg->n_layer_phys; ++il) {
-        float *br = (float *)malloc(sizeof(float) * d);
-        if (!br) { free(blocks); return WUBU_INKLING2_ERR_IO; }
-        memcpy(br, h, sizeof(float) * d);
-        /* The four full-attention layers (il % 6 == 5) are structurally different: three depth-mixed
-         * states and three input norms. Sliding layers still use their single-block approximation of
-         * mlp_input; that is a known gap, recorded in the port doc. */
-        if (il % cfg->attn_res_block == cfg->attn_res_block - 1)
-            rc = in2_layer_full(ctx, m, cfg, il, h, 1, 0, blocks, n_blocks);
-        else
-            rc = in2_layer_sliding(ctx, m, cfg, il, h, 1, 0, blocks, n_blocks);
-        if (rc != WUBU_INKLING2_OK) { free(br); free(blocks); return rc; }
-        if (il % cfg->attn_res_block == 0 && n_blocks < 16) {
-            memcpy(blocks + (size_t)n_blocks * d, br, sizeof(float) * d);
-            ++n_blocks;
+    float *qres = global_f32(ctx, "loop_res_query.weight");
+    float *qkv  = global_f32(ctx, "loop_kv_res_query.weight");
+    float *msgs = (float *)calloc((size_t)4 * d, sizeof(float));
+    float *pre_h = (float *)malloc(sizeof(float) * d);
+    float *prev_h = (float *)malloc(sizeof(float) * d);
+    float *prev_blocks = (float *)calloc((size_t)16 * d, sizeof(float));
+    int pre_blocks = 0, n_prev = 0;
+    if (!msgs || !pre_h || !prev_h || !prev_blocks) rc = WUBU_INKLING2_ERR_IO;
+
+    /* helper: run one layer and bank the block residual at boundaries */
+    #define RUN_LAYER(IL, MSG) do {                                                    \
+        float *_br = (float *)malloc(sizeof(float) * d);                               \
+        if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
+        memcpy(_br, h, sizeof(float) * d);                                             \
+        if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
+            rc = in2_layer_full(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks);         \
+        else                                                                            \
+            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks, (MSG)); \
+        if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
+            memcpy(blocks + (size_t)n_blocks * d, _br, sizeof(float) * d); ++n_blocks;  \
+        }                                                                               \
+        free(_br);                                                                      \
+    } while (0)
+
+    /* pre-loop layers */
+    for (int il = 0; il < cfg->loop_core_start && rc == WUBU_INKLING2_OK; ++il) RUN_LAYER(il, NULL);
+    if (rc == WUBU_INKLING2_OK) { memcpy(pre_h, h, sizeof(float) * d); pre_blocks = n_blocks; }
+
+    /* first pass over the loop core: no messages yet */
+    for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il)
+        RUN_LAYER(il, NULL);
+
+    /* each later pass restarts from the pre-loop state and carries only the messages */
+    for (int pass = 1; pass < n_loops && rc == WUBU_INKLING2_OK; ++pass) {
+        memcpy(prev_h, h, sizeof(float) * d);
+        /* the reference skips the pre-loop blocks plus the first block appended by the previous pass */
+        const int skip = pre_blocks + 1;
+        n_prev = (n_blocks > skip) ? (n_blocks - skip) : 0;
+        for (int i = 0; i < n_prev; ++i)
+            memcpy(prev_blocks + (size_t)i * d, blocks + (size_t)(skip + i) * d, sizeof(float) * d);
+
+        memcpy(h, pre_h, sizeof(float) * d);
+        n_blocks = pre_blocks;
+        for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il) {
+            const int li = il - cfg->loop_core_start;
+            if (qres && qkv) in2_messages(prev_blocks, n_prev, prev_h, qres, qkv, li, d, eps, msgs);
+            RUN_LAYER(il, (qres && qkv) ? msgs : NULL);
         }
-        free(br);
     }
+
+    /* post-loop layers */
+    for (int il = cfg->loop_core_end; il < cfg->n_layer_phys && rc == WUBU_INKLING2_OK; ++il)
+        RUN_LAYER(il, NULL);
+    #undef RUN_LAYER
+
+    free(qres); free(qkv); free(msgs); free(pre_h); free(prev_h); free(prev_blocks);
+    if (rc != WUBU_INKLING2_OK) { free(blocks); return rc; }
 
     float *fin = (float *)malloc(sizeof(float) * d);
     float *fq = global_f32(ctx, "output_res_query.weight");

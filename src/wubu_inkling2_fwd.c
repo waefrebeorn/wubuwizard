@@ -35,7 +35,12 @@ int  in2_router(const float *x, const float *W, const float *corr_bias, int n_ex
 int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
              int il, const float *x, int n_tok, float *out);
 int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
+                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                       const float *msgs);
+void in2_messages(const float *prev_blocks, int n_prev, const float *prev_h,
+                  const float *qres, const float *qkv, int li, int d, float eps, float *out);
+void in2_message_gate(const float *h, const float *message, const float *down, const float *forget,
+                      const float *msgp, int d, int rank, float eps, float *out);
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out);
 
 /* Unweighted RMS norm: x * rsqrt(mean(x^2) + eps). Used by the loop message gates. */
@@ -252,7 +257,8 @@ static void in2_softmax_sink(const float *logits, int n_key, float sink, float *
 }
 
 int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                      int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks)
+                      int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
+                      const float *msgs)
 {
     const wubu_in2_layer_t *L = &m->layer[il];
     const int d = cfg->d_model, NH = cfg->n_head, NKV = cfg->n_kv_head, HD = cfg->head_dim;
@@ -277,9 +283,36 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     }
     free(arq);
 
-    /* 1. attn_norm (weighted), applied to the mixed state. */
+    /* 1. attn_norm applied to the mixed state. In passes after the first, q/k/v each get their own
+     *    message-gated input and the same norm is applied to all three (the reference uses one
+     *    input_layernorm for sliding layers, unlike the full layers' three). */
     float *xn = (float *)calloc((size_t)n_tok * d, sizeof(float));
-    for (int t = 0; t < n_tok; ++t) in2_rmsnorm(mixh + (size_t)t * d, an, d, eps, xn + (size_t)t * d);
+    float *xkk = (float *)calloc((size_t)n_tok * d, sizeof(float));
+    float *xvv = (float *)calloc((size_t)n_tok * d, sizeof(float));
+    if (msgs) {
+        for (int s = 0; s < 4; ++s) {
+            float *dw = in2_tensor_to_f32(ctx, &L->loop_down[s], NULL);
+            float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[s], NULL);
+            float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[s], NULL);
+            float *dst = (s == 0) ? xn : (s == 1 ? xkk : (s == 2 ? xvv : NULL));
+            for (int t = 0; t < n_tok; ++t) {
+                float *gated = (float *)calloc((size_t)d, sizeof(float));
+                if (dw && fw && gw) in2_message_gate(mixh + (size_t)t * d, msgs + (size_t)s * d, dw, fw, gw,
+                                                     d, cfg->loop_gate_rank, eps, gated);
+                else                memcpy(gated, mixh + (size_t)t * d, sizeof(float) * d);
+                if (dst) in2_rmsnorm(gated, an, d, eps, dst + (size_t)t * d);
+                else     in2_rmsnorm(gated, an, d, eps, mixh + (size_t)t * d);  /* slot 3: mlp input */
+                free(gated);
+            }
+            free(dw); free(fw); free(gw);
+        }
+    } else {
+        for (int t = 0; t < n_tok; ++t) {
+            in2_rmsnorm(mixh + (size_t)t * d, an, d, eps, xn + (size_t)t * d);
+            memcpy(xkk + (size_t)t * d, xn + (size_t)t * d, sizeof(float) * d);
+            memcpy(xvv + (size_t)t * d, xn + (size_t)t * d, sizeof(float) * d);
+        }
+    }
 
     /* 2. q: project, scale+clip per head. */
     const int qdim = NH * HD, kdim = NKV * HD;
@@ -308,8 +341,8 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     int rc = WUBU_INKLING2_OK;
     if (!Wk || !Wv || !kc || !vc || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
-        in2_matvec(Wk, xn + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
-        in2_matvec(Wv, xn + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
+        in2_matvec(Wk, xkk + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
+        in2_matvec(Wv, xvv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
     }
     if (rc == WUBU_INKLING2_OK) {
         in2_shortconv(kraw, n_tok, kdim, kc, 4, kt);
@@ -469,6 +502,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
     free(attn_out); free(alpha); free(logits); free(Wg); free(Wo); free(gate); free(ao);
     free(pc); free(res); free(fn); free(moein); free(moeout); free(pm); free(mo); free(mixh);
+    free(xkk); free(xvv);
     return rc;
 }
 
@@ -593,6 +627,78 @@ void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float 
         }
     }
     free(dw);
+}
+
+/* Messages for one loop layer: four learned queries attending over the PREVIOUS pass's
+ * [block_states; hidden]. Turns that pass into four gating signals.
+ *
+ * The file stores the queries split across two globals of [24, 2304]. The reference has one
+ * [12, 4, 2304] tensor, so 24+24 == 48 rows either way; the row->slot mapping is an assumption
+ * (res = query, mlp; kv = key, value) that is flagged rather than proven. IN2_MSG_ORDER=1 flips it so the
+ * two possibilities can be compared once there is a reference output to compare against. */
+void in2_messages(const float *prev_blocks, int n_prev, const float *prev_h,
+                  const float *qres, const float *qkv, int li, int d, float eps, float *out)
+{
+    const int alt = getenv("IN2_MSG_ORDER") != NULL;
+    const float *src[4];
+    if (!alt) { src[0] = qres + (size_t)(2*li) * d; src[3] = qres + (size_t)(2*li+1) * d;
+                src[1] = qkv  + (size_t)(2*li) * d; src[2] = qkv  + (size_t)(2*li+1) * d; }
+    else      { src[0] = qres + (size_t)(2*li) * d; src[1] = qres + (size_t)(2*li+1) * d;
+                src[2] = qkv  + (size_t)(2*li) * d; src[3] = qkv  + (size_t)(2*li+1) * d; }
+
+    const int n = n_prev + 1;
+    float *st = (float *)malloc((size_t)n * d * sizeof(float));
+    float *nr = (float *)malloc((size_t)n * d * sizeof(float));
+    float *al = (float *)malloc((size_t)n * sizeof(float));
+    if (!st || !nr || !al) { free(st); free(nr); free(al); return; }
+    for (int i = 0; i < n_prev; ++i) memcpy(st + (size_t)i * d, prev_blocks + (size_t)i * d, sizeof(float) * d);
+    memcpy(st + (size_t)n_prev * d, prev_h, sizeof(float) * d);
+    for (int i = 0; i < n; ++i) in2_rmsnorm_unweighted(st + (size_t)i * d, d, eps, nr + (size_t)i * d);
+
+    const float inv = 1.0f / sqrtf((float)d);
+    for (int s = 0; s < 4; ++s) {
+        float mx = -1e30f;
+        for (int i = 0; i < n; ++i) {
+            double acc = 0.0;
+            for (int j = 0; j < d; ++j) acc += (double)src[s][j] * nr[(size_t)i * d + j];
+            al[i] = (float)acc * inv;
+            if (al[i] > mx) mx = al[i];
+        }
+        double sum = 0.0;
+        for (int i = 0; i < n; ++i) { al[i] = expf(al[i] - mx); sum += al[i]; }
+        for (int i = 0; i < n; ++i) al[i] = (float)(al[i] / sum);
+        for (int j = 0; j < d; ++j) {
+            double acc = 0.0;
+            for (int i = 0; i < n; ++i) acc += (double)al[i] * nr[(size_t)i * d + j];
+            out[(size_t)s * d + j] = (float)acc;
+        }
+    }
+    free(st); free(nr); free(al);
+}
+
+/* Message gate: out = (1 - tanh(forget(g))) * h + tanh(msg(g)) * message, g = down(cat(rms(h), rms(m))). */
+void in2_message_gate(const float *h, const float *message, const float *down, const float *forget,
+                      const float *msgp, int d, int rank, float eps, float *out)
+{
+    float *cat = (float *)malloc((size_t)2 * d * sizeof(float));
+    float *g = (float *)malloc((size_t)rank * sizeof(float));
+    float *rh = (float *)malloc((size_t)d * sizeof(float));
+    float *rm = (float *)malloc((size_t)d * sizeof(float));
+    if (!cat || !g || !rh || !rm) { free(cat); free(g); free(rh); free(rm); return; }
+    in2_rmsnorm_unweighted(h, d, eps, rh);
+    in2_rmsnorm_unweighted(message, d, eps, rm);
+    memcpy(cat, rh, sizeof(float) * d);
+    memcpy(cat + d, rm, sizeof(float) * d);
+    in2_matvec(down, cat, 2 * d, rank, g);
+    for (int i = 0; i < d; ++i) {
+        double af = 0.0, am = 0.0;
+        for (int r = 0; r < rank; ++r) {
+            af += (double)forget[(size_t)i * rank + r] * g[r];
+            am += (double)msgp[(size_t)i * rank + r] * g[r];
+        }
+        out[i] = (1.0f - tanhf((float)af)) * h[i] + tanhf((float)am) * message[i];
+    }
+    free(cat); free(g); free(rh); free(rm);
 }
 
 /* Full-attention layer: three depth-mixed states -> three input norms -> tau-scaled q, dynamic k/v
