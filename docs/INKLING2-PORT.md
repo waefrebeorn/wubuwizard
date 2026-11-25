@@ -197,6 +197,15 @@ by name. What the engine lacks is the *math* - MoE routing at 128 experts (the e
 `wubu_gpu_moe_forward_experts` is hard-wired to 8), relative attention with the bias table and sinks (no
 RoPE), shortconv with its recurrent state, the attn_res `mix` blocks, and the loop driver.
 
+## Reference class (not llama.cpp)
+
+For throughput and design we compare against **Strata** and **Project Maya**, and for the quant formats
+we read what **AtomicChat**, **unsloth** and the **base model** ship. llama.cpp is explicitly not a
+reference here: its `inkling2` is single-pass with no loop driver, so matching it would mean matching a
+partial implementation of the model. Where the formats disagree between producers, the base model's own
+definition decides - which is also why the GGUF inventory above is taken from the file rather than from
+another engine's loader.
+
 ## Port order
 
 1. GGUF loader for `inkling2`: config fields above, 734-tensor map, MoE expert blocks.
