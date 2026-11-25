@@ -75,7 +75,8 @@ int wubu_inkling2_global_tensor(gguf_ctx *ctx, const char *name, gguf_tensor_inf
  * success, WUBU_INKLING2_ERR_UNKNOWN_TYPE when the tensor uses a quant type this
  * engine has no dequantiser for (ids 30/40/42 in this file), other negative codes
  * on I/O failure. */
-enum { WUBU_INKLING2_ERR_UNKNOWN_TYPE = -5, WUBU_INKLING2_ERR_IO = -6 };
+enum { WUBU_INKLING2_ERR_UNKNOWN_TYPE = -5, WUBU_INKLING2_ERR_IO = -6,
+       WUBU_INKLING2_ERR_NO_LOOP = -7 };
 
 int wubu_inkling2_tensor_f32(gguf_ctx *ctx, const char *name, float *out,
                              int64_t max_elems, int64_t *n_out);

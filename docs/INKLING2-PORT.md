@@ -393,6 +393,24 @@ Also fixed on the way: the layer was writing its attention output into `h` befor
 captured, and the MoE slice reader failed for **expert 0** of every tensor (it asked `raw_size` for the
 byte offset of element 0, which returns -1 for `n_elems <= 0`).
 
+## Step 6: the depth path, and where it stops
+
+`src/wubu_inkling2_model.c` runs embed (with the normed-embedding wrap) -> 24 physical layers -> the
+`final_input` depth mix -> weighted output norm -> lm_head -> softcap(30). `tools/inkling_logits.c`
+drives it for one token.
+
+Two things are deliberately explicit rather than silent:
+
+- `in2_forward_token` **refuses** when `n_loops > 1`, because the message gates are not implemented. A
+  partial graph that answers anyway would produce the output of a shallower model and be indistinguishable
+  from a bug. `IN2_SINGLE_PASS=1` overrides this to exercise the depth path, and anything it prints is a
+  1-of-3-pass number.
+- The run currently stops at **blk.5** with `rc=-6`: blk.5 is the first full-attention layer and has no
+  `attn_norm` (its per-q/k/v input norms replace it), so the sliding-layer function cannot run it. The
+  full-attention variant - separate input norms, dynamic conv taps, `log_scale` on q, attention over all
+  keys rather than a window - is not implemented yet. That is the next piece, and the depth path is
+  otherwise complete for the layers it can run.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
