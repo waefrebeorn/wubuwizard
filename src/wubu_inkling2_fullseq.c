@@ -58,6 +58,11 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
         in2_mix(blocks, n_attn, n_tok * d, t * d, h + (size_t)t * d, arq, 3, d, eps,
                 state + (size_t)t * 3 * d);
     }
+    if (il == 5 && getenv("IN2_DUMP_FULLMIX")) {
+        char mp[512]; snprintf(mp, sizeof mp, "%s/L%02d_mix.bin", getenv("IN2_DUMP_FULLMIX"), il);
+        FILE *mf = fopen(mp, "wb");
+        if (mf) { fwrite(state, sizeof(float), (size_t)n_tok * 3 * d, mf); fclose(mf); }
+    }
 
     for (int sl = 0; sl < 3 && msgs; ++sl) {
         float *dw = in2_tensor_to_f32(ctx, &L->loop_down[sl], NULL);

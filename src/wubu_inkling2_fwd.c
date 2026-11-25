@@ -289,6 +289,12 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else {
         memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
     }
+    if ((il == 1 || il == 5) && getenv("IN2_DUMP_FULLMIX")) {
+        /* blk.5 is the first full layer: its mix takes THREE queries, a path blk.1 never exercises */
+        char mp[512]; snprintf(mp, sizeof mp, "%s/L%02d_mix.bin", getenv("IN2_DUMP_FULLMIX"), il);
+        FILE *mf = fopen(mp, "wb");
+        if (mf) { fwrite(mixh, sizeof(float), (size_t)n_tok * d * 3, mf); fclose(mf); }
+    }
     if (il == 1 && getenv("IN2_DUMP_MIX")) {
         FILE *mf = fopen(getenv("IN2_DUMP_MIX"), "wb");
         if (mf) { fwrite(mixh, sizeof(float), (size_t)n_tok * d, mf); fclose(mf); }
