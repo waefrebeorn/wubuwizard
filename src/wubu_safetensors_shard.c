@@ -62,8 +62,12 @@ wubu_shard_ctx_t *wubu_shard_open(const char *path_or_dir) {
     char dir[1024]; dir_of(path_or_dir, dir, sizeof(dir));
     if (dir[0]==0) snprintf(dir, sizeof(dir), ".");
 
-    char paths[SHARD_MAX][1024];
+    /* 1024 * 1024 == 1.0 MB, which is exactly the default Windows thread stack: this was one recursion
+     * or one extra frame away from a crash, and the failure would present as a stack overflow with no
+     * indication that a path list caused it. Heap instead of stack. */
+    char (*paths)[1024] = (char (*)[1024])calloc(SHARD_MAX, 1024);
     int n = 0;
+    if (!paths) return NULL;
     /* If the given path is itself a shard, scan its directory. */
     if (strstr(path_or_dir, "model-") && strstr(path_or_dir, "-of-")) {
         n = scan_shards(dir, paths);
@@ -78,20 +82,21 @@ wubu_shard_ctx_t *wubu_shard_open(const char *path_or_dir) {
         st_ctx *s = st_open(path_or_dir);
         if (s) {
             wubu_shard_ctx_t *sc = (wubu_shard_ctx_t *)calloc(1, sizeof(*sc));
-            if (sc) { sc->shards[0] = s; sc->n = 1; return sc; }
+            if (sc) { sc->shards[0] = s; sc->n = 1; free(paths); return sc; }
             st_close(s);
         }
     }
 
-    if (n == 0) return NULL;
+    if (n == 0) { free(paths); return NULL; }
 
     wubu_shard_ctx_t *sc = (wubu_shard_ctx_t *)calloc(1, sizeof(*sc));
-    if (!sc) return NULL;
+    if (!sc) { free(paths); return NULL; }
     sc->n = 0;
     for (int i = 0; i < n && i < SHARD_MAX; i++) {
         st_ctx *s = st_open(paths[i]);
         if (s) sc->shards[sc->n++] = s;
     }
+    free(paths);
     if (sc->n == 0) { free(sc); return NULL; }
     return sc;
 }
