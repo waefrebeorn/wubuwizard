@@ -242,6 +242,48 @@ wrong. `attn_q` is `[2304, 3072]` and `attn_k`/`attn_v` are `[2304, 1024]` on *b
 blk.23 (full), so both layer types are 24 query heads and 8 kv heads at head_dim 128. The sliding window
 changes which keys are attended, not the head geometry.
 
+## Relative attention: the whole block, verified
+
+There is no RoPE anywhere (`inkling2.rope.dimension_count = 0`). Position enters as a **token-conditioned
+mixture of learned distance profiles**:
+
+```
+rel_states  = attn_rel(hidden)                       # 2304 -> 24 heads x 16 (d_rel)
+rel_states *= attn_rel_clip[h][r]                    # per-(head, profile) learned scale
+per head:  rel_states *= min(1, 8.0 / (|rel_states| + 1e-6))     # relative_clip = 8.0
+bias[h][dist] = sum_r rel_states[h][r] * P[dist][r]  # P = attn_rel_bias, 16 profiles x 1024 distances
+score[h][q][k] = q·k/sqrt(128) + bias[h][dist(q,k)]  # zero outside 0 <= dist < 1024
+```
+
+So `attn_rel_bias` is literally the reference's `proj` parameter `(d_rel, rel_extent)`, and the 384-wide
+`attn_rel` is `hidden -> num_heads * d_rel` (24 x 16). ggml stores both transposed relative to PyTorch:
+`attn_rel_clip` is `(16, 24)` -> scale indexed `[h*16 + r]`, and `attn_rel_bias` is `(16, 1024)` ->
+`P[dist*16 + r]`, so the bias is `rel_states @ P.T`.
+
+**Verified** against an independent implementation (Q8_0 dequant of `attn_rel`, F32 reads of the clip and
+the profile bank) for token 1234 at blk.0:
+
+```
+rel_states   max abs diff 7.9e-07   (values to 7.6)
+bias table   max abs diff 8.1e-07   (values to 8.6)   over all 24 x 1024 entries
+```
+
+That one comparison pins the Q8_0 path, the 384-output layout, the clip scale layout, the L2-clip formula
+and the profile-bank transpose together.
+
+## The rest of the attention block (read from the reference)
+
+- **q**: `attn_q` -> scaled L2 clip, scale `attn_q_clip (128,24)`, threshold `qk_clip = 22.6274166`.
+- **k**: `attn_k` -> static (or dynamic, on full layers) short conv -> **bare L2 clip**, same threshold.
+- **v**: `attn_v` -> short conv -> **unweighted RMS norm** (not a clip).
+- **output**: `sigmoid(attn_gate(hidden)) * attn_out`, then `attn_output`. The gate is a sigmoid over the
+  full 3072-wide attention output, so `attn_gate` is `[2304, 3072]` as the census shows.
+- **sinks**: `attn_sink_proj` is `hidden -> num_heads`, giving one extra logit per query whose value
+  slice is zero: it only absorbs probability mass, so it lowers attention sharpness without contributing.
+- **head geometry**: `swa_head_dim`/`swa_num_attention_heads` are separate config fields, but for this
+  model both resolve to 128 / 24 / 8 kv heads, which is why the q/k/v tensors have identical shapes on
+  sliding and full layers.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

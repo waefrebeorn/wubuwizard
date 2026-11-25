@@ -75,6 +75,30 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Relative-position bias check: attn_rel(x) -> clip(rel_clip) -> mix the 16 learned distance
+     * profiles. Dumps the 24x1024 table for an independent recomputation. */
+    {
+        extern void in2_l2_clip(float *, const float *, int, int, float);
+        extern void in2_rel_bias_table(const float *, const float *, int, int, int, float *);
+        const int NH = 24, DREL = 16, EXT = 1024;
+        float *wrel = in2_tensor_to_f32(ctx, &m.layer[0].wrel, NULL);
+        float *rclip = in2_tensor_to_f32(ctx, &m.layer[0].rel_clip, NULL);
+        float *P = in2_tensor_to_f32(ctx, &m.layer[0].rel_bias, NULL);
+        if (wrel && rclip && P) {
+            float *rs = (float *)calloc(NH * DREL, sizeof(float));
+            float *bias = (float *)calloc((size_t)NH * EXT, sizeof(float));
+            in2_matvec(wrel, xn, d, NH * DREL, rs);
+            in2_l2_clip(rs, rclip, NH, DREL, 8.0f);
+            in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
+            printf("rel_bias h0 d0..3: %+.6f %+.6f %+.6f %+.6f\n", bias[0], bias[1], bias[2], bias[3]);
+            printf("rel_bias h23 d0..3: %+.6f %+.6f %+.6f %+.6f\n", bias[23*EXT], bias[23*EXT+1], bias[23*EXT+2], bias[23*EXT+3]);
+            FILE *bf = fopen("relbias.bin", "wb");
+            if (bf) { fwrite(rs, sizeof(float), NH*DREL, bf); fwrite(bias, sizeof(float), (size_t)NH*EXT, bf); fclose(bf); }
+            free(rs); free(bias);
+        }
+        free(wrel); free(rclip); free(P);
+    }
+
     free(wq); free(x); free(xn); free(an);
     gguf_close(ctx);
     return 0;

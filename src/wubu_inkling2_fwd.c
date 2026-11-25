@@ -70,6 +70,48 @@ void in2_shortconv(const float *x, int n_tok, int channels, const float *w, int 
     }
 }
 
+/* L2 clip, optionally preceded by a learned per-(head,dim) scale.
+ *
+ *   x *= scale;  row = x[h*dim .. h*dim+dim];  x *= min(1, threshold / (|row| + 1e-6))
+ *
+ * q uses this with a learned scale (attn_q_clip), k uses it bare, and the relative-position states use it
+ * with rel_clip. The scale is stored in ggml order (dim, heads), i.e. scale[h*dim + d].
+ */
+void in2_l2_clip(float *x, const float *scale, int n_head, int dim, float threshold)
+{
+    for (int h = 0; h < n_head; ++h) {
+        float *row = x + (size_t)h * dim;
+        if (scale) for (int d = 0; d < dim; ++d) row[d] *= scale[(size_t)h * dim + d];
+        double ss = 0.0;
+        for (int d = 0; d < dim; ++d) ss += (double)row[d] * row[d];
+        const float norm = sqrtf((float)ss);
+        float f = threshold / (norm + 1e-6f);
+        if (f > 1.0f) f = 1.0f;
+        for (int d = 0; d < dim; ++d) row[d] *= f;
+    }
+}
+
+/* Relative-position bias table: bias[h][dist] = sum_r rel_states[h][r] * P[dist][r].
+ *
+ * P is attn_rel_bias, stored in ggml order (d_rel, extent) so that r is the fastest axis:
+ * P[dist * d_rel + r]. Computing the whole table once and indexing it by distance is what the reference
+ * does, and it is cheaper than a gemm per (query,key) pair. Distances outside [0, extent) get 0, which
+ * the caller handles by skipping them.
+ */
+void in2_rel_bias_table(const float *rel_states, const float *P, int n_head, int d_rel, int extent, float *bias)
+{
+    for (int h = 0; h < n_head; ++h) {
+        const float *rs = rel_states + (size_t)h * d_rel;
+        float *out = bias + (size_t)h * extent;
+        for (int d = 0; d < extent; ++d) {
+            const float *pr = P + (size_t)d * d_rel;
+            double acc = 0.0;
+            for (int r = 0; r < d_rel; ++r) acc += (double)rs[r] * pr[r];
+            out[d] = (float)acc;
+        }
+    }
+}
+
 /* Dequantise a whole tensor into f32. Caller frees. Returns NULL on failure. */
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
 {
