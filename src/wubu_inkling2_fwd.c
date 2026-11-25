@@ -8,6 +8,7 @@
  * dims (n_in, n_out) is row-major as W[o * n_in + i].
  */
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -626,6 +627,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                 (void*)act, (void*)eo, rc);
     if (rc != WUBU_INKLING2_OK) { free(Wr); free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo); return rc; }
 
+    const clock_t moe_t0 = clock();
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
         int idx[256]; float w[256];
         const int got = in2_router(x + (size_t)t * d, Wr, cb, NE, d, TOPK, cfg->expert_weights_scale, idx, w);
@@ -664,6 +666,9 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
         }
     }
     free(Wr); free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
+    if (getenv("IN2_TIME"))
+        fprintf(stderr, "  moe L%-2d %.3fs%s\n", il, (double)(clock() - moe_t0) / (double)CLOCKS_PER_SEC,
+                getenv("IN2_STAGE") ? " [staged]" : " [fused]");
     return rc;
 }
 
