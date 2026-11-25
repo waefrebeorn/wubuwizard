@@ -550,6 +550,32 @@ the default. **Suggestive, not conclusive** - a second defect elsewhere could fl
 This is exactly the kind of question that needs a reference forward pass to settle, and it remains the
 single largest unverified assumption in the port.
 
+## The output ids are real vocabulary, and what multi-token still needs
+
+The engine has no detokeniser (only `gguf_tokenizer_token_count`), so `tools/gguf_detok.py` walks the KV
+section for `tokenizer.ggml.tokens` and expands the Gemma-family `\u0120` space marker and `<0xNN>` escapes.
+Decoding the top-1 ids from earlier runs:
+
+```
+190472 -> ' telescope'    150417 -> ' group'     289 -> 'ch'
+66     -> 'c'             60159  -> 'dji'        386 -> 'ly'
+```
+
+Every one is a real subword in the 200,058-token vocabulary. Weak but real evidence: a graph that was
+badly wrong would be expected to rank control or degenerate ids at the top. It does not say the words are
+*right* - these are context-free single-token predictions from an unverified message-slot mapping.
+
+**What multi-token generation needs, concretely.** `in2_layer_full` and the model forward are single-token:
+the full layer's attention loop and buffers, and the model's block-state handling, are sized for one token.
+Sliding layers already take `n_tok`. So the path is:
+
+1. Generalise `in2_layer_full` to `n_tok` with causal masking (the sliding layer is the template).
+2. Generalise `in2_forward_token` to a token sequence, with block states per position rather than per token.
+3. Add the KV cache so a step costs one token instead of the whole prefix - which is also the first point
+   where throughput means anything.
+
+That is a real refactor, not a switch, and it is the next body of work.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
