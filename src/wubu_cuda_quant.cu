@@ -1219,7 +1219,9 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2s_v3(const void *d_w, const void *d_q8, floa
 {
     if (!d_w || !d_q8 || !d_y || K <= 0 || n_cols <= 0 || (K % QK_K) != 0) return -1;
     const int nblocks = K / QK_K;
-    const int warps_per_block = 8;
+    /* Occupancy tweak for the FFN shape, tunable so a sweep does not need a rebuild per value. */
+    int warps_per_block = 8;
+    { const char *w = getenv("G4_MMA_WPB"); if (w) { const int v = atoi(w); if (v >= 1 && v <= 16) warps_per_block = v; } }
     const int blocks = (n_cols + warps_per_block - 1) / warps_per_block;
     iq2s_matvec_v3_kernel<<<blocks, warps_per_block * 32>>>(
         (const uint8_t *)d_w, (const c_q8_k *)d_q8, d_y, col_stride, nblocks, n_cols);

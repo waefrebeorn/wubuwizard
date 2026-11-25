@@ -539,6 +539,19 @@ host memcpys removed two PCIe round trips per layer, 96 per token:
 The FFN is now 34.1 ms of the 68 and runs at ~65 GB/s, so the remaining distance to llama.cpp's 41 ms
 per token is bandwidth inside the FFN kernel (llama.cpp's figure implies ~97 GB/s), not overhead.
 
+
+Occupancy is not the limiter either. `G4_MMA_WPB` sweeps warps per block on the FFN kernel, and the
+shape is flat:
+
+    warps/block   2      4      8      16
+    ffn all ms    33.29  33.56  33.55  34.04
+    decode t/s    15.1   15.1   15.1   14.9
+
+So the 65 GB/s is the kernel's access pattern against an 82-byte block that cannot be vectorised -
+not a shortage of resident warps. Reaching llama.cpp's implied ~97 GB/s means repacking IQ2_S into an
+aligned layout, which costs a second copy of the weights and does not fit alongside the model in
+6 GB, so it is a layout decision rather than a tuning one.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
