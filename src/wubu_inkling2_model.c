@@ -287,6 +287,9 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                             in2_ty_macs[_t] / (in2_ty_sec[_t] > 0 ? in2_ty_sec[_t] : 1.0) / 1e9);
                 { extern double in2_lay_sec, in2_phase[8];
                   static const char *_pn[8] = {"mix","q","k+v+conv","rel+sink","attn","gate+wo","resconv","moe"};
+                  { extern double in2_arq_sec; extern long in2_arq_calls;
+                    fprintf(stderr, "  arq load   %.3f s  %ld calls\n", in2_arq_sec, in2_arq_calls);
+                    in2_arq_sec = 0; in2_arq_calls = 0; }
                   fprintf(stderr, "PHASE layers=%.3f s\n", in2_lay_sec);
                   for (int _i = 0; _i < 8; ++_i)
                       fprintf(stderr, "  %-10s %.3f s  %5.1f%%\n", _pn[_i], in2_phase[_i],

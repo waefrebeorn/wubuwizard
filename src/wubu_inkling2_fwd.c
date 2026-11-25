@@ -20,6 +20,7 @@ double in2_ty_sec[256];
 long   in2_ty_calls[256];
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
+double in2_arq_sec; long in2_arq_calls;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
 static clock_t _tk;    /* file scope so the phase macro works in every layer body */
 #define TKPH(i) do { clock_t _n = clock(); in2_phase[i] += (double)(_n - _tk) / (double)CLOCKS_PER_SEC; _tk = _n; } while (0)
@@ -708,7 +709,9 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
      *    the sliding and full layers disagreed about what they were looking at. */
     float *mixh = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (!mixh) { free(an); return WUBU_INKLING2_ERR_IO; }
+    const clock_t _a0 = clock();
     float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    in2_arq_sec += (double)(clock() - _a0) / (double)CLOCKS_PER_SEC; in2_arq_calls++;
     if (arq && il > 0) {
         /* At a boundary the reference banks this layer's input between the two mixes, so the
          * attention_input mix must exclude the entry the caller has already appended, while the

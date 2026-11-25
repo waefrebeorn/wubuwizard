@@ -330,3 +330,25 @@ Tried and reverted after measuring, all under the harness:
 - `in2_tensor_borrow` (hand callers the cache buffer instead of a copy): 3.00/1.00 s unchanged **and** it leaks
   when `IN2_NO_DQ_CACHE` is set, because the returned buffer is caller-owned in that path and the call site no
   longer frees it. No measured gain plus a real defect is not a trade worth keeping.
+
+### The mix paradox (2026-11-25, unresolved)
+
+`IN2_TIMETY` says the `mix` phase is **81.5% of layer time** (0.520 s of 0.638 s per step). Everything that phase
+contains, measured:
+
+- `in2_tensor_to_f32(&L->attn_res_q)`: **0.000 s over 40 calls** (instrumented directly; the DQ cache makes a
+  2304x2304 look-up free)
+- `in2_tensor_to_f32(&L->attn_norm)`: a 2304-float vector
+- three `calloc`s of n_tok*d
+- `in2_mix` once per position: n_blocks+1 rmsnorms of d and **one** query dot of 39K MACs
+
+By arithmetic that is tens of microseconds per visit, not 26 ms. Yet the phase timer says 26 ms. Either the timer is
+mis-attributing (something inside `in2_mix` blocks on first touch of a large allocation, or the phase boundary is
+not where the label says), or `in2_mix` is doing far more work than its source suggests.
+
+**Do not paper over this with another guess.** The next step is a sampling profiler (or a `perf`-style
+post-mortem of the running process) rather than more reasoning from source - three of the last four hypotheses about
+this engine measured wrong, and the phase split has now disagreed with the arithmetic twice.
+
+What is solid regardless: total layer time is 0.64 s, kernels inside it sum to 0.32 s, moe is 0.26 s, and the
+engine does 1.00 s per decode step with the cache, exact.
