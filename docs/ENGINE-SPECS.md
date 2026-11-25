@@ -309,3 +309,40 @@ Two things follow, and they are the reason this addendum exists:
 
 Also actioned from §9: `FlexGen` deleted from the clone set - it is a Java map generator from 2014, not the
 offloading engine, and citing it as an offloading reference would have been an error traceable to this pull.
+
+### Why llama.cpp cannot load this checkpoint - diagnosed, not guessed
+
+Built b12723 (`llama-cli.exe`, MinGW-UCRT 16.1, needs `libgcc_s_seh-1`/`libstdc++-6`/`libwinpthread-1`
+copied beside it or the loader returns 127 with no message) and attempted the load three ways:
+
+```
+arch as shipped      -> failed to load model (no detail at default verbosity)
+arch=inkling2_loop   -> key not found in model: inkling2_loop.context_length
+block_count=24       -> key inkling2.attention.head_count has wrong array length; expected 24, got 48
+```
+
+The third line is the diagnosis. `inkling2.attention.head_count` is a **per-layer array of length 48** in the
+file, matching its declared `block_count = 48` (the *logical* count: 24 physical layers with the core looped
+three times). `llama.cpp`'s `inkling2_loop` instead takes `n_phys = hparams.n_layer()` and expects both
+`block_count` and every per-layer array to be **physical** (24), then expands to cache slots itself:
+
+```cpp
+n_phys = hparams.n_layer();
+const size_t n_slot = n_phys + (n_phys ... )*(core_end - core_start);
+hparams.n_layer_all = n_slot;
+```
+
+So the two disagree on a **metadata convention**, not on capability. llama.cpp ships a real looped
+implementation for this architecture (`src/models/inkling2-loop.cpp`, 123 lines, with `loop_q/k/v/ffn_ctrl_{down,gain,forget}`
+and a `bank` that starts at `prelude_blocks.size() + 1`); it simply cannot read a file authored to the
+logical-count convention. Loading it there would require rewriting the KV section - every per-layer array
+truncated to 24 and the arch string re-prefixed - which shifts the 8.4 GB data section.
+
+**That closes the earlier load-failure question** ("tensor blk.24.attn_q.weight not found"): the file says
+`block_count 48`, so the non-loop path wants blk.24..47, which do not exist. It was never a missing
+architecture and never a corrupt file.
+
+**Decision, per the standing ruling:** making llama.cpp ingest this file is the nerd snipe. The implementation
+was read for *semantics* (`mix`, `control`, `convolve`, `tau`, `clip` - all extracted above and all now
+reflected in the port), and the loading attempt stops here. The file's own convention is the one the port
+already uses.
