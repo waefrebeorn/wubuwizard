@@ -16,6 +16,43 @@
 #include "wubu_inkling2.h"
 #include "wubu_dequant_fp4.h"
 #include "wubu_iq2q8.h"
+#include "wubu_iq_c11.h"
+
+/* ggml block_q8_K, spelled out so this file needs no ggml header: 256 int8 quants with one float scale and the
+ * 16 per-16 sums. The translated kernels read exactly this layout. */
+typedef struct { float d; int8_t qs[256]; int16_t bsums[16]; } in2_q8k_blk;
+
+/* Quantise a whole activation row to Q8_K, mirroring ggml's scale convention (iscale negative, d = 1/iscale) so
+ * the kernels' bit-exactness argument still applies: positive x maps to negative q and a negative d, and the
+ * product is unchanged. Done ONCE per matvec, reused by every row. */
+static void in2_q8k_quantise(const float *x, int64_t n, in2_q8k_blk *out)
+{
+    const int64_t nb = n / 256;
+    for (int64_t b = 0; b < nb; ++b) {
+        const float *xb = x + b * 256;
+        in2_q8k_blk *y = &out[b];
+        float amax = 0.0f, maxv = 0.0f;
+        for (int j = 0; j < 256; ++j) {
+            const float a = fabsf(xb[j]);
+            if (a > amax) { amax = a; maxv = xb[j]; }
+        }
+        if (amax == 0.0f) { y->d = 0.0f; memset(y->qs, 0, 256); memset(y->bsums, 0, 32); continue; }
+        const float iscale = -128.0f / maxv;
+        y->d = 1.0f / iscale;
+        for (int j = 0; j < 256; ++j) {
+            float v = iscale * xb[j];
+            int q = (int)(v < 0.0f ? v - 0.5f : v + 0.5f);
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            y->qs[j] = (int8_t)q;
+        }
+        for (int g = 0; g < 16; ++g) {
+            int s = 0;
+            for (int j = 0; j < 16; ++j) s += y->qs[g * 16 + j];
+            y->bsums[g] = (int16_t)s;
+        }
+    }
+}
 void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float *out);
 
 /* ---- prototypes (definitions follow in dependency order) ---- */
@@ -86,6 +123,30 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
      * multiply-accumulate: measured 12.64x against dequantise-then-dot on a 2304-element row, worst relative
      * error 5.9e-08 over 64 random block sets (tools/dot_test.c). The other expert types still materialise. */
     const int ty_mv = (t && t->info) ? t->info->ggml_type : -1;
+    /* Translated maya kernels (bit-identical to ggml's AVX2 dot, verified per type) cover the gate/up formats.
+     * One call handles every row of the expert, so the activation is quantised once and the row loops stay inside
+     * the kernel. */
+    if (getenv("IN2_NOFAST") == NULL && (n_in % 256) == 0 &&
+        (ty_mv == 16 || ty_mv == 17 || ty_mv == 22) && wubu_iq_supported(ty_mv)) {
+        const int64_t rb = gguf_raw_size(ty_mv, n_in);
+        unsigned char *whole = (rb > 0) ? (unsigned char *)malloc((size_t)rb * (size_t)n_out) : NULL;
+        in2_q8k_blk *act = (in2_q8k_blk *)malloc(((size_t)n_in / 256) * sizeof(in2_q8k_blk));
+        if (whole && act) {
+            const int64_t eo   = elem_off;
+            const int64_t boff = (eo == 0) ? 0 : gguf_raw_size(ty_mv, eo);
+            wubu_in2_tensor_t sh = *t;
+            sh.file_offset = t->file_offset + (boff < 0 ? 0 : boff);
+            if (boff >= 0 && wubu_inkling2_read(ctx, &sh, whole, rb * n_out) == WUBU_INKLING2_OK) {
+                in2_q8k_quantise(x, n_in, act);
+                const void *ap[1] = { (const void *)act };
+                float *op[1] = { y };
+                wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);
+                free(act); free(whole);
+                return WUBU_INKLING2_OK;
+            }
+        }
+        free(act); free(whole);
+    }
     /* Types with a fused row kernel: Q2_0 (`down`) and IQ2_XS (gate/up). Everything else still materialises. */
     /* Both types now have a vectorised path (Q2_0 float AVX2, IQ2_XS int8 AVX2 against a once-per-matvec
      * activation). The IQ2_XS SCALAR fused form measured 14% SLOWER
