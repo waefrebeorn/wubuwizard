@@ -289,6 +289,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else {
         memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
     }
+    if (il == 1 && getenv("IN2_DUMP_MIX")) {
+        FILE *mf = fopen(getenv("IN2_DUMP_MIX"), "wb");
+        if (mf) { fwrite(mixh, sizeof(float), (size_t)n_tok * d, mf); fclose(mf); }
+    }
     free(arq);
 
     /* 1. attn_norm applied to the mixed state. In passes after the first, q/k/v each get their own

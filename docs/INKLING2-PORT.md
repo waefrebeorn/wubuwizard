@@ -736,6 +736,28 @@ Also confirmed while reading: the mix really is attention (`scaling = hidden_siz
 unweighted-RMS-normalised states with the values being those same states - which is what `in2_mix` does, so
 the formula was right and only the input set was wrong.
 
+## The depth mix verified with real block states
+
+blk.0 is the only layer with no `attn_res_query` and no banked states, so the mix had never run with a
+populated block list - even though it runs 24 times per pass. `tools/mix_check.py` checks blk.1's mix
+against an independent implementation over the verified blk.0 output:
+
+```
+weights [0.5074748 0.49252525]
+rms engine 0.702816   python 0.702816
+max abs diff 1.907e-06   corr 0.9999999999999954
+```
+
+Two things this establishes. The banked block state is the **normed embedding** (IQ4_XS row +
+`token_embd_norm`) - confirming what blk.0 banks. And the weights sit near 0.5/0.5, a soft blend; without
+the `hidden_size**-0.5` factor the 2304-dim dot products would differ by orders of magnitude and the softmax
+would collapse to a hard 1/0 pick, so the scaling is load-bearing, not cosmetic.
+
+Also resolved by listing the actual tensor names: `blk.1.attn_res_query.weight` is `[2304]`, a single
+vector, so using row 0 is correct - and blk.1 carries only the static `attn_k_conv`/`attn_v_conv`, with no
+`*_proj`, matching "dynamic convs are full-layer only". My first probe missed these because I queried names
+without the `.weight` suffix.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
