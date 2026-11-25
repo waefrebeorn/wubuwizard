@@ -123,5 +123,22 @@ not carry.** `MAYA_NATIVE_EXPERTS=OFF` (CMakeLists.txt:1637) removes that path a
 build with no upstream checkout — accepted only if the resulting binary can still run a GGUF IQ2 checkpoint,
 which is the thing being tested.
 
-This is the one place where the ban on llama.cpp meets a wall: it is maya's own dependency, not a reference we
-consult, and no code from it is read or copied into this repo. Recording it rather than quietly re-cloning.
+**Resolution (2026-11-25): pulling fresh upstream is allowed.** A current llama.cpp checkout may exist as a
+*build dependency* of the standard if it is fresh to date - it is not a reference, not a bar, and nothing from
+it is read or copied into this repo. The distinction that matters:
+
+- **banned**: consulting llama.cpp to decide what this model's arithmetic *is*, or benchmarking against it;
+- **allowed**: maya's own build needing `ggml/include/ggml.h` and `ggml/include/ggml-cpu.h`.
+
+A stale copy is worse than none - the deleted one was pinned at b12723 and its `inkling2` implementation
+disagreed with maya on the loop gate. So the dependency is cloned fresh (`git clone --depth 1`) into
+`research/upstream-ggml`, verified at clone time (`upstream-ggml/.git` present, commit date recorded), and its
+path passed to maya as:
+
+```
+-DFETCHCONTENT_SOURCE_DIR_STRATA_LLAMACPP=research/upstream-ggml
+-DCMAKE_CXX_FLAGS="-I<upstream>/ggml/include -D_WIN32_WINNT=0x0A00"
+```
+
+Freshness is part of the gate: record the commit hash with any oracle number taken from a maya build, exactly
+as atomic-engine records provenance for its KL runs.
