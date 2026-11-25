@@ -28,8 +28,11 @@ void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float 
  * New types are added here only after their sweep passes, never merely because wubu_iq_supported() returns 1. */
 static int in2_ty_verified(int ty)
 {
+    const char *only = getenv("IN2_TY_ONLY");   /* isolate one type when a new kernel disagrees end to end */
+    if (only) return ty == atoi(only);
     switch (ty) {
-        case 12: case 13: case 16: case 17: case 18: case 21: case 22: case 23: case 29: return 1;
+        case 12: case 13: case 16: case 17: case 18: case 19: case 21: case 22: case 23:
+        case 29: case 40: case 42: return 1;
         default: return 0;
     }
 }
@@ -132,6 +135,21 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                     const void *ap[1] = { actbuf };
                     float *op[1] = { y };
                     wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);
+                    /* Does the kernel agree with THIS engine's own dequantiser on REAL bytes from THIS file?
+                     * A kernel can be bit-identical to ggml on synthetic blocks and still disagree here, which
+                     * would mean the file's encoding of that type is not ggml's canonical struct. */
+                    if (getenv("IN2_CMP")) {
+                        float *r0 = (float *)malloc((size_t)n_in * sizeof(float));
+                        if (r0) {
+                            if (in2_dequant_slice(ctx, t, elem_off, n_in, r0) == WUBU_INKLING2_OK) {
+                                double a0 = 0.0;
+                                for (int i = 0; i < n_in; ++i) a0 += (double)r0[i] * (double)x[i];
+                                fprintf(stderr, "CMP ty=%d row0 kernel=%.9g dequant=%.9g rel=%.3e\n",
+                                        ty_mv, (double)y[0], a0, fabs((double)y[0] - a0) / (fabs(a0) > 1e-30 ? fabs(a0) : 1e-30));
+                            }
+                            free(r0);
+                        }
+                    }
                     free(actbuf); free(whole);
                     return WUBU_INKLING2_OK;
                 }
