@@ -89,6 +89,7 @@ void in2_kv_begin(int pos0) { g_visit = 0; g_kv_pos = pos0; }
  * with the same visit numbering (kraw = residual stream, vraw = moe stream). Missing these is why a 1-token step
  * produced different tokens from a full recompute: K and V were cached, these two were still pad-with-zeros. */
 static in2_kv_t *g_kv2;
+int g_kv_window = 0;   /* ring size of the K/V cache, 0 = linear slots */
 
 static void in2_conv_stream(in2_kv_t *kvc, int vvis, int which, const float *x, int n_tok,
                             int ch, const float *w, int k, float *out)
@@ -687,14 +688,20 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* 2. q: project, scale+clip per head. */
     const int qdim = NH * HD, kdim = NKV * HD;
     if (!g_kv && getenv("IN2_KV")) {
-        /* store-path exercise only: a 64-position cap keeps the test allocation small; the read path will size
-         * sliding visits to EXT and full visits to the context length. */
+        /* Real sizing. Sliding layers never look past EXT keys, so the ring holds EXT rows per visit:
+         * 72 x 1024 x 1024 x 4 B x 2 = 604 MB, which is the honest cost of a 1024-token window on this model.
+         * IN2_KV_POS lowers it for short-context work. */
         static in2_kv_t boot;
-        if (in2_kv_init(&boot, 72, kdim, 0, 64) == 0) g_kv = &boot;
+        const char *pz = getenv("IN2_KV_POS");
+        const int cap = pz ? atoi(pz) : 1024;
+        if (in2_kv_init(&boot, 72, kdim, cap, cap) == 0) { g_kv = &boot; g_kv_window = cap; }
     }
     if (!g_kv2 && getenv("IN2_KV")) {
+        /* The residual and MoE convs only ever need the last three rows, so this record is a 3-row window per
+         * visit rather than a position ring: 72 x 3 x 2304 x 4 B x 2 = 4 MB, against 1.36 GB if it were sized
+         * like the K/V cache. */
         static in2_kv_t boot2;
-        if (in2_kv_init(&boot2, 72, d, 0, 64) == 0) g_kv2 = &boot2;
+        if (in2_kv_init(&boot2, 72, d, 3, 3) == 0) g_kv2 = &boot2;
     }
     /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
      * would attend to the next visit's empty rows */

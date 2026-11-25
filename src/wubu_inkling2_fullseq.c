@@ -244,7 +244,9 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
                 const int kvh = hh / (NH / NKV);
                 int n_key = 0;
                 const int gp = kv_pos0 + t;
-                for (int j = 0; j <= gp; ++j) {           /* causal, global positions */
+                /* the cache is a ring over the window, so keys older than it are no longer resident */
+                const int jstart = (g_kv_window > 0 && gp + 1 > g_kv_window) ? gp + 1 - g_kv_window : 0;
+                for (int j = jstart; j <= gp; ++j) {      /* causal, global positions */
                     const int dist = gp - j;
                     const float *kbp;
                     if (kv) { kbp = in2_kv_k(kv, vvis, j); if (!kbp) continue; kbp += kvh * HD; }

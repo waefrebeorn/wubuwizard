@@ -13,6 +13,7 @@ typedef struct {
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */
+extern int g_kv_window;   /* ring size of the K/V cache, 0 = linear */
 in2_kv_t *in2_kv_current(int *visit, int *pos0);
 void      in2_kv_advance(void);
 void  in2_kv_begin(int pos0);
