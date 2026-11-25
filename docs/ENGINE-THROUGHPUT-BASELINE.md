@@ -658,6 +658,16 @@ With attention still 37.5 ms of a 100.5 ms decode step at that length - it was 1
 register-blocking fix above - halving those bytes is the next thing worth measuring, and the same
 register-blocked loops are where the conversion has to pay for itself.
 
+
+**Tried and not adopted: fusing the GQA head group.** 16 q heads over 8 kv heads means two threads read
+the same K and V rows, so the group's two q heads were handled in one thread with the row loaded once -
+half the KV traffic, bit-identical output (tokens matched). It measured **9.0 tok/s against 9.7**, but
+that comparison was not interleaved and the box was still busy from the build; three consecutive runs of
+the restored binary then gave 9.7 / 9.7 / 9.7. So the result is **inconclusive, and it was reverted**
+rather than kept on a plausible story. It halves the parallel iterations (16 threads to 8 on a 12-thread
+CPU) while halving traffic, so it may well be a wash; deciding needs an interleaved A/B, which is the only
+kind that counts here.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
