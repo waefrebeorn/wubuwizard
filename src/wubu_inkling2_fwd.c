@@ -69,6 +69,16 @@ static in2_kv_t *g_kv;
 static int g_visit;
 static int g_kv_pos;
 
+/* shared with the full-attention layers, which live in another translation unit but must use the same visit
+ * numbering or their rows land in a different slot every pass */
+in2_kv_t *in2_kv_current(int *visit, int *pos0)
+{
+    if (visit) *visit = g_visit;
+    if (pos0) *pos0 = g_kv_pos;
+    return g_kv;
+}
+void in2_kv_advance(void) { ++g_visit; }
+
 void in2_kv_attach(in2_kv_t *kv, int pos0)
 {
     g_kv = kv;
