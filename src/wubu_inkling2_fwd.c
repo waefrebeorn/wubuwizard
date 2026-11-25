@@ -699,7 +699,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
      * would attend to the next visit's empty rows */
     const int vvis = g_visit;
-    if (g_kv && il == 6 && getenv("IN2_VTRACE")) fprintf(stderr, "VISIT il=6 vvis=%d pos0=%d ntok=%d\n", vvis, pos0, n_tok);
+    if (il == 6 && getenv("IN2_VTRACE")) fprintf(stderr, "VISIT il=6 vvis=%d pos0=%d ntok=%d\n", vvis, pos0, n_tok);
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if (!q) { if (DBG) fprintf(stderr, "[L%d] q alloc failed\n", il);
@@ -843,6 +843,13 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                  * local) and an incremental step (pos0 = already-cached prefix, keys read from the cache). With no
                  * cache attached the lookup is the local array and the arithmetic is bit-identical to before. */
                 const int gp = pos0 + t;
+                if (il == 6 && getenv("IN2_KROW") && t == 0 && hh == 0) {
+                    const float *sk = g_kv ? in2_kv_k(g_kv, vvis, 0) : k;
+                    const float *sv = g_kv ? in2_kv_v(g_kv, vvis, 0) : v;
+                    fprintf(stderr, "ATT row0 mode=%s pos0=%d nkey=%d k=[%.8g %.8g] v=[%.8g %.8g]\n",
+                            g_kv ? "cache" : "local", pos0, gp + 1,
+                            sk ? sk[0] : 0.f, sk ? sk[1] : 0.f, sv ? sv[0] : 0.f, sv ? sv[1] : 0.f);
+                }
                 const int j0 = (gp + 1 > EXT) ? (gp + 1 - EXT) : 0;
                 int n_key = 0;
                 for (int j = j0; j <= gp; ++j) {

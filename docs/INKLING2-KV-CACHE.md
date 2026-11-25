@@ -217,3 +217,27 @@ Still open at layer 6. Remaining candidates, in the order that costs least to te
    act at layer 6 specifically).
 
 Do not spend more attempts on integration guesses. The next action is the row diff in (1).
+
+## Retraction: the layer-6 localization was built on a fragile comparison (2026-11-25)
+
+The `IN2_LTRACE` diff used `tail -45` on each run and compared line by line. That is not anchored to a step or a
+visit, so the "first difference at il=06" may be a slicing artifact rather than a numeric divergence. It is not
+evidence until the trace carries a monotonic number.
+
+What IS established, from a probe placed immediately before attention consumes the rows:
+
+```
+recompute   ATT row0 mode=local pos0=0 nkey=1 k=[0.084696069 1.0070702] v=[0.60930085 -0.90455842]
+incremental ATT row0 mode=cache pos0=0 nkey=1 k=[0.084696069 1.0070702] v=[0.60930085 -0.90455842]
+incremental ATT row0 mode=cache pos0=1 nkey=2 k=[0.084696069 1.0070702] v=[0.60930085 -0.90455842]
+```
+
+K and V for position 0 at layer 6, all three passes, are byte-identical between the cached and local paths. The
+cache is storing and returning the right rows. Note also `nkey=2` on the step against `nkey=1` in the 1-token
+prefill, which is correct.
+
+Next, strictly in order:
+1. Give the trace a monotonic sequence number and re-run the comparison anchored on it. Do not trust any
+   first-difference claim until that is done.
+2. Only if a difference survives that: probe the same row at the FULL-attention layers (il 5, 11, 17, 23), where
+   V is stored from a different code path.
