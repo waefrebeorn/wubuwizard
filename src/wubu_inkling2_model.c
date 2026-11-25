@@ -131,6 +131,12 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
         else                                                                            \
             rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
+        if (rc == WUBU_INKLING2_OK && getenv("IN2_LTRACE")) {                           \
+            const int _t = n_tok - 1;                                                   \
+            double _s = 0.0;                                                            \
+            for (int _i = 0; _i < d; ++_i) { double _v = h[(size_t)_t * d + _i]; _s += _v * _v; } \
+            fprintf(stderr, "LT il=%02d ntok=%d l2_last=%.12e\n", (IL), n_tok, _s);    \
+        }                                                                               \
         if (rc == WUBU_INKLING2_OK && getenv("IN2_DUMP_LAYERS")) {                     \
             char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d.bin", getenv("IN2_DUMP_LAYERS"), (IL)); \
             FILE *_lf = fopen(_lp, "wb");                                              \

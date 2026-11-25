@@ -170,3 +170,27 @@ Next test, in order:
    prefill, where history is zeros.
 
 Do not treat the cache as working until the 1+1 case matches to 1e-4. The tokens agreeing at 3+1 is not evidence.
+
+## Divergence localized to the pass boundary (2026-11-25)
+
+`IN2_LTRACE=1` prints the L2 of the last position's hidden state after every layer. Comparing a 2-token recompute
+against a 1+1 incremental step, aligned on the step's last position:
+
+```
+LT il=06 ntok=2 l2_last=3.025383022053e+02   (recompute)
+LT il=06 ntok=1 l2_last=8.184486260684e+02   (incremental)
+```
+
+Layers 0-5 are identical to twelve digits. Layer 6 is the **first layer of the second loop pass**, and that is the
+only place it diverges. So the read path, the four convs, K/V, the relative bias and the sink are all correct for
+pass 1 - what is wrong is what crosses between passes.
+
+`in2_messages(prev_blocks, n_prev, prev_h, ...)` builds the message for a position from the PREVIOUS pass's hidden
+states and block states. In a full recompute those buffers hold every position in the prefix; on a 1-token step they
+hold one. Nothing caches them.
+
+That is the same class of bug as the four convs, one level up: per-visit state that depends on the whole prefix.
+The fix is to cache the pass-boundary h and block states per position (d_model and n_blocks x d_model per pass),
+keyed the same way, and have the message construction read prefix rows from that cache.
+
+Acceptance stays the same: 1+1 must match to 1e-4, then 3+1, then a 19-token prompt.
