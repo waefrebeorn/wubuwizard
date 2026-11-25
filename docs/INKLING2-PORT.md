@@ -627,6 +627,32 @@ step. That is seconds per token - far too slow to be the final path - but it can
 which is exactly why the first output should come through it. The KV cache comes after, and any divergence
 between cached and uncached decoding is then a cache bug by construction rather than a needle in the graph.
 
+## First generated tokens, and what they say
+
+Generation before this run selected id **200567**, which is beyond the 200,058 real tokens - a padded vocab
+row with a meaningless embedding. The reference drops the padded vocab before sampling; that mask was
+missing. With it applied the model can no longer pick padding, and the first generation reads:
+
+```
+ids: 1234 87 779 11 1234   ->   "utexot,ute"
+gen logits: 19.84, 17.18, 19.09, 27.90
+```
+
+**It is degenerate**: the fourth token is the prompt token itself, at a logit of 27.9 against ~19 for
+everything else. A model returning to its own input with a commanding margin is a symptom, not a
+prediction - it is what a broken or misindexed graph tends to do, and the output projection returning one
+token far above the rest is consistent with that.
+
+So there are now two definite bugs found and fixed by generating output (padding mask, and earlier the
+residual corruption from the slot-3 gate writing into `h`), and the output itself is still wrong. That is
+the expected state: no stage above blk.0 has ever been compared against a reference, and the message-slot
+order is still an assumption with only suggestive evidence behind it.
+
+**Next diagnostic, and it is cheap:** the LM head is the last stage and the easiest to check in isolation.
+Dump the final hidden state, dequantise the matching rows of `output.weight` independently, and confirm the
+logit for the top token reproduces. If it does, the head is exonerated and the defect is upstream in the
+loop; if it does not, the head or the final norm is the problem and everything above it was noise.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
