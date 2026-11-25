@@ -150,7 +150,37 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
             in2_matvec(Wk, xk + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
             in2_matvec(Wv, xv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
         }
-        in2_shortconv_dynamic(kraw, n_tok, kdim, kc, kp, xk, d, NKV, 4, kt);
+        if (kv) {
+            /* Prepend the three cached raw rows as if they were part of this batch, run the tested conv over
+             * history+new, keep only the new outputs. Placed HERE, before the loop that builds k[]/v[] from kt/vt -
+             * an earlier attempt inserted this after that loop, so the rows were built from an unfilled buffer and
+             * the run quietly used zeros (22.0042 instead of 26.9567). */
+            const int H3 = 3, rows = H3 + n_tok;
+            float *hx = (float *)calloc((size_t)rows * (size_t)d, sizeof(float));
+            float *hk = (float *)malloc((size_t)rows * (size_t)kdim * sizeof(float));
+            float *hv = (float *)malloc((size_t)rows * (size_t)kdim * sizeof(float));
+            float *okb = (float *)malloc((size_t)rows * (size_t)kdim * sizeof(float));
+            float *ovb = (float *)malloc((size_t)rows * (size_t)kdim * sizeof(float));
+            if (hx && hk && hv && okb && ovb) {
+                const float *hkh = in2_kv_hist_k(kv, vvis, 3);
+                const float *hvh = in2_kv_hist_v(kv, vvis, 3);
+                if (hkh) memcpy(hk, hkh, (size_t)H3 * (size_t)kdim * sizeof(float));
+                if (hvh) memcpy(hv, hvh, (size_t)H3 * (size_t)kdim * sizeof(float));
+                memcpy(hk + (size_t)H3 * kdim, kraw, (size_t)n_tok * (size_t)kdim * sizeof(float));
+                memcpy(hv + (size_t)H3 * kdim, vraw, (size_t)n_tok * (size_t)kdim * sizeof(float));
+                memcpy(hx + (size_t)H3 * d, xk, (size_t)n_tok * (size_t)d * sizeof(float));
+                in2_shortconv_dynamic(hk, rows, kdim, kc, kp, hx, d, NKV, 4, okb);
+                memcpy(kt, okb + (size_t)H3 * kdim, (size_t)n_tok * (size_t)kdim * sizeof(float));
+                memcpy(hx + (size_t)H3 * d, xv, (size_t)n_tok * (size_t)d * sizeof(float));
+                in2_shortconv_dynamic(hv, rows, kdim, vc, vp, hx, d, NKV, 4, ovb);
+                memcpy(vt, ovb + (size_t)H3 * kdim, (size_t)n_tok * (size_t)kdim * sizeof(float));
+                for (int t = 0; t < n_tok; ++t)
+                    in2_kv_store_raw(kv, vvis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
+            } else rc = WUBU_INKLING2_ERR_IO;
+            free(hx); free(hk); free(hv); free(okb); free(ovb);
+        } else {
+            in2_shortconv_dynamic(kraw, n_tok, kdim, kc, kp, xk, d, NKV, 4, kt);
+        }
         if (il == 5 && getenv("IN2_DUMP_DYNCONV")) {
             FILE *df = fopen(getenv("IN2_DUMP_DYNCONV"), "wb");
             if (df) {
@@ -162,7 +192,7 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
                 fclose(df);
             }
         }
-        in2_shortconv_dynamic(vraw, n_tok, kdim, vc, vp, xv, d, NKV, 4, vt);
+        if (!kv) in2_shortconv_dynamic(vraw, n_tok, kdim, vc, vp, xv, d, NKV, 4, vt);
         for (int t = 0; t < n_tok; ++t) {
             memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);
             in2_l2_clip(k + (size_t)t * kdim, NULL, NKV, HD, 22.6274166f);
@@ -178,7 +208,7 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
                 float *cv = in2_kv_v(kv, vvis, kv_pos0 + t);
                 if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
                 if (cv) memcpy(cv, v + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
-                in2_kv_store_raw(kv, vvis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
+                /* raw rows are pushed by the conv branch above, once each */
             }
         }
     }
