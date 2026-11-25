@@ -87,7 +87,24 @@ double in2_arq_sec, in2_mixfn_sec, in2_tail_sec; long in2_arq_calls;
 double in2_alloc_sec;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
 static clock_t _tk;    /* file scope so the phase macro works in every layer body */
-#define TKPH(i) do { clock_t _n = clock(); in2_phase[i] += (double)(_n - _tk) / (double)CLOCKS_PER_SEC; _tk = _n; } while (0)
+
+/* High-resolution clock. clock() on Windows/MSYS resolves at ~15.6 ms, so every region shorter than that reads as
+ * exactly 0.000 s - which is why in2_mix, the arq load, the post-mlp conv and the callocs all measured 0.000 while
+ * their sum over 40 layer visits is real. That aliasing produced three contradictory answers from the same span. */
+static double in2_now(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / (double)freq.QuadPart;
+#else
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+#endif
+}
+static double _tkh;    /* high-res companion to _tk */
+#define TKPH(i) do { const double _n = in2_now(); in2_phase[i] += _n - _tkh; _tkh = _n; } while (0)
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
 #include "wubu_dequant_fp4.h"
@@ -770,7 +787,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* Timer origin for the phase split. It MUST be set at function entry: it was previously set further down,
      * after the first TKPH had already fired, so the "mix" phase was timing the PREVIOUS layer's uninstrumented
      * tail and reporting 81% of layer time for code that measured 0.000 s when instrumented directly. */
-    _tk = clock();
+    _tk = clock(); _tkh = in2_now();
     float *an = in2_tensor_to_f32(ctx, &L->attn_norm, NULL);
     if (!an) { if (DBG) fprintf(stderr, "[L%d] attn_norm failed\n", il); return WUBU_INKLING2_ERR_IO; }
     if (DBG) fprintf(stderr, "[L%d] step1 ok\n", il);

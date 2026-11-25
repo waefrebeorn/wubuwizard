@@ -551,3 +551,24 @@ Where the engine actually stands, all through tools/bench.py at 0% spread:
 - prefill 3.00 s (was 42,774 ms at the start of the kernel work)
 - decode 1.00 s/step, 0.90 s at prefix 5, exact logits, vs 2.60 s recompute at prefix 4 and 25.8 s at prefix 20
 - all 12 formats 144/144 bit-identical to ggml; NVFP4 1.59 -> 7.96 GOPS
+
+### The unaccounted third is the 4 full-attention layers (found, not yet fixed) (2026-11-25)
+
+The phases never summed to the layer total because `in2_layer_full_seq` has **no phase ticks at all** - I only ever
+instrumented the sliding path. Four layers of 24, but they are the expensive ones: still on the pre-batching code,
+with `in2_tensor_to_f32(&L->wq)` (a 3072x2304 materialisation) per visit and `in2_matvec` for rel/sink/gate/wo.
+
+Tried converting those four calls to `in2_matvec_nt` (the kernel path the sliding layers already use). It builds and
+runs, and it **changes the output**: top1 149876 -> 220, logit 26.9567 -> 23.9460. That is the int8-activation
+contract being extended to layers that feed the residual most directly, and it is a bigger behavioural shift than the
+one already accepted globally (29.6508 -> 29.2490). Reverted rather than absorbed: a top-1 change is not something to
+slip in behind a "same pattern as the sliding layers" argument.
+
+To land it properly it needs its own A/B: greedy tokens and logits for both activation modes side by side across
+several prompts, and a decision recorded about whether the engine's contract is "exact fp32 activations" or "ggml's
+int8 activations everywhere". Right now the engine is *inconsistent* - sliding layers int8, full layers fp32 - and
+that inconsistency is the thing to resolve before more speed work.
+
+Fixed in passing: the instrumentation now uses QueryPerformanceCounter instead of `clock()`, which on
+Windows/MSYS resolves at ~15.6 ms and made every sub-16 ms region read as exactly 0.000 s. That aliasing is what
+produced three contradictory answers about the same span.
