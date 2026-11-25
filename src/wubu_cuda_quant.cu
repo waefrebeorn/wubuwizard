@@ -2740,6 +2740,34 @@ int ffn_mrow_impl(const void *d_wg, int tg, const void *d_wu, int tu,
     ffn_stage_mark(1);
     quantize_q8k_kernel<<<dim3(nbx, M), 32>>>(dx, qx, hidden == K ? K : K, K, nbx);
     ffn_stage_mark(2);
+    if (getenv("G4_Q8_CHECK")) {
+        static int done_q8;
+        if (!done_q8) {
+            done_q8 = 1;
+            c_q8_k *ref = (c_q8_k *)pool_get("chk.q8", (size_t)nbx * sizeof(c_q8_k));
+            if (ref) {
+                quantize_q8k_kernel<<<nbx, 32>>>(dx, ref, K, 0, 0);   /* the M=1 launch, row 0 */
+                c_q8_k *a = (c_q8_k *)malloc((size_t)nbx * sizeof(c_q8_k));
+                c_q8_k *b = (c_q8_k *)malloc((size_t)nbx * sizeof(c_q8_k));
+                if (a && b) {
+                    cudaMemcpy(a, qx, (size_t)nbx * sizeof(c_q8_k), cudaMemcpyDeviceToHost);
+                    cudaMemcpy(b, ref, (size_t)nbx * sizeof(c_q8_k), cudaMemcpyDeviceToHost);
+                    int bad_blocks = 0, bad_vals = 0; double worst_d = 0.0;
+                    for (int i = 0; i < nbx; ++i) {
+                        const double dd = fabs((double)a[i].d - (double)b[i].d);
+                        if (dd > worst_d) worst_d = dd;
+                        int bad = 0;
+                        for (int j = 0; j < QK_K; ++j) if (a[i].qs[j] != b[i].qs[j]) ++bad;
+                        if (bad || a[i].d != b[i].d) ++bad_blocks;
+                        bad_vals += bad;
+                    }
+                    fprintf(stderr, "[Q8-CHECK] blocks=%d differing blocks=%d differing values=%d worst d delta=%.6g\n",
+                            nbx, bad_blocks, bad_vals, worst_d);
+                    free(a); free(b);
+                }
+            }
+        }
+    }
     if (getenv("G4_IQ2S_CHECK") && tg == 22) {
         static int done_i2;
         if (!done_i2) { done_i2 = 1; wubu_cuda_check_iq2s(d_wg, qx, K, ff, sg, M); }
