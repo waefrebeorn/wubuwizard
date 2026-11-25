@@ -285,9 +285,14 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                     fprintf(stderr, "TY %3d calls=%5ld  %.3f s  %5.1f%%  %6.2f GOPS\n", _t, in2_ty_calls[_t],
                             in2_ty_sec[_t], 100.0 * in2_ty_sec[_t] / (tot > 0 ? tot : 1.0),
                             in2_ty_macs[_t] / (in2_ty_sec[_t] > 0 ? in2_ty_sec[_t] : 1.0) / 1e9);
-                { extern double in2_lay_sec, in2_moe_sec;
-                  fprintf(stderr, "PHASE layers=%.3f s  moe=%.3f s\n", in2_lay_sec, in2_moe_sec);
-                  in2_lay_sec = 0; in2_moe_sec = 0; }
+                { extern double in2_lay_sec, in2_phase[8];
+                  static const char *_pn[8] = {"mix","q","k+v+conv","rel+sink","attn","gate+wo","resconv","moe"};
+                  fprintf(stderr, "PHASE layers=%.3f s\n", in2_lay_sec);
+                  for (int _i = 0; _i < 8; ++_i)
+                      fprintf(stderr, "  %-10s %.3f s  %5.1f%%\n", _pn[_i], in2_phase[_i],
+                              100.0 * in2_phase[_i] / (in2_lay_sec > 0 ? in2_lay_sec : 1.0));
+                  in2_lay_sec = 0;
+                  for (int _i = 0; _i < 8; ++_i) in2_phase[_i] = 0; }
                 for (int _t = 0; _t < 256; ++_t) { in2_ty_sec[_t] = 0; in2_ty_calls[_t] = 0; in2_ty_macs[_t] = 0; }
             }
             if (getenv("IN2_TIME")) fprintf(stderr, "HEAD %.3f s for %d rows x %d\n",

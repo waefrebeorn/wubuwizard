@@ -20,6 +20,9 @@ double in2_ty_sec[256];
 long   in2_ty_calls[256];
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
+double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
+static clock_t _tk;    /* file scope so the phase macro works in every layer body */
+#define TKPH(i) do { clock_t _n = clock(); in2_phase[i] += (double)(_n - _tk) / (double)CLOCKS_PER_SEC; _tk = _n; } while (0)
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
 #include "wubu_dequant_fp4.h"
@@ -453,8 +456,43 @@ static void in2_attn_accum(float *y, const float *x, float a, int n)
 }
 
 /* y[o] = dot(W + o*n_in, x) for o in [0, n_out). */
+#if defined(__x86_64__) || defined(_M_X64)
+/* Four independent double accumulators, eight floats per iteration. Double, not float: the QK experiment showed
+ * float accumulation drifting 2 logits over 48 layer visits, and this function feeds the message gates that every
+ * pass is conditioned on. Splitting into 4 partial sums changes the summation order but each partial is still
+ * double, so the result differs from the scalar loop only at ~1e-16 relative - unlike a float accumulator. */
+__attribute__((target("avx2,fma")))
+static void in2_matvec_avx2(const float *W, const float *x, int n_in, int n_out, float *y)
+{
+    for (int o = 0; o < n_out; ++o) {
+        const float *row = W + (size_t)o * n_in;
+        __m256d s0 = _mm256_setzero_pd(), s1 = _mm256_setzero_pd();
+        __m256d s2 = _mm256_setzero_pd(), s3 = _mm256_setzero_pd();
+        int i = 0;
+        for (; i + 16 <= n_in; i += 16) {
+            s0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(row + i)),      _mm256_cvtps_pd(_mm_loadu_ps(x + i)),      s0);
+            s1 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(row + i + 4)),  _mm256_cvtps_pd(_mm_loadu_ps(x + i + 4)),  s1);
+            s2 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(row + i + 8)),  _mm256_cvtps_pd(_mm_loadu_ps(x + i + 8)),  s2);
+            s3 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(row + i + 12)), _mm256_cvtps_pd(_mm_loadu_ps(x + i + 12)), s3);
+        }
+        for (; i + 4 <= n_in; i += 4)
+            s0 = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(row + i)), _mm256_cvtps_pd(_mm_loadu_ps(x + i)), s0);
+        __m256d s = _mm256_add_pd(_mm256_add_pd(s0, s1), _mm256_add_pd(s2, s3));
+        __m128d lo = _mm256_castpd256_pd128(s), hi = _mm256_extractf128_pd(s, 1);
+        lo = _mm_add_pd(lo, hi);
+        double acc = _mm_cvtsd_f64(lo) + _mm_cvtsd_f64(_mm_unpackhi_pd(lo, lo));
+        for (; i < n_in; ++i) acc += (double)row[i] * x[i];
+        y[o] = (float)acc;
+    }
+}
+static int in2_have_avx2(void) { static int c = -1; if (c < 0) c = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"); return c; }
+#endif
+
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y)
 {
+#if defined(__x86_64__) || defined(_M_X64)
+    if (in2_have_avx2()) { in2_matvec_avx2(W, x, n_in, n_out, y); return; }
+#endif
     for (int o = 0; o < n_out; ++o) {
         const float *row = W + (size_t)o * n_in;
         double acc = 0.0;
@@ -696,6 +734,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     }
     free(arq);
 
+    TKPH(0);
     /* 1. attn_norm applied to the mixed state. In passes after the first, q/k/v each get their own
      *    message-gated input and the same norm is applied to all three (the reference uses one
      *    input_layernorm for sliding layers, unlike the full layers' three). */
@@ -748,6 +787,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
      * would attend to the next visit's empty rows */
     const int vvis = g_visit;
+    _tk = clock();
     if (il == 6 && getenv("IN2_VTRACE")) fprintf(stderr, "VISIT il=6 vvis=%d pos0=%d ntok=%d\n", vvis, pos0, n_tok);
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
@@ -768,6 +808,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         }
     }
 
+    TKPH(1);
     /* 3. k, v: project, static short conv, then bare L2 clip (k) / unweighted rms (v). */
     float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
     float *Wv = in2_tensor_to_f32(ctx, &L->wv, NULL);
@@ -857,6 +898,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         }
     }
 
+    TKPH(2);
     /* 4. relative bias table from the normed input, plus sinks. */
     float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
     float *P = in2_tensor_to_f32(ctx, &L->rel_bias, NULL);
@@ -874,6 +916,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] rel/sink failed rcl=%p P=%p\n", il, (void*)rcl, (void*)P); }
     if (DBG) fprintf(stderr, "[L%d] step4 rc=%d\n", il, rc);
 
+    TKPH(3);
     /* 5. attention per head. The bias table is token-dependent, so it is recomputed per token; the
      *    loop below therefore walks queries and rebuilds only the distances it needs. */
     float *attn_out = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
@@ -943,6 +986,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         }
     }
 
+    TKPH(4);
     /* 6. gated output projection into its own buffer: h still holds the layer input, which the
      *    residual needs. sigmoid(attn_gate(xn)) * attn_out, then attn_output. */
     float *gate = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
@@ -972,6 +1016,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         FILE *q7 = fopen("d_gate.bin","wb"); if (q7) { fwrite(gate,sizeof(float),(size_t)n_tok*qdim,q7); fclose(q7); }
     }
 
+    TKPH(5);
     /* 7. post-attention short conv, then the residual rule:
      *    boundary (il % block_size == 0): the attention output becomes the residual and block_residual
      *    is banked into block_states (a no-op here, single block);
@@ -994,6 +1039,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                   fwrite(res, sizeof(float), (size_t)n_tok * d, of); fclose(of); }
     }
 
+    TKPH(6);
     /* 8. mlp_input: the same depth mix, one query, over [block_states; residual]. With no banked blocks
      *    it degenerates to an unweighted RMS norm. */
     float *fn = in2_tensor_to_f32(ctx, &L->ffn_norm, NULL);
@@ -1010,6 +1056,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             free(tmp);
         }
         rc = in2_moe(ctx, m, cfg, il, moein, n_tok, moeout);
+        TKPH(7);
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step8 failed fn=%p moein=%p moeout=%p (moe rc=%d)\n", il, (void*)fn, (void*)moein, (void*)moeout, rc); }
     if (DBG) fprintf(stderr, "[L%d] step8 rc=%d\n", il, rc);
 
