@@ -450,6 +450,15 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         }
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step5 failed attn_out=%p alpha=%p logits=%p\n", il, (void*)attn_out, (void*)alpha, (void*)logits); }
     if (DBG) fprintf(stderr, "[L%d] step5 rc=%d\n", il, rc);
+    if (il == 1 && getenv("IN2_DUMP_ATTN")) {
+        FILE *af = fopen(getenv("IN2_DUMP_ATTN"), "wb");
+        if (af) {
+            fwrite(sink, sizeof(float), (size_t)n_tok * NH, af);
+            for (int hh2 = 0; hh2 < NH; ++hh2) fwrite(&bias[hh2 * EXT], sizeof(float), 1, af);
+            fwrite(attn_out, sizeof(float), (size_t)n_tok * qdim, af);
+            fclose(af);
+        }
+    }
 
     /* 6. gated output projection into its own buffer: h still holds the layer input, which the
      *    residual needs. sigmoid(attn_gate(xn)) * attn_out, then attn_output. */

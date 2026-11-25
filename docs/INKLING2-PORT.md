@@ -817,6 +817,27 @@ That is the **fourth** time in this port that the instrument, not the engine, wa
 frequent enough to treat as the default hypothesis: when a check reports something dramatic, verify the check
 fires at the right moment before believing it.
 
+## The attention block, verified with the sink active
+
+Dumping `sink`, `bias[h][0]` and `attn_out` for blk.1 and recomputing all three independently:
+
+```
+sink    max|diff| 1.907e-06      (BF16 attn_sink_proj @ xn)
+bias0   max|diff| 1.192e-06      (Q8_0 attn_rel -> ScaledL2Clip(8.0) -> table column 0)
+attn    max|diff| 5.364e-07      (sink-aware softmax, GQA v mapping kvh = h//3)
+```
+
+Three things this closes:
+
+- **The rel-bias table indexing is right.** `attn_rel_bias` is `[16, 1024]` with `ne0 = 16`, so column
+  `dist` is `P[16*dist : 16*dist+16]`; at position 0 only `dist == 0` contributes, and the dot reproduces to
+  1.2e-06.
+- **The sink competes in the softmax correctly.** With one key, `alpha = 1/(1+exp(sink - logit))`; across the
+  24 heads it spans **0.00018 to 0.99993**, so some heads are almost entirely suppressed by the sink and
+  others ignore it. The sink removes **47.9% of the attention mass on average** - it is not a no-op term
+  that would "pass" a weaker check.
+- **The GQA mapping is right**: query head `h` reads kv head `h//3`, so 24 query heads over 8 kv heads.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
