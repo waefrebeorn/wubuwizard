@@ -682,6 +682,31 @@ sub-block instead of advancing 16 bytes per sub-block as `dequantize_row_iq4_xs`
 and the instrument was wrong, which is the third time in this port that the check, not the code, was at
 fault.
 
+## Per-layer dumps, and the shape they show
+
+`IN2_DUMP_LAYERS=<dir>` writes the hidden state after every layer, so the stack can be bisected. The first
+read of those dumps needs no reference at all - just whether the statistics follow the architecture:
+
+```
+layer  rms    max|x|   kind
+  0   2.3879   9.7919  slid BOUND
+  5   3.7198  18.3012  FULL
+  6   0.5376   3.3903  slid BOUND    <- reset
+ 11   1.8474  17.8182  FULL
+ 12   0.6169   2.2679  slid BOUND    <- reset
+ 17   2.3897  23.4495  FULL
+ 18   1.5433   5.1558  slid BOUND    <- reset
+ 23   2.2524   8.0898  FULL
+```
+
+RMS grows smoothly within each 6-layer segment and drops hard at every boundary. That is exactly what the
+boundary rule predicts: `is_block_boundary` means the attention output *becomes* the residual and the
+previous state is banked, so the accumulated energy is replaced rather than carried. Nothing explodes,
+nothing collapses, and the resets land on 0/6/12/18 - the boundaries the census says they should.
+
+This is a structural sanity check, not a correctness proof. It rules out "a layer is scaling itself to
+death", which is the cheapest failure to spot and the one most likely to be behind degenerate output.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
