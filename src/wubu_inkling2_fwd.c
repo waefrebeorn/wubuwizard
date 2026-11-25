@@ -35,7 +35,7 @@ int  in2_router(const float *x, const float *W, const float *corr_bias, int n_ex
 int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
              int il, const float *x, int n_tok, float *out);
 int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                       int il, float *h, int n_tok, int pos0);
+                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out);
 
 /* Unweighted RMS norm: x * rsqrt(mean(x^2) + eps). Used by the loop message gates. */
@@ -252,7 +252,7 @@ static void in2_softmax_sink(const float *logits, int n_key, float sink, float *
 }
 
 int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                      int il, float *h, int n_tok, int pos0)
+                      int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks)
 {
     const wubu_in2_layer_t *L = &m->layer[il];
     const int d = cfg->d_model, NH = cfg->n_head, NKV = cfg->n_kv_head, HD = cfg->head_dim;
@@ -263,9 +263,23 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     if (!an) { if (DBG) fprintf(stderr, "[L%d] attn_norm failed\n", il); return WUBU_INKLING2_ERR_IO; }
     if (DBG) fprintf(stderr, "[L%d] step1 ok\n", il);
 
-    /* 1. attn_norm (weighted). */
+    /* 0. attention_input: the depth mix that runs on every layer above 0 (blk.0 has no attn_res_query).
+     *    The layer was previously norming the raw hidden state and skipping this entirely, which is why
+     *    the sliding and full layers disagreed about what they were looking at. */
+    float *mixh = (float *)calloc((size_t)n_tok * d, sizeof(float));
+    if (!mixh) { free(an); return WUBU_INKLING2_ERR_IO; }
+    float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
+    if (arq && il > 0) {
+        for (int t = 0; t < n_tok; ++t)
+            in2_mix(blocks, n_blocks, h + (size_t)t * d, arq, 1, d, eps, mixh + (size_t)t * d);
+    } else {
+        memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
+    }
+    free(arq);
+
+    /* 1. attn_norm (weighted), applied to the mixed state. */
     float *xn = (float *)calloc((size_t)n_tok * d, sizeof(float));
-    for (int t = 0; t < n_tok; ++t) in2_rmsnorm(h + (size_t)t * d, an, d, eps, xn + (size_t)t * d);
+    for (int t = 0; t < n_tok; ++t) in2_rmsnorm(mixh + (size_t)t * d, an, d, eps, xn + (size_t)t * d);
 
     /* 2. q: project, scale+clip per head. */
     const int qdim = NH * HD, kdim = NKV * HD;
@@ -417,15 +431,18 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step7 failed pc=%p res=%p\n", il, (void*)pc, (void*)res); }
     if (DBG) fprintf(stderr, "[L%d] step7 rc=%d\n", il, rc);
 
-    /* 8. mlp_input: with a single block in block_states the learned-query attention has one key, so
-     *    softmax is degenerate and the mix reduces to an unweighted RMS norm. */
+    /* 8. mlp_input: the same depth mix, one query, over [block_states; residual]. With no banked blocks
+     *    it degenerates to an unweighted RMS norm. */
     float *fn = in2_tensor_to_f32(ctx, &L->ffn_norm, NULL);
     float *moein = (float *)calloc((size_t)n_tok * d, sizeof(float));
     float *moeout = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (fn && moein && moeout && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             float *tmp = (float *)calloc((size_t)d, sizeof(float));
-            in2_rmsnorm_unweighted(res + (size_t)t * d, d, eps, tmp);
+            float *frq = in2_tensor_to_f32(ctx, &L->ffn_res_q, NULL);
+            if (frq) in2_mix(blocks, n_blocks, res + (size_t)t * d, frq, 1, d, eps, tmp);
+            else      in2_rmsnorm_unweighted(res + (size_t)t * d, d, eps, tmp);
+            free(frq);
             in2_rmsnorm(tmp, fn, d, eps, moein + (size_t)t * d);
             free(tmp);
         }
@@ -451,7 +468,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     free(Wk); free(Wv); free(kc); free(vc); free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
     free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
     free(attn_out); free(alpha); free(logits); free(Wg); free(Wo); free(gate); free(ao);
-    free(pc); free(res); free(fn); free(moein); free(moeout); free(pm); free(mo);
+    free(pc); free(res); free(fn); free(moein); free(moeout); free(pm); free(mo); free(mixh);
     return rc;
 }
 

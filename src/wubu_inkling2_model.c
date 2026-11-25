@@ -19,7 +19,7 @@ void in2_rmsnorm_unweighted(const float *x, int n, float eps, float *out);
 void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out);
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y);
 int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                       int il, float *h, int n_tok, int pos0);
+                       int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
 int  in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                     int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks);
 int  in2_embed(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
@@ -105,7 +105,7 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         if (il % cfg->attn_res_block == cfg->attn_res_block - 1)
             rc = in2_layer_full(ctx, m, cfg, il, h, 1, 0, blocks, n_blocks);
         else
-            rc = in2_layer_sliding(ctx, m, cfg, il, h, 1, 0);
+            rc = in2_layer_sliding(ctx, m, cfg, il, h, 1, 0, blocks, n_blocks);
         if (rc != WUBU_INKLING2_OK) { free(br); free(blocks); return rc; }
         if (il % cfg->attn_res_block == 0 && n_blocks < 16) {
             memcpy(blocks + (size_t)n_blocks * d, br, sizeof(float) * d);

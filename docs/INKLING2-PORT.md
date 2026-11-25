@@ -474,6 +474,21 @@ Three tokens were run to check the output is input-dependent rather than constan
 So: the plumbing is complete end to end, and the numbers are structurally unverified. The next steps
 close the two gaps rather than adding features.
 
+## Gap closed: sliding layers now use the depth mix
+
+The sliding layer had never applied `attention_input` at all - it normed the raw hidden state - and its
+`mlp_input` was hard-wired to a bare RMS norm. Both now go through the real depth mix over
+`[block_states; partial]`, so sliding and full layers finally see the same depth information. The full
+layers keep the 3-query variant.
+
+**The change is safely bounded, and that is checkable:** blk.0 is bit-identical afterwards (rms 0.913700,
+h[0..3] = 0.045412 0.754640 -0.048702 -0.061992), which is what must happen - layer 0 has no
+`attn_res_query` and no banked blocks, so the mix degenerates to the same norm. The verified reference for
+blk.0 therefore still stands rather than being invalidated by the refactor.
+
+The model-level output does change, as it should: top-1 moves from 196984 to 66 for the same token, since
+every layer above 0 now mixes depth instead of ignoring it.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
