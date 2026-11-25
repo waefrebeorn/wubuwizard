@@ -80,3 +80,15 @@ make test_<name>  # one subsystem (e.g. test_kvfs, test_codec, test_userfs)
 - **research/INDEX.md** — the gap ledger (open/wired discipline)
 - **STATUS.md** — verified implementation state (fresh-command audited)
 - **docs/BRANCH-AUDIT-2026-08-09.md** — the no-code-lost branch audit
+
+## Standard
+
+- **Layer:** research corpus + brain-side experiments
+- **Build:** `make`
+- **Verify:** `make test`
+- **Docs:** `docs/` in this repo
+- **Provenance:** own C11; no vendored third-party source without a note
+
+Part of the ~WuBu~ tree: this repository is held to the same conventions as the
+parent. See the parent's `docs/compendium/04-roadmap/submodule-standard.md` for the
+checklist and why each item exists.
