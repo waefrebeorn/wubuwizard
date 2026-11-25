@@ -611,7 +611,11 @@ void in2_shortconv(const float *x, int n_tok, int channels, const float *w, int 
         for (int c = 0; c < channels; ++c) {
             float acc = 0.0f;
             for (int tap = 0; tap < k; ++tap) {
-                const int src = t - tap;             /* tap 0 = current token */
+                /* Reference (llama.cpp SSM_CONV) builds in = [3 state rows, x0..xN] and computes
+                 * out[t] = sum_i w[i]*in[t+i], so the LAST tap sees the current token and tap 0 is the
+                 * oldest. The earlier `t - tap` put the current token on tap 0, which reverses the whole
+                 * filter (proven against node_35 of the reference dump). */
+                const int src = t - (k - 1 - tap);
                 if (src < 0) continue;               /* left padding with zeros */
                 acc += w[(size_t)c * k + tap] * x[(size_t)src * channels + c];
             }
@@ -1105,13 +1109,48 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     if (DBG) fprintf(stderr, "[L%d] step6 rc=%d\n", il, rc);
 
     if (getenv("IN2_DUMPX")) {
-        FILE *q1 = fopen("d_xn.bin","wb"); if (q1) { fwrite(xn,sizeof(float),(size_t)n_tok*d,q1); fclose(q1); }
-        FILE *q2 = fopen("d_q.bin","wb");  if (q2) { fwrite(q,sizeof(float),(size_t)n_tok*qdim,q2); fclose(q2); }
-        FILE *q3 = fopen("d_k.bin","wb");  if (q3) { fwrite(k,sizeof(float),(size_t)n_tok*kdim,q3); fclose(q3); }
-        FILE *q4 = fopen("d_v.bin","wb");  if (q4) { fwrite(v,sizeof(float),(size_t)n_tok*kdim,q4); fclose(q4); }
-        FILE *q5 = fopen("d_attn.bin","wb"); if (q5) { fwrite(attn_out,sizeof(float),(size_t)n_tok*qdim,q5); fclose(q5); }
-        FILE *q6 = fopen("d_ao.bin","wb"); if (q6) { fwrite(ao,sizeof(float),(size_t)n_tok*d,q6); fclose(q6); }
-        FILE *q7 = fopen("d_gate.bin","wb"); if (q7) { fwrite(gate,sizeof(float),(size_t)n_tok*qdim,q7); fclose(q7); }
+        /* Layer-scoped: this site is inside the per-layer function, so an unscoped fixed path
+         * silently keeps the LAST layer's buffers (the instrument lied once already). */
+        const char *_dl = getenv("IN2_DUMPX_L");
+        const int _want = _dl ? atoi(_dl) : -1;
+        if (_want < 0 || _want == il) {
+            char p[512];
+            #define IN2_DX(NAME, PTR, N) do {                                       \
+                snprintf(p, sizeof p, "C:/Users/eman5/AppData/Local/Temp/d_%s_l%d.bin", (NAME), il); \
+                FILE *_f = fopen(p, "wb");                                          \
+                if (_f) { fwrite((PTR), sizeof(float), (size_t)(N), _f); fclose(_f); } \
+            } while (0)
+            IN2_DX("xn", xn, n_tok * d);
+            IN2_DX("q", q, n_tok * qdim);
+            IN2_DX("k", k, n_tok * kdim);
+            IN2_DX("v", v, n_tok * kdim);
+            IN2_DX("attn", attn_out, n_tok * qdim);
+            IN2_DX("ao", ao, n_tok * d);
+            IN2_DX("gate", gate, n_tok * qdim);
+            IN2_DX("bias", bias, NH * EXT);
+            IN2_DX("rs", rs_all, n_tok * NH * DREL);
+            IN2_DX("sink", sink, n_tok * NH);
+            IN2_DX("alpha", alpha, n_tok + pos0 + 1);
+            IN2_DX("logits", logits, n_tok + pos0 + 1);
+            IN2_DX("kraw", kraw, n_tok * kdim);
+            IN2_DX("kt", kt, n_tok * kdim);
+            IN2_DX("vraw", vraw, n_tok * kdim);
+            IN2_DX("vt", vt, n_tok * kdim);
+            IN2_DX("kc", kc, 4 * kdim);
+            IN2_DX("vc", vc, 4 * kdim);
+            #undef IN2_DX
+            if (_want == 0 && getenv("IN2_DUMP_W")) {
+                float *W = in2_tensor_to_f32(ctx, &L->wo, NULL);
+                FILE *_f = fopen("C:/Users/eman5/AppData/Local/Temp/d_wo_l0.bin", "wb");
+                if (W && _f) {
+                    fwrite(W, sizeof(float), (size_t)d * qdim, _f);
+                    fprintf(stderr, "dumped wo layer0 %d x %d\n", d, qdim);
+                }
+                if (_f) fclose(_f);
+                free(W);
+            }
+            fprintf(stderr, "dumped layer %d vectors (xn/q/k/v/attn/ao/gate)\n", il);
+        }
     }
 
     TKPH(5);
@@ -1326,7 +1365,8 @@ void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float 
                 const int c = h * hd + d;
                 float acc = 0.0f;
                 for (int j = 0; j < k; ++j) {
-                    const int src = t - j;
+                    /* tap j has age (k-1-j): the current token is the LAST tap, as in the reference graph */
+                    const int src = t - (k - 1 - j);
                     if (src < 0) continue;
                     const float tap = stat[(size_t)c * k + j] + dw[((size_t)t * n_head + h) * k + j];
                     acc += tap * x[(size_t)src * channels + c];
