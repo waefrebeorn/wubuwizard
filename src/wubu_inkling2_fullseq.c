@@ -142,12 +142,16 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
 
     FP2(2); /* q */
     /* 3. k and v with the dynamic short conv */
-    float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
-    float *Wv = in2_tensor_to_f32(ctx, &L->wv, NULL);
-    float *kc = in2_tensor_to_f32(ctx, &L->k_conv, NULL);
-    float *vc = in2_tensor_to_f32(ctx, &L->v_conv, NULL);
-    float *kp = in2_tensor_to_f32(ctx, &L->k_conv_proj, NULL);
-    float *vp = in2_tensor_to_f32(ctx, &L->v_conv_proj, NULL);
+    /* Borrowed, not copied. in2_tensor_to_f32 returns memory the caller owns, so every one of these paid a full
+     * matrix memcpy per full-layer visit (wk/wv are 9.4 MB each) and the copies were used once and freed. The
+     * borrowed pointer is the dequant cache's own buffer - identical floats, no copy - and must NOT be freed, which is
+     * why the free list at the end of this function no longer mentions them. */
+    const float *Wk = in2_tensor_borrow(ctx, &L->wk);
+    const float *Wv = in2_tensor_borrow(ctx, &L->wv);
+    const float *kc = in2_tensor_borrow(ctx, &L->k_conv);
+    const float *vc = in2_tensor_borrow(ctx, &L->v_conv);
+    const float *kp = in2_tensor_borrow(ctx, &L->k_conv_proj);
+    const float *vp = in2_tensor_borrow(ctx, &L->v_conv_proj);
     float *kraw = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     float *vraw = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     float *kt = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
@@ -383,7 +387,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     } else rc = WUBU_INKLING2_ERR_IO;
 
     free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
-    free(qcl); free(q); free(Wk); free(Wv); free(kc); free(vc); free(kp); free(vp);
+    free(qcl); free(q);   /* Wk/Wv/kc/vc/kp/vp are borrowed from the dequant cache, not owned here */
     free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
     free(rcl); free(P); free(rs); free(bias); free(sink);
     free(logit); free(alpha); free(attn_out); free(gate); free(ao);
