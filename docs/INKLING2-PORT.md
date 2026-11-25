@@ -1223,3 +1223,36 @@ and the per-layer forensic crawl had started to serve parity rather than the eng
 testbed: the work that matters is the class of things a looped-native engine can do that a single-pass one
 cannot - keeping h_1 (done), halving the loop count while matching full depth (the paper's FLOP result), and
 contrasting passes instead of discarding them.
+
+### CORRECTION - the dynamic conv was correct; my check was not
+
+The section above records three failed compositions and calls this "the first unexplained stage". That
+conclusion was wrong, and the correction belongs here rather than replacing it.
+
+The engine's `in2_shortconv_dynamic` divides by `1/sqrt(2k+1)` (it even carries the comment that using the
+static conv's `1/sqrt(k+1)` would be a silent 1.34x error). My check used `1/sqrt(5)`. Recomputing with the
+engine's actual normaliser, and the layout `proj[head*4 + tap]`:
+
+```
+1/sqrt(5)  (k+1)       max|diff| 3.7187e+00   mean 3.862e-01
+1/sqrt(9)=1/3 (2k+1)   max|diff| 9.5367e-07   mean 1.201e-07
+implied normaliser from data: mean(kt / (kraw*(1+filt))) = 0.333333
+```
+
+`0.333333` against `1/3 = 0.333333` and `1/sqrt(5) = 0.447214`. The data does not merely tolerate the engine's
+value, it names it. **The dynamic conv is verified**: static taps from `attn_k_conv`, dynamic taps
+`W_proj @ xk` reshaped per head, one normaliser of `1/sqrt(2k+1)`.
+
+What settled it was not reasoning about the reference but `llama.cpp b12723`'s `src/models/inkling2.cpp:251`,
+which states the rule in one line:
+
+```c
+ggml_scale(ggml_add(cur, out), 1.0f/sqrtf((dynamic ? 2 : 1)*n_conv + 1));
+```
+
+That is a *format-and-semantics* fact, the same category as `ggml-quants.c` being the authority on dequantiser
+layouts - not a throughput or quality comparison. llama.cpp remains barred as the comparative spec; it is
+still a legitimate source for what a tensor means.
+
+Running tally, stated plainly because it matters more than the wins: **nine broken instruments, four real
+defects.** The ninth was mine, and it cost a full investigation.
