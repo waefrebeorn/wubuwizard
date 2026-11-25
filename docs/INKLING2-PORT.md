@@ -901,6 +901,27 @@ This is a characterisation rather than a proof: `in2_moe`'s expert matvec is sti
 blk.1, and it needs IQ1_S/Q2_0 decoders in the check suite to close. But healthy routing is a precondition
 that would have to hold for the layer to be right, and it does.
 
+## The MoE check needs a per-layer decoder set, not one decoder
+
+Setting up the expert-matvec check turned up a complication that changes the plan. The expert quant types are
+**not uniform across layers**:
+
+```
+blk.1 .ffn_gate_up_exps  type 19 (IQ1_S)      blk.22 .ffn_gate_up_exps  type 17 (IQ2_XS)
+blk.1 .ffn_down_exps     type 42 (Q2_0)       blk.22 .ffn_down_exps     type 42 (Q2_0)
+```
+
+and the `.scale` companions exist on layers 0..19 only - **blk.22 has no `.scale` at all**, so its expert
+matrices are unscaled while blk.1's are scaled by ~1e-4. That matches the census taken much earlier, but it
+hadn't mattered until now: the check suite needs `iq1s_grid`, `iq2xs_grid` and the Q2_0 layout, and needs to
+apply `.scale` only where the tensor exists.
+
+The `iq1s_grid` parse is verified on its own terms - all 2048 entries decode to values in {-1, 0, 1}, the only
+values an IQ1 grid can contain. A misparse would produce values outside that set immediately.
+
+`Q2_0` is trivial to decode (`((q) - 1) * d` with `q` a 2-bit field per element, 4 per byte), so the remaining
+work is `IQ2_XS` for the layers that use it - a 256-entry grid with per-32 scales, more involved than IQ1_S.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
