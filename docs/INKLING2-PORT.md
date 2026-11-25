@@ -358,6 +358,41 @@ one.
    but the fp4 raw-size helper returns -1 for `n_elems <= 0`, so **expert 0 of every MoE tensor** failed
    to decode while experts 1..127 worked. Fixed by special-casing offset 0.
 
+## Step 5: the first complete layer is verified against an independent reference
+
+Every intermediate of the sliding layer (blk.0, token 1234, one token) compared against a Python
+reference built from **canonical llama.cpp dequantisers** (IQ1_S grid and algorithm taken from
+`ggml-common.h`/`ggml-quants.c`, Q2_0 likewise) and the base model's forward semantics:
+
+```
+stage   max abs diff    stage    max abs diff
+q       3.9e-07         ao       6.3e-08
+k       1.8e-07         res      3.2e-08
+v       4.8e-07         moein    8.9e-07
+attn    3.4e-07         moe      2.0e-06
+gate    2.3e-07         final    8.1e-07
+```
+
+Values reach ~3.8, so these are float32 accumulation differences. IQ1_S and Q2_0 had already been
+confirmed separately on an expert slice (gate_up and the expert output both matching to six decimals).
+
+### Correction: the earlier short-conv verification was circular, and a layout bug it hid
+
+The 6,912-value short-conv agreement reported earlier proved nothing about layout: the C code indexed
+the filter as `w[tap*channels + c]` and the Python used the same reshape, so both were wrong the same
+way. ggml stores these as `(k, channels)` with **ne0 = k fastest**, i.e. `w[c*k + tap]`, matching
+`nn.Conv1d`'s `[out_channels, 1, kernel]`.
+
+What caught it was a **structure test**, not a cross-check: reading the filter as `[tap][c]` gives flat
+per-tap RMS (0.95, 0.72, 0.79, 0.77 - noise), while `[c][tap]` gives a clear profile (0.15, 0.26, 0.70,
+1.43). A correct grouping of a learned filter shows structure; a wrong one averages across unrelated
+axes. Lesson worth keeping: **an independent implementation must be independent in its assumptions, not
+just in its code** - same-language, same-reshape "verification" is a mirror.
+
+Also fixed on the way: the layer was writing its attention output into `h` before the residual was
+captured, and the MoE slice reader failed for **expert 0** of every tensor (it asked `raw_size` for the
+byte offset of element 0, which returns -1 for `n_elems <= 0`).
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

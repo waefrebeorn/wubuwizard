@@ -68,7 +68,11 @@ void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y)
  * The residual add and the 1/sqrt(k+1) scale are part of the block, not an optimisation detail:
  * dropping them changes the magnitude by ~2.2x.
  *
- * w is (k, channels) with w[0] weighting the current token (tap index == backward distance).
+ * w is ggml (k, channels): ne0 = k is the FASTEST axis, so the weight for channel c, tap j lives at
+ * w[c*k + j]. That matches nn.Conv1d's [out_channels, 1, kernel] layout. Indexing it as
+ * w[j*channels + c] (tap-major) reads a plausible-looking but wrong filter: the per-tap magnitudes come
+ * out flat, which is how the mistake was caught. Tap index == backward distance, so tap 0 is the
+ * current token.
  */
 void in2_shortconv(const float *x, int n_tok, int channels, const float *w, int k, float *out)
 {
@@ -79,7 +83,7 @@ void in2_shortconv(const float *x, int n_tok, int channels, const float *w, int 
             for (int tap = 0; tap < k; ++tap) {
                 const int src = t - tap;             /* tap 0 = current token */
                 if (src < 0) continue;               /* left padding with zeros */
-                acc += w[(size_t)tap * channels + c] * x[(size_t)src * channels + c];
+                acc += w[(size_t)c * k + tap] * x[(size_t)src * channels + c];
             }
             const float res = x[(size_t)t * channels + c];
             out[(size_t)t * channels + c] = (acc + res) * scale;
@@ -379,6 +383,16 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step6 failed Wg=%p Wo=%p gate=%p ao=%p\n", il, (void*)Wg, (void*)Wo, (void*)gate, (void*)ao); }
     if (DBG) fprintf(stderr, "[L%d] step6 rc=%d\n", il, rc);
 
+    if (getenv("IN2_DUMPX") && n_tok == 1) {
+        FILE *q1 = fopen("d_xn.bin","wb"); if (q1) { fwrite(xn,sizeof(float),(size_t)n_tok*d,q1); fclose(q1); }
+        FILE *q2 = fopen("d_q.bin","wb");  if (q2) { fwrite(q,sizeof(float),(size_t)n_tok*qdim,q2); fclose(q2); }
+        FILE *q3 = fopen("d_k.bin","wb");  if (q3) { fwrite(k,sizeof(float),(size_t)n_tok*kdim,q3); fclose(q3); }
+        FILE *q4 = fopen("d_v.bin","wb");  if (q4) { fwrite(v,sizeof(float),(size_t)n_tok*kdim,q4); fclose(q4); }
+        FILE *q5 = fopen("d_attn.bin","wb"); if (q5) { fwrite(attn_out,sizeof(float),(size_t)n_tok*qdim,q5); fclose(q5); }
+        FILE *q6 = fopen("d_ao.bin","wb"); if (q6) { fwrite(ao,sizeof(float),(size_t)n_tok*d,q6); fclose(q6); }
+        FILE *q7 = fopen("d_gate.bin","wb"); if (q7) { fwrite(gate,sizeof(float),(size_t)n_tok*qdim,q7); fclose(q7); }
+    }
+
     /* 7. post-attention short conv, then the residual rule:
      *    boundary (il % block_size == 0): the attention output becomes the residual and block_residual
      *    is banked into block_states (a no-op here, single block);
@@ -411,6 +425,12 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         rc = in2_moe(ctx, m, cfg, il, moein, n_tok, moeout);
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step8 failed fn=%p moein=%p moeout=%p (moe rc=%d)\n", il, (void*)fn, (void*)moein, (void*)moeout, rc); }
     if (DBG) fprintf(stderr, "[L%d] step8 rc=%d\n", il, rc);
+
+    if (getenv("IN2_DUMPX") && n_tok == 1) {
+        FILE *r1 = fopen("d_res.bin","wb"); if (r1) { fwrite(res,sizeof(float),(size_t)n_tok*d,r1); fclose(r1); }
+        FILE *r2 = fopen("d_moein.bin","wb"); if (r2) { fwrite(moein,sizeof(float),(size_t)n_tok*d,r2); fclose(r2); }
+        FILE *r3 = fopen("d_moe.bin","wb"); if (r3) { fwrite(moeout,sizeof(float),(size_t)n_tok*d,r3); fclose(r3); }
+    }
 
     /* 9. post-mlp conv, then residual + h. */
     float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
