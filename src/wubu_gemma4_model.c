@@ -1338,13 +1338,37 @@ static void g4_full_attn_cpu(g4_model_t *model, g4_layer_t *layer, g4_kv_cache_t
              * the same value loop changed greedy token 22 (37475 -> 193634) even though
              * the arithmetic is, on paper, identical. Not worth the token-identity bar
              * for the cost of the few non-sliding layers. */
-            for (int d = 0; d < hd; d++) {
-                float val = 0.0f;
+            /* Eight d values at a time. The summation order over kp is unchanged for every
+             * element, so the result is bit-identical to the plain d-outer form, but the V
+             * reads become contiguous 8-float chunks instead of a stride-16KB walk - the
+             * stride was making every load in this loop a cache miss, and this loop was 59%
+             * of long-context decode (102.9 ms of 174.9 at 1407 tokens). */
+            for (int d0 = 0; d0 < hd; d0 += 8) {
+                float v0 = 0.0f, v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
+                float v4 = 0.0f, v5 = 0.0f, v6 = 0.0f, v7 = 0.0f;
+                const int nd = (hd - d0 < 8) ? (hd - d0) : 8;
+                const float *vbase = cache->v + (size_t)kv_h * hd + d0;
                 for (int kp = 0; kp <= kv_end; kp++) {
-                    val += s[kp] * inv_sum *
-                           (cache->v + (size_t)kp * kvd + (size_t)kv_h * hd)[d];
+                    const float w = s[kp] * inv_sum;
+                    const float *vv = vbase + (size_t)kp * kvd;
+                    v0 += w * vv[0];
+                    if (nd > 1) v1 += w * vv[1];
+                    if (nd > 2) v2 += w * vv[2];
+                    if (nd > 3) v3 += w * vv[3];
+                    if (nd > 4) v4 += w * vv[4];
+                    if (nd > 5) v5 += w * vv[5];
+                    if (nd > 6) v6 += w * vv[6];
+                    if (nd > 7) v7 += w * vv[7];
                 }
-                attn_out[(size_t)t * qd + (size_t)hq * hd + d] = val;
+                float *o = attn_out + (size_t)t * qd + (size_t)hq * hd + d0;
+                o[0] = v0;
+                if (nd > 1) o[1] = v1;
+                if (nd > 2) o[2] = v2;
+                if (nd > 3) o[3] = v3;
+                if (nd > 4) o[4] = v4;
+                if (nd > 5) o[5] = v5;
+                if (nd > 6) o[6] = v6;
+                if (nd > 7) o[7] = v7;
             }
         }
     }

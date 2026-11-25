@@ -611,6 +611,32 @@ adds blocks but not throughput here, and wide block loads would only shave the s
 float scaling per fragment - which is a different piece of work than the one this paragraph originally
 proposed, and it is the one to profile with counters rather than by shape sweeping.
 
+
+### Long context: a stride-16KB loop was 59% of decode
+
+Chasing the linked note on KV-cache sharing sent a check at real long-context decode, which had never
+been measured here: a 1407-token prompt decoded at **5.1 tok/s**, a 3x collapse from the 15 at 129 tokens.
+Profile:
+
+    layer total 174.85 ms    attention 102.89    ffn all 38.14    norm+qkv 14.68    head 7.89
+
+The attention is parallelised over heads and its dots are AVX2, so the cost was not parallelism: the
+weighted-sum loop was **d-outer over a strided V read** - `cache->v[kp * kvd + kv_h * hd + d]` with
+kvd = 4096 floats, so every inner iteration touched an address 16 KB from the last and the whole loop ran
+at cache-miss speed (512 d-values x 1407 keys of misses per head).
+
+Swapping the loops to kp-outer would fix the access but changes the summation order, and a note in the
+file records that this exact rewrite moved greedy token 22 (37475 -> 193634). Register-blocking eight d
+values instead keeps each element's accumulation order over kp **identical** while making the V reads
+contiguous 8-float chunks:
+
+    attention phase  102.89 -> 37.47 ms      layer total 174.85 -> 100.48 ms
+    decode @1407 tok   5.1 -> 9.7 tok/s      token-identical (45518 107 236775 818 6590 ...)
+    decode @129 tok   14.7-15.0 tok/s        unchanged, as expected
+
+The sliding-window path never had this problem - it already uses a kp-outer vectorised AXPY over a
+contiguous row - which is why only the full-attention layers were affected.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each
