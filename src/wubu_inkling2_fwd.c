@@ -18,41 +18,10 @@
 #include "wubu_iq2q8.h"
 #include "wubu_iq_c11.h"
 
-/* ggml block_q8_K, spelled out so this file needs no ggml header: 256 int8 quants with one float scale and the
- * 16 per-16 sums. The translated kernels read exactly this layout. */
-typedef struct { float d; int8_t qs[256]; int16_t bsums[16]; } in2_q8k_blk;
+/* block_q8_K lives in wubu_iq2q8.h now, together with its quantiser, so the layout is defined once and can be
+ * tested against ggml's own ref quantiser in isolation. */
 
-/* Quantise a whole activation row to Q8_K, mirroring ggml's scale convention (iscale negative, d = 1/iscale) so
- * the kernels' bit-exactness argument still applies: positive x maps to negative q and a negative d, and the
- * product is unchanged. Done ONCE per matvec, reused by every row. */
-static void in2_q8k_quantise(const float *x, int64_t n, in2_q8k_blk *out)
-{
-    const int64_t nb = n / 256;
-    for (int64_t b = 0; b < nb; ++b) {
-        const float *xb = x + b * 256;
-        in2_q8k_blk *y = &out[b];
-        float amax = 0.0f, maxv = 0.0f;
-        for (int j = 0; j < 256; ++j) {
-            const float a = fabsf(xb[j]);
-            if (a > amax) { amax = a; maxv = xb[j]; }
-        }
-        if (amax == 0.0f) { y->d = 0.0f; memset(y->qs, 0, 256); memset(y->bsums, 0, 32); continue; }
-        const float iscale = -128.0f / maxv;
-        y->d = 1.0f / iscale;
-        for (int j = 0; j < 256; ++j) {
-            float v = iscale * xb[j];
-            int q = (int)(v < 0.0f ? v - 0.5f : v + 0.5f);
-            if (q > 127) q = 127;
-            if (q < -127) q = -127;
-            y->qs[j] = (int8_t)q;
-        }
-        for (int g = 0; g < 16; ++g) {
-            int s = 0;
-            for (int j = 0; j < 16; ++j) s += y->qs[g * 16 + j];
-            y->bsums[g] = (int16_t)s;
-        }
-    }
-}
+/* in2_q8k_quantise() now lives in wubu_act_quant.c: one definition, testable against ggml's ref. */
 void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float *out);
 
 /* ---- prototypes (definitions follow in dependency order) ---- */
@@ -137,7 +106,7 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
             wubu_in2_tensor_t sh = *t;
             sh.file_offset = t->file_offset + (boff < 0 ? 0 : boff);
             if (boff >= 0 && wubu_inkling2_read(ctx, &sh, whole, rb * n_out) == WUBU_INKLING2_OK) {
-                in2_q8k_quantise(x, n_in, act);
+                in2_q8k_quantise(x, n_in / 256, act);   /* groups, not elements: 9 blocks for a 2304 row */
                 const void *ap[1] = { (const void *)act };
                 float *op[1] = { y };
                 wubu_iq_rows(ty_mv, whole, (size_t)rb, n_in, ap, 1, op, 0, n_out);

@@ -33,6 +33,40 @@ int wubu_iq_supported(int ggml_type);
 int wubu_iq_rows1_supported(int ggml_type);
 
 /*
+ * Each format's dot product consumes ONE specific activation layout -- quantise
+ * the activations with ggml's matching *_ref function and nothing else:
+ *
+ *   ggml type  format   activation block      ggml quantiser
+ *   ---------  ------   ----------------      --------------
+ *    8         Q8_0     block_q8_0 (32 elem)  quantize_row_q8_0_ref
+ *   12         Q4_K     block_q8_K (256)      quantize_row_q8_K_ref
+ *   13         Q5_K     block_q8_K (256)      quantize_row_q8_K_ref
+ *   14         Q6_K     block_q8_K (256)      quantize_row_q8_K_ref
+ *   16         IQ2_XXS  block_q8_K (256)      quantize_row_q8_K_ref
+ *   17         IQ2_XS   block_q8_K (256)      quantize_row_q8_K_ref
+ *   18         IQ3_XXS  block_q8_K (256)      quantize_row_q8_K_ref
+ *   19         IQ1_S    block_q8_K (256)      quantize_row_q8_K_ref
+ *   20         IQ4_NL   block_q8_0 (32)       quantize_row_q8_0_ref   [IQ4_NL path
+ *                                                only: wubu_iq4nl_down_rows; type 20
+ *                                                is not a wubu_iq_rows type]
+ *   21         IQ3_S    block_q8_K (256)      quantize_row_q8_K_ref
+ *   22         IQ2_S    block_q8_K (256)      quantize_row_q8_K_ref
+ *   23         IQ4_XS   block_q8_K (256)      quantize_row_q8_K_ref
+ *   29         IQ1_M    block_q8_K (256)      quantize_row_q8_K_ref
+ *   40         NVFP4    block_q8_0 (32)       quantize_row_q8_0_ref
+ *   42         Q2_0     block_q8_0 (32)       quantize_row_q8_0_ref
+ *
+ * One NVFP4 / Q2_0 weight block spans 64 elements, i.e. two block_q8_0 blocks;
+ * one Q8_0 weight block spans 32 elements, i.e. one. The activation buffer for a
+ * row of n elements therefore holds n / wubu_iq_block_elems(type) blocks.
+ */
+int wubu_iq_block_elems(int ggml_type);
+
+/* "q8_K" or "q8_0": which activation struct ggml_type's dot takes (matching
+ * wubu_iq_block_elems), or NULL when the type is not handled here. */
+const char * wubu_iq_act_kind(int ggml_type);
+
+/*
  * out[t][r] = w_r . a[t] for rows [r0, r1); w_r lives at w + r * row_bytes,
  * a[t] is a block_q8_K array of n/256 blocks.
  */

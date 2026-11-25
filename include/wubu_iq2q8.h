@@ -15,7 +15,19 @@ typedef struct {
     float  scale;
 } in2_act_q8;
 
+/* block_q8_K: what the K-quants and the IQ2/IQ3/IQ1 kernels consume. 256 elements, one float scale. */
+typedef struct { float d; int8_t qs[256]; int16_t bsums[16]; } in2_q8k_blk;
+
+/* block_q8_0: what Q8_0, Q2_0 and NVFP4 consume. 32 elements, FP16 scale. The two are NOT interchangeable and
+ * feeding the wrong one yields plausible numbers rather than a crash, so the kind is explicit at the call site. */
+typedef struct { uint16_t d; int8_t qs[32]; } in2_q8_0_blk;
+
+uint16_t in2_f32_to_f16(float f);
+float    in2_f16_to_f32(uint16_t h);
+
 void  in2_act_quantise(const float *x, int64_t n_groups, in2_act_q8 *out);
+void  in2_q8k_quantise(const float *x, int64_t n_groups, in2_q8k_blk *out);
+void  in2_q8_0_quantise(const float *x, int64_t n_groups, in2_q8_0_blk *out);
 float dot_row_iq2_xs_q8(const uint8_t *data, const in2_act_q8 *act, int64_t n_groups);
 
 #endif
