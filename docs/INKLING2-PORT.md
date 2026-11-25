@@ -1386,3 +1386,54 @@ its product, exactly as `docs/INKLING2.md:45-47` states, and exactly what the en
 So the MoE is verified on a layer **with** scales (blk.10, 2.9e-06) and on a layer **without** them (blk.22,
 2.7e-06). The router was computed independently in the same check: picks 15, 16, 21, 56, 57, 83, 84, 97 with
 weights summing to exactly 8.0000 (the file's `expert_weights_scale`).
+
+## A sliding layer is now verified end to end, against the authoritative source
+
+Read `transformers`' own `modeling_inkling2.py` (the file `docs/INKLING2.md` points at for this architecture)
+rather than any engine. It settles the two normalisers and the residual composition outright:
+
+```python
+# Inkling2ShortConvolution        (static, conv_idx 2 and 3)
+return (hidden_states + residual) / math.sqrt(self.conv_kernel_size + 1)      # 1/sqrt(k+1)
+
+# Inkling2DynamicShortConvolution (k and v of the full-attention layers)
+return (hidden_states + residual) / math.sqrt(2 * self.conv_kernel_size + 1)  # 1/sqrt(2k+1)
+```
+
+and the decoder layer's exact residual algebra:
+
+```python
+block_residual = hidden_states
+hidden_states  = attention_input(block_states, hidden_states)[0]     # depth mix, layers > 0
+hidden_states  = post_attention_convolution(self_attn(input_layernorm(hidden_states)))
+residual = hidden_states
+if is_block_boundary:
+    block_states = cat([block_states, block_residual])               # bank the INPUT
+else:
+    residual = block_residual + hidden_states                        # input + conv_out
+hidden_states = mlp_input(block_states, hidden_states)[0]            # mlp depth mix
+hidden_states = post_mlp_convolution(mlp(post_attention_layernorm(hidden_states)))
+return residual + hidden_states
+```
+
+The final step - `res + post_mlp_conv(moe)` - had never been checked. Verified on blk.10 at position 0, where
+only the current tap contributes:
+
+```
+h = res + (conv(moe) + moe)/sqrt(5)     tap 0    max|diff| 4.768e-07    MATCH
+```
+
+with the alternatives all grossly wrong (`res + conv(moe)` 57.1, `/sqrt(2k+1)=3` 17.7, `conv(moe)/sqrt5` 22.5).
+Tap 0 carries norm 3.22 against 61.9 for tap 3, so the active tap is unambiguous.
+
+**blk.10 is now verified at every step**: depth mix, attention, post-attention conv, boundary rule, mlp mix,
+MoE with its expert scales (2.9e-06), post-mlp conv (4.8e-07), and the final residual. A sliding layer is
+correct end to end at position 0.
+
+The same source also confirms, each matching the port: `Inkling2TopKRouter` selects on
+`scores + e_score_correction_bias` but weights with `scores` only, normalised then x `routed_scaling_factor`;
+experts chunk `gate_up` gate-first in fp32; `LogScaledL2Clip` gives the relative-bias states the same tau as q;
+`BlockAttentionResidual` normalises each stacked state separately (not jointly) with `scaling = hidden_size**-0.5`
+and no causal mask. And notably it has **no message gate at all** - the HF reference is the un-looped form, which
+is consistent with `docs/INKLING2.md`'s "with the messages left out the KL is 0.56": wrong, but still a working
+model.
