@@ -271,3 +271,24 @@ states), keyed exactly like K/V. On a step, `prev_h`/`prev_blocks` become views 
 hidden states, plus the block states at 16 blocks.
 
 Acceptance unchanged: 1+1 to 1e-4, then 3+1, then a 19-token prompt.
+
+## in2_messages is prefix-dependent (measured, 2026-11-25)
+
+`IN2_MTRACE` prints the L2 of the message buffer for the last position at each pass boundary. Same position, same
+pass:
+
+| | pass 1 | pass 2 |
+|---|---|---|
+| recompute (ntok=2) | 1.693092588358e+03 | **1.695040155345e+03** |
+| incremental (pos0=1, ntok=1) | 1.399332211860e+03 | **1.673956871484e+03** |
+
+Different in both passes, so `in2_messages` reads across positions even though its signature carries no position
+index - exactly the mechanism the anchored trace pointed at.
+
+Anomaly worth stating rather than smoothing over: the pass-1 message differs by ~20% yet pass-1 output was identical
+to twelve digits for seq 6..17. Either the message is gated to zero at the layers that matter, or this probe is
+measuring a buffer that is not what those layers consume. That has to be settled before the fix is called correct.
+
+The fix stands regardless: `prev_h` and `prev_blocks` must cover the whole prefix, so they have to be cached per
+position at each pass boundary. What must NOT be assumed is that fixing the messages alone will close the gap -
+the anomaly above says the injection path needs checking at the same time.

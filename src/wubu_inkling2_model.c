@@ -178,7 +178,16 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         n_blocks = pre_blocks;
         for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il) {
             const int li = il - cfg->loop_core_start;
-            if (qres && qkv) in2_messages(prev_blocks, n_prev, prev_h, qres, qkv, li, d, eps, msgs);
+            if (qres && qkv) {
+                in2_messages(prev_blocks, n_prev, prev_h, qres, qkv, li, d, eps, msgs);
+                if (getenv("IN2_MTRACE") && li == 0) {
+                    const int _t = n_tok - 1;
+                    double _m = 0.0;
+                    for (int _i = 0; _i < d; ++_i) { double _v = msgs[(size_t)_t * d + _i]; _m += _v * _v; }
+                    fprintf(stderr, "MSG pass=%d li=%d n_prev=%d pos0=%d ntok=%d l2_last=%.12e\n",
+                            pass, li, n_prev, pos0, n_tok, _m);
+                }
+            }
             RUN_LAYER(il, (qres && qkv) ? msgs : NULL);
         }
     }
