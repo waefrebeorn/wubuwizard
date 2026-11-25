@@ -85,6 +85,48 @@ int main(void)
         in2_kv_free(&ck);
     }
 
+    /* full-attention layers use the dynamic conv: tap set = stat + a projection of that position's own input.
+     * Only the input row is position-local, so the row-at-a-time form must match the batch form exactly. */
+    {
+        enum { N = 7, CH2 = 6, NH2 = 3, K2 = 4 };
+        const int hd = CH2 / NH2;
+        float x[N][CH2], stat[CH2 * K2], dw[N][NH2 * K2], batch[N][CH2], inc[N][CH2];
+        for (int i = 0; i < N; ++i)
+            for (int c = 0; c < CH2; ++c) x[i][c] = cosf((float)(i * 3 + c) * 0.29f);
+        for (int c = 0; c < CH2 * K2; ++c) stat[c] = sinf((float)c * 0.11f) * 0.5f;
+        for (int t = 0; t < N; ++t)
+            for (int h = 0; h < NH2; ++h)
+                for (int j = 0; j < K2; ++j) dw[t][h * K2 + j] = cosf((float)(t * 7 + h * 3 + j) * 0.17f);
+
+        const float sc = 1.0f / sqrtf(2.0f * K2 + 1.0f);
+        for (int t = 0; t < N; ++t)
+            for (int h = 0; h < NH2; ++h)
+                for (int d = 0; d < hd; ++d) {
+                    const int c = h * hd + d;
+                    float acc = 0.0f;
+                    for (int j = 0; j < K2; ++j) {
+                        const int src = t - j;
+                        if (src < 0) continue;
+                        acc += (stat[c * K2 + j] + dw[t][h * K2 + j]) * x[src][c];
+                    }
+                    batch[t][c] = (acc + x[t][c]) * sc;
+                }
+
+        in2_kv_t ck2;
+        CHECK(in2_kv_init(&ck2, 1, CH2, 0, 16) == 0, "init dyn cache");
+        for (int t = 0; t < N; ++t) {
+            in2_kv_conv_row_dyn(in2_kv_hist_k(&ck2, 0, 3), x[t], CH2, stat, dw[t], NH2, K2, inc[t]);
+            in2_kv_store_raw(&ck2, 0, x[t], x[t]);
+            in2_kv_tick(&ck2);
+        }
+        float worst = 0.0f;
+        for (int t = 0; t < N; ++t)
+            for (int c = 0; c < CH2; ++c) { const float e = fabsf(batch[t][c] - inc[t][c]); if (e > worst) worst = e; }
+        CHECK(worst < 1e-6f, "dynamic conv row-vs-batch worst |diff| %.3e", worst);
+        printf("dynamic conv row-vs-batch worst |diff| = %.3e over %d rows\n", worst, N);
+        in2_kv_free(&ck2);
+    }
+
     in2_kv_free(&kv); in2_kv_free(&fk);
     printf(fails ? "KV SELFTEST: %d FAILED\n" : "KV SELFTEST: all passed\n", fails);
     return fails != 0;

@@ -128,6 +128,28 @@ void in2_kv_conv_row(const float *hist3, const float *xrow, int channels, const 
     }
 }
 
+/* Same idea as in2_kv_conv_row, for the full-attention layers: those use in2_shortconv_dynamic, whose tap set is
+ * stat + a per-position projection of that position's own input. Only the input row is position-local, so the
+ * per-row form needs the three cached history rows and that position's tap row - nothing else carries over. */
+void in2_kv_conv_row_dyn(const float *hist3, const float *xrow, int channels, const float *stat,
+                         const float *dwrow, int n_head, int k, float *out)
+{
+    const int hd = channels / n_head;
+    const float scale = 1.0f / sqrtf((float)(2 * k + 1));
+    for (int h = 0; h < n_head; ++h) {
+        for (int d = 0; d < hd; ++d) {
+            const int c = h * hd + d;
+            float acc = (stat[(size_t)c * (size_t)k] + dwrow[(size_t)h * (size_t)k]) * xrow[c];
+            for (int j = 1; j < k; ++j) {
+                if (!hist3 || j > 3) continue;
+                acc += (stat[(size_t)c * (size_t)k + (size_t)j] + dwrow[(size_t)h * (size_t)k + (size_t)j])
+                     * hist3[(size_t)(3 - j) * (size_t)channels + (size_t)c];
+            }
+            out[c] = (acc + xrow[c]) * scale;
+        }
+    }
+}
+
 void in2_kv_tick(in2_kv_t *kv)
 {
     if (kv) ++kv->n_stored;

@@ -66,3 +66,27 @@ Then the speed claim is measured, not asserted: `n_gen / elapsed` for both, on a
 5. The gate above, then timing.
 
 Non-goal for this pass: batching, sampling beyond greedy, and any GPU work. Those come after decode is linear.
+
+## Status (2026-11-25)
+
+Done and verified:
+- `src/wubu_inkling2_kv.c` — per-visit storage, ring slots for the 20 sliding visits and linear slots for the 4
+  full ones, raw pre-conv rows, residency predicate. Self-test covers slot reuse, visit aliasing, expiry, rotation.
+- `in2_kv_conv_row` — the 4-tap static conv one row at a time from cached history. **Bit-identical to
+  `in2_shortconv`** over 9 rows (worst |diff| 0.000e+00).
+- `in2_kv_conv_row_dyn` — the same for the full layers' dynamic conv (tap = stat + per-position projection).
+  **Bit-identical to `in2_shortconv_dynamic`** over 7 rows.
+- Store path wired and gated: `IN2_KV=1 IN2_KV_VERIFY=1` writes post-clip K / post-norm V plus raw rows every
+  sliding visit and reads them back — `worst=0.000e+00`, logits 27.1610 with and without the cache.
+
+Remaining, and it is one coherent change, not a set of independent ones:
+1. `in2_forward_step(ctx, m, cfg, tokens, n_tok, pos0, h, logits, kv)` — the current entry point always starts at
+   position 0 and the layers always receive `pos0 = 0` from the macro in `wubu_inkling2_model.c`.
+2. Both layer bodies must compute K/V only for `[pos0, pos0+n_tok)` and attend over `[max(0,p-EXT+1), p]` from the
+   cache. Sliding and full must land together: caching one and not the other leaves the other layer type
+   attending to a partial prefix, which is silently wrong rather than obviously broken.
+3. The gate: incremental step logits vs a full recompute of the same final token, `max|dlogit| < 1e-4`.
+   Note the activations already diverge at ~1e-2 from int8 quantisation, so this gate must be run **within one
+   activation mode** (both int8 or both fp32), not across them.
+4. Size the real cache: 60 sliding visits x 1024 pos x 1024 dim x 4 B x 2 = ~504 MB, plus 12 full visits growing
+   with context. The store-path test allocation is deliberately tiny (72 x 64) and must not be mistaken for it.
