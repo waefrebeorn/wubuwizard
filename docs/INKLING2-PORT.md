@@ -1437,3 +1437,46 @@ experts chunk `gate_up` gate-first in fp32; `LogScaledL2Clip` gives the relative
 and no causal mask. And notably it has **no message gate at all** - the HF reference is the un-looped form, which
 is consistent with `docs/INKLING2.md`'s "with the messages left out the KL is 0.56": wrong, but still a working
 model.
+
+## The prompt was the artifact, the repetition is the defect
+
+Every test in this port had used prompt token **1234 = `'ute'`** - a bare subword fragment. A tokenizer over the
+GGUF's own vocabulary (greedy longest-match on the `\u0120`-expanded pieces) lets a real prompt through, and the
+comparison is worth recording for what it disproves and what it does not:
+
+```
+prompt "The capital of France is"  [371, 151451, 149879, 151194, 149884]
+  gen  ->  ' capital' ' ' ' ' ' capital'    logit 29.22, 23.56, 25.71, 26.83
+prompt "ute"                        [1234]
+  gen  ->  'ute' 'ä¸Ī' 'Zer' '99' 'ut'
+```
+
+Two conclusions, and only the first is good news:
+
+1. The token distribution **is** lexical English rather than fragment noise, so the graph is not producing
+   random ids. That is real information that the `'ute'` prompt destroyed.
+2. **The output is still degenerate.** `' capital' ' ' ' ' ' capital'` re-emits the prompt's own token at
+   logit 29 and then trails spaces. That is a repetition loop, not text, and it is not "Paris". Recording it as
+   "not garbage" earlier was grading on the curve.
+
+**The repetition is not the messages.** With `IN2_SINGLE_PASS=1` (pass 1 only, no cross-pass messages at all)
+it repeats harder - three identical `151451`s:
+
+```
+single pass : 151451 151451 151451   (logits 29.64, 27.84, 25.92)
+three passes: 151451 220 220 (then 151451)
+```
+
+So the defect sits in the **single-pass graph**, which is the same computation the transformers reference
+implements. That is the useful part: it is three times cheaper to debug and it has an authoritative oracle.
+
+### A self-correction, before it became a bad fix
+
+Reading `in2_layer_full` (the superseded single-token path) I found a genuine bug - its attention loop iterates
+`j` over `n_tok` but always indexes `k[kvh*HD+e]` and `bias[hh*EXT+0]`, so every key is token 0's and every
+bias is distance 0. It is **dead code**: nothing calls it, and both live paths (`in2_layer_sliding`,
+`in2_layer_full_seq`) index `k[j*kdim + ...]` and `bias[... + dist]` correctly with `j <= t` causal bounds.
+
+I then mis-read the full-seq softmax as having dropped the sink. It has not: `tot = exp(sink - mx)` plus the
+keys, so the weights sum to less than one by the sink's share, exactly as the sliding path does. Catching that
+before "fixing" it is the one place this log shows the habit working.
