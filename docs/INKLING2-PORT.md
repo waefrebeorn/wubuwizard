@@ -880,6 +880,27 @@ Since sixteen of the twenty-four layers share this path, the sliding layers are 
 one block. The remaining suspects for the degenerate output are therefore: the MoE composition, the four full
 layers, and the message path - which is a much shorter list than "everything above blk.0" two stretches ago.
 
+## Router behaves on real data (il=22)
+
+Recomputing the router from the dumped `d_moein.bin` for the last sliding layer, using only F32 tensors
+(`ffn_gate_inp` is `[2304,128]`, i.e. 128 experts x 2304 rows):
+
+```
+picks   [110, 35, 65, 89, 88, 15, 72, 105]
+weights [2.3553, 1.1622, 1.1262, 1.1095, 0.7366, 0.5386, 0.4389, 0.5327]   sum 8.000000
+scores  max 0.67289  min 0.00625  mean 0.05800
+entropy 1.9312 nats of a possible 2.0794
+moe out rms 1.0250 vs moein 0.7775
+```
+
+Eight distinct experts, weights summing to exactly 8, a spread of 1.92 between the largest and smallest, and
+only a couple of scores above 0.5 - normal sparse routing, not a collapse onto one expert. The MoE output is
+1.3x the input rms, so the block is amplifying as a mixture of experts should.
+
+This is a characterisation rather than a proof: `in2_moe`'s expert matvec is still the one unverified block in
+blk.1, and it needs IQ1_S/Q2_0 decoders in the check suite to close. But healthy routing is a precondition
+that would have to hold for the layer to be right, and it does.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
