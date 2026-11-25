@@ -120,6 +120,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     if (!msgs || !pre_h || !prev_h || !prev_blocks) rc = WUBU_INKLING2_ERR_IO;
 
     /* helper: run one layer and bank the block residual at boundaries */
+    int ltseq = 0;
     #define RUN_LAYER(IL, MSG) do {                                                    \
         float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
@@ -135,7 +136,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             const int _t = n_tok - 1;                                                   \
             double _s = 0.0;                                                            \
             for (int _i = 0; _i < d; ++_i) { double _v = h[(size_t)_t * d + _i]; _s += _v * _v; } \
-            fprintf(stderr, "LT il=%02d ntok=%d l2_last=%.12e\n", (IL), n_tok, _s);    \
+            fprintf(stderr, "LT seq=%d il=%02d pos0=%d ntok=%d l2_last=%.12e\n", ltseq++, (IL), pos0, n_tok, _s); \
         }                                                                               \
         if (rc == WUBU_INKLING2_OK && getenv("IN2_DUMP_LAYERS")) {                     \
             char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d.bin", getenv("IN2_DUMP_LAYERS"), (IL)); \

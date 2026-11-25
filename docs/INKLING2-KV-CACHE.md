@@ -241,3 +241,33 @@ Next, strictly in order:
    first-difference claim until that is done.
 2. Only if a difference survives that: probe the same row at the FULL-attention layers (il 5, 11, 17, 23), where
    V is stored from a different code path.
+
+## VERIFIED: divergence begins at pass 2, pass 1 is exact (2026-11-25)
+
+With a monotonic `seq` in the trace (so alignment cannot drift), a 2-token recompute against a 1+1 incremental
+step gives **identical L2 for seq 0..17** and the first difference at **seq=18, il=06**:
+
+```
+seq=18 il=06   recompute 3.025383022053e+02   incremental 8.184486260684e+02
+```
+
+The loop structure makes seq=18 unambiguous: seq 0-5 are layers 0-5, seq 6-17 are the middle 12 layers (6-17) in
+pass 1, so **seq=18 is the first layer of pass 2**. Pass 1 is exact from the first layer to the last, on a step that
+reads its keys from the cache. The read path, K/V storage, the four conv histories, the relative bias and the sink
+are all correct.
+
+That leaves one mechanism: what crosses between passes. `in2_messages(prev_blocks, n_prev, prev_h, ...)` builds each
+position's message from the previous pass's hidden states and block states. In a full recompute `prev_h` and
+`prev_blocks` hold every position of the prefix; on a 1-token step they hold only the new one. Nothing caches them.
+
+Confirmed independently by the row probe: K and V for position 0 at il=6 are byte-identical in both paths across all
+passes, so the cache is not returning wrong data - pass 2 is consuming the right keys against the wrong messages.
+
+### The fix
+
+Cache the pass-boundary `h` and `blocks` per position (3 boundaries x positions x d, plus n_blocks x d for the block
+states), keyed exactly like K/V. On a step, `prev_h`/`prev_blocks` become views over that cache for positions
+`[0, pos0+n_tok)` instead of the batch-sized buffers. Memory for 64 positions: ~3 x 64 x 2304 x 4 B = 1.8 MB for the
+hidden states, plus the block states at 16 blocks.
+
+Acceptance unchanged: 1+1 to 1e-4, then 3+1, then a 19-token prompt.
