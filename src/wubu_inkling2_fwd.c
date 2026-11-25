@@ -1397,9 +1397,9 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
 
     float *gu = (float *)malloc((size_t)2 * DFF * d * sizeof(float));
     float *dn = (float *)malloc((size_t)d * DFF * sizeof(float));
-    float *g  = (float *)malloc((size_t)2 * DFF * sizeof(float));
-    float *act = (float *)malloc((size_t)DFF * sizeof(float));
-    float *eo = (float *)malloc((size_t)d * sizeof(float));
+    float *g  = (float *)malloc((size_t)TOPK * 2 * DFF * sizeof(float));
+    float *act = (float *)malloc((size_t)TOPK * DFF * sizeof(float));
+    float *eo = (float *)malloc((size_t)TOPK * d * sizeof(float));
     int rc = (gu && dn && g && act && eo) ? WUBU_INKLING2_OK : WUBU_INKLING2_ERR_IO;
     if (getenv("IN2_DEBUG"))
         fprintf(stderr, "[moe L%d] d=%d NE=%d TOPK=%d DFF=%d scale=%.3f bufs=%p/%p/%p/%p/%p rc=%d\n",
@@ -1412,6 +1412,38 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
         int idx[256]; float w[256];
         const int got = in2_router(x + (size_t)t * d, Wr, cb, NE, d, TOPK, cfg->expert_weights_scale, idx, w);
         for (int i = 0; i < d; ++i) out[(size_t)t * d + i] = 0.0f;
+        /* Experts are independent, so the k loop is the natural parallel axis: with n_tok == 1 it is the only one
+         * that gives a thread a whole contiguous expert block to stream, which is what this phase is bound by.
+         * Each k writes its own g/act/eo slice, so nothing races, and the weighted sum stays a SERIAL loop in k
+         * order - the same expression in the same order as the one-expert-at-a-time version, so the bits match. */
+        if (!getenv("IN2_STAGE") && got > 1 && in2_threads() > 1) {
+            int bad = 0;
+#ifdef _OPENMP
+            #pragma omp parallel for num_threads(in2_threads()) schedule(dynamic) reduction(|:bad)
+#endif
+            for (int k = 0; k < got; ++k) {
+                const int e = idx[k];
+                const float gsc = gs ? gs[e] : 1.0f;
+                float *gk = g  + (size_t)k * 2 * DFF;
+                float *ak = act + (size_t)k * DFF;
+                float *ok = eo + (size_t)k * d;
+                if (in2_matvec_quant(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
+                                     x + (size_t)t * d, 2 * DFF, d, gk) != WUBU_INKLING2_OK) { bad = 1; continue; }
+                for (int i = 0; i < 2 * DFF; ++i) gk[i] *= gsc;
+                in2_expert_act(gk, gk + DFF, DFF, ak);
+                if (in2_matvec_quant(ctx, &L->down, (int64_t)e * d * DFF, ak, d, DFF, ok) != WUBU_INKLING2_OK) {
+                    bad = 1; continue;
+                }
+            }
+            if (bad) { rc = WUBU_INKLING2_ERR_IO; break; }
+            for (int k = 0; k < got; ++k) {
+                const int e = idx[k];
+                const float dsc = ds ? ds[e] : 1.0f;
+                const float *ok = eo + (size_t)k * d;
+                for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * ok[i] * dsc;
+            }
+            continue;
+        }
         for (int k = 0; k < got; ++k) {
             const int e = idx[k];
             const float gsc = gs ? gs[e] : 1.0f, dsc = ds ? ds[e] : 1.0f;
