@@ -28,6 +28,41 @@ G4_GPU=1 ./gen_text_gemma4.exe <model> "The meaning of life is" 64 64
 | greedy tokens | 45518, 107, 236775, 818, 6590, ... |
 | CPU path vs GPU path | identical tokens |
 
+## RESOLVED: the batched path was one wrong argument
+
+`ffn_mrow_impl` ran `gelu_mul_kernel(dg, du, elems)` and then quantised **`dg`** for the down
+projection. That kernel writes its product into its second argument, so the gated values were in `du`
+and the down projection was consuming the raw gate. One argument.
+
+Fixing it makes the whole batched path correct and, with it, both IQ3_XXS/IQ4_XS M-row kernels - which
+had been gated off as "numerically sound but end-to-end broken" through three separate investigations:
+
+    reference                     45518 107 236775 818 6590 529 1972 563
+    batch + fused FFN (fixed)     45518 107 236775 818 6590 529 1972 563
+    batch + fused FFN + XXS on    45518 107 236775 818 6590 529 1972 563
+    decode, 24 tokens, XXS on     45518 107 236775 818 6590 529 1972 563 ... exact
+
+    prefill 87 tokens   1.57 s / 55.3 tok/s   (XXS kernels on)
+                        2.81 s / 31.0 tok/s   (XXS kernels off)
+    prefill 1407 tokens 29.81 s / 47.2 tok/s  (XXS kernels on)
+    decode at 24 tokens unchanged, reference exact
+
+Against the faithful per-token loop (6.10 s at 87, 164.7 s at 1407) that is **3.9x at 87 tokens and
+5.5x at 1407** with the reference tokens reproduced.
+
+Two caveats, both measured rather than assumed:
+
+- At 87 tokens, batched and per-token agree for the first nine generated tokens and then split
+  (`... 236764 58148 ...` vs `... 236764 81964 ...`). Attention mode is not the cause: per-token gives
+  the same tokens with batched attention and with host attention, and batched does the same. The residual
+  is the mma kernel's int8 summation order against dp4a's - a ~1e-7 per-element difference that cannot be
+  made bit-identical without giving up the tensor cores, and which eventually flips a token at IQ2
+  precision. The batched path is therefore numerically equivalent to float rounding, not bit-identical,
+  and `G4_PREFILL_BATCH` stays opt-in.
+- `G4_XXS_MMA` produced identical tokens to the kernels-off path at every length tried and is a straight
+  1.8x on prefill, but it stays opt-in as well until it has the same track record the rest of the path
+  has.
+
 ## CORRECTION: the batched prefill path is fast and wrong
 
 The M-row (batched) FFN path does not reproduce the reference tokens. Same prompt, same binary, only
