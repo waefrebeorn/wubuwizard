@@ -358,6 +358,16 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     }
     if (rc == WUBU_INKLING2_OK) {
         in2_shortconv(kraw, n_tok, kdim, kc, 4, kt);
+        if (il == 1 && getenv("IN2_DUMP_KV")) {
+            /* kraw then post-conv k, so the conv formula can be checked in isolation from the matvec */
+            FILE *kf = fopen(getenv("IN2_DUMP_KV"), "wb");
+            if (kf) {
+                fwrite(kraw, sizeof(float), (size_t)n_tok * kdim, kf);
+                fwrite(kt,   sizeof(float), (size_t)n_tok * kdim, kf);
+                fwrite(kc,   sizeof(float), 4 * (size_t)kdim, kf);
+                fclose(kf);
+            }
+        }
         in2_shortconv(vraw, n_tok, kdim, vc, 4, vt);
         for (int t = 0; t < n_tok; ++t) {
             memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);

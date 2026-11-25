@@ -758,6 +758,26 @@ vector, so using row 0 is correct - and blk.1 carries only the static `attn_k_co
 `*_proj`, matching "dynamic convs are full-layer only". My first probe missed these because I queried names
 without the `.weight` suffix.
 
+## The short conv at position 0, this time not circularly
+
+The earlier conv verification was circular (C and Python shared the same wrong index expression), so the
+retest is designed to be a *discriminator*: dump `kraw`, the post-conv `kt` and the filter `kc` for blk.1, then
+compute the expected value under both candidate layouts from the engine's own `kraw`.
+
+At `n_tok == 1` only tap 0 has real history, so `kt[c]` must equal `kraw[c] * (1 + w[c][0]) / sqrt(5)`:
+
+```
+layout A  w[c*4 + 0]        max|diff| 9.537e-07   mean 6.929e-09    <- matches
+layout B  w[0*channels + c] max|diff| 1.312e+01   mean 4.085e-01    <- excluded
+```
+
+Two orders of magnitude apart in the means, thirteen units apart in the worst case. The filter really is
+`w[c*k + tap]` (matching `nn.Conv1d`'s `[out_channels, 1, kernel]`), the `(conv(x)+x)/sqrt(k+1)` form is right,
+and the zero-history boundary at position 0 is handled correctly - which is where a padding bug would live.
+
+Also worth noting from the ratio: `kt/kraw` averages 0.4794 against the 0.4472 that a zero conv weight would
+give, so the learned tap-0 filters are genuinely modifying the signal rather than being near-inert.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
