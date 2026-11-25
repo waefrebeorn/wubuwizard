@@ -509,6 +509,11 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             }
     } else { rc = WUBU_INKLING2_ERR_IO; if (DBG) fprintf(stderr, "[L%d] step7 failed pc=%p res=%p\n", il, (void*)pc, (void*)res); }
     if (DBG) fprintf(stderr, "[L%d] step7 rc=%d\n", il, rc);
+    if (il == 1 && getenv("IN2_DUMP_AO")) {
+        FILE *of = fopen(getenv("IN2_DUMP_AO"), "wb");
+        if (of) { fwrite(ao,  sizeof(float), (size_t)n_tok * d, of);
+                  fwrite(res, sizeof(float), (size_t)n_tok * d, of); fclose(of); }
+    }
 
     /* 8. mlp_input: the same depth mix, one query, over [block_states; residual]. With no banked blocks
      *    it degenerates to an unweighted RMS norm. */

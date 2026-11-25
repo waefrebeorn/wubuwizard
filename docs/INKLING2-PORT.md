@@ -838,6 +838,25 @@ Three things this closes:
   that would "pass" a weaker check.
 - **The GQA mapping is right**: query head `h` reads kv head `h//3`, so 24 query heads over 8 kv heads.
 
+## Gated output and the residual composition
+
+`IN2_DUMP_AO` writes `ao` and the post-residual `res` for blk.1. With the already-verified `xn` and
+`attn_out`:
+
+```
+ao  = attn_output @ (sigmoid(attn_gate @ xn) * attn_out)   max|diff| 3.874e-07
+res = h_in + (post_conv(ao) + ao)/sqrt(5)                  max|diff| 2.384e-07
+```
+
+The gate is live (`|ao|` peaks at 1.72, 83% of gates below 0.5), and the residual composition is
+`input + post_conv(attention)`, exactly as the reference's non-boundary branch specifies. Worth recording the
+proportions: `h_in` rms 2.0483, the attention contribution 0.1182, the sum 2.0654 - so attention moves about
+5.7% of the residual's magnitude. Small but non-zero; a zero here would have been invisible in the rms.
+
+My first attempt at this check used `res == conv(ao)` and was off by 8.4, which looked like a residual bug
+and was my formula being wrong rather than the code. Fifth broken instrument. The rule holds: check the
+formula before the finding.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
