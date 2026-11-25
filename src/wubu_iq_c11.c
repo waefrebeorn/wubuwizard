@@ -1449,14 +1449,36 @@ IQ_AVX2 static inline __m256 iq_mul_sum_i8_pairs_float(__m256i x, __m256i y)
 
 /* ggml's ggml_ue4m3_to_fp32 (ggml-impl.h): ggml's x86 AVX2 path reads the same
  * values out of ggml_table_f32_ue4m3, which ggml_cpu_init() fills from this. */
+/* UE4M3 decode through a 256-entry table.
+ *
+ * There are only 256 possible byte values, and this used to be called four times per NVFP4 block - about 166,000
+ * times per matvec - with an ldexpf() (a libm call) and a division in each. Measured effect of that: NVFP4 ran at
+ * 1.59 GOPS where every other quant type in this file runs at 19-49, and it alone was half the kernel time on a
+ * decode step while being one of twelve formats. The table is filled by the SAME expression, once, so every value
+ * is bit-identical to what the function returned; the 144/144 bit-identical sweep is the check. */
+static float iq_ue4m3_lut[256];
+static int   iq_ue4m3_ready = 0;
+
+static void iq_ue4m3_init(void)
+{
+    for (int i = 0; i < 256; ++i) {
+        float v = 0.0f;
+        if (i != 0 && i != 0x7f) {
+            const int   e   = (i >> 3) & 0xf;
+            const int   man = i & 0x7;
+            const float raw = e == 0 ? ldexpf((float) man, -9)
+                                     : ldexpf(1.0f + (float) man / 8.0f, e - 7);
+            v = raw * 0.5f;
+        }
+        iq_ue4m3_lut[i] = v;
+    }
+    iq_ue4m3_ready = 1;
+}
+
 static float iq_ue4m3_to_fp32(uint8_t x)
 {
-    if (x == 0 || x == 0x7f) return 0.0f;
-    const int   e   = (x >> 3) & 0xf;
-    const int   man = x & 0x7;
-    const float raw = e == 0 ? ldexpf((float) man, -9)
-                             : ldexpf(1.0f + (float) man / 8.0f, e - 7);
-    return raw * 0.5f;
+    if (!iq_ue4m3_ready) iq_ue4m3_init();
+    return iq_ue4m3_lut[x];
 }
 
 /* ggml's get_scale_shuffle: scale s spread over 16 bytes, for Q6_K */
