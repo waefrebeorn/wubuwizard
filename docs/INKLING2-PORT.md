@@ -1205,3 +1205,21 @@ because it has no per-pass state to contrast against.
 Note the honest limit: with the port still emitting degenerate text, guidance strength cannot yet be scored on
 quality. What is established is that the mechanism works and is measurable. Quality sweeps come after the
 remaining full-layer defect is found.
+
+Measurement after wiring it, 4 greedy tokens from prompt 1234:
+
+```
+unguided    1234 14776 39885 68436   322   -> "uteä¸ĪZer99ut"
+LoopCD 1.5  1234 37338 52806 198077  1234  -> "utedpiTete mtgute"
+```
+
+Both are degenerate, and both end by returning to the prompt token - the same failure signature as before
+LoopCD, at a different logit. That is the expected outcome and it is worth being blunt about: **guidance
+amplifies whatever the recurrent states encode, and it cannot repair a broken graph.** LoopCD is not a fix for
+the remaining full-layer defect; it is the capability that will be worth having once that defect is gone.
+
+The reframing does change priorities, though. Chasing token-for-token parity with llama.cpp was the wrong bar,
+and the per-layer forensic crawl had started to serve parity rather than the engine. This model is the house
+testbed: the work that matters is the class of things a looped-native engine can do that a single-pass one
+cannot - keeping h_1 (done), halving the loop count while matching full depth (the paper's FLOP result), and
+contrasting passes instead of discarding them.
