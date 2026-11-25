@@ -43,15 +43,16 @@ static float *global_f32(gguf_ctx *ctx, const char *name)
 
 /* Depth mix: one learned query over [block_states; partial] after an unweighted RMS norm. With one state
  * and one query it degenerates to a bare norm - which is why layer 0's mlp_input is a norm in disguise. */
-static void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *query,
-                    int d, float eps, float *out)
+static void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos_off,
+                    const float *partial, const float *query, int d, float eps, float *out)
 {
     const int n = n_blocks + 1;
     float *st = (float *)malloc((size_t)n * d * sizeof(float));
     float *nr = (float *)malloc((size_t)n * d * sizeof(float));
     float *al = (float *)malloc((size_t)n * sizeof(float));
     if (!st || !nr || !al) { free(st); free(nr); free(al); return; }
-    for (int i = 0; i < n_blocks; ++i) memcpy(st + (size_t)i * d, blocks + (size_t)i * d, sizeof(float) * d);
+    for (int i = 0; i < n_blocks; ++i)
+        memcpy(st + (size_t)i * d, blocks + (size_t)i * block_stride + pos_off, sizeof(float) * d);
     memcpy(st + (size_t)n_blocks * d, partial, sizeof(float) * d);
     for (int i = 0; i < n; ++i) in2_rmsnorm_unweighted(st + (size_t)i * d, d, eps, nr + (size_t)i * d);
     const float inv = 1.0f / sqrtf((float)d);
@@ -73,8 +74,8 @@ static void in2_mix(const float *blocks, int n_blocks, const float *partial, con
     free(st); free(nr); free(al);
 }
 
-int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
-                      int token, float *h, float *logits)
+int in2_forward_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                    const int *tokens, int n_tok, float *h, float *logits)
 {
     /* IN2_SINGLE_PASS runs pass 1 only. It exists to exercise the depth path before the message gates
      * land; anything it prints is a 1-of-3-pass number and must be labelled as such. */
@@ -84,46 +85,52 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     const int d = cfg->d_model;
     const float eps = cfg->rms_eps;
 
-    float *emb = (float *)calloc((size_t)d, sizeof(float));
+    const size_t ND = (size_t)n_tok * d;
+    float *emb = (float *)calloc(ND, sizeof(float));
     if (!emb) return WUBU_INKLING2_ERR_IO;
-    int rc = in2_embed(ctx, m, cfg, token, emb);
-    if (rc != WUBU_INKLING2_OK) { free(emb); return rc; }
+    int rc = WUBU_INKLING2_OK;
     float *en = global_f32(ctx, "token_embd_norm.weight");
-    if (en) { in2_rmsnorm(emb, en, d, eps, h); free(en); }
-    else    memcpy(h, emb, sizeof(float) * d);
-    free(emb);
+    for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
+        rc = in2_embed(ctx, m, cfg, tokens[t], emb + (size_t)t * d);
+        if (rc != WUBU_INKLING2_OK) break;
+        if (en) in2_rmsnorm(emb + (size_t)t * d, en, d, eps, h + (size_t)t * d);
+        else    memcpy(h + (size_t)t * d, emb + (size_t)t * d, sizeof(float) * d);
+    }
+    free(en); free(emb);
+    if (rc != WUBU_INKLING2_OK) return rc;
 
-    float *blocks = (float *)calloc((size_t)16 * d, sizeof(float));
+    /* block states hold a whole sequence per entry: 16 entries x n_tok positions */
+    float *blocks = (float *)calloc((size_t)16 * ND, sizeof(float));
     int n_blocks = 0;
     if (!blocks) return WUBU_INKLING2_ERR_IO;
 
     float *qres = global_f32(ctx, "loop_res_query.weight");
     float *qkv  = global_f32(ctx, "loop_kv_res_query.weight");
     float *msgs = (float *)calloc((size_t)4 * d, sizeof(float));
-    float *pre_h = (float *)malloc(sizeof(float) * d);
-    float *prev_h = (float *)malloc(sizeof(float) * d);
-    float *prev_blocks = (float *)calloc((size_t)16 * d, sizeof(float));
+    float *pre_h = (float *)malloc(sizeof(float) * ND);
+    float *prev_h = (float *)malloc(sizeof(float) * ND);
+    float *prev_blocks = (float *)calloc((size_t)16 * ND, sizeof(float));
     int pre_blocks = 0, n_prev = 0;
     if (!msgs || !pre_h || !prev_h || !prev_blocks) rc = WUBU_INKLING2_ERR_IO;
 
     /* helper: run one layer and bank the block residual at boundaries */
     #define RUN_LAYER(IL, MSG) do {                                                    \
-        float *_br = (float *)malloc(sizeof(float) * d);                               \
+        float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
-        memcpy(_br, h, sizeof(float) * d);                                             \
+        memcpy(_br, h, sizeof(float) * ND);                                            \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
-            rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks, (MSG)); \
+            rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, 0, blocks, n_blocks, (MSG)); \
         else                                                                            \
-            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, 1, 0, blocks, n_blocks, (MSG)); \
+            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, 0, blocks, n_blocks, (MSG)); \
         if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
-            memcpy(blocks + (size_t)n_blocks * d, _br, sizeof(float) * d); ++n_blocks;  \
+            memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
         }                                                                               \
         free(_br);                                                                      \
     } while (0)
 
     /* pre-loop layers */
     for (int il = 0; il < cfg->loop_core_start && rc == WUBU_INKLING2_OK; ++il) RUN_LAYER(il, NULL);
-    if (rc == WUBU_INKLING2_OK) { memcpy(pre_h, h, sizeof(float) * d); pre_blocks = n_blocks; }
+    if (rc == WUBU_INKLING2_OK) { memcpy(pre_h, h, sizeof(float) * ND); pre_blocks = n_blocks; }
 
     /* first pass over the loop core: no messages yet */
     for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il)
@@ -131,14 +138,14 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 
     /* each later pass restarts from the pre-loop state and carries only the messages */
     for (int pass = 1; pass < n_loops && rc == WUBU_INKLING2_OK; ++pass) {
-        memcpy(prev_h, h, sizeof(float) * d);
+        memcpy(prev_h, h, sizeof(float) * ND);
         /* the reference skips the pre-loop blocks plus the first block appended by the previous pass */
         const int skip = pre_blocks + 1;
         n_prev = (n_blocks > skip) ? (n_blocks - skip) : 0;
         for (int i = 0; i < n_prev; ++i)
-            memcpy(prev_blocks + (size_t)i * d, blocks + (size_t)(skip + i) * d, sizeof(float) * d);
+            memcpy(prev_blocks + (size_t)i * ND, blocks + (size_t)(skip + i) * ND, sizeof(float) * ND);
 
-        memcpy(h, pre_h, sizeof(float) * d);
+        memcpy(h, pre_h, sizeof(float) * ND);
         n_blocks = pre_blocks;
         for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il) {
             const int li = il - cfg->loop_core_start;
@@ -158,16 +165,20 @@ int in2_forward_token(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *fin = (float *)malloc(sizeof(float) * d);
     float *fq = global_f32(ctx, "output_res_query.weight");
     if (!fin) { free(blocks); free(fq); return WUBU_INKLING2_ERR_IO; }
-    if (fq) in2_mix(blocks, n_blocks, h, fq, d, eps, fin);
-    else    memcpy(fin, h, sizeof(float) * d);
+    /* logits are only meaningful for the last position */
+    const float *last = h + (size_t)(n_tok - 1) * d;
+    if (fq) in2_mix(blocks, n_blocks, n_tok * d, (n_tok - 1) * d, last, fq, d, eps, fin);
+    else    memcpy(fin, last, sizeof(float) * d);
 
     float *on = global_f32(ctx, "output_norm.weight");
-    if (on) { in2_rmsnorm(fin, on, d, eps, h); free(on); }
-    else    memcpy(h, fin, sizeof(float) * d);
+    float out_h[1];
+    (void)out_h;
+    if (on) { in2_rmsnorm(fin, on, d, eps, fin); free(on); }
+
 
     float *Wo = global_f32(ctx, "output.weight");
     if (!Wo) { free(blocks); free(fin); free(fq); return WUBU_INKLING2_ERR_IO; }
-    in2_matvec(Wo, h, d, cfg->vocab_size, logits);
+    in2_matvec(Wo, fin, d, cfg->vocab_size, logits);
     const float cap = 30.0f;
     for (int i = 0; i < cfg->vocab_size; ++i) logits[i] = tanhf(logits[i] / cap) * cap;
 

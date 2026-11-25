@@ -15,8 +15,8 @@
 #include "wubu_inkling2.h"
 
 /* ---- prototypes (definitions follow in dependency order) ---- */
-void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *queries, int n_q,
-             int d, float eps, float *out);
+void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos_off,
+             const float *partial, const float *queries, int n_q, int d, float eps, float *out);
 void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float *stat,
                            const float *dyn_proj, const float *dyn_input, int hidden,
                            int n_head, int k, float *out);
@@ -278,7 +278,8 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *arq = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
     if (arq && il > 0) {
         for (int t = 0; t < n_tok; ++t)
-            in2_mix(blocks, n_blocks, h + (size_t)t * d, arq, 1, d, eps, mixh + (size_t)t * d);
+            in2_mix(blocks, n_blocks, n_tok * d, t * d, h + (size_t)t * d, arq, 1, d, eps,
+                    mixh + (size_t)t * d);
     } else {
         memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
     }
@@ -474,7 +475,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         for (int t = 0; t < n_tok; ++t) {
             float *tmp = (float *)calloc((size_t)d, sizeof(float));
             float *frq = in2_tensor_to_f32(ctx, &L->ffn_res_q, NULL);
-            if (frq) in2_mix(blocks, n_blocks, res + (size_t)t * d, frq, 1, d, eps, tmp);
+            if (frq) in2_mix(blocks, n_blocks, n_tok * d, t * d, res + (size_t)t * d, frq, 1, d, eps, tmp);
             else      in2_rmsnorm_unweighted(res + (size_t)t * d, d, eps, tmp);
             free(frq);
             in2_rmsnorm(tmp, fn, d, eps, moein + (size_t)t * d);
@@ -559,15 +560,19 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
 /* Depth mix over [block_states; partial]: one learned query per requested output.
  * With n_blocks == 0 and n_q == 1 this is exactly an unweighted RMS norm, which is why layer 0's
  * mlp_input (and every layer's mlp_input before any block has been banked) is a norm in disguise. */
-void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *queries, int n_q,
-             int d, float eps, float *out)
+/* blocks holds n_blocks entries, each a SEQUENCE of positions: entry i, position pos_off/d, lives at
+ * blocks + i*block_stride + pos_off. For a single token block_stride == d and pos_off == 0, which is the
+ * only case the earlier version supported. */
+void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos_off,
+             const float *partial, const float *queries, int n_q, int d, float eps, float *out)
 {
     const int n = n_blocks + 1;
     float *st = (float *)malloc((size_t)n * d * sizeof(float));
     float *nr = (float *)malloc((size_t)n * d * sizeof(float));
     float *al = (float *)malloc((size_t)n * sizeof(float));
     if (!st || !nr || !al) { free(st); free(nr); free(al); return; }
-    for (int i = 0; i < n_blocks; ++i) memcpy(st + (size_t)i * d, blocks + (size_t)i * d, sizeof(float) * d);
+    for (int i = 0; i < n_blocks; ++i)
+        memcpy(st + (size_t)i * d, blocks + (size_t)i * block_stride + pos_off, sizeof(float) * d);
     memcpy(st + (size_t)n_blocks * d, partial, sizeof(float) * d);
     for (int i = 0; i < n; ++i) in2_rmsnorm_unweighted(st + (size_t)i * d, d, eps, nr + (size_t)i * d);
 
@@ -718,7 +723,8 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *wq_n = in2_tensor_to_f32(ctx, &L->attn_res_q, NULL);
     float *state = (float *)calloc((size_t)3 * d, sizeof(float));
     if (!wq_n || !state) { free(wq_n); free(state); return WUBU_INKLING2_ERR_IO; }
-    in2_mix(blocks, n_blocks, h, wq_n, 3, d, eps, state);   /* rows: q, k, v */
+    /* superseded by in2_layer_full_seq, kept only for single-token reference; block_stride == d here */
+    in2_mix(blocks, n_blocks, d, 0, h, wq_n, 3, d, eps, state);   /* rows: q, k, v */
 
     float *qn = in2_tensor_to_f32(ctx, &L->q_inp_norm, NULL);
     float *kn = in2_tensor_to_f32(ctx, &L->k_inp_norm, NULL);
@@ -861,7 +867,7 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *moein = (float *)calloc((size_t)d, sizeof(float));
     float *moeout = (float *)calloc((size_t)d, sizeof(float));
     if (fq && mixed && fn && moein && moeout && rc == WUBU_INKLING2_OK) {
-        in2_mix(blocks, n_blocks, res, fq, 1, d, eps, mixed);
+        in2_mix(blocks, n_blocks, d, 0, res, fq, 1, d, eps, mixed);
         in2_rmsnorm(mixed, fn, d, eps, moein);
         rc = in2_moe(ctx, m, cfg, il, moein, 1, moeout);
     } else rc = WUBU_INKLING2_ERR_IO;

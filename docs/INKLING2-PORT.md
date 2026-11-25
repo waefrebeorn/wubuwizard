@@ -599,6 +599,27 @@ produced by a graph with this bug in it**, and the span 13.2 figure that made th
 right was measured through that bug. The gating conclusion still stands (it moved the symptom the right
 way), but the absolute numbers before this commit are superseded.
 
+## The model forward takes a sequence
+
+`in2_forward_seq` replaces the single-token entry point: it embeds every token, keeps block states as
+16 entries x `n_tok` positions (the mix grew a `block_stride`/`pos_off` pair to address them), runs the
+layers over the whole sequence, and emits logits for the last position.
+
+**The regression that matters passed this time:** at `n_tok == 1` the output is byte-identical to before
+the generalisation (`max 19.8403`, `min 8.9541`, `top1 87`). Unlike the last refactor, this one changed no
+arithmetic - it only threaded a stride through.
+
+```
+1 token  : rc=0  max 19.8403  min 8.9541  span 10.9  top1 87
+2 tokens : rc=0  max 20.1966  min 2.7856  span 17.4  top1 5195
+```
+
+The span widening with context is the expected direction, not evidence of correctness.
+
+**Still not exercised by any of this:** the sliding window (needs > 1024 tokens before it clips anything)
+and `tau` (needs position > 8192 before `log` stops returning 0). Both are implemented and untested at
+their operating point.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

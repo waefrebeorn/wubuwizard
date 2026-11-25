@@ -5,8 +5,8 @@
 #include "gguf_reader.h"
 #include "wubu_inkling2.h"
 
-int in2_forward_token(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
-                      int, float *, float *);
+int in2_forward_seq(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
+                    const int *, int, float *, float *);
 
 int main(int argc, char **argv)
 {
@@ -20,10 +20,13 @@ int main(int argc, char **argv)
     static wubu_inkling2_model_t m;
     if (wubu_inkling2_load(ctx, &cfg, &m) != WUBU_INKLING2_OK) { fprintf(stderr, "load failed\n"); return 3; }
 
-    float *h = (float *)calloc(cfg.d_model, sizeof(float));
+    const int n_tok = argc > 1 ? argc - 1 : 1;
+    int *toks = (int *)calloc((size_t)n_tok, sizeof(int));
+    for (int i = 0; i < n_tok; ++i) toks[i] = argc > 1 ? atoi(argv[i + 1]) : 1234;
+    float *h = (float *)calloc((size_t)n_tok * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
-    const int rc = in2_forward_token(ctx, &m, &cfg, token, h, logits);
-    printf("forward rc=%d  token=%d  d=%d vocab=%d\n", rc, token, cfg.d_model, cfg.vocab_size);
+    const int rc = in2_forward_seq(ctx, &m, &cfg, toks, n_tok, h, logits);
+    printf("forward rc=%d  n_tok=%d  d=%d vocab=%d\n", rc, n_tok, cfg.d_model, cfg.vocab_size);
     if (rc != 0) return rc;
 
     double mx = -1e30, sum = 0; int bad = 0;

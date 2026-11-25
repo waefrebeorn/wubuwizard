@@ -21,8 +21,8 @@ void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float 
                            int n_head, int k, float *out);
 void in2_l2_clip(float *x, const float *scale, int n_head, int dim, float threshold);
 void in2_rel_bias_table(const float *rel_states, const float *P, int n_head, int d_rel, int extent, float *bias);
-void in2_mix(const float *blocks, int n_blocks, const float *partial, const float *queries, int n_q,
-             int d, float eps, float *out);
+void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos_off,
+             const float *partial, const float *queries, int n_q, int d, float eps, float *out);
 void in2_message_gate(const float *h, const float *message, const float *down, const float *forget,
                       const float *msgp, int d, int rank, float eps, float *out);
 int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
@@ -52,7 +52,7 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     float *state = (float *)calloc((size_t)3 * ND, sizeof(float));
     if (!state) { free(arq); free(qn); free(kn); free(vn); return WUBU_INKLING2_ERR_IO; }
     for (int t = 0; t < n_tok; ++t)
-        in2_mix(blocks, n_blocks, h + (size_t)t * d, arq, 3, d, eps,
+        in2_mix(blocks, n_blocks, n_tok * d, t * d, h + (size_t)t * d, arq, 3, d, eps,
                 state + (size_t)t * 3 * d);
 
     for (int sl = 0; sl < 3 && msgs; ++sl) {
@@ -209,7 +209,8 @@ int in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu
     float *moeout = (float *)calloc(ND, sizeof(float));
     if (fq && mixed && fn && moein && moeout && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
-            in2_mix(blocks, n_blocks, res + (size_t)t * d, fq, 1, d, eps, mixed + (size_t)t * d);
+            in2_mix(blocks, n_blocks, n_tok * d, t * d, res + (size_t)t * d, fq, 1, d, eps,
+                    mixed + (size_t)t * d);
             if (msgs) {
                 float *dw = in2_tensor_to_f32(ctx, &L->loop_down[3], NULL);
                 float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[3], NULL);
