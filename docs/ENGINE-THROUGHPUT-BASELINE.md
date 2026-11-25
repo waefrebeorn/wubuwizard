@@ -502,6 +502,24 @@ between 14.2 tok/s and llama.cpp's 24.3: keeping q/k/v/o and the residual stream
 decode step is the next refactor, and unlike the prefill version of that idea (which measured neutral)
 this one has 26 of 71 ms to win.
 
+
+Two more experiments, both neutral, which together settle the question:
+
+    decode 128 tok, device-attention block at M=1   13.6 tok/s   (token-identical: 24/24 exact)
+    decode 128 tok, host attention                  13.8 tok/s
+
+`G4_ATTN_BLOCK_DEC=1` extends the prefill attention block to decode, and it **is** token-identical
+there - 24 of 24 reference tokens - so the block itself is correct at M=1. It still buys nothing: it
+saves the q/k/v round trips and pays back the KV rows it returns. With the all-CPU configuration at
+12.3 tok/s and full device offload at 14.2, the arithmetic accounts for only about 10 ms of the 71, and
+no single transfer removal moves the number.
+
+The conclusion is that decode is latency-bound on per-layer host-device synchronisation: roughly 48
+layers times several launches and blocking copies per token, which only a restructure that runs a whole
+token without returning to the host - device-side norms, residual and attention in one resident pass -
+can remove. That is a different design from the one here, where each layer crosses back to the host for
+its residual stream, and it is the honest description of the remaining 1.75x against llama.cpp.
+
 ## Rule: an instrument must be checked against a known answer before it is believed
 
 Every wrong conclusion in this stretch came from an instrument that had never been validated, and each

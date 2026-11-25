@@ -1616,7 +1616,10 @@ void g4_layer_forward_cpu(g4_model_t *model, int il, float *x,
      * with only the attention rows and the KV rows coming back. Without it this layer downloads q
      * and re-uploads q/k/v, 11 MB of PCIe for a block doing 5 MB of arithmetic, and runs the head
      * norms and RoPE on the CPU. Off by default until it proves token-identical. */
-    if (N > 1 && !getenv("G4_ATTN_BLOCK_CPU") && layer->attn_q.dev && layer->attn_k.dev &&
+    /* G4_ATTN_BLOCK_DEC lets the same block run for decode (N == 1): if it is correct there, the
+     * whole attention phase can stay device-resident and the per-layer q/k/v round trips go away. */
+    if ((N > 1 || getenv("G4_ATTN_BLOCK_DEC")) && !getenv("G4_ATTN_BLOCK_CPU") &&
+        layer->attn_q.dev && layer->attn_k.dev &&
         layer->attn_v.dev && !layer->share_kv && !layer->kv_eq) {
         extern int wubu_gpu_attn_block_mrow(int, const void *, int, const void *, int, const void *, int,
                                             const float *, const int *, int, int, int, int, int, int, int,
