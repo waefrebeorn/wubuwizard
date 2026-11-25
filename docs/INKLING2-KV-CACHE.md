@@ -194,3 +194,26 @@ The fix is to cache the pass-boundary h and block states per position (d_model a
 keyed the same way, and have the message construction read prefix rows from that cache.
 
 Acceptance stays the same: 1+1 must match to 1e-4, then 3+1, then a 19-token prompt.
+
+## Layer 6: hypotheses cleared (2026-11-25)
+
+`IN2_VTRACE=1` prints the visit index for `il=6`. Prefill (pos0=0, ntok=1) and the step (pos0=1, ntok=1) both
+report `vvis=6, 18, 30` - so the three passes of layer 6 address the same cache slots in both modes. Visit
+alignment is correct and is not the bug.
+
+Also cleared: the read path (positions are addressed globally and agree to 12 digits through layers 0-5), K/V
+storage for pass 1, the four convs' history push (the prefill is exact), the relative bias and the sink.
+
+Still open at layer 6. Remaining candidates, in the order that costs least to test:
+1. **The K/V rows themselves.** Dump the row `in2_kv_k(kv, 6, 0)` in the step and the row the 2-token recompute
+   used for position 0 at the same visit, and diff. If they differ, the prefill stored something different from
+   what the recompute computes for position 0, which would mean the *prefill* path and the recompute path disagree
+   at that layer even though the final h agreed - possible, because layers 0-5 comparing equal does not prove
+   their stored K/V are equal.
+2. **The MoE router.** Layer 6 is a fresh visit; if a row differs by 1e-7 the top-8 selection can flip and the
+   output moves by far more than the input error. That would also explain a divergence that starts at exactly one
+   layer and then persists.
+3. Only after 1 and 2: messages/block states, which the trace has not yet implicated (a message bug would have to
+   act at layer 6 specifically).
+
+Do not spend more attempts on integration guesses. The next action is the row diff in (1).

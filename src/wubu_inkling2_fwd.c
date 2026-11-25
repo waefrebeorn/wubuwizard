@@ -699,6 +699,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
      * would attend to the next visit's empty rows */
     const int vvis = g_visit;
+    if (g_kv && il == 6 && getenv("IN2_VTRACE")) fprintf(stderr, "VISIT il=6 vvis=%d pos0=%d ntok=%d\n", vvis, pos0, n_tok);
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if (!q) { if (DBG) fprintf(stderr, "[L%d] q alloc failed\n", il);
