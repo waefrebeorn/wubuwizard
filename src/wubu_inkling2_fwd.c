@@ -14,6 +14,7 @@
 #include <math.h>
 
 #include "wubu_inkling2.h"
+#include "wubu_inkling2_kv.h"
 #include "wubu_dequant_fp4.h"
 #include "wubu_iq2q8.h"
 #include "wubu_iq_c11.h"
@@ -60,6 +61,21 @@ int  in2_router(const float *x, const float *W, const float *corr_bias, int n_ex
                 int top_k, float scale, int *idx, float *w);
 int  in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
              int il, const float *x, int n_tok, float *out);
+/* KV cache hook. The forward pass still computes every position, so this only exercises the store path: each
+ * visit writes its final (post-clip / post-norm) K and V rows plus the raw rows the 4-tap conv will need, then
+ * reads them back and compares. Nothing consumes the cache yet, which is why it is gated and why a wrong index
+ * cannot affect a single number the engine produces. */
+static in2_kv_t *g_kv;
+static int g_visit;
+static int g_kv_pos;
+
+void in2_kv_attach(in2_kv_t *kv, int pos0)
+{
+    g_kv = kv;
+    g_visit = 0;
+    g_kv_pos = pos0;
+}
+
 int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                        int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
                        const float *msgs);
@@ -620,6 +636,12 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 
     /* 2. q: project, scale+clip per head. */
     const int qdim = NH * HD, kdim = NKV * HD;
+    if (!g_kv && getenv("IN2_KV")) {
+        /* store-path exercise only: a 64-position cap keeps the test allocation small; the read path will size
+         * sliding visits to EXT and full visits to the context length. */
+        static in2_kv_t boot;
+        if (in2_kv_init(&boot, 72, kdim, 0, 64) == 0) g_kv = &boot;
+    }
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if (!q) { if (DBG) fprintf(stderr, "[L%d] q alloc failed\n", il);
@@ -679,9 +701,42 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         for (int t = 0; t < n_tok; ++t) {
             memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);
             in2_l2_clip(k + (size_t)t * kdim, NULL, NKV, HD, 22.6274166f);
+            if (g_kv) {
+                const int gp = g_kv_pos + t, vis = g_visit;
+                float *ck = in2_kv_k(g_kv, vis, gp);
+                if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
+                in2_kv_store_raw(g_kv, vis, kraw + (size_t)t * kdim, vraw + (size_t)t * kdim);
+            }
             memcpy(v + (size_t)t * kdim, vt + (size_t)t * kdim, sizeof(float) * kdim);
             float *row = v + (size_t)t * kdim;
             for (int hh = 0; hh < NKV; ++hh) in2_rmsnorm_unweighted(row + hh * HD, HD, eps, row + hh * HD);
+            if (g_kv) {
+                float *cv = in2_kv_v(g_kv, g_visit, g_kv_pos + t);
+                if (cv) memcpy(cv, row, sizeof(float) * (size_t)kdim);
+            }
+        }
+        if (g_kv && getenv("IN2_KV_VERIFY")) {
+            /* read back what was just stored and compare with the live rows: this is an index test, not a numerics
+             * test - the cache is written from these same bytes, so anything nonzero here means the slot mapping
+             * or the visit identity is wrong, which is the failure a later read path would silently inherit. */
+            float worst = 0.0f;
+            for (int t = 0; t < n_tok; ++t) {
+                const float *ck = in2_kv_k(g_kv, g_visit, g_kv_pos + t);
+                const float *cv = in2_kv_v(g_kv, g_visit, g_kv_pos + t);
+                if (!ck || !cv) { worst = 1e30f; break; }
+                for (int e = 0; e < kdim; ++e) {
+                    float e1 = fabsf(ck[e] - k[(size_t)t * kdim + e]);
+                    float e2 = fabsf(cv[e] - v[(size_t)t * kdim + e]);
+                    if (e1 > worst) worst = e1;
+                    if (e2 > worst) worst = e2;
+                }
+            }
+            if (worst > 1e-6f) fprintf(stderr, "KV STORE MISMATCH L%d visit=%d worst=%.3e\n", il, g_visit, worst);
+            else if (il == 0 && n_tok > 0) fprintf(stderr, "KV store ok L%d visit=%d n_tok=%d worst=%.3e\n", il, g_visit, n_tok, worst);
+        }
+        if (g_kv) {
+            if (g_kv->n_stored < g_kv_pos + n_tok) g_kv->n_stored = g_kv_pos + n_tok;
+            ++g_visit;
         }
     }
 
