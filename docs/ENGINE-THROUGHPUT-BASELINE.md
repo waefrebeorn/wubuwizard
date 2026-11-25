@@ -54,6 +54,38 @@ tokens and 8.5 tok/s at 1407** (164.7 s). That is the honest baseline. The batch
 and unusable until its kernels match. Making it match is now the top-priority correctness task, and the
 test is exact: `G4_PREFILL_BATCH` must produce the same greedy tokens as the per-token loop.
 
+### Narrowing it: the fused M-row FFN, not the batching machinery
+
+Each component of the batched path tested on its own, same prompt, `top_k=1`:
+
+    reference (per-token)              45518 107 236775 818 6590 529 1972 563
+    batch, attention batched only      45518 107 236775 818 6590 529 1972 563   exact
+    batch, host FFN                    45518 107 236775 818 6590 529 1972 563   exact
+    batch, fused FFN                   64056 2499 118451 43039 236749 159017 ...
+    batch, fused FFN, G4_NO_MMA=1      237208 230046 210995 150788 236794 51417 ...
+
+So batching itself is sound - batched attention and batched host matvecs both reproduce the reference.
+The **fused M-row FFN** is the only broken component, and it is broken on both of its kernel paths (the
+tensor-core one and the `G4_NO_MMA` dp4a fallback), which points at their shared code rather than at one
+kernel.
+
+Per-layer, with everything else on the proven-correct batched host path (so layer 0's input is identical
+by construction):
+
+    batch + layer 0 fused      236761 236761 236761 236779 ...   broken
+    batch + layer 47 fused     45518 107 236775 818 6590 ...      exact
+
+and layer 0's FFN output at M=21 measures **mean |difference| 3.2% of scale but max 99.4%** - 2554 of
+80640 elements off by more than 20% of scale, spread evenly across every row (85-155 each) and every
+256-column block (all 15). Uniform, not a boundary condition: a buffer overrun or an edge case would
+cluster in specific rows or columns, and this does not.
+
+Both the exact M=1 path (`matvec_devbuf`) and the broken M-row path quantise activations to Q8_K, so
+quantisation is not the difference; the M-row kernels' own arithmetic is. The next measurement is a
+device-side A/B of the M-row matvec against the per-row matvec on identical Q8_K input for one layer,
+which is the last untested link.
+
+
 Decode degrades with context and the profiler says why: the attention section is 7.3 ms at
 32 tokens, **29.0 ms at 256 tokens**, and the layer total goes 76 -> 98 ms. Attention is
 the only section that scales with context, and it is entirely on the CPU. At 257 tokens it
