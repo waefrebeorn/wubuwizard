@@ -98,3 +98,30 @@ Two things that made this fail before were both mine, not maya's:
 
 - the clone was a **sparse checkout** (1,358 absent files, `git status` clean), and
 - the default fetch has no network path here.
+
+## 7. Maya's ggml dependency is a real constraint, not a build hiccup
+
+Three attempts to build maya on this box, three environmental failures, each distinct:
+
+| # | failure | cause |
+|---|---|---|
+| 1 | `CMake step for strata_llamacpp failed: 1` | sparse checkout (1,358 files absent) + no network fetch path |
+| 2 | `cmake/maya_old_names.cmake` not found | same sparse checkout |
+| 3 | `native_expert.cpp:12: ggml.h` → then `ggml-cpu.h` not found | see below |
+
+**The third is not environmental in the same way.** `third_party/ggml/` in maya holds exactly six tracked files —
+`ggml-common.h`, `LICENSE`, `VERSION.txt`, and three patches. It vendors the *block layouts and codebook grids*,
+not the public headers. `ggml.h` and `ggml-cpu.h` are expected from a ggml source tree, and:
+
+- pointing at `ik_llama.cpp` satisfies `ggml.h` (`ggml/include/ggml.h`) but **not** `ggml-cpu.h`, which does not
+  exist anywhere in that fork;
+- `native_expert.cpp` needs it because its whole purpose is "the activation quantizers and the row dot products
+  are ggml-cpu's" — i.e. maya's GGUF-form IQ experts *are* ggml-cpu's code, by design.
+
+So the honest statement is: **maya's GGUF expert path depends on upstream ggml headers that `ik_llama.cpp` does
+not carry.** `MAYA_NATIVE_EXPERTS=OFF` (CMakeLists.txt:1637) removes that path and is the only route to a maya
+build with no upstream checkout — accepted only if the resulting binary can still run a GGUF IQ2 checkpoint,
+which is the thing being tested.
+
+This is the one place where the ban on llama.cpp meets a wall: it is maya's own dependency, not a reference we
+consult, and no code from it is read or copied into this repo. Recording it rather than quietly re-cloning.
