@@ -1003,7 +1003,28 @@ full 16-bit entropy and `q >> 9` reaches 127. The engine's own comment says
 both my 12-bit readings failed, and it means the format here is not byte-identical to canonical IQ2_XS, which
 is itself worth knowing before making any correctness claim about expert weights.
 
-**Not resolved, and deliberately not guessed at.** The engine's own type-17 decoder produces sane MoE output
+**RESOLVED - and the MoE now matches end to end.**
+
+The test vector did its job. With `grid = iq2xs_grid[q & 511]`, `signs = ksigns_iq2xs[(q >> 9) & 127]` and
+`db = d*(0.5+ls)*0.25`, the first block decodes **bit-exactly** (max|diff| 0.000e+00) against the engine's eight
+values. The 128-entry sign table is the whole explanation: this file uses a **9-bit grid + 7-bit sign** word,
+not the 9+3 of canonical ggml, which is why every 12-bit reading failed and why the bytes carry full 16-bit
+entropy.
+
+With the decoder pinned, the full MoE for blk.22 (8 experts, IQ2_XS gate/up, Q2_0 down, no `.scale` on this
+layer) reproduces the engine's output:
+
+```
+MoE recomputed vs engine: max|diff| 2.6822e-06   mean 4.7866e-07
+rms engine 1.02497   mine 1.02497   corr 1.000000000
+```
+
+**That closes the last unverified block in the sliding path.** blk.1 and blk.22 are now verified end to end
+against independent implementations: mix, attn_norm, q/k/v with convs and clips, rel-bias table, sink softmax,
+GQA, gated output, post-attn residual, ffn mix, **MoE**, post-mlp conv, residual add. Sixteen of the
+twenty-four layers share that path and are cleared by it.
+
+## Expert magnitudes: resolved The engine's own type-17 decoder produces sane MoE output
 (rms 1.0, 46.6% of the residual, router healthy), so the file is fine and the fault is in the check. Five
 attempts at this check failed in this stretch; the next one starts from dumping the engine's first 8
 dequantised values for that expert and matching raw bytes against them, which pins the packing without any
