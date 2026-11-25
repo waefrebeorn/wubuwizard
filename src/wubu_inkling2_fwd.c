@@ -43,6 +43,33 @@ void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y)
     }
 }
 
+/* Static depthwise causal short convolution over a sequence.
+ *
+ * Reference semantics (Inkling2LoopShortConvolution): nn.Conv1d(kernel=k, groups=channels,
+ * padding=k-1, bias=False), i.e. output at step t sees x[t-k+1..t], followed by
+ *     out = (conv(x) + x) / sqrt(k + 1)
+ * The residual add and the 1/sqrt(k+1) scale are part of the block, not an optimisation detail:
+ * dropping them changes the magnitude by ~2.2x.
+ *
+ * w is (k, channels) with w[0] weighting the current token (tap index == backward distance).
+ */
+void in2_shortconv(const float *x, int n_tok, int channels, const float *w, int k, float *out)
+{
+    const float scale = 1.0f / sqrtf((float)(k + 1));
+    for (int t = 0; t < n_tok; ++t) {
+        for (int c = 0; c < channels; ++c) {
+            float acc = 0.0f;
+            for (int tap = 0; tap < k; ++tap) {
+                const int src = t - tap;             /* tap 0 = current token */
+                if (src < 0) continue;               /* left padding with zeros */
+                acc += w[(size_t)tap * channels + c] * x[(size_t)src * channels + c];
+            }
+            const float res = x[(size_t)t * channels + c];
+            out[(size_t)t * channels + c] = (acc + res) * scale;
+        }
+    }
+}
+
 /* Dequantise a whole tensor into f32. Caller frees. Returns NULL on failure. */
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
 {

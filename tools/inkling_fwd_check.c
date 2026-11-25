@@ -53,6 +53,28 @@ int main(int argc, char **argv)
     float y[4] = {0};
     in2_matvec(wq, xn, d, 4, y);
     printf("attn_q row0..3 : %+.8e %+.8e %+.8e %+.8e\n", y[0], y[1], y[2], y[3]);
+    /* Static short conv check: run attn_post_conv over 3 deterministic tokens and dump the result.
+     * Verifiable in Python from the same weights, which pins tap order and the 1/sqrt(k+1) block. */
+    extern void in2_shortconv(const float *, int, int, const float *, int, float *);
+    {
+        const int T = 3, C = 2304;
+        float *pc = in2_tensor_to_f32(ctx, &m.layer[0].attn_post_conv, NULL);
+        if (pc) {
+            float *in = (float *)calloc((size_t)T * C, sizeof(float));
+            float *out = (float *)calloc((size_t)T * C, sizeof(float));
+            for (int t = 0; t < T; ++t)
+                for (int c = 0; c < C; ++c)
+                    in[(size_t)t * C + c] = xn[c] * (float)(t + 1) * (float)((c % 7) - 3) * 0.01f;
+            in2_shortconv(in, T, C, pc, 4, out);
+            printf("shortconv t2 c0..3: %+.6f %+.6f %+.6f %+.6f\n", out[2*C+0], out[2*C+1], out[2*C+2], out[2*C+3]);
+            FILE *cf = fopen("conv_check.bin", "wb");
+            if (cf) { fwrite(in, sizeof(float), (size_t)T*C, cf); fclose(cf); }
+            FILE *of = fopen("conv_out.bin", "wb");
+            if (of) { fwrite(out, sizeof(float), (size_t)T*C, of); fclose(of); }
+            free(in); free(out); free(pc);
+        }
+    }
+
     free(wq); free(x); free(xn); free(an);
     gguf_close(ctx);
     return 0;

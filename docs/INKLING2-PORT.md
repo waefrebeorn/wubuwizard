@@ -211,6 +211,37 @@ independent IQ4_XS implementation reproduces the engine's gather exactly (all fo
 match to six decimals) and gives a column RMS of 1.002, which is where trained embeddings sit. So the
 IQ4_XS path, the 136-byte block layout and the strided gather are confirmed, not merely self-consistent.
 
+## Short convolution: semantics read from the reference, then verified
+
+`Inkling2LoopShortConvolution` is not a bare conv. It is a depthwise `Conv1d(kernel=4, groups=channels,
+padding=3, bias=False)` followed by
+
+```
+out = (conv(x) + x) / sqrt(k + 1)
+```
+
+Both the residual add and the `1/sqrt(k+1)` are part of the block; omitting them scales the output by
+2.24x. Tap order is `tap index == backward distance`, so `w[0]` weights the current token.
+
+The full-attention layers add a second, dynamic term (`Inkling2LoopDynamicShortConvolution`):
+`taps = static[tap] + weight_proj(dynamic_input)` with `weight_proj: input_size -> num_heads * k`, shared
+within each kv head. That matches the census exactly: `attn_k_conv` is `[4, 1024]` on *every* layer
+(static only) while `attn_k_conv_proj` is `[2304, 32]` on the four full layers only (32 = 8 heads x 4 taps).
+
+**Verified:** `in2_shortconv` against a Python brute-force reference over the same weights and input,
+all 6,912 values of a 3x2304 run:
+
+```
+max abs diff 5.08e-08   mean 6.87e-10   relative max 4.09e-08
+```
+
+## A correction: head_dim is 128 on every layer
+
+An earlier note in this file claimed head_dim 512 for full attention and 256 for sliding window. That is
+wrong. `attn_q` is `[2304, 3072]` and `attn_k`/`attn_v` are `[2304, 1024]` on *both* blk.0 (sliding) and
+blk.23 (full), so both layer types are 24 query heads and 8 kv heads at head_dim 128. The sliding window
+changes which keys are attended, not the head geometry.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
