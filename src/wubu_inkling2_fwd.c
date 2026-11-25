@@ -20,6 +20,69 @@ double in2_ty_sec[256];
 long   in2_ty_calls[256];
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
+
+void wubu_iq_rows(int ggml_type, const void *w, size_t row_bytes, int n,
+                  const void *const *act, int nt, float *const *out, int r0, int r1);
+
+#ifdef _WIN32
+#include <windows.h>
+/* Row-parallel kernel dispatch.
+ *
+ * Every row of a projection is independent and writes only its own output element, and wubu_iq_rows already takes
+ * an r0/r1 range, so the split needs no accumulation changes and no new arithmetic: N threads, N disjoint row
+ * ranges, same kernel. The engine is otherwise single-threaded on an 8-core box.
+ *
+ * Gated by IN2_THREADS (default 1 = off) until it is measured against the harness. */
+typedef struct {
+    int ty; const void *w; size_t rb; int n;
+    const void *const *act; int nt; float *const *out; int r0, r1;
+} in2_rows_job;
+
+static DWORD WINAPI in2_rows_worker(LPVOID p)
+{
+    in2_rows_job *j = (in2_rows_job *)p;
+    wubu_iq_rows(j->ty, j->w, j->rb, j->n, j->act, j->nt, j->out, j->r0, j->r1);
+    return 0;
+}
+
+static int in2_threads(void)
+{
+    static int n = -1;
+    if (n < 0) {
+        const char *e = getenv("IN2_THREADS");
+        n = e ? atoi(e) : 1;
+        if (n < 1) n = 1;
+        if (n > 8) n = 8;
+    }
+    return n;
+}
+
+/* returns 1 if the work was done by threads */
+static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
+                             const void *const *act, int nt, float *const *out, int n_out)
+{
+    const int NT = in2_threads();
+    if (NT < 2 || n_out < 256) return 0;
+    HANDLE h[8];
+    in2_rows_job jobs[8];
+    int chunk = (n_out + NT - 1) / NT;
+    for (int i = 0; i < NT; ++i) {
+        jobs[i].ty = ty; jobs[i].w = w; jobs[i].rb = rb; jobs[i].n = n;
+        jobs[i].act = act; jobs[i].nt = nt; jobs[i].out = out;
+        jobs[i].r0 = i * chunk;
+        jobs[i].r1 = (i + 1) * chunk;
+        if (jobs[i].r1 > n_out) jobs[i].r1 = n_out;
+        if (jobs[i].r0 >= jobs[i].r1) { h[i] = NULL; continue; }
+        h[i] = CreateThread(NULL, 0, in2_rows_worker, &jobs[i], 0, NULL);
+        if (!h[i]) {                                   /* no thread: finish this range inline */
+            in2_rows_worker(&jobs[i]);
+        }
+    }
+    for (int i = 0; i < NT; ++i) if (h[i]) { WaitForSingleObject(h[i], INFINITE); CloseHandle(h[i]); }
+    return 1;
+}
+#endif
+
 double in2_arq_sec, in2_mixfn_sec; long in2_arq_calls;
 double in2_alloc_sec;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
@@ -379,7 +442,10 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                         op[i] = Y + (size_t)(g + i) * n_out;
                     }
                     const clock_t _k0 = clock();
-                    wubu_iq_rows(ty, base, (size_t)rb, n_in, ap, nn, op, 0, n_out);
+#ifdef _WIN32
+                    if (!in2_rows_parallel(ty, base, (size_t)rb, n_in, ap, nn, op, n_out))
+#endif
+                        wubu_iq_rows(ty, base, (size_t)rb, n_in, ap, nn, op, 0, n_out);
                     if (ty >= 0 && ty < 256) {
                         in2_ty_sec[ty] += (double)(clock() - _k0) / (double)CLOCKS_PER_SEC;
                         in2_ty_calls[ty] += 1;
