@@ -482,3 +482,26 @@ What this actually implies:
 This is the fourth hypothesis in this stretch that measurement has overturned (mix hot spot, allocator as the
 whole of the tail, threading as a win, moe as memory-bound). The pattern is consistent: read the per-type and
 per-phase numbers before naming a cause.
+
+### IQ2_XXS/IQ2_XS throughput is a property of the format, and further speed breaks 1:1 parity (2026-11-25)
+
+`dot1_iq2_xxs_*` is a faithful translation of ggml's AVX2 kernel: per 32 elements it does four grid lookups through
+`tab4`, eight sign-vector lookups (or `iq3_neg` parity expansion depending on the variant), two `sign_epi8`, and two
+`madd`. Compare Q6_K, which is straight scaled multiply-add and reaches 49 GOPS. The IQ2 family is slow because the
+format requires table indirection per element, not because the port is bad.
+
+That closes the obvious avenue: **getting more out of 16/17 means computing something other than what ggml computes**
+- pre-expanding the 256-entry grid into a wider table, or replacing the lookup with a shuffle scheme, changes the
+  arithmetic, and the whole gate on this engine is "144/144 bit-identical to ggml's AVX2 dot, max|diff| 0.000e+00".
+
+So the honest position:
+- The kernels are at format-parity. There is no free 2-3x sitting in them without leaving that parity.
+- If a faster IQ2 path is wanted, it needs its own gate: a tolerance-based comparison (exact top-1 and a bounded
+  logit delta) rather than bit-identity, decided deliberately and recorded, not slipped in under the existing one.
+
+Remaining safe work, in order of measured value and risk:
+1. **Arena for the layer buffers** (0.208 s, ~20% of a step) - pure allocation removal, no arithmetic, no parity
+   impact. 25 call sites, hand edits; two scripted attempts already failed.
+2. **Persistent thread pool** (moe 0.264 s) - per-call spawning measured zero gain; a pool is the only version worth
+   building, and it must be pooled before it is enabled.
+3. Anything that changes the IQ2 arithmetic - only behind its own gate.
