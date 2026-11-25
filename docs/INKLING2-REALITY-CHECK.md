@@ -175,3 +175,27 @@ The remaining gap is not arithmetic, it is architecture:
    The C11 kernels then become the cold-expert CPU fallback, which is exactly the SSD -> RAM -> VRAM hierarchy
    the standing goal describes.
 3. Only then, more kernel work - on the attention core, which is still scalar `double`.
+
+## 9. KV cache lands: O(n^2) -> O(n), exact (2026-11-25)
+
+| prefix | recompute | incremental | speedup |
+|---|---|---|---|
+| 1 -> 2 | 3.3 s | 2.0 s | 1.7x |
+| 3 -> 5 | 5.8 / 7.2 s | 2.1 / 2.0 s | ~3x |
+| 19 -> 21 | 25.7 / 25.8 s | 28.2 prefill, then 2.2 / 2.3 s | **11.7x and widening** |
+
+Byte-identical output at every prefix: `61840/19.2437` (1+1), `26.9567 / 13.5936 / 29.3580` (3 steps),
+`150126/20.0673` (19-token prompt). Not "same tokens" - the same logits to the last printed digit.
+
+What it took, in the order the failures taught it:
+1. Four convs per layer, not two. K and V were cached; the residual conv after attention and the MoE conv were
+   still padding with zeros on a 1-token step.
+2. Two buffer sizings (`logit`/`alpha` at `n_tok` while `n_key` becomes `pos0+t+1`), both of which present as a
+   silent death rather than an error.
+3. A visit index advanced before attention read it, so a layer attended to the next visit's empty rows.
+4. **The message anchor.** `in2_messages` reads only position 0 of `prev_h` and of each block state. On a step the
+   batch is the new token, so pass 2 was conditioned on token N instead of token 0. Caching the pass-boundary
+   anchor closed the last gap and turned every number above exact.
+
+Decode is now flat cost per token regardless of prefix length. The remaining per-token cost at 2.2 s is the
+projections themselves (and the 463M-MAC LM head), which is where GPU offload belongs - not more cache work.
