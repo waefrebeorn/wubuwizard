@@ -778,6 +778,23 @@ and the zero-history boundary at position 0 is handled correctly - which is wher
 Also worth noting from the ratio: `kt/kraw` averages 0.4794 against the 0.4472 that a zero conv weight would
 give, so the learned tap-0 filters are genuinely modifying the signal rather than being near-inert.
 
+## blk.1 q path: attn_norm, Q6_K matvec, ScaledL2Clip
+
+`IN2_DUMP_Q` writes the attn-normed input and the post-clip q for blk.1; Python recomputes both from the
+dumped mix and independently dequantised weights (Q6_K extracted from `ggml-quants.c`, `attn_q_clip`
+reshaped `(24,128)`):
+
+```
+xn          max|diff| 1.907e-06
+q post-clip max|diff| 1.907e-06   mean 2.342e-07
+rms: pre-clip 1.84450 -> post-clip 1.18146   (engine and python identical)
+```
+
+So `attn_norm` is applied to the mixed state (not the raw hidden), the Q6_K matvec over `attn_q` is correct
+at this layer, and `ScaledL2Clip` matches the reference exactly: `x*scale`, then
+`x * clamp(threshold/(||x||+1e-6), max=1)`. The rms drop 1.844 -> 1.181 shows the clip is actually
+engaging - a threshold that never bites would also "match" and prove much less.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

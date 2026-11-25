@@ -338,6 +338,14 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         in2_matvec(Wq, xn + (size_t)t * d, d, qdim, q + (size_t)t * qdim);
         in2_l2_clip(q + (size_t)t * qdim, qcl, NH, HD, 22.6274166f);
     }
+    if (il == 1 && getenv("IN2_DUMP_Q")) {
+        FILE *qf = fopen(getenv("IN2_DUMP_Q"), "wb");
+        if (qf) {
+            fwrite(xn, sizeof(float), (size_t)n_tok * d, qf);        /* attn-normed input */
+            fwrite(q,  sizeof(float), (size_t)n_tok * qdim, qf);     /* post-clip q */
+            fclose(qf);
+        }
+    }
 
     /* 3. k, v: project, static short conv, then bare L2 clip (k) / unweighted rms (v). */
     float *Wk = in2_tensor_to_f32(ctx, &L->wk, NULL);
