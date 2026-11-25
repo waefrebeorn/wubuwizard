@@ -25,7 +25,7 @@ void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y);
 int  in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                        int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
                        const float *msgs);
-void in2_messages(const float *prev_blocks, int n_prev, const float *prev_h,
+void in2_messages(const float *srcs, int n_src, int n_tok,
                   const float *qres, const float *qkv, int li, int d, float eps, float *out);
 int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                         int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
@@ -119,7 +119,16 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
 
     float *qres = global_f32(ctx, "loop_res_query.weight");
     float *qkv  = global_f32(ctx, "loop_kv_res_query.weight");
-    float *msgs = (float *)calloc((size_t)4 * d, sizeof(float));
+    /* The reference has ONE message-query tensor of [n_core, 4, d]: four queries per loop layer. The four roles
+     * therefore come from four consecutive rows of loop_res_query.weight, not from a second tensor. Dump the rows
+     * so the row->role order can be settled against the reference's softmax instead of assumed. */
+    if (qres && getenv("IN2_DUMP_MSGQ")) {
+        FILE *qf = fopen(getenv("IN2_DUMP_MSGQ"), "wb");
+        if (qf) { fwrite(qres, sizeof(float), (size_t)12 * 4 * d, qf); fclose(qf); }
+        if (qkv) { FILE *kf = fopen("C:/Users/eman5/AppData/Local/Temp/msgqkv.bin", "wb");
+                   if (kf) { fwrite(qkv, sizeof(float), (size_t)12 * 4 * d, kf); fclose(kf); } }
+    }
+    float *msgs = (float *)calloc((size_t)4 * (size_t)n_tok * d, sizeof(float));
     float *pre_h = (float *)malloc(sizeof(float) * ND);
     float *prev_h = (float *)malloc(sizeof(float) * ND);
     float *prev_blocks = (float *)calloc((size_t)16 * ND, sizeof(float));
@@ -128,19 +137,34 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
 
     /* helper: run one layer and bank the block residual at boundaries */
     int ltseq = 0;
+    /* Block list handed to the depth mix. Pass 1 grows it as blocks close (live `n_blocks`). A loop pass reuses the
+     * SAME pass-1 bank, truncated to the entries that were active at this layer's position: the reference's mix for
+     * layer 6 of pass 2 is one query over node_92 (rms of the embedding) and node_1165 (rms of l_out-5) - the pass-1
+     * block starts - plus the running partial. Only the MESSAGES use the previous pass's core block ends. */
+    int use_pass_bank = 0;
+    int pass_bank_n = 0;
+    const int blk_len = cfg->attn_res_block > 0 ? cfg->attn_res_block : 6;
+    /* Message sources for loop passes: the previous pass's core block ends, per token (declared here because the
+     * layer macro reads them). */
+    float *src_cur  = (float *)calloc((size_t)4 * ND, sizeof(float));
+    float *src_next = (float *)calloc((size_t)4 * ND, sizeof(float));
+    int n_src_cur = 0, n_src_next = 0;
+    if (!src_cur || !src_next) rc = WUBU_INKLING2_ERR_IO;
     static int in2_dump_pass = 0;   /* 0 = pre/post layers and the first loop pass; N = loop pass N */
     #define RUN_LAYER(IL, MSG) do {                                                    \
         float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
         memcpy(_br, h, sizeof(float) * ND);                                            \
-        if (rc == WUBU_INKLING2_OK && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
+        if (rc == WUBU_INKLING2_OK && !use_pass_bank && (IL) % cfg->attn_res_block == 0 && n_blocks < 16) { \
             memcpy(blocks + (size_t)n_blocks * ND, _br, sizeof(float) * ND); ++n_blocks; \
         }                                                                               \
         const clock_t _L0 = clock();                                                    \
+        const float *_bs = blocks;                                                      \
+        const int _bn = use_pass_bank ? pass_bank_n : n_blocks;                          \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
-            rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
+            rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, _bs, _bn, (MSG)); \
         else                                                                            \
-            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, pos0, blocks, n_blocks, (MSG)); \
+            rc = in2_layer_sliding(ctx, m, cfg, (IL), h, n_tok, pos0, _bs, _bn, (MSG)); \
         { const char *_dp = getenv("IN2_DUMP_L");                                       \
           if (_dp && atoi(_dp) == (IL)) {                                               \
               char _p[512]; snprintf(_p, sizeof _p,                                     \
@@ -160,6 +184,12 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             FILE *_lf = fopen(_lp, "wb");                                              \
             if (_lf) { fwrite(h, sizeof(float), (size_t)ND, _lf); fclose(_lf); }        \
         }                                                                               \
+        if (rc == WUBU_INKLING2_OK && (IL) >= cfg->loop_core_start && (IL) < cfg->loop_core_end && \
+            (((IL) - cfg->loop_core_start + 1) % blk_len) == 0 && n_src_next < 4) {      \
+            memcpy(src_next + (size_t)n_src_next * n_tok * d, h,                        \
+                   sizeof(float) * (size_t)n_tok * d);                                  \
+            ++n_src_next;                                                               \
+        }                                                                               \
         if (getenv("IN2_TIMETY")) {                                                     \
             extern double in2_lay_sec, in2_moe_sec;                                     \
             in2_lay_sec += (double)(clock() - _L0) / (double)CLOCKS_PER_SEC;            \
@@ -171,9 +201,11 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     for (int il = 0; il < cfg->loop_core_start && rc == WUBU_INKLING2_OK; ++il) RUN_LAYER(il, NULL);
     if (rc == WUBU_INKLING2_OK) { memcpy(pre_h, h, sizeof(float) * ND); pre_blocks = n_blocks; }
 
-    /* first pass over the loop core: no messages yet */
+    /* first pass over the loop core: no messages yet, but its block ends are the first pass's message sources */
     for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il)
         RUN_LAYER(il, NULL);
+    { float *sw = src_cur; src_cur = src_next; src_next = sw; n_src_cur = n_src_next; n_src_next = 0; }
+    const int bank_full = n_blocks;   /* the pass-1 block bank the loop passes and the coda both mix over */
 
     /* LoopCD (arXiv 2610.02185, Eq. 2): the first recurrent state h_1 is a WEAK prediction of the same next
      * token, because it embodies less computation than h_R. Standard decoding throws it away. Keeping it lets
@@ -186,50 +218,34 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         if (h1) memcpy(h1, h, sizeof(float) * ND);
     }
 
-    /* each later pass restarts from the pre-loop state and carries only the messages */
-    /* Message anchor. in2_messages does memcpy(st + n_prev*d, prev_h, d) - it reads ONLY position 0 of the batch,
-     * and the same for each prev_blocks entry. In a full recompute position 0 is the first token of the prefix; on
-     * a decode step the batch is the new token, so the anchor would silently move from token 0 to token N and every
-     * later pass would be conditioned on the wrong state. Measured: messages at pass 2 were 1.695e+03 recomputed vs
-     * 1.674e+03 on a step. Cache the anchor from the first forward and reuse it. */
-    static float *msg_anchor = NULL;
-    static int    msg_anchor_n = 0;
+    /* each later pass restarts from the pre-loop state and carries only the messages.
+     *
+     * Message sources (reference: node_2321 / node_3488 for every core layer of pass 2, node_5130 / node_6797 for
+     * pass 3): exactly the residuals at the END of each attn_res_block chunk of the core, per token, from the pass
+     * that just finished. So a pass banks its own block ends and consumes the previous pass's bank - it never
+     * consumes its own. The old scheme (every core residual, anchored at batch position 0) was wrong on both counts:
+     * l_out-11 and l_out-17 are the only two sources, and the message softmax is per token. */
+
     for (int pass = 1; pass < n_loops && rc == WUBU_INKLING2_OK; ++pass) {
         in2_dump_pass = pass;   /* per-pass layer dumps must not overwrite each other */
         memcpy(prev_h, h, sizeof(float) * ND);
-        /* the reference skips the pre-loop blocks plus the first block appended by the previous pass */
-        const int skip = pre_blocks + 1;
-        n_prev = (n_blocks > skip) ? (n_blocks - skip) : 0;
-        for (int i = 0; i < n_prev; ++i)
-            memcpy(prev_blocks + (size_t)i * ND, blocks + (size_t)(skip + i) * ND, sizeof(float) * ND);
-        if (!msg_anchor && pos0 == 0) {
-            msg_anchor = (float *)malloc(sizeof(float) * (size_t)(n_prev + 1) * (size_t)d);
-            if (msg_anchor) msg_anchor_n = n_prev;
-        }
-        if (msg_anchor && pos0 == 0) {
-            for (int i = 0; i < n_prev; ++i) memcpy(msg_anchor + (size_t)i * d, prev_blocks + (size_t)i * ND, sizeof(float) * d);
-            memcpy(msg_anchor + (size_t)n_prev * d, prev_h, sizeof(float) * d);
-        }
-
         memcpy(h, pre_h, sizeof(float) * ND);
         n_blocks = pre_blocks;
+        n_src_next = 0;
+        /* loop passes reuse the pass-1 block bank, truncated to this layer's position */
+        use_pass_bank = 1;
         for (int il = cfg->loop_core_start; il < cfg->loop_core_end && rc == WUBU_INKLING2_OK; ++il) {
             const int li = il - cfg->loop_core_start;
-            if (qres && qkv) {
-                const float *use_blk = prev_blocks;
-                const float *use_h = prev_h;
-                int use_n = n_prev;
-                if (msg_anchor && pos0 > 0 && msg_anchor_n == n_prev) { use_blk = msg_anchor; use_h = msg_anchor + (size_t)n_prev * d; use_n = n_prev; }
-                in2_messages(use_blk, use_n, use_h, qres, qkv, li, d, eps, msgs);
-                if (getenv("IN2_MTRACE") && li == 0) {
-                    const int _t = n_tok - 1;
-                    double _m = 0.0;
-                    for (int _i = 0; _i < d; ++_i) { double _v = msgs[(size_t)_t * d + _i]; _m += _v * _v; }
-                    fprintf(stderr, "MSG pass=%d li=%d n_prev=%d pos0=%d ntok=%d l2_last=%.12e\n",
-                            pass, li, n_prev, pos0, n_tok, _m);
-                }
+            pass_bank_n = 1 + il / blk_len;
+            if (qres && qkv && n_src_cur > 0)
+                in2_messages(src_cur, n_src_cur, n_tok, qres, qkv, li, d, eps, msgs);
+            if (getenv("IN2_MTRACE") && li == 0) {
+                double _m = 0.0;
+                for (int _i = 0; _i < n_tok * d; ++_i) { double _v = msgs[_i]; _m += _v * _v; }
+                fprintf(stderr, "MSG pass=%d li=%d n_src=%d ntok=%d l2_tok0=%.12e\n",
+                        pass, li, n_src_cur, n_tok, _m);
             }
-            RUN_LAYER(il, (qres && qkv) ? msgs : NULL);
+            RUN_LAYER(il, (qres && qkv && n_src_cur > 0) ? msgs : NULL);
             /* Bisect hook: dump the residual stream after a chosen layer, in the same layout as llama.cpp's
              * eval-callback node dump (l_out-<il>): d floats per token, token-major. */
             { const char *dp = getenv("IN2_DUMP_L");
@@ -240,7 +256,13 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                   if (df) { fwrite(h, sizeof(float), (size_t)ND, df); fclose(df);
                             fprintf(stderr, "dumped l_out-%d (%d x %d) to %s\n", il, n_tok, d, path); } } }
         }
+        /* this pass's block ends become the next pass's message sources */
+        { float *sw = src_cur; src_cur = src_next; src_next = sw; }
+        n_src_cur = n_src_next;
     }
+    /* the coda mixes over the full pass-1 bank again */
+    n_blocks = bank_full;
+    use_pass_bank = 0;
 
     if (h1 && rc == WUBU_INKLING2_OK) {
         const float w = (float)atof(getenv("IN2_LOOPCD"));

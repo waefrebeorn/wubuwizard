@@ -81,7 +81,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
             for (int t = 0; t < n_tok; ++t) {
                 float *dst = state + (size_t)t * 3 * d + (size_t)sl * d;
                 float *gated = (float *)calloc((size_t)d, sizeof(float));
-                in2_message_gate(dst, msgs + (size_t)sl * d, dw, fw, gw, d, cfg->loop_gate_rank, eps, gated);
+                in2_message_gate(dst, msgs + ((size_t)t * 4 + sl) * d, dw, fw, gw, d, cfg->loop_gate_rank, eps, gated);
                 memcpy(dst, gated, sizeof(float) * d);
                 free(gated);
             }
@@ -348,7 +348,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
                 float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[3], NULL);
                 if (dw && fw && gw) {
                     float *gated = (float *)calloc((size_t)d, sizeof(float));
-                    in2_message_gate(mixed + (size_t)t * d, msgs + (size_t)3 * d, dw, fw, gw,
+                    in2_message_gate(mixed + (size_t)t * d, msgs + ((size_t)t * 4 + 3) * d, dw, fw, gw,
                                      d, cfg->loop_gate_rank, eps, gated);
                     memcpy(mixed + (size_t)t * d, gated, sizeof(float) * d);
                     free(gated);
