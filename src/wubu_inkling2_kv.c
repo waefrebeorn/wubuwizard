@@ -150,6 +150,23 @@ void in2_kv_conv_row_dyn(const float *hist3, const float *xrow, int channels, co
     }
 }
 
+/* Independent pushes for the two streams, for callers that fill them at different times (the residual conv and
+ * the MoE conv are computed at different points in a layer but share one history record). */
+void in2_kv_store_row_k(in2_kv_t *kv, int visit, const float *row)
+{
+    if (!kv || visit < 0 || visit >= kv->n_visit) return;
+    float *kh = kv->kraw + (size_t)visit * 3u * (size_t)kv->dim;
+    memmove(kh, kh + kv->dim, (size_t)kv->dim * 2u * sizeof(float));
+    memcpy(kh + (size_t)kv->dim * 2u, row, (size_t)kv->dim * sizeof(float));
+}
+void in2_kv_store_row_v(in2_kv_t *kv, int visit, const float *row)
+{
+    if (!kv || visit < 0 || visit >= kv->n_visit) return;
+    float *vh = kv->vraw + (size_t)visit * 3u * (size_t)kv->dim;
+    memmove(vh, vh + kv->dim, (size_t)kv->dim * 2u * sizeof(float));
+    memcpy(vh + (size_t)kv->dim * 2u, row, (size_t)kv->dim * sizeof(float));
+}
+
 void in2_kv_tick(in2_kv_t *kv)
 {
     if (kv) ++kv->n_stored;

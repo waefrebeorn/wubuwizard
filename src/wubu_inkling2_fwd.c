@@ -84,6 +84,39 @@ void in2_kv_advance(void) { ++g_visit; }
  * NULL, which the attention loops skip - a silently truncated context rather than a loud failure. */
 void in2_kv_begin(int pos0) { g_visit = 0; g_kv_pos = pos0; }
 
+/* Second history record for the two convs that are not K/V: the residual conv after attention and the MoE conv.
+ * They carry three positions of history each, at d_model rather than kdim, so they get their own cache instance
+ * with the same visit numbering (kraw = residual stream, vraw = moe stream). Missing these is why a 1-token step
+ * produced different tokens from a full recompute: K and V were cached, these two were still pad-with-zeros. */
+static in2_kv_t *g_kv2;
+
+static void in2_conv_stream(in2_kv_t *kvc, int vvis, int which, const float *x, int n_tok,
+                            int ch, const float *w, int k, float *out)
+{
+    if (!kvc) { in2_shortconv(x, n_tok, ch, w, k, out); return; }
+    if (n_tok == 1) {
+        const float *hist = which ? in2_kv_hist_v(kvc, vvis, 3) : in2_kv_hist_k(kvc, vvis, 3);
+        in2_kv_conv_row(hist, x, ch, w, k, out);
+        if (which) in2_kv_store_row_v(kvc, vvis, x);
+        else       in2_kv_store_row_k(kvc, vvis, x);
+    } else {
+        /* a real batch: the batch conv is already correct for it, and the history it must leave behind is its
+         * own last rows, pushed one per position so the record ends up in order */
+        in2_shortconv(x, n_tok, ch, w, k, out);
+        const int from = n_tok > 3 ? n_tok - 3 : 0;
+        for (int t = from; t < n_tok; ++t) {
+            if (which) in2_kv_store_row_v(kvc, vvis, x + (size_t)t * ch);
+            else       in2_kv_store_row_k(kvc, vvis, x + (size_t)t * ch);
+        }
+    }
+}
+
+/* same two streams, reachable from the full-attention translation unit */
+void in2_conv_stream_res(int vvis, const float *x, int n_tok, int ch, const float *w, int k, float *out)
+{ in2_conv_stream(g_kv2, vvis, 0, x, n_tok, ch, w, k, out); }
+void in2_conv_stream_moe(int vvis, const float *x, int n_tok, int ch, const float *w, int k, float *out)
+{ in2_conv_stream(g_kv2, vvis, 1, x, n_tok, ch, w, k, out); }
+
 void in2_kv_attach(in2_kv_t *kv, int pos0)
 {
     g_kv = kv;
@@ -659,6 +692,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         static in2_kv_t boot;
         if (in2_kv_init(&boot, 72, kdim, 0, 64) == 0) g_kv = &boot;
     }
+    if (!g_kv2 && getenv("IN2_KV")) {
+        static in2_kv_t boot2;
+        if (in2_kv_init(&boot2, 72, d, 0, 64) == 0) g_kv2 = &boot2;
+    }
     /* pinned for the whole layer: the store advances g_visit at the end, so attention must not re-read it or it
      * would attend to the next visit's empty rows */
     const int vvis = g_visit;
@@ -885,7 +922,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *pc = in2_tensor_to_f32(ctx, &L->attn_post_conv, NULL);
     float *res = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (pc && res && rc == WUBU_INKLING2_OK) {
-        in2_shortconv(ao, n_tok, d, pc, 4, res);
+        in2_conv_stream(g_kv2, vvis, 0, ao, n_tok, d, pc, 4, res);
         const int boundary = (cfg->attn_res_block > 0) && (il % cfg->attn_res_block == 0);
         for (int t = 0; t < n_tok; ++t)
             for (int i = 0; i < d; ++i) {
@@ -933,7 +970,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
     float *mo = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (pm && mo && rc == WUBU_INKLING2_OK) {
-        in2_shortconv(moeout, n_tok, d, pm, 4, mo);
+        in2_conv_stream(g_kv2, vvis, 1, moeout, n_tok, d, pm, 4, mo);
         for (size_t i = 0; i < (size_t)n_tok * d; ++i) h[i] = res[i] + mo[i];
     } else rc = WUBU_INKLING2_ERR_IO;
 

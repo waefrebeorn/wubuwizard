@@ -15,7 +15,11 @@ typedef struct {
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */
 in2_kv_t *in2_kv_current(int *visit, int *pos0);
 void      in2_kv_advance(void);
-void      in2_kv_begin(int pos0);
+void  in2_kv_begin(int pos0);
+void  in2_kv_store_row_k(in2_kv_t *kv, int visit, const float *row);
+void      in2_kv_store_row_v(in2_kv_t *kv, int visit, const float *row);
+void      in2_conv_stream_res(int vvis, const float *x, int n_tok, int ch, const float *w, int k, float *out);
+void      in2_conv_stream_moe(int vvis, const float *x, int n_tok, int ch, const float *w, int k, float *out);
 
 int   in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap);
 void  in2_kv_free(in2_kv_t *kv);
