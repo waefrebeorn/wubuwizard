@@ -1942,6 +1942,43 @@ void dequantize_iq2_xs_row(const uint8_t *data, float *output, int64_t n_elems) 
     }
 }
 
+/* Fused IQ2_XS row dot: same arithmetic as dequantize_iq2_xs_row, but the value is multiplied into x instead of
+ * being stored, so the 256-float block never exists. The gate/up experts are two thirds of the MoE MACs and were
+ * still materialising floats one row at a time; this removes the store, the reload and the double-accumulated
+ * scalar dot that followed it. Declared for in2_matvec_quant, which routes IQ2_XS rows here. */
+void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float *out)
+{
+    const int64_t n_blocks = (n_elems + QK_K - 1) / QK_K;
+    double acc = 0.0;
+    for (int64_t b = 0; b < n_blocks; b++) {
+        const uint8_t *block = data + b * IQ2_XS_BLOCK_SIZE;
+        uint16_t d_bits;
+        memcpy(&d_bits, block, 2);
+        const float d = gguf_f16_to_f32(d_bits);
+        const uint16_t *qs = (const uint16_t *)(block + 2);
+        const uint8_t *scales = block + 2 + 64;
+        const float *xb = x + b * QK_K;
+        for (int ib32 = 0; ib32 < QK_K / 32; ib32++) {
+            const float db0 = d * (0.5f + (scales[ib32] & 0xf)) * 0.25f;
+            const float db1 = d * (0.5f + (scales[ib32] >> 4)) * 0.25f;
+            for (int l = 0; l < 4; l++) {
+                const uint16_t q = qs[4 * ib32 + l];
+                const uint8_t *grid = (const uint8_t *)(&iq2xs_grid[q & 511]);
+                const uint8_t signs = ksigns_iq2xs[q >> 9];
+                const float db = (l < 2) ? db0 : db1;
+                const float *xg = xb + ib32 * 32 + l * 8;
+                double s = 0.0;
+                for (int j = 0; j < 8; j++) {
+                    const float wv = db * (float)grid[j] * ((signs & kmask_iq2xs[j]) ? -1.0f : 1.0f);
+                    s += (double)wv * (double)xg[j];
+                }
+                acc += s;
+            }
+        }
+    }
+    *out = (float)acc;
+}
+
 // ========== IQ2_S Dequantization (llama.cpp reference) ==========
 
 // block_iq2_s: d(fp16,2) + qs[64] + qh[8] + scales[8] = 82 bytes per 256 elements
