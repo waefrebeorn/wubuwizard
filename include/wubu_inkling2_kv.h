@@ -1,0 +1,25 @@
+/* INKLING2 KV CACHE - see src/wubu_inkling2_kv.c for why this is per-visit and why raw conv rows are kept. */
+#ifndef WUBU_INKLING2_KV_H
+#define WUBU_INKLING2_KV_H
+
+typedef struct {
+    int    n_visit;     /* layer visits per forward = stored layers + extra loop passes */
+    int    dim;         /* key/value width */
+    int    window;      /* sliding window in positions; 0 = full attention, grows with context */
+    int    n_pos_cap;   /* rows allocated per visit */
+    int    n_stored;    /* positions stored so far */
+    float *k, *v;       /* post-conv keys/values, [n_visit][n_pos_cap][dim] */
+    float *kraw, *vraw; /* pre-conv rows for the 4-tap causal conv, [n_visit][3][dim] */
+} in2_kv_t;
+
+int   in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap);
+void  in2_kv_free(in2_kv_t *kv);
+float *in2_kv_k(in2_kv_t *kv, int visit, int pos);
+float *in2_kv_v(in2_kv_t *kv, int visit, int pos);
+int   in2_kv_resident(const in2_kv_t *kv, int pos);
+void  in2_kv_store_raw(in2_kv_t *kv, int visit, const float *krow, const float *vrow);
+const float *in2_kv_hist_k(const in2_kv_t *kv, int visit, int back);
+const float *in2_kv_hist_v(const in2_kv_t *kv, int visit, int back);
+void  in2_kv_tick(in2_kv_t *kv);
+
+#endif
