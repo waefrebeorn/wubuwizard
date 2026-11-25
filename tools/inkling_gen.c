@@ -58,6 +58,22 @@ int main(int argc, char **argv)
         t_total += dt;
         printf("gen[%d] id=%d logit=%.4f  %.1fs  (%.2f tok/s at prefix %d)\n",
                step, best, bv, dt, dt > 0 ? 1.0 / dt : 0.0, n);
+        if (getenv("IN2_TOPK")) {
+            /* Top-k of the same distribution, so a near-tie can be judged against llama-server's
+             * completion_probabilities instead of only by the argmax. */
+            const int K = atoi(getenv("IN2_TOPK"));
+            static int used[64];
+            for (int r = 0; r < K && r < 64; ++r) {
+                int bi = -1; float bvv = -1e30f;
+                for (int i = 0; i < cfg.vocab_size; ++i) {
+                    int skip = 0;
+                    for (int q = 0; q < r; ++q) if (used[q] == i) { skip = 1; break; }
+                    if (!skip && logits[i] > bvv) { bvv = logits[i]; bi = i; }
+                }
+                used[r] = bi;
+                fprintf(stderr, "TOPK %d %d %.4f\n", r, bi, bvv);
+            }
+        }
         fflush(stdout);
     }
     if (n_gen > 0 && t_total > 0)
