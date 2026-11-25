@@ -411,6 +411,44 @@ Two things are deliberately explicit rather than silent:
   keys rather than a window - is not implemented yet. That is the next piece, and the depth path is
   otherwise complete for the layers it can run.
 
+## The full-attention layers are structurally different, not just masked differently
+
+blk.5, 11, 17 and 23 are not "sliding layers with a wider window". From the file, all four:
+
+```
+attn_res_query.weight  (2304, 3)    three depth-mix queries   (one elsewhere)
+attn_q/k/v_inp_norm    present      three separate input norms
+attn_norm              ABSENT       replaced by the three input norms
+```
+
+and from the reference, `Inkling2LoopFullDecoderLayer` builds
+`attention_input = BlockAttentionResidual(config, num_queries=3)` and feeds three *separately mixed*
+states into q, k and v:
+
+```
+q_state, k_state, v_state = attention_input(block_states, h)      # 3 queries, 3 outputs
+h = attn(q_input_layernorm(q_state), k_input_layernorm(k_state), v_input_layernorm(v_state))
+```
+
+So the depth mix is not just a preconditioner for the attention - on these layers it produces three
+different inputs, which is why the query tensor has three rows. Implementing them as a sliding layer with
+`sliding_window = None` would have run and produced plausible numbers with the wrong structure entirely.
+
+### Dynamic short conv (full layers only)
+
+```
+taps[c][j] = static[c][j] + dynamic[h][j]        # dynamic is per HEAD, shared across its channels
+out[t][c] = sum_j taps[c][j] * x[t-j][c]
+out = (out + x) / sqrt(2*k + 1)                  # sqrt(9) = 3, NOT sqrt(5) as the static conv
+```
+
+Two traps: the dynamic term is per kv head while the static term is per channel, and the normaliser is
+`sqrt(2k+1)` here against `sqrt(k+1)` for the static post-attention/post-mlp convs. The reference even
+comments on the static one that it differs from Inkling by having an output scale.
+
+The four full layers also use `LogScaledL2Clip` on q (the `tau = 1 + 0.1*log(max((pos+1)/8192, 1))` term),
+which the sliding layers do not.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
