@@ -140,6 +140,29 @@ int main(int argc, char **argv)
         free(gu); free(dn); free(g); free(act); free(eo); free(dsc); free(gsc); free(Wr); free(cb);
     }
 
+    /* Full sliding layer (blk.0) over 1 and 2 tokens. */
+    {
+        extern int in2_layer_sliding(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
+                                     int, float *, int, int);
+        for (int N = 1; N <= 2; ++N) {
+            float *hh = (float *)calloc((size_t)N * d, sizeof(float));
+            for (int t = 0; t < N; ++t)
+                for (int i = 0; i < d; ++i) hh[(size_t)t * d + i] = x[i] * (1.0f + 0.1f * t);
+            int rc2 = in2_layer_sliding(ctx, &m, &cfg, 0, hh, N, 0);
+            double ss = 0, mx = 0; int bad = 0;
+            for (int i = 0; i < N * d; ++i) {
+                double vq = hh[i];
+                if (!(vq == vq)) bad++;
+                ss += vq * vq; if (fabs(vq) > mx) mx = fabs(vq);
+            }
+            printf("layer0 N=%d rc=%d rms=%.6f max|h|=%.4f nan=%d  h[0..3]=%.6f %.6f %.6f %.6f\n",
+                   N, rc2, sqrt(ss / (N * d)), mx, bad, hh[0], hh[1], hh[2], hh[3]);
+            FILE *lf = fopen(N == 1 ? "layer0_n1.bin" : "layer0_n2.bin", "wb");
+            if (lf) { fwrite(hh, sizeof(float), (size_t)N * d, lf); fclose(lf); }
+            free(hh);
+        }
+    }
+
     free(wq); free(x); free(xn); free(an);
     gguf_close(ctx);
     return 0;

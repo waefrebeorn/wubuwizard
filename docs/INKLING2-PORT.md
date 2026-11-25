@@ -327,6 +327,37 @@ Note: `exp_probs_b` is non-zero on all 128 experts (max 0.065), but for this tok
 unbiased top-8 agree, so this check does not yet discriminate the correction-bias rule. A token where
 the two selections differ is needed for that.
 
+## Step 4: a complete sliding layer runs end-to-end
+
+`in2_layer_sliding` now runs the whole block for N tokens: attn_norm -> q/k/v with convs and clips ->
+relative-bias + sink softmax over the sliding window -> sigmoid-gated output -> post-attn conv ->
+residual rule -> depth mix -> MoE -> post-mlp conv -> residual add.
+
+The layer order is **not** the conventional pre-norm block, and two details would be easy to miss:
+
+- `is_block_boundary` is `il % 6 == 0`, so boundaries are layers **0, 6, 12, 18** (not the 5/11/17/23
+  full-attention layers). At a boundary the attention output *becomes* the residual and the previous
+  hidden state is banked into `block_states`; elsewhere `residual = block_residual + attention_out`.
+- `mlp_input` exists on every layer while `attention_input` only for `layer_idx > 0`, which is exactly
+  the `ffn_res_query` / `attn_res_query` pattern in the tensor census.
+
+**First result:** `rc=0`, rms 1.0699, max|h| 6.24, no NaN. A causality check falls out for free: token 0
+is bit-identical between an N=1 and an N=2 run (it can only attend to itself, and the conv has no history
+at t=0) while the sequence RMS changes - so no future leakage.
+
+**Still unverified:** the layer is not yet compared numerically against the reference. That needs a
+Python reference for one full layer, which in turn needs IQ1_S and Q2_0 dequantisers in Python (the
+expert tensors). Until then this is a runnable graph with internally consistent pieces, not a validated
+one.
+
+### Two bugs found while wiring it up
+
+1. **Engine:** `gguf_raw_size(IQ1_S)` was 42 bytes/block instead of 50 (`qh` is `uint16_t[8]`), which
+   under-allocated 8 bytes/block and segfaulted the first large expert slice. Fixed.
+2. **Mine:** `in2_dequant_slice` asked for `gguf_raw_size(type, 0)` to get the byte offset of element 0,
+   but the fp4 raw-size helper returns -1 for `n_elems <= 0`, so **expert 0 of every MoE tensor** failed
+   to decode while experts 1..127 worked. Fixed by special-casing offset 0.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's
