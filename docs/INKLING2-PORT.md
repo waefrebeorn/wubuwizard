@@ -795,6 +795,28 @@ at this layer, and `ScaledL2Clip` matches the reference exactly: `x*scale`, then
 `x * clamp(threshold/(||x||+1e-6), max=1)`. The rms drop 1.844 -> 1.181 shows the clip is actually
 engaging - a threshold that never bites would also "match" and prove much less.
 
+## v's conv, and the fourth broken instrument
+
+Dumping `vraw`, `vt` and `vc` and evaluating both filter layouts:
+
+```
+layout A  w[c*4+0]         max|diff| 4.768e-07
+layout B  w[0*channels+c]  max|diff| 1.007e+01
+rms: vraw 2.30511 -> vt 1.13202
+```
+
+Same layout as k, as it must be, and the conv is live.
+
+**But the first read of this dump said v was entirely zero** - `vt` and `v` both at rms 0.00000 while `vraw`
+was 2.30511 - which looks exactly like a catastrophic defect where v contributes nothing to attention. It
+was not: I had appended the v writes to the block that fires immediately after the *k* conv, so `vt` and `v`
+were dumped while still `calloc` zeros, before their own conv had run. The dump was moved to after the v conv
+and everything matches.
+
+That is the **fourth** time in this port that the instrument, not the engine, was wrong. The pattern is now
+frequent enough to treat as the default hypothesis: when a check reports something dramatic, verify the check
+fires at the right moment before believing it.
+
 ## Expert magnitudes: resolved
 
 The MoE expert tensors decode to +-hundreds while the dense tensors decode to +-0.05. That is the file's

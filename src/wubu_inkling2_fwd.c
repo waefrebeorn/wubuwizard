@@ -377,6 +377,13 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             }
         }
         in2_shortconv(vraw, n_tok, kdim, vc, 4, vt);
+        if (il == 1 && getenv("IN2_DUMP_V")) {
+            FILE *vf = fopen(getenv("IN2_DUMP_V"), "wb");
+            if (vf) { fwrite(vraw, sizeof(float), (size_t)n_tok*kdim, vf);
+                      fwrite(vt,   sizeof(float), (size_t)n_tok*kdim, vf);
+                      fwrite(vc,   sizeof(float), 4*(size_t)kdim, vf);
+                      fclose(vf); }
+        }
         for (int t = 0; t < n_tok; ++t) {
             memcpy(k + (size_t)t * kdim, kt + (size_t)t * kdim, sizeof(float) * kdim);
             in2_l2_clip(k + (size_t)t * kdim, NULL, NKV, HD, 22.6274166f);
