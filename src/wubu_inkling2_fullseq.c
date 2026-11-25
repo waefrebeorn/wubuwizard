@@ -32,6 +32,7 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
 
 int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                   const float *X, int nt, int n_in, int n_out, float *Y);
+const float *in2_tensor_borrow(gguf_ctx *, const wubu_in2_tensor_t *);
 
 int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                        int il, float *h, int n_tok, int pos0, const float *blocks, int n_blocks,
@@ -116,11 +117,11 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     }
 
     /* 2. q with scaled clip and tau (tau is 1.0 at positions below 8192, so it only bites on long context) */
-    float *Wq = in2_tensor_to_f32(ctx, &L->wq, NULL);
+    const float *Wq = in2_tensor_borrow(ctx, &L->wq);   /* table-owned, never freed */
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if (!Wq || !q) { free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
-                     free(Wq); free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
+                     free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
     for (int t = 0; t < n_tok; ++t) {
         float *qt = q + (size_t)t * qdim;
         in2_matvec(Wq, xq + (size_t)t * d, d, qdim, qt);
@@ -217,10 +218,10 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     }
 
     /* 4. attention: causal, over every earlier key (no window), with the per-query relative bias and sink */
-    float *Wrel = in2_tensor_to_f32(ctx, &L->wrel, NULL);
+    const float *Wrel = in2_tensor_borrow(ctx, &L->wrel);
     float *rcl = in2_tensor_to_f32(ctx, &L->rel_clip, NULL);
     float *P = in2_tensor_to_f32(ctx, &L->rel_bias, NULL);
-    float *Wsk = in2_tensor_to_f32(ctx, &L->sink, NULL);
+    const float *Wsk = in2_tensor_borrow(ctx, &L->sink);
     float *rs = (float *)calloc((size_t)NH * DREL, sizeof(float));
     float *bias = (float *)calloc((size_t)NH * EXT, sizeof(float));
     float *sink = (float *)calloc((size_t)n_tok * NH, sizeof(float));
@@ -285,8 +286,8 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     }
 
     /* 5. gated output projection */
-    float *Wg = in2_tensor_to_f32(ctx, &L->wgate, NULL);
-    float *Wo = in2_tensor_to_f32(ctx, &L->wo, NULL);
+    const float *Wg = in2_tensor_borrow(ctx, &L->wgate);
+    const float *Wo = in2_tensor_borrow(ctx, &L->wo);
     float *gate = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     float *ao = (float *)calloc(ND, sizeof(float));
     if (Wg && Wo && gate && ao && rc == WUBU_INKLING2_OK) {
@@ -351,10 +352,10 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     } else rc = WUBU_INKLING2_ERR_IO;
 
     free(arq); free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
-    free(Wq); free(qcl); free(q); free(Wk); free(Wv); free(kc); free(vc); free(kp); free(vp);
+    free(qcl); free(q); free(Wk); free(Wv); free(kc); free(vc); free(kp); free(vp);
     free(kraw); free(vraw); free(kt); free(vt); free(k); free(v);
-    free(Wrel); free(rcl); free(P); free(Wsk); free(rs); free(bias); free(sink);
-    free(logit); free(alpha); free(attn_out); free(Wg); free(Wo); free(gate); free(ao);
+    free(rcl); free(P); free(rs); free(bias); free(sink);
+    free(logit); free(alpha); free(attn_out); free(gate); free(ao);
     free(pc); free(res); free(fq); free(mixed); free(fn); free(moein); free(moeout); free(pm); free(mo);
     if (kv) in2_kv_advance();
     return rc;

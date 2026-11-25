@@ -83,6 +83,10 @@ static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
 }
 #endif
 
+static int g_force_cache;
+int  in2_dq_force_begin(void) { const int s = g_force_cache; g_force_cache = 1; return s; }
+void in2_dq_force_end(int s) { g_force_cache = s; }
+
 double in2_arq_sec, in2_mixfn_sec, in2_tail_sec; long in2_arq_calls;
 double in2_alloc_sec;
 double in2_phase[8];   /* mix, q, kv, rel/sink, attn, gate/wo, resconv, mlp+moe */
@@ -1630,7 +1634,7 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
      * was left behind a flag; now the per-visit tensors are the hot spot (attn_res_q alone is a full 2304x2304
      * dequantisation on every layer visit) and it is worth ~30%% of a decode step. It returns a copy, so every
      * caller's ownership contract is unchanged. IN2_NO_DQ_CACHE disables it. */
-    const int cache_on = getenv("IN2_NO_DQ_CACHE") == NULL;
+    const int cache_on = g_force_cache || getenv("IN2_NO_DQ_CACHE") == NULL;
     if (cache_on) {
         for (int i = 0; i < in2_dq_n; ++i) {
             if (in2_dq_tab[i].key == t->info) {
@@ -1659,6 +1663,32 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
     }
     if (n_out) *n_out = ne;
     return buf;
+}
+
+int in2_dq_force_begin(void);
+void in2_dq_force_end(int);
+
+/* Borrowed, table-owned view of a weight matrix.
+ *
+ * The DQ cache returns a COPY so every caller's free() stays valid - correct, but it means a constant 3072x2304
+ * weight matrix gets copied out of the cache on every layer visit, which is 28 MB x 8 full-layer visits per token.
+ * This returns the table's buffer instead and never hands back caller-owned memory (it forces the cache on for the
+ * call), so a caller that does not free anything cannot leak.
+ *
+ * Only for read-only weight use. Never free the result. */
+const float *in2_tensor_borrow(gguf_ctx *ctx, const wubu_in2_tensor_t *t)
+{
+    extern int in2_dq_force_begin(void);
+    extern void in2_dq_force_end(int);
+    if (!ctx || !t || !t->info) return NULL;
+    const int saved = in2_dq_force_begin();
+    float *v = in2_tensor_to_f32(ctx, t, NULL);
+    in2_dq_force_end(saved);
+    if (!v) return NULL;
+    /* if the table now owns it, free our copy and hand back the table's pointer */
+    for (int i = 0; i < in2_dq_n; ++i)
+        if (in2_dq_tab[i].key == t->info) { free(v); return in2_dq_tab[i].buf; }
+    return v;   /* table full: caller owns it after all, and that is a leak risk we accept only in that case */
 }
 
 /* Token embedding lookup: token_embd is (n_embd, n_vocab) so token t occupies columns t.
