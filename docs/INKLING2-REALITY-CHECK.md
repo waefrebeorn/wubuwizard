@@ -298,3 +298,15 @@ page-cache state. **The real numbers for this engine are 3.70 s prefill and 1.1-
 median/min/max/spread, so a delta inside the spread is visible as such instead of being reported as a win.
 
 Every delta recorded before this harness must be re-measured through it before it is believed.
+
+### Cache speedup, measured through the harness (0% spread)
+
+| prefix | recompute | incremental | speedup |
+|---|---|---|---|
+| 4 | 3.40 s | 1.20 s | 2.8x |
+| 5 | 4.30 s | 1.10 s | 3.9x |
+| 20 | 25.8 s | 2.2 s | 11.7x |
+
+All medians with zero spread, all producing identical logits. The speedup is linear in prefix because one path is
+O(n) per token and the other O(n^2) - which is the whole point: the ratio is not a tuning result, it is the
+complexity change, and it keeps growing with context.
