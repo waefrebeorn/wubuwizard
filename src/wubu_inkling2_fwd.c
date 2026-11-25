@@ -15,6 +15,7 @@
 
 #include "wubu_inkling2.h"
 #include "wubu_dequant_fp4.h"
+#include "wubu_iq2q8.h"
 void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float *out);
 
 /* ---- prototypes (definitions follow in dependency order) ---- */
@@ -86,15 +87,22 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
      * error 5.9e-08 over 64 random block sets (tools/dot_test.c). The other expert types still materialise. */
     const int ty_mv = (t && t->info) ? t->info->ggml_type : -1;
     /* Types with a fused row kernel: Q2_0 (`down`) and IQ2_XS (gate/up). Everything else still materialises. */
-    /* Q2_0 has a vectorised kernel and wins; IQ2_XS does not, and its fused scalar form measured 14% SLOWER
+    /* Both types now have a vectorised path (Q2_0 float AVX2, IQ2_XS int8 AVX2 against a once-per-matvec
+     * activation). The IQ2_XS SCALAR fused form measured 14% SLOWER
      * than materialise-then-dot (48,014/48,121 ms against 42,230/42,227 ms, twice each, logits identical), because
      * the per-group double accumulator serialises 8 dependent adds while the materialised dot interleaves two.
      * So it stays behind IN2_FAST until an AVX2 IQ2_XS kernel exists - a quantised load path is not a speedup
      * just because it skips the buffer. */
-    const int fast_ty = (getenv("IN2_NOFAST") == NULL &&
-                         (ty_mv == 42 || (ty_mv == 17 && getenv("IN2_FAST") != NULL))) ? ty_mv : -1;
+    const int fast_ty = (getenv("IN2_NOFAST") == NULL && (ty_mv == 42 || ty_mv == 17)) ? ty_mv : -1;
     const int64_t row_bytes = (fast_ty > 0) ? gguf_raw_size(fast_ty, n_in) : -1;
     unsigned char *rawrow = (row_bytes > 0) ? (unsigned char *)malloc((size_t)row_bytes) : NULL;
+    /* int8 activation for the IQ2_XS vector path: quantised ONCE here and reused by every row of the expert, which
+     * is the amortisation that makes the kernel pay. Only when the type and the ISA both allow it. */
+    in2_act_q8 *actq = NULL;
+    if (fast_ty == 17 && (n_in % 32) == 0 && __builtin_cpu_supports("avx2")) {
+        actq = (in2_act_q8 *)malloc(((size_t)n_in / 32) * sizeof(in2_act_q8));
+        if (actq) in2_act_quantise(x, n_in / 32, actq);
+    }
     for (int o = 0; o < n_out; ++o) {
         if (rawrow) {
             const int64_t eo   = elem_off + (int64_t)o * n_in;
@@ -103,13 +111,15 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                 wubu_in2_tensor_t sh = *t;
                 sh.file_offset = t->file_offset + boff;
                 if (wubu_inkling2_read(ctx, &sh, rawrow, row_bytes) == WUBU_INKLING2_OK) {
-                    if (fast_ty == 42) dot_row_q2_0(rawrow, x, n_in, &y[o]);
-                    else               dot_row_iq2_xs(rawrow, x, n_in, &y[o]);
+                    if (fast_ty == 42)     dot_row_q2_0(rawrow, x, n_in, &y[o]);
+                    else if (actq)         y[o] = dot_row_iq2_xs_q8(rawrow, actq, n_in / 32);
+                    else                   dot_row_iq2_xs(rawrow, x, n_in, &y[o]);
                     continue;
                 }
             }
         }
         if (in2_dequant_slice(ctx, t, elem_off + (int64_t)o * n_in, n_in, row) != WUBU_INKLING2_OK) {
+            free(actq);
             free(rawrow);
             free(row);
             return WUBU_INKLING2_ERR_IO;
@@ -119,6 +129,7 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
         for (int i = n_in & ~1; i < n_in; ++i) a0 += (double)row[i] * x[i];
         y[o] = (float)(a0 + a1);
     }
+    free(actq);
     free(rawrow);
     free(row);
     return WUBU_INKLING2_OK;

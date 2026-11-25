@@ -1979,6 +1979,104 @@ void dot_row_iq2_xs(const uint8_t *data, const float *x, int64_t n_elems, float 
     *out = (float)acc;
 }
 
+/* ---- C11 AVX2 IQ2_XS dot against an int8 activation ----
+ *
+ * The scalar fused form lost (48,014 ms vs 42,230 ms) because it rebuilt every weight value per element and
+ * serialised its accumulator. The vector form needs no weight rebuild at all: the grid already holds 8 int8
+ * magnitudes and the sign word holds 8 sign bits, so an 8-element contribution is
+ *     maddubs(mag_u8, sign(act_i8)) -> int16 pairs -> madd_epi16 -> int32
+ * which is integer work, no floats, and no dependency chain longer than one vector.
+ *
+ * The activation is quantised ONCE per matvec and reused across all 2304 rows of the expert - that amortisation
+ * is the actual win, and it is why this is a different shape of change from the scalar attempt. int8 activations
+ * are what the reference engines use (ggml block_q8_K, maya's iq256_rows), so the result agrees with them to
+ * quantisation error rather than bit-exactly. */
+#include "wubu_iq2q8.h"
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+#include <immintrin.h>
+
+/* ±1 int8 per sign bit of ksigns_iq2xs, so _mm_sign_epi8 can apply the pattern without scalar branches. */
+static int8_t g_iq2_sign8[128][8];
+static int    g_iq2_sign8_ready = 0;
+
+static void iq2_sign8_init(void)
+{
+    if (g_iq2_sign8_ready) return;
+    for (int s = 0; s < 128; ++s)
+        for (int j = 0; j < 8; ++j)
+            g_iq2_sign8[s][j] = (int8_t)((ksigns_iq2xs[s] & (1u << j)) ? -1 : 1);
+    g_iq2_sign8_ready = 1;
+}
+
+void in2_act_quantise(const float *x, int64_t n_groups, in2_act_q8 *out)
+{
+    for (int64_t g = 0; g < n_groups; ++g) {
+        const float *xg = x + g * 32;
+        float mx = 0.0f;
+        for (int j = 0; j < 32; ++j) { const float a = fabsf(xg[j]); if (a > mx) mx = a; }
+        const float scale = (mx > 1e-30f) ? mx / 127.0f : 1e-30f;
+        const float inv = 1.0f / scale;
+        for (int j = 0; j < 32; ++j) {
+            float v = xg[j] * inv;
+            int q = (int)(v < 0.0f ? v - 0.5f : v + 0.5f);   /* round half away from zero */
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            out[g].q[j] = (int8_t)q;
+        }
+        out[g].scale = scale;
+    }
+}
+
+/* One 8-element word: returns sum(mag_j * act_j * sign_j) as an integer. */
+__attribute__((target("avx2")))
+static int32_t iq2_dot8(const uint8_t *grid, uint8_t signs, const int8_t *aq)
+{
+    const __m128i m = _mm_loadl_epi64((const __m128i *)(const void *)grid);
+    const __m128i a = _mm_loadl_epi64((const __m128i *)(const void *)aq);
+    const __m128i s = _mm_loadl_epi64((const __m128i *)(const void *)g_iq2_sign8[signs & 127]);
+    const __m128i as = _mm_sign_epi8(a, s);                       /* act * ±1 */
+    __m128i p = _mm_maddubs_epi16(m, as);                         /* u8 * s8 -> 8x int16 */
+    p = _mm_madd_epi16(p, _mm_set1_epi16(1));                     /* -> 4x int32 */
+    p = _mm_hadd_epi32(p, p);
+    p = _mm_hadd_epi32(p, p);
+    return _mm_cvtsi128_si32(p);
+}
+
+__attribute__((target("avx2")))
+float dot_row_iq2_xs_q8(const uint8_t *data, const in2_act_q8 *act, int64_t n_groups)
+{
+    iq2_sign8_init();
+    const int64_t n_blocks = (n_groups + 7) / 8;         /* 8 groups of 32 per 256-element block */
+    double acc = 0.0;
+    for (int64_t b = 0; b < n_blocks; ++b) {
+        const uint8_t *block = data + b * IQ2_XS_BLOCK_SIZE;
+        uint16_t d_bits;
+        memcpy(&d_bits, block, 2);
+        const float d = gguf_f16_to_f32(d_bits);
+        const uint16_t *qs = (const uint16_t *)(block + 2);
+        const uint8_t *scales = block + 2 + 64;
+        for (int ib32 = 0; ib32 < 8; ++ib32) {
+            const int64_t g = b * 8 + ib32;
+            if (g >= n_groups) break;
+            const float db0 = d * (0.5f + (scales[ib32] & 0xf)) * 0.25f;
+            const float db1 = d * (0.5f + (scales[ib32] >> 4)) * 0.25f;
+            const float as = act[g].scale;
+            int32_t s0 = 0, s1 = 0;
+            const int8_t *aq = act[g].q;
+            for (int l = 0; l < 4; ++l) {
+                const uint16_t q = qs[4 * ib32 + l];
+                const uint8_t *grid = (const uint8_t *)(&iq2xs_grid[q & 511]);
+                const int32_t v = iq2_dot8(grid, (uint8_t)(q >> 9), aq + l * 8);
+                if (l < 2) s0 += v; else s1 += v;
+            }
+            acc += (double)db0 * as * (double)s0 + (double)db1 * as * (double)s1;
+        }
+    }
+    return (float)acc;
+}
+#endif
+
 // ========== IQ2_S Dequantization (llama.cpp reference) ==========
 
 // block_iq2_s: d(fp16,2) + qs[64] + qh[8] + scales[8] = 82 bytes per 256 elements
