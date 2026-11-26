@@ -1136,3 +1136,22 @@ ruled out four separate ways.
 Not attempted here: per-thread `rs`/`bias` plumbing plus verifying no other shared scratch exists is a multi-site change
 inside the hottest, most parity-sensitive loop in the engine, and the last few turns have shown how quickly a label or a
 grep can mislead. It needs a session with room to build, run the oracle, and revert.
+
+## Parallelisation attempt: reverted, and the reason is mechanical
+
+Tried the `omp parallel for` over tokens with per-thread `rs`/`bias`/`logit`/`alpha`, scoping the rewrite to the loop body by
+brace counting from `for (int t = 0; t < n_tok; ++t) {`. The build failed:
+
+    fullseq.c:324: 't' undeclared        fullseq.c:324: 'hh' undeclared
+    fullseq.c:325: 'n_key' undeclared    fullseq.c:325: 'logit' undeclared
+
+The brace scan stopped early, so the tail of the loop ended up outside the `for` - i.e. the script cut the loop at the wrong
+`}`. The cause is that a naive character scan counts braces inside comments and string literals, and this loop is dense with
+both (multi-line comments containing `{ }`, and the IN2_FULL_KERNEL note). Any attempt at this rewrite needs a depth
+tracker that strips comments and string literals first, or - better - a hand-scoped edit against a printed line range.
+
+Reverted immediately: full rebuild, oracle 94-char IDS exact, `git status` clean.
+
+One thing worth noting: during the failed build `gen_fast.exe` did not exist and the oracle check returned an EMPTY string.
+Because the check now prints the length, that was visible as `len=0` rather than passing as a match - the fourth time this
+session that requiring a non-empty reference caught what an equality test would have reported as success.
