@@ -510,3 +510,105 @@ still worth routing q/k/v through `in2_matvec_nt` there, but it is a prefill cos
 decode-per-token cost. What does not survive: quoting it as per-token. Recorded here rather than quietly edited,
 because the wrong version was carried for one commit.
 
+## Wave 10 - what five deep briefs changed, and where they were wrong about us
+
+### The roofline correction: our kernel is not at the memory wall, and the brief that said so assumed our format wrong
+
+The toolchain brief measured this exact silicon class and concluded the quantised GEMV is "indistinguishable from a
+pure sequential read" - 53.44 GB/s against 55.95 GB/s for an AVX2 byte-sum over the same 64 MiB - and therefore that
+no codegen flag can help. That measurement is sound and it is the right way to test the claim. But its roofline check
+assumes **1 byte per weight** (int8). This model is IQ2_XXS at **66 bytes per 256 weights = 0.258 B/weight**, so:
+
+    19.08 G weights/s single thread = 4.92 GB/s of weight bytes   (not 19 GB/s)
+    43.5  G weights/s aggregate     = 11.2 GB/s of weight bytes   (not 43.5 GB/s)
+    measured stream ceiling, same box: 32-40 GB/s single thread, 42-55 GB/s aggregate
+
+So the IQ2_XXS kernel runs at **~15 % of single-thread stream bandwidth and ~25 % of aggregate**, i.e. it is
+**dequant-bound, not bandwidth-bound**, and the 2.28x thread ceiling is *not* DRAM saturation. That single arithmetic
+error inverts the brief's headline conclusion for our case: codegen and ISA work *does* have room here, and the gain
+is on the decode side of the block, not the load side. It also explains why maya's codebook-avoiding AVX-512 row was
+only worth 6-8 % to them: their dot is already past the LUT, ours is not.
+
+### What is real, measured on our box or at our shape
+
+- **`__builtin_prefetch` is negative, consistently.** 128 B ahead -0.9 %, 512 B -2.8 %, 1 KiB -6.0 %, 2 KiB -3.2 %,
+  and -5..-12 % in earlier trials; the literature agrees on regular streams. We have `iq_env_pf_rows` prefetch in the
+  IQ row kernels. It is worth deleting rather than tuning - and it is consistent with the flat `IN2_IQ_PF_ROWS=0/8`
+  result already in this register.
+- **mingw `target("avx2")` costs 16 vector registers on Zen4.** Under `-march=native` gcc keeps the activation vector in
+  ymm16-22 (EVEX); inside a `target("avx2")` function only ymm0-15 exist, so the vector spills and every
+  `vpmaddubsw` gains a stack operand - measured 0 to -25 % against a globally `-mavx2` build. Our kernels are built
+  from `target` attributes. Also: `target` + `always_inline` intrinsics is a hard compile error in mingw gcc (a
+  13-year-old open bug), which is a build hazard we have presumably avoided by luck of structure.
+- **Theatre on PE, confirmed by byte-identical objects:** `-fno-plt`, `-fno-semantic-interposition`, alignment
+  tuning, unroll pragmas, LTO-for-speed, `-static`/`-static-libgcc` (hot loop byte-identical). Huge pages fail with
+  error 1314 (no `SeLockMemoryPrivilege`) and measured neutral-to-worse for streaming weights anyway. BOLT is ELF-only
+  with no COFF plan. clang's +4-7 % exists only in the L2-resident regime.
+
+### Expert cache: LRU is already near the causal ceiling, and Strata's prefetch brought zero
+
+Measured on **Qwen3-Coder-30B-A3B, 48 layers / 128 experts / top-8** - our exact shape - at 43 % residency:
+
+    LRU 80.7-82.4 %  |  LFRU 82.0 %  |  shared global pool +1.5 pp  |  Belady 90.1 %
+    ARC / LRU-2 / W-TinyLFU: never more than 2.4 pp above shared LRU, W-TinyLFU up to 13 pp below
+
+So the plan in Wave 9 should use **Aged-LFU (halve the counter every 64 tokens) with a global pool over all slots**,
+not per-layer caches, and should not bother with ARC/TinyLFU. 84.3-96.6 % of the gap to Belady is *knowing the future
+victim*, which eviction policy cannot supply.
+
+The future is available one layer ahead, from the router we already have: applying `ffn_gate_inp[L+1]` to the residual
+entering layer L recovers **84 % of cache misses** at 87-90 % top-8 agreement, for 0.5 % of one expert's FLOPs and no
+training. Two layers ahead costs ~14 pp of miss coverage.
+
+And the null result that should govern expectations: **Strata built exactly this and measured zero decode gain**
+while removing 21-39 % of CPU misses, because "below one miss per layer-window the cost is per layer, not per expert -
+a layer that still hands one expert to the CPU waits for the CPU round trip either way". Their extra copies also took
+7-13 % of the expert cache. So the metric to optimise is **fraction of layers with zero CPU fallback**, not average
+miss count, and prefetch slots must come from a separate small ring.
+
+### Speculation: our own LP-25 kill survives, and the brief supplies the test that would overturn it
+
+Dense self-speculation costs **rho(B) = 0.92 + 0.038*B** per pass on an 8-thread CPU (measured: rho(9)=1.27,
+rho(17)=1.57), which is why n-gram drafting with K=2-3 gives 1.4-1.6x on this MoE and K=8+ loses. Our engine measured
+rho ~= B instead, which the brief names precisely: "if your verify loop calls the single-token GEMV B times,
+rho(B)=B and everything loses". That is our batched path. So LP-25 stands as written, with one explicit reopen test:
+measure rho(B) for B=1,2,4,8 directly. If it comes out near the dense curve, revisit; if it comes out at B, the kill is
+confirmed by construction.
+
+### The head: independently confirmed at 246 MB, and the ceiling is 1.19x
+
+The head brief derived **246 MB from 463.16 M params at IQ4_XS (4.25 bpw)** - the same correction this register made
+from the GGUF, and it flags the 469 MB figure as implying 8.1 bpw. With the head at 246 MB the Amdahl ceiling for
+eliminating it entirely is **1.19x**. Its recommended shape beats everything else it measured: a router shortlist of
+2048 rows at **F16** plus per-row residual norms for an exactness bound is 14.9 MB total, gives 1.42x on the full
+1,535 MB step and *raises* head precision while cutting its traffic 31x. It also confirms the precision cliff is
+already behind us (IQ4_XS 90.4 % top-1 agreement, Q3_K 82.8 %), so "drop the head's precision" is the worst available
+lever.
+
+### 512k: compute-bound, and a real 1M-on-16GB datapoint exists
+
+- **What actually breaks 512k is not memory.** llama.cpp's CUDA/HIP and CPU-decode attention kernels accumulate
+  softmax*V in FP16: relative error vs float64 goes 0.23 @32K -> 0.76 @128K -> 0.87 @256K, and the bug report names
+  NoPE global-attention layers as worst-hit - which is exactly our 8 full layers. A patch exists (9/9 needles vs 8/9)
+  but is unmerged and unvalidated past 128k.
+- **q8_0 is free at 32K, not at 256K.** Same-binary KLD q8/q8 0.000587 vs q4_0/q4_0 0.00245, but vLLM MRCR AUC at
+  256k reads BF16 45.8, FP8 43.1, 4-bit 42.3, 3-bit 31.2. NIAH saturates and hides all of it.
+- **The answer for our shape:** q8_0 K + q4_1 V on the 8 full layers + a 4k f32 tail + 4 sinks = **7.25 GB**
+  (8.02 GB with the 0.5 GB sliding part). With 5.2 GB of weights that is 13.2 GB resident on a 16 GB box. Cost is
+  **1.5-2.5 tok/s and it is FLOP-bound**: 8 layers x 4*T*d = 17.18 GFLOP/token at 26-43 GFLOPS, while the 8.02 GB at
+  52 GB/s would allow 6.5 tok/s. Compression buys fit, not speed.
+- **llama.cpp has no disk KV** - `-nkvo` moves KV to host RAM only; there is no KV-file paging. Disk paging exists in
+  LMCache, Dual-Blade (page-cache hit ratio collapses 42 % -> <1 % the moment host memory drops below the working set,
+  a cliff not a slope) and HiFC.
+- **A 1M-on-16GB engine exists:** llama.cpp + Nemotron-3-Nano-30B-A3B (52 layers, 6 KV layers) at 1M uses
+  **14,104 MiB with 2,200 free**, q4_0 KV, and its 1M blocker is the 4,038 MiB compute buffer, not the cache.
+- Our nominal bit figures understate real llama.cpp blocks by +6.2 % (q8_0), +12.5 % (q4_0), +25 % (q4_1).
+
+### What this changes in the plan
+
+LP-21's device IQ2_XXS kernel is now the highest-value item in the project, because it is 11.5x the CPU's
+dequant-bound rate - not because of the byte count. LP-22's residency should target **q/k/v first** (they are the
+tensors that still have no quantised path on the fullseq side). The expert cache becomes Aged-LFU + global pool +
+router-ahead prefetch, gated on the dirty-layer metric. And the CPU lane's 4-7x dequant headroom is a real target that
+the toolchain brief's null result does not apply to, because its roofline assumed 1 byte per weight.
+
