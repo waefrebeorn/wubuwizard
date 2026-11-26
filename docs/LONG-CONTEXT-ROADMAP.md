@@ -246,3 +246,22 @@ justification is the IMMA itself, and it should be built as the MMA change rathe
 The engine-side record stands: CPU at 11.9 GMAC/s ceiling, GPU IQ2 at 30.8 GMAC/s, card at 11.8 TMAC/s, and the gap is
 the instruction. The four prior retractions in this project were about speedups claimed too early; this one is about a
 *bottleneck* diagnosed too confidently from arithmetic alone.
+
+## Swept the one knob the kernel has: IQ2X_MT = 16 is already optimal
+
+`IQ2X_MT` is how many activation rows share one weight unpack in registers. It is the kernel's only tuning parameter and
+had never been swept:
+
+    MT= 8    1.35 ms batched    parity exact
+    MT=16    1.34 ms batched    parity exact     <- current value
+    MT=32    1.49 ms batched    parity exact     (-11 %, register pressure)
+
+So the shipping value is the right one and the kernel is not leaving anything on the table at this knob. Worth recording
+for a second reason: **parity stayed bit-exact at all three values**, which confirms the accumulation order does not
+depend on MT - so MT is a free parameter for any future scheduling experiment, not something that silently moves the
+reference tokens.
+
+Remaining state, unchanged: GPU IQ2 is exact and 30.8 GMAC/s against an 11.8 TMAC/s card, CPU is at its 11.9 GMAC/s
+ceiling, and the only lever left is the 8-column `mma.sync.m16n8k32.s8` kernel, whose justification is now purely the
+instruction (the traffic argument was retracted) and whose parity reference is the dp4a kernel that this sweep just
+re-confirmed.
