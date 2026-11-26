@@ -115,3 +115,46 @@ Paged-KV fault attacks surfaced in this sweep only as an untitled stub with no e
 [206] https://github.com/Niko1221/Strata/pull/4222 — Strata PR 4222 tools+JSON token masks
 [207] https://github.com/sgl-project/sglang/releases/tag/v0.5.23 — SGLang v0.5.23 primary GitHub release notes
 [215] https://github.com/ggml-org/llama.cpp/issues/32258 — llama.cpp issue 32258 unified SWA shared-cell slot bug
+
+## Wave 8 — long context (1M) on one 16 GB box
+
+Model facts that set the problem, read from the GGUF rather than assumed: `inkling2.context_length = 1048576` and
+`inkling2.rope.dimension_count = 0` with a `relative_length = 16` scheme, so this model is natively 1M and needs no
+positional extension at all - no YaRN, no NTK, no continued training. `inkling2.attention.sliding_window = 1024` with
+pattern `[T,T,T,T,T,F]`, confirmed by IN2_KV_TRACE (full attention only at visits 5,11,17,23,29,35,41,47), means 8 of
+72 KV visits ever read past 1024 positions. Full-attention KV at 1M is 8 x 1M x 1024 dims x 2 x 4 B = 68.7 GB f32.
+The 12-slot reading in the briefs assumes the loop passes duplicate attention visits; the trace says they do not, so
+the budget here is the 8-slot one.
+
+- **LP-17 - batched prefill.** Gate: prefill throughput on a 4k-token prompt >= 3x today (3.5 -> >=10.5 tok/s) with
+  the 34-token oracle unchanged. Per-position cost currently equals the decode step (0.195 s vs 0.22 s) because
+  `in2_matvec_nt(..., 1, ...)` is called inside `for (t < n_tok)`. Hoist the projections to nt = n_tok, keep attention
+  per-token and causal, keep the conv history path per row. Nothing else on this list is worth building first: at
+  3.5 tok/s a 1M prompt is 79 hours.
+- **LP-18 - quantised KV for the full visits, dequant fused into the score dot.** Gate: 128k context resident with the
+  5.2 GB model on this 16 GB box, and identical argmax over 50 decode steps at 4k versus the f32 cache. KV quant is
+  NOT bit-exact, so the gate is token equality and the commit must say so. Budget: 1M is 68.7 GB f32, 34.4 q8, 17.2
+  q4, 8.6 at ~2 bits. Unpack cost measured on this box per value: f32 100.7 ps, q8 19.7, q4 13.7, q2 scalar 48.3, q2
+  with AVX-512 `vpmultishiftqb` 7.9 - the 2-bit path is only viable vectorised. The 60 sliding rings stay f32 and
+  exact; they cost 0.5 GB at any context.
+- **LP-19 - selectivity, because residency alone is not enough.** Gate: decode at 128k >= 2x dense with needle
+  retrieval >= 90% at 128k. Mechanism: block/page selection with page >= 256 - Quest's own numbers are page 16 = 6.44
+  GB scanned per step = 184 ms against page 256 = 402 MB = 12 ms, i.e. the index can cost more than the attention it
+  saves - and one indexer per KV *group*, not per query head, since GQA heads sharing a KV slot must take the union of
+  their selections. Eviction is a hard cap only: Quest's 100k passkey table kills H2O/TOVA/StreamingLLM, and their
+  RULER slope is ~8 points per doubling.
+- **LP-20 - KV persisted to disk, so a long prefill is paid once.** Gate: restore a 100k-token KV in <= 5 s and
+  continue decoding with the same tokens. This is the only shape that makes 1M a product on this box: prefill once,
+  persist 12.9 GB at q4, then answer at ~4 tok/s with LP-19 selectivity. Restore cost from the literature: 100k tokens
+  = 1.7 s with GDS (4.74 GB/s) to 5.0 s with O_DIRECT (1.97 GB/s). Use NO_BUFFERING so KV streaming cannot evict the
+  5.2 GB model, and preallocate the file (append-extend measured 537 MB/s against 1206 MB/s preallocated).
+
+Evidence base, all local, each with its own verified citation ledger:
+`C:/Users/eman5/kv-1m-brief.md` (KV representation), `C:/Users/eman5/longcontext-kv-offload-brief.md` (engines),
+`C:/Users/eman5/kvbrief/KV-MEMORY-BRIEF.md` (Windows memory, measured on this box, with kvbench.c),
+`C:/Users/eman5/AppData/Local/hermes/cache/scratch/pe/positional-extension-512k-brief.md` (positional; moot here).
+
+Two results worth carrying although they are not pads: KTransformers is the only engine measured at 1M on a single
+device (16 tok/s on a 24 GB GPU) and it gets there by attending ~16k of blocks, not by shrinking KV to fit; and
+llama.cpp hit a hard bug at `n_kv * n_ubatch = 2^32`, so mask or index arithmetic added for long context must be
+64-bit. This engine has no masks and its KV offsets are already size_t, so that bug class does not apply as it stands.
