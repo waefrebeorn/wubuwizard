@@ -867,6 +867,26 @@ IQ_AVX2 static inline __m256i iq1m_grid_nopd(const uint8_t *qs, const uint8_t *q
                 qs[3] | ((h >> 4) & 0x700));
 }
 
+/* IQ1_S (type 19) has the same 3-bits-per-8 index bits as IQ1_M but takes all twelve from ONE qh word,
+ * three bits per 8 values, instead of IQ1_M's four-bit stride across two bytes. Same two forms, same probe:
+ * pdep builds all four 11-bit grid indices in one instruction pair where it is fast. Indices are identical to
+ * the shift/or form, so every lane is identical and the result is bit-exact - this is the +50% kernel win
+ * llama.cpp PR 12154 reports for the pdep form on Zen 4, which this file never enabled for type 19. */
+IQ_AVX2 static inline __m256i iq1s_grid_pd(const uint8_t *qs, uint16_t qh)
+{
+    const uint64_t p = pdep64(u32(qs), 0x00ff00ff00ff00ffULL) | pdep64(qh, 0x0700070007000700ULL);
+    uint16_t ix[4];
+    memcpy(ix, &p, sizeof ix);
+    return _mm256_set_epi64x((long long) iq1s_grid[ix[3]], (long long) iq1s_grid[ix[2]],
+                             (long long) iq1s_grid[ix[1]], (long long) iq1s_grid[ix[0]]);
+}
+
+IQ_AVX2 static inline __m256i iq1s_grid_nopd(const uint8_t *qs, uint16_t qh)
+{
+    return tab4(iq1s_grid, qs[0] | ((qh << 8) & 0x700), qs[1] | ((qh << 5) & 0x700),
+                qs[2] | ((qh << 2) & 0x700), qs[3] | ((qh >> 1) & 0x700));
+}
+
 /* The IQ1_M tail: ggml's two float accumulators. Explicit fusion preserves ggml's
  * rounding for subnormal accumulators too (this TU disables contraction). */
 IQ_AVX2 static inline float iq1m_finish(__m256 acc, __m256 delta)
@@ -1586,6 +1606,9 @@ IQ_AVX2 static float dot1_iq1_s(const uint8_t *row, int nb, const block_q8_K *y)
     const block_iq1_s *x = (const block_iq1_s *) row;
     __m256 accum = _mm256_setzero_ps();
     float accum1 = 0;
+    /* pdep index assembly where the CPU runs it in hardware (probed once, same gate as IQ1_M). Both forms produce
+     * the same four grid indices, so the choice cannot change a single lane. */
+    const int pd = iq1m_pdep();
     for (int i = 0; i < nb; ++i) {
         const int8_t   *q8 = y[i].qs;
         const uint8_t  *qs = x[i].qs;
@@ -1594,14 +1617,8 @@ IQ_AVX2 static float dot1_iq1_s(const uint8_t *row, int nb, const block_q8_K *y)
         __m256i sumi = _mm256_setzero_si256();
         int sumi1 = 0;
         for (int ib = 0; ib < QK_K / 32; ib += 2) {
-            const __m256i q1b_1 = _mm256_set_epi64x((long long) iq1s_grid[qs[3] | ((qh[ib + 0] >> 1) & 0x700)],
-                                                    (long long) iq1s_grid[qs[2] | ((qh[ib + 0] << 2) & 0x700)],
-                                                    (long long) iq1s_grid[qs[1] | ((qh[ib + 0] << 5) & 0x700)],
-                                                    (long long) iq1s_grid[qs[0] | ((qh[ib + 0] << 8) & 0x700)]);
-            const __m256i q1b_2 = _mm256_set_epi64x((long long) iq1s_grid[qs[7] | ((qh[ib + 1] >> 1) & 0x700)],
-                                                    (long long) iq1s_grid[qs[6] | ((qh[ib + 1] << 2) & 0x700)],
-                                                    (long long) iq1s_grid[qs[5] | ((qh[ib + 1] << 5) & 0x700)],
-                                                    (long long) iq1s_grid[qs[4] | ((qh[ib + 1] << 8) & 0x700)]);
+            const __m256i q1b_1 = pd ? iq1s_grid_pd(qs, qh[ib + 0]) : iq1s_grid_nopd(qs, qh[ib + 0]);
+            const __m256i q1b_2 = pd ? iq1s_grid_pd(qs + 4, qh[ib + 1]) : iq1s_grid_nopd(qs + 4, qh[ib + 1]);
             qs += 8;
             const __m256i q8b_1 = _mm256_loadu_si256((const __m256i *) q8); q8 += 32;
             const __m256i q8b_2 = _mm256_loadu_si256((const __m256i *) q8); q8 += 32;
