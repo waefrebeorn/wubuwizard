@@ -2156,7 +2156,7 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)qdim, sizeof(float));
     if (Wq && q) {
-        if (getenv("IN2_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wq, 0, xq, qdim, d, q);
+        if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wq, 0, xq, qdim, d, q);
         else                          in2_matvec(Wq, xq, d, qdim, q);
         in2_l2_clip(q, qcl, NH, HD, 22.6274166f);
         const float tau = 1.0f + 0.1f * logf(fmaxf(((float)pos0 + 1.0f) / 8192.0f, 1.0f));
@@ -2180,9 +2180,9 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     int rc = WUBU_INKLING2_OK;
     if (!Wk || !Wv || !kc || !vc || !kp || !vp || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
     if (rc == WUBU_INKLING2_OK) {
-        if (getenv("IN2_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wk, 0, xk, kdim, d, kraw);
+        if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wk, 0, xk, kdim, d, kraw);
         else                          in2_matvec(Wk, xk, d, kdim, kraw);
-        if (getenv("IN2_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wv, 0, xv, kdim, d, vraw);
+        if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wv, 0, xv, kdim, d, vraw);
         else                          in2_matvec(Wv, xv, d, kdim, vraw);
         in2_shortconv_dynamic(kraw, 1, kdim, kc, kp, xk, d, NKV, 4, kt);
         in2_shortconv_dynamic(vraw, 1, kdim, vc, vp, xv, d, NKV, 4, vt);

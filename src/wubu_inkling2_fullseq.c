@@ -133,7 +133,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
      * per position, 1,836 MB across 48 layers, against 488 MB for the same weights quantised. IN2_FULL_KERNEL routes
      * them through in2_matvec_nt like wrel/sink/gate/wo, and the borrow is skipped entirely when it does - the point
      * is to stop touching the float view, not merely to add a second way to read it. */
-    const int qkv_kernel = getenv("IN2_FULL_KERNEL") != NULL;
+    const int qkv_kernel = !getenv("IN2_NO_FULL_KERNEL");
     const float *Wq = qkv_kernel ? NULL : in2_tensor_borrow(ctx, &L->wq);   /* table-owned, never freed */
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
@@ -276,7 +276,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
              * Behind a flag because it changes top1 (149876 -> 220) when applied: the engine is inconsistent today -
              * sliding int8, full fp32 - and which contract it keeps is a decision that needs a text-level A/B, not a
              * one-token comparison. Default keeps the fp32 path so nothing silently changes. */
-            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wrel, xq + (size_t)t * d, 1, d, NH * DREL, rs);
+            if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wrel, xq + (size_t)t * d, 1, d, NH * DREL, rs);
             else                        in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs);
             in2_l2_clip(rs, rcl, NH, DREL, cfg->rel_clip);
             /* the relative-bias query carries the same log-position tau as q (inkling2.cpp:357-358).
@@ -287,7 +287,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
                 if (tau != 1.0f) for (int i = 0; i < NH * DREL; ++i) rs[i] *= tau;
             }
             in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
-            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->sink, xq + (size_t)t * d, 1, d, NH, sink + (size_t)t * NH);
+            if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_nt(ctx, &L->sink, xq + (size_t)t * d, 1, d, NH, sink + (size_t)t * NH);
             else                          in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
             for (int hh = 0; hh < NH; ++hh) {
                 const int kvh = hh / (NH / NKV);
@@ -326,18 +326,22 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
 
     FP2(4); /* attention */
     /* 5. gated output projection */
-    const float *Wg = in2_tensor_borrow(ctx, &L->wgate);
-    const float *Wo = in2_tensor_borrow(ctx, &L->wo);
+    /* Do NOT borrow these unless the float path is actually going to read them. Borrowing dequantises the whole
+     * tensor to f32; with the kernel path taken that is ~56 MB per visit of pure waste, and it kept this phase at
+     * ~1 G weights/s. This is the same rule q already follows a few lines above. */
+    const int gk = !getenv("IN2_NO_FULL_KERNEL");
+    const float *Wg = gk ? NULL : in2_tensor_borrow(ctx, &L->wgate);
+    const float *Wo = gk ? NULL : in2_tensor_borrow(ctx, &L->wo);
     float *gate = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     float *ao = (float *)calloc(ND, sizeof(float));
-    if (Wg && Wo && gate && ao && rc == WUBU_INKLING2_OK) {
+    if ((gk || (Wg && Wo)) && gate && ao && rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
             float *gt = gate + (size_t)t * qdim;
-            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wgate, xq + (size_t)t * d, 1, d, qdim, gt);
+            if (gk)                       in2_matvec_nt(ctx, &L->wgate, xq + (size_t)t * d, 1, d, qdim, gt);
             else                          in2_matvec(Wg, xq + (size_t)t * d, d, qdim, gt);
             for (int i = 0; i < qdim; ++i)
                 gt[i] = attn_out[(size_t)t * qdim + i] * (1.0f / (1.0f + expf(-gt[i])));
-            if (getenv("IN2_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wo, gt, 1, qdim, d, ao + (size_t)t * d);
+            if (gk)                       in2_matvec_nt(ctx, &L->wo, gt, 1, qdim, d, ao + (size_t)t * d);
             else                          in2_matvec(Wo, gt, qdim, d, ao + (size_t)t * d);
         }
     } else rc = WUBU_INKLING2_ERR_IO;
