@@ -265,3 +265,24 @@ Remaining state, unchanged: GPU IQ2 is exact and 30.8 GMAC/s against an 11.8 TMA
 ceiling, and the only lever left is the 8-column `mma.sync.m16n8k32.s8` kernel, whose justification is now purely the
 instruction (the traffic argument was retracted) and whose parity reference is the dp4a kernel that this sweep just
 re-confirmed.
+
+## Parity gate PASSED: the 8-column tile is bit-identical to the shipping kernel
+
+`wubu_cuda_iq2x8_check` runs both kernels on the same device bytes and compares:
+
+    upload rc=0
+    rc=0  K=2304 n_cols=2304 M=8
+    mrow vs 8col:  max|diff| = 0.000e+00   max|ref| = 1.266e+04   rel = 0
+    BIT-IDENTICAL
+
+Two things had to be right for this number to mean anything, and the first attempt got both wrong:
+- the first run reported `max|ref| = 0.000e+00` - both kernels emitted zeros, because the IQ2 grid and k-sign tables
+  live in `__constant__` memory and are EMPTY until `wubu_cuda_upload_iq2xxs` is called. A 0 == 0 comparison would have
+  "passed" and proven nothing. The tool now uploads the tables first and refuses to print a verdict on a zero reference.
+- the fp16 block scales are forced to 1.0h so the values are finite instead of inf.
+
+So the tile that `mma.sync.m16n8k32` requires is now proven equivalent to the shipping kernel, with no shared memory and
+no barriers, activation loads hoisted into registers and reused across eight columns. What is NOT yet known is whether it
+is FASTER - parity and speed are separate gates and only the first has been passed. Next: time both kernels at
+2048x2304x8 and require a win before wiring; then swap the inner `__dp4a` pair for `mma.sync.m16n8k32.s8` on this tile,
+where the activation fragment is already resident and the unpack already produces per-column int8.

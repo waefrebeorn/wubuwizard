@@ -3954,3 +3954,76 @@ __global__ void iq2xxs_matvec_8col_kernel(const uint8_t * __restrict__ w,
         }
     }
 }
+
+/* Parity gate for the 8-column kernel: run the shipping mrow kernel and iq2xxs_matvec_8col_kernel on the SAME device
+ * bytes, bring both results back and report the largest difference. Wired to nothing; this exists so the tile can be
+ * proven equivalent (or not) before any dispatch decision is made.
+ * Deterministic synthetic data with a finite reference: fp16 scales forced to 1.0h so the comparison is about values. */
+WUBU_EXPORT int wubu_cuda_iq2x8_check(int K, int n_cols, int M, double *out_maxdiff, double *out_maxref)
+{
+    if (K <= 0 || n_cols <= 0 || M <= 0 || (K % QK_K) != 0) return -1;
+    const int nblocks = K / QK_K;
+    const size_t row_bytes = (size_t) nblocks * 66;
+    const size_t wbytes = row_bytes * (size_t) n_cols;
+    const size_t nq8 = (size_t) M * (size_t) nblocks;
+
+    uint8_t *h_w = (uint8_t *) malloc(wbytes);
+    c_q8_k  *h_q8 = (c_q8_k *) malloc(nq8 * sizeof(c_q8_k));
+    float   *h_a = (float *) malloc((size_t) M * (size_t) n_cols * sizeof(float));
+    float   *h_b = (float *) malloc((size_t) M * (size_t) n_cols * sizeof(float));
+    if (!h_w || !h_q8 || !h_a || !h_b) { free(h_w); free(h_q8); free(h_a); free(h_b); return -2; }
+
+    uint32_t st = 987654321u;
+    for (size_t i = 0; i < wbytes; ++i) { st = st * 1664525u + 1013904223u; h_w[i] = (uint8_t) (st >> 24); }
+    for (size_t b = 0; b + 66 <= wbytes; b += 66) { h_w[b] = 0x00; h_w[b + 1] = 0x3C; }   /* fp16 d = 1.0 */
+    for (size_t i = 0; i < nq8; ++i) {
+        float d = 0.25f;
+        memcpy(&h_q8[i].d, &d, 4);
+        for (int k = 0; k < 256; ++k) h_q8[i].qs[k] = (int8_t) ((k % 17) - 8);
+    }
+
+    void *d_w = NULL, *d_q8 = NULL, *d_a = NULL, *d_b = NULL;
+    int rc = -3;
+    if (cudaMalloc(&d_w, wbytes) != cudaSuccess) goto cleanup;
+    if (cudaMalloc(&d_q8, nq8 * sizeof(c_q8_k)) != cudaSuccess) goto cleanup;
+    if (cudaMalloc(&d_a, (size_t) M * n_cols * sizeof(float)) != cudaSuccess) goto cleanup;
+    if (cudaMalloc(&d_b, (size_t) M * n_cols * sizeof(float)) != cudaSuccess) goto cleanup;
+    if (cudaMemcpy(d_w, h_w, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) goto cleanup;
+    if (cudaMemcpy(d_q8, h_q8, nq8 * sizeof(c_q8_k), cudaMemcpyHostToDevice) != cudaSuccess) goto cleanup;
+
+    {
+        const int threads = 256, wpb = threads / 32;
+        int blocks = (n_cols + wpb - 1) / wpb;
+        iq2xxs_matvec_mrow_kernel<<<blocks, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_a,
+                                                      (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
+        blocks = (n_cols / 8 + wpb - 1) / wpb;
+        if (blocks < 1) blocks = 1;
+        iq2xxs_matvec_8col_kernel<<<blocks, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_b,
+                                                       (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
+        if (cudaDeviceSynchronize() != cudaSuccess) { rc = -4; goto cleanup; }
+    }
+    if (cudaMemcpy(h_a, d_a, (size_t) M * n_cols * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) goto cleanup;
+    if (cudaMemcpy(h_b, d_b, (size_t) M * n_cols * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) goto cleanup;
+
+    {
+        double mx = 0.0, mr = 0.0;
+        const size_t n = (size_t) M * (size_t) n_cols;
+        for (size_t i = 0; i < n; ++i) {
+            const double d = (double) h_a[i] - (double) h_b[i];
+            const double ad = d < 0 ? -d : d;
+            const double ar = h_a[i] < 0 ? -(double) h_a[i] : (double) h_a[i];
+            if (ad > mx) mx = ad;
+            if (ar > mr) mr = ar;
+        }
+        if (out_maxdiff) *out_maxdiff = mx;
+        if (out_maxref)  *out_maxref  = mr;
+        rc = 0;
+    }
+cleanup:
+    if (d_w) cudaFree(d_w);
+    if (d_q8) cudaFree(d_q8);
+    if (d_a) cudaFree(d_a);
+    if (d_b) cudaFree(d_b);
+    free(h_w); free(h_q8); free(h_a); free(h_b);
+    return rc;
+}
