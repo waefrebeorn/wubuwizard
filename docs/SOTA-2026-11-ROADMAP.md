@@ -126,11 +126,16 @@ pattern `[T,T,T,T,T,F]`, confirmed by IN2_KV_TRACE (full attention only at visit
 The 12-slot reading in the briefs assumes the loop passes duplicate attention visits; the trace says they do not, so
 the budget here is the 8-slot one.
 
-- **LP-17 - batched prefill.** Gate: prefill throughput on a 4k-token prompt >= 3x today (3.5 -> >=10.5 tok/s) with
-  the 34-token oracle unchanged. Per-position cost currently equals the decode step (0.195 s vs 0.22 s) because
-  `in2_matvec_nt(..., 1, ...)` is called inside `for (t < n_tok)`. Hoist the projections to nt = n_tok, keep attention
-  per-token and causal, keep the conv history path per row. Nothing else on this list is worth building first: at
-  3.5 tok/s a 1M prompt is 79 hours.
+- **LP-17 - prefill is at the hardware FLOP ceiling, so this pad is about fewer FLOPs, not faster batching.**
+  Measured and corrected from an earlier guess: prefill costs 0.195 s per position, the decode step costs 0.22 s per
+  token, and `in2_matvec_nt` already takes `n_tok` - so batching at 320 tokens buys ~11%, not 3x, because weight
+  traffic is already amortised and the limit is arithmetic. Active compute is ~90M MAC/layer x 48 layers = 8.6 GFLOP
+  per token, which at 0.195 s/position is 44 GFLOPS sustained against a measured machine ceiling of 26 GFLOPS fp32
+  (the IQ kernels use integer MACs, which are wider, so 36-44 is peak rather than a shortfall). Consequence, stated
+  plainly because it bounds every other pad: **1M prefill is ~62 hours and 512k ~31 hours on this CPU at hardware
+  peak.** No amount of batching, prefetch or cache work changes that; only fewer FLOPs per token does. Gates: (a)
+  a measured FLOP/token reduction from sequence pooling (LP-18) or from attending fewer keys, and (b) a documented
+  decision about ingest - offline prefill, a GPU, or a shorter working context.
 - **LP-18 - quantised KV for the full visits, dequant fused into the score dot.** Gate: 128k context resident with the
   5.2 GB model on this 16 GB box, and identical argmax over 50 decode steps at 4k versus the f32 cache. KV quant is
   NOT bit-exact, so the gate is token equality and the commit must say so. Budget: 1M is 68.7 GB f32, 34.4 q8, 17.2
