@@ -581,3 +581,62 @@ wrong answer.
 The general principle this gives, which is the transferable part: **the bit-width floor is a property of the model's
 sensitivity to row error, not of the quantiser's distortion bound.** The bound says b=4 is near-optimal for its bit
 budget; the model says 1.6 % is too much. Both are true, and only the end-to-end run can tell you where the line is.
+
+## Context capacity: 256k is now real, and 1M has an arithmetic answer
+
+With the 6-bit KV tier in place, the engine's own allocation print at two long-context settings, both running to
+completion:
+
+    ctx       f32 KV      6-bit KV     + model 7.90   result
+    131072    8704.0 MB   1640.5 MB     9.54 GB       runs
+    262144   16896.0 MB   3184.5 MB    11.08 GB       runs
+
+So **262,144 tokens of context fits in a 16 GB box** where f32 needed 16.9 GB of KV alone before the model was loaded.
+That is the single largest capacity gain measured in this project, and it costs token 10 of 12 versus the f32 oracle on
+the short prompt (b=6 is the width where row error stays under the model's sensitivity).
+
+### Why 1M is not a bigger version of the same thing
+
+Full visits are 8 of the 72 and they index the *whole* context, so their KV is `8 x ctx x 1024 x 2` elements:
+
+    ctx        f32 GB    q8 GB    q6 GB    q6 + model   q6 GB read per token
+    262144      17.72      4.71     3.32     11.22        3.32
+    524288      34.90      9.27     6.54     14.44        6.54
+    1048576     69.26     18.40    12.99     20.89       12.99
+
+At 1M the 6-bit tier alone is 12.99 GB, and with the 7.90 GB model that is **20.89 GB against a 16 GB machine**. Budgeting
+1.5 GB of slack, the KV allowance is about 6.6 GB, which at 1M and 8 full visits permits
+
+    6.6e9 / (8 x 1e6 x 1024 x 2) = 0.40 bytes per element  =  3.2 bits
+
+**3.2 bits is below the 6-bit floor that this model was just measured to need**, and below it the answer goes wrong
+rather than degrading gracefully. So 1M context is not reachable by tuning the quantiser: the requirement is
+architecturally out of reach by a factor of two in bits, and bits are the one thing already at the limit.
+
+### The two ways it becomes reachable, both fidelity trades
+
+Memory scales linearly in the number of full visits, so:
+
+  - **4 full visits instead of 8** -> 6.50 GB at 1M, fits; 2 full visits -> 3.25 GB, comfortable. The other 6 visits
+    keep their 1024-token sliding window. Cost: less global mixing, unknown quality effect.
+  - **pool the far history** in the full visits (merge adjacent key/value pairs as positions age), which makes their
+    footprint O(window + n/group) rather than O(n): at 4:1 pooling, 1M costs the same as 250k, 3.25 GB, constant.
+
+Neither can be chosen from arithmetic. Both need a long-context fidelity measurement on this model - a needle/recall
+probe at 128k and 256k to establish that the tier works at length at all, then the same probe to price the trade. That is
+the next piece of work, and it is a measurement task rather than a coding one.
+
+### Tandem GPU, honestly priced
+
+Per-token decode is bandwidth-bound, not FLOP-bound: at 6 bits, 1M costs 12.99 GB of KV traffic per step.
+
+    CPU 8 threads (measured 5.65 GB/s)  -> 2.30 s/token   0.44 tok/s
+    GPU resident (measured 59.05 GB/s)  -> 0.22 s/token   4.55 tok/s
+    PCIe 4.0 x8 streaming (~12-13 GB/s) -> ~1.0-1.1 s    ~0.9 tok/s
+
+The GPU figure is only reachable if the KV is resident, and 12.99 GB does not fit in 6 GB of VRAM, so the real tandem
+number at 1M is the PCIe row: **about 1 s/token, an order of magnitude better than CPU-only and an order worse than
+resident.** That is the case for the tiered design: keep the hot window resident on the GPU and stream only the cold
+history, which is exactly the strata/tiering pattern, and it makes the PCIe row the floor rather than the ceiling.
+None of the three rows above has been measured end to end at 1M - they are bandwidth arithmetic on measured throughput,
+which is why the tier work has to come before any claim about 1M speed.
