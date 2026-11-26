@@ -111,3 +111,55 @@ What IS real and valuable: `vram_load_order` is a complete priority permutation 
 pack. Residency is decided offline, once, and the engine just walks the list - whereas our engine decides at runtime with
 `IN2_RES_GB`. The first entries cluster in high expert indices (2176+, i.e. layers 17+), consistent with ordering by use.
 rather than guessed.
+
+## Section 0 is a ZSTD manifest - and it contains the drafter
+
+`strata_reader.cpp:71-107` decompresses section 0 with ZSTD into `manifest_json_`. Decompressed: 92,499 bytes of JSON. This is
+the single most informative artifact in the pack.
+
+    format        strata-v1.1
+    build         SQ-10
+    arch          inkling2_loop
+    allocation    global_hessian_knapsack_v2
+    trunk_tensors 646        dspark_tensors 54
+    num_physical_layers 24   num_experts_per_layer 128
+    quant         modelopt / NVFP4
+
+### The codebooks are per-expert BIT ALLOCATION, not per-tensor-group
+
+    code_counts: S3_K+S3_K : 658, S3_K+S2_K : 1,814, S2_K+S2_K : 585, SF4+SF4 : 15   (sum 3,072 = every expert)
+
+Each expert gets a gate/up codebook and a down codebook selected from {2-bit, 3-bit, 4-bit-float}, chosen by
+`global_hessian_knapsack_v2`. That is the answer to the earlier measurement (`distinct gu_code_id = 3`) - three *schemes*, not
+three shared codebooks: **mixed precision per expert, allocated by a global Hessian knapsack**. My earlier reading that this was
+"per tensor group" was wrong in substance; the three ids are three bit-widths and the assignment is per expert.
+
+### DSpark: the drafter, fully specified
+
+`mtp_config` plus 54 tensors, **216.2 MB total**:
+
+    3 layers, each: q/k/v/o proj (plus *_ctx cross-attention variants), mlp gate/up/down (intermediate 9216),
+                    input/post layernorm, dflare_norm, q_norm/k_norm
+    markov_head:    markov_w1 [201024, 256] Q8_ROW (52 MB), rnn_proj [768, 5120], hidden_out [2304, 256]
+    mask_embed [2304], fuse_weight [4,4], norm [2304]
+    formats: 27 x S5_K, 24 x F32, 3 x Q8_ROW
+
+    block_size 8            -> predicts 8 tokens per step
+    markov_rank 256         -> the Markov head's rank over the 201,024-token vocabulary
+    target_layer_ids [5, 23, 41, 48]   -> consumes hidden states from those four target-model layers
+    local_layer_ids [0, 2]  -> sliding_window_size 1024 on those
+    rope_theta 1e6, 24 heads / 8 KV heads, head_dim 128, hidden 2304
+
+So a real drafter exists for this model, is 216 MB, is a 3-layer cross-attention + rank-256 Markov head that reads four
+intermediate layers of the target and emits 8 tokens per step. That is why upstream reports 1.7-3.1x at unchanged output: their
+acceptance comes from this module, not from n-gram matching.
+
+**To use it here** we would need: (a) extract 216 MB by the manifest's own offsets, (b) dequantise or port `S5_K` and `Q8_ROW`,
+(c) implement the 3-layer cross-attention against our layers 5/23/41/48, (d) implement the Markov head. That is a project with a
+clear specification, not a session. It is now the only path to beating upstream's speed at identical output.
+
+### One open discrepancy, flagged rather than guessed
+
+`target_layer_ids` ends at **48**, which implies indices 0..48 exist (49 blocks), while our GGUF reports `block_count = 48` and
+the trunk here lists 646 tensors against our 734. Either the target ids are 1-based, or the two distributions differ in layer
+count. Not resolved; it matters because the drafter keys off those exact indices.
