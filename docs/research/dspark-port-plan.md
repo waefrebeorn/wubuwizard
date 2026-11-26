@@ -224,3 +224,33 @@ tensors, different shapes and fan-ins, landing on the same invariant.
 should not be more introspection - it should be ground truth. We already have 12 oracle continuation ids; a correct stage 3
 would draft tokens that agree with them at a high rate. Implementing the Markov head and measuring draft-vs-oracle agreement
 turns this from "is my activation scale plausible" into a pass/fail number.
+
+## Stage 3 (Markov head) implemented and its dynamics are stable - which sharpens the stage-2 problem
+
+Semantics, read from the kernels:
+
+    joint[5120] = [ state[256] | markov_w1[prev_tok][:256] | hidden[2304] | f_rnn_ctx[2304] ]
+    proj  = joint @ rnn_proj^T + rnn_proj.bias                       -> [768]
+    g     = sigmoid(proj[0:256]);  cand = tanh(proj[256:512])
+    state = cand + g*(state - cand);  lat_out = tanh(proj[512:768])
+    corr  = lat_out @ hidden_out^T + hidden_out.bias
+
+`tools/dspark_stage3.py`, 7 steps, weights straight from the pack:
+
+    step  state_rms  state_absmax  corr_rms  corr_absmax
+       0     0.5325        0.9996    1.3172       4.8077
+       3     0.6644        1.0000    1.3304       4.8324
+       6     0.7031        1.0000    1.3299       4.8660
+
+State converges upward and saturates at the tanh bound; `corr` sits at rms 1.33 with an absmax of 4.8 and does not drift across
+seven steps. **That is what a correctly wired recurrent head looks like** - the tanh/sigmoid structure bounds it by construction,
+and the numbers are consistent with hidden_out's verified stdev (0.0626) applied to a 256-dim tanh output.
+
+**The contrast is the useful result.** Stage 3 is stable on the same weights where stage 2 grows 3.9 -> 7.1 -> 13.4 per layer.
+Both run on the same dequantised tensors and the same verified extractor, so the weights are not the differentiator: **the block
+stack's wiring is.** That is now the single hypothesis left, and it is narrow - the candidates inside stage 2 are the residual
+adds, the attention output scale, or a missing normalisation of the block state after the residual.
+
+What remains for a ground-truth number is the unembed rows: scoring is `dot(corr, unembed[cand])` and those 201,024 rows live in
+the trunk, not in the DSpark package. The next step is a small engine-side dump of the rows for the 12 known oracle ids, then
+draft-vs-oracle agreement becomes a percentage instead of an opinion.
