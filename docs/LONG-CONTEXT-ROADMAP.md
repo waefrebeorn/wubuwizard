@@ -490,3 +490,21 @@ Note on method: the first run of this build failed to compile, so `gen_fast.exe`
 runs returned EMPTY IDS lines. The equality check `[ "$A" = "$B" ]` compared "" to "" and reported "oracle exact". That
 is the fourth degenerate comparison this session and the fix is the same one every time: **require the reference to be
 non-empty before believing an equality**, never just check that two sides agree.
+
+## Residency ruled out: the prefill resident tier hits 97.7 %
+
+    IN2_GPU_DENSE=1 prefill, 120 tokens:  RESSTAT hit=4679 miss=110 evict=0 slots=110 budget=0MB rate=97.7 %
+
+110 misses for the whole run is the weight set itself being filled once (48 layers x 2-3 matrices), so every projection
+after the first is a device hit. The 1.5 MB-per-call residency theory is dead, and with it the last of the three suspects
+that were about data movement into the card.
+
+What is left is the shape of the call, not the data:
+- `wubu_cuda_matvec_iq2xxs` ends in `return cudaDeviceSynchronize() == cudaSuccess ? 0 : -2;` - so every single projection
+  is a blocking round trip. A prefill makes one call per 8-token group per projection per layer; the useful work per call
+  is a 2304-wide matvec and the sync latency is paid on top of it, with no overlap between layers.
+- the whole token block is re-quantised per call on the host.
+
+So the next lever is not bandwidth and not the kernel: it is **one synchronisation per layer instead of one per projection**
+(launch async, sync where the result is first read), which is cheap to try and directly measurable against the 12,913 ms
+CPU baseline. Measure that before any further kernel work.
