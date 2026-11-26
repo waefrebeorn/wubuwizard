@@ -249,3 +249,15 @@ What remains is not decoding but *reimplementation*: 3 layers of cross-attention
 5/23/41/48, a rank-256 Markov head over a 201,024-token vocabulary, `block_size = 8`, and a per-step short-conv snapshot ring
 for partial-accept rollback (which their `CpuSlot` does and which our `in2_kv_conv_save/restore` mirrors with a single snapshot).
 The format is no longer an obstacle; the work is now ordinary engine work.
+
+## DSpark materialised: 54 tensors, 1.2 GB of f32 on disk
+
+    tools/strata_extract.py <pack> --dump-dspark C:/Users/eman5/models/inkling-2-strata/dspark-f32
+    -> 54 files, 1.2 GB
+
+Names keep their dots as a flat filename (`dspark.layers.0.self_attn.q_proj.weight.f32`), so a shell `find -name q_proj...`
+will not match - quote the wildcard. Sizes check out against the manifest's own element counts:
+q_proj [3072,2304] = 7,077,888 floats = 28,311,552 B, hidden_out [2304,256] = 589,824 floats = 2,359,296 B.
+
+The drafter is now ordinary data in a trivially readable format. Nothing about the .strata container blocks this project any
+more; what remains is implementing it against our engine.
