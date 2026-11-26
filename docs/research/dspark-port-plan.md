@@ -441,3 +441,43 @@ the prompt.
 
 So the next run must dump taps from a real prefill - at least a few hundred positions - and rebuild the loop from that. The
 mechanism is already there (`IN2_DUMP_VISITS` during a longer `--text` prefill); only the input is wrong, again.
+
+## Three input hypotheses tested against a real prompt; all three fail to move 0/7
+
+The `--text` mystery was my own invocation, not the tool: `text_mode` requires `argc >= 4`, so `gen_fast 1 --text` silently fell
+through to numeric prompt parsing and turned `"--text"` into token 0. With a dummy third argument the tokenizer runs:
+
+    TEXT_FILE 1302 bytes cap 1310      ->  281-position prefill, visit-5 dump = 2,589,696 B = 281 x 2304
+
+So the context cache now really holds 281 positions. Rebuilding the loop on that, with the anchor set to the last prompt token
+(220) and the oracle being the engine's own continuation for the same prompt:
+
+    step    prev   draft  oracle      score  ok
+       0     220  150327    1377     52.960   n
+       1  150327  167207   68014     54.416   n
+       ...
+    accepted prefix: 0/7                               drafted [150327, 167207, 167207, 167207, 170409, 146120, 146120]
+
+**Context length was not the blocker.** Then the last unused tensor in the pipeline, `dspark.norm` (rms 3.09, matching the trunk
+taps' own 2.9-7.7), applied to the block output before the head:
+
+    step    prev   draft  oracle      score  ok
+       0     220  201014    1377     12.281   n
+    accepted prefix: 0/7                               scores collapse to 12-17, drafts no better
+
+**Post-norm was not the blocker either.** It is left in the code behind `IN2_DSPARK_POSTNORM=1` and off by default, because an
+unvalidated change should not become the baseline.
+
+### What has been eliminated, and what that implies
+
+Eliminated by measurement, each one a hypothesis I considered likely: the block input placeholder (anchor embedding, cosine
+0.036 with mask_embed), the context length (1 -> 281 positions), and the missing final norm. Also eliminated earlier: weight
+orientation (only one combination composes) and a constant dequant error (ratios scatter).
+
+What remains is not another input guess. The port is structurally complete - every stage runs, the head is stable, the shapes
+compose - but functionally it is wrong, and after five eliminations the productive move is to stop guessing at the inputs and
+get a **reference from their own engine**. They ship a CPU backend (`engine/src/inkling2/ink_cpu_backend.cpp`) that decodes all
+these formats and runs the same drafter. Building it and dumping the block output and `corr` for the same prompt would let us
+diff intermediates tensor by tensor, which converts this from hypothesis testing into ordinary debugging.
+
+That is the next step, and it is the one that actually ends the guessing.

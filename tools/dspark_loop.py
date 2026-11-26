@@ -41,9 +41,19 @@ def engine_top1(base_vec, corr_vec):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--taps', default=TAPD)
+    ap.add_argument('--oracle', default=','.join(map(str, ORACLE)))
+    ap.add_argument('--anchor', type=int, default=ANCHOR)
+    ap.add_argument('--embd', default=os.path.join(TMP, 'our_embd.bin'))
+    a = ap.parse_args()
+    tapd = a.taps
+    oracle = [int(x) for x in a.oracle.split(',')]
+    anchor = a.anchor
     taps = []
     for v in (5, 23, 41, 47):
-        p = sorted(glob.glob(os.path.join(TAPD, f'V{v:03d}_*.bin')))
+        p = sorted(glob.glob(os.path.join(tapd, f'V{v:03d}_*.bin')))
         taps.append(np.fromfile(p[0], dtype='<f4').reshape(-1, H))
     M = min(t.shape[0] for t in taps)
     taps = np.stack([t[:M] for t in taps])
@@ -52,11 +62,16 @@ def main():
     # Block init exactly as emit_dspark_backbone does it: slot 0 is the anchor token embedded and passed
     # through token_embd_norm, slots 1..B-1 are mask_embed. The anchor embedding comes from the engine's own
     # post-embedding dump (IN2_DUMP_EMBD with the anchor as the only input token).
-    anchor_emb = np.fromfile(os.path.join(TMP, 'our_embd.bin'), dtype='<f4')
+    anchor_emb = np.fromfile(a.embd, dtype='<f4')
     assert anchor_emb.size == H, anchor_emb.size
     x0 = np.repeat(mask[None, :], B, axis=0)
     x0[0] = anchor_emb
     h = s2.forward(x0, taps, fuse, W, np.arange(M, M + B), np.arange(M), B)
+    # Final norm before the head: dspark.norm is unused elsewhere in this pipeline and RMSNorm with its weight
+    # (rms 3.09, matching the trunk taps' own 2.9-7.7) is what maps the block stream into the hidden distribution
+    # the unembed matrix expects. IN2_DSPARK_POSTNORM=0 disables it for an A/B.
+    if os.environ.get('IN2_DSPARK_POSTNORM', '0') == '1':
+        h = s2.rmsnorm(h, s2.load(W, 'dspark.norm.weight'))
     w1 = s2.mat(W, 'dspark.markov_head.markov_w1.weight', 201024, R)
     rp = s2.mat(W, 'dspark.markov_head.rnn_proj.weight', 768, 5120)
     rpb = s2.load(W, 'dspark.markov_head.rnn_proj.bias')
@@ -68,11 +83,11 @@ def main():
                       s2.load(W, 'dspark.layers.2.dflare_norm.weight'))
 
     state = np.zeros((B, R), dtype=np.float32)
-    prev = ANCHOR
+    prev = anchor
     drafted = []
     print(f"{'step':>4} {'prev':>7} {'draft':>7} {'oracle':>7} {'score':>10}  ok")
     for i in range(STEPS):
-        joint = np.concatenate([state[i], w1[prev], h[i], frnn[0]], axis=0)[None, :]
+        joint = np.concatenate([state[i], w1[prev], h[i], frnn[-1]], axis=0)[None, :]
         proj = joint @ rp.T + rpb
         g = sig(proj[:, :R]); cand = np.tanh(proj[:, R:2 * R])
         state[i] = cand + g * (state[i] - cand)
@@ -80,18 +95,18 @@ def main():
         corr = (lat @ ho.T + hob)[0]
         tok, sc = engine_top1(h[i], corr)
         drafted.append(tok)
-        ok = 'Y' if tok == ORACLE[i] else 'n'
-        print(f"{i:>4} {prev:>7} {tok:>7} {ORACLE[i]:>7} {sc:10.3f}  {ok}")
+        ok = 'Y' if tok == oracle[i] else 'n'
+        print(f"{i:>4} {prev:>7} {tok:>7} {oracle[i]:>7} {sc:10.3f}  {ok}")
         prev = tok                                     # feedback: the loop consumes its own drafts
 
     acc = 0
-    for a, b in zip(drafted, ORACLE):
-        if a == b:
+    for x, b in zip(drafted, oracle):
+        if x == b:
             acc += 1
         else:
             break
     print(f"\ndrafted   {drafted}")
-    print(f"oracle    {ORACLE}")
+    print(f"oracle    {oracle}")
     print(f"accepted prefix: {acc}/{STEPS}")
 
 
