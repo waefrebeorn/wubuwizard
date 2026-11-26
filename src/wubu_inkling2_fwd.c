@@ -621,9 +621,20 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                     if (nn == 1 && getenv("IN2_GPU_DENSE") && t && t->info && t->info->name[0] &&
                         strstr(t->info->name, "exps") == NULL) {
                         in2_gpu_init();
-                        if (in2_gpu_state == 1 &&
-                            in2_gpu_resident(ty, base, (size_t) rb * (size_t) n_out, ap[0],
-                                             (int) (ablk * (size_t) nab), op[0], n_in, n_out, (int64_t) rb) == 0) {
+                        const int g_rc2 = (in2_gpu_state == 1)
+                            ? in2_gpu_resident(ty, base, (size_t) rb * (size_t) n_out, ap[0],
+                                               (int) (ablk * (size_t) nab), op[0], n_in, n_out, (int64_t) rb)
+                            : -99;
+                        if (g_rc2 != 0 && getenv("IN2_GPU_TRACE")) {
+                            static int w2[256];
+                            if (ty >= 0 && ty < 256 && !w2[ty]) {
+                                w2[ty] = 1;
+                                fprintf(stderr, "NT-GPU refused ty=%d rc=%d actb=%d wb=%zu (%s)\n",
+                                        ty, g_rc2, (int) (ablk * (size_t) nab), (size_t) rb * (size_t) n_out,
+                                        t->info->name);
+                            }
+                        }
+                        if (g_rc2 == 0) {
                             gpu_took = 1;
                             if (in2_gpu_calls++ == 0)
                                 fprintf(stderr, "GPU tier: engaged (%s)\n", t->info->name);

@@ -718,3 +718,28 @@ The only float tensor in this block is `sink` (type 30), which is 24 wide and ir
 What follows is simple and was always available: put the resident hook in `in2_matvec_nt` at **fwd.c:560**, next to its
 `wubu_iq_rows` call, instead of in `in2_matvec_quant_mt`. The destination is ready - Q8_0 is verified at 3.8e-06 and
 Q6_K is the only dense type still lacking a device kernel.
+
+### attn_q is not one format: it changes per layer, so "add a Q6_K kernel" was wrong
+
+With the hook finally in `in2_matvec_nt` and a refusal trace that prints once per type, a 4-token decode says:
+
+    NT-GPU refused ty=14 rc=-1 actb=2628 wb=5806080 (blk.0.attn_q.weight)    Q6_K
+    NT-GPU refused ty=13 rc=-1 actb=2628 wb=4866048 (blk.3.attn_q.weight)    Q5_K
+    NT-GPU refused ty=12 rc=-1 actb=2628 wb=3981312 (blk.18.attn_q.weight)   Q4_K
+    NT-GPU refused ty=18 rc=-1 actb=2628 wb=2709504 (blk.20.attn_q.weight)   IQ3_XXS
+
+**`attn_q` is Q6_K on layer 0, Q5_K on layer 3, Q4_K on layer 18 and IQ3_XXS on layer 20**, and the tensor byte
+sizes step down with them (5.81 MB -> 4.87 -> 3.98 -> 2.71 for the same 2304x3072 shape). Reading type 14 from
+`blk.0` and concluding "q is Q6_K" was a sample-of-one error, and it means the dense tier needs **four** more device
+kernels, not one, before the whole attention block can be resident. Each is a K-quant with its own block layout and
+super-block scales, so this is not one afternoon's work; the reference harness exists for each of them now.
+
+Good news in the same output: the type gate works exactly as intended. Every unverified type is refused with `rc=-1`
+and falls through to the CPU kernel, and the tokens stay identical:
+
+    149876 220 36838 182189 149933 220
+
+Also still unexplained and worth saying plainly: type 8 (attn_k, attn_v, attn_output, attn_rel) neither engages nor is
+refused - nothing is printed for it. So either those calls do not reach this hook at all, or they succeed without the
+one-shot message firing because another hook incremented the counter first. One print of the counter inside the hook
+distinguishes those two, and it is the next edit rather than another guess.
