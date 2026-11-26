@@ -1272,3 +1272,30 @@ Ranked, measured, and unchanged by anything in the GPU line of work:
     q    16.2 %   SINGLE-THREADED, 9 % recoverable
     attn  7.5 %   partly parallelised this session (3.8 % overall gain)
     gate+wo 6.8 %
+
+## Fourth attempt at `q`: parallelising the group loop in in2_matvec_nt changed nothing
+
+Added `#pragma omp parallel for schedule(dynamic) reduction(&:done)` to the 8-token group loop, which is independent per
+group (each writes only `Y + (g+i)*n_out`, reads the shared already-quantised `act`). Built clean, oracle exact, and:
+
+    before (batched q, reverted)   layers 5.334 s   q 0.857 s
+    after  (group loop parallel)   layers 5.516 s   q 0.865 s     -> no gain, 3 % worse
+
+Reverted. The most likely reason, and it is an important one for anything attempted next: **OpenMP does not nest by
+default.** `in2_matvec_quant` and the row-split helpers inside this loop already create regions; an outer
+`parallel for` therefore runs with one thread and its inner regions are serialised, so the pragma adds fork/join cost and
+buys nothing. Any future attempt at this loop has to either set `omp_set_max_active_levels` / `OMP_NESTED` and measure
+whether nesting actually helps here, or restructure so there is exactly ONE parallel region and the inner calls are
+explicit serial kernels.
+
+Four attempts now at the second-largest component in the engine, all revertible and all reverted:
+
+    1. batch q across tokens (nt = 60)              -> no change
+    2. residual-claim: q is call-bound              -> refuted (batching would have moved it)
+    3. parallelise the group loop                   -> no change, and nesting is why
+    4. (earlier) parallelise the attention loop      -> 3.8 % overall, kept
+
+What `q` needs is a measurement I still do not have: whether `in2_matvec_quant` for `wq`'s type reaches the kernel at all,
+or falls to the float path. The `IN2_TRACE_NT` line said `ty=8 ... -> kernel`, but that trace is emitted before the branch,
+not by it. Printing inside the taken branch - once per type - would settle it, and that is the next step rather than another
+speculative pragma.
