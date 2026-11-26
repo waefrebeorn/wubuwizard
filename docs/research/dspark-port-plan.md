@@ -824,3 +824,46 @@ that no intermediate value from this implementation has ever been compared again
 run here (private UCRT import), but a local build will, and `common/speculative.cpp` already implements `draft-dspark` against this
 exact drafter GGUF. That gives a reference that can be executed on this machine, for this model, with intermediate values to
 compare - the thing every failed hypothesis this session was missing.
+
+## A working upstream reference now exists on this machine - but it cannot load this trunk, and the reason is a real format mismatch
+
+**The reference binary builds and runs.** The shipped `build-ref` was MinGW/UCRT and imported
+`api-ms-win-crt-private-l1-1-0.dll`, a private UCRT shim that consumer Windows does not ship, so it exited 127 with no output -
+my earlier diagnosis, now confirmed by fixing it. `tools/build_upstream_msvc.bat` builds with MSVC 19.44 (WinLibs MinGW and
+MSVC differ precisely in whether they link the public UCRT):
+
+    llama.exe --version -> version 1.0.0-dev, built with MSVC 19.44.35222.0 for Windows AMD64
+
+Three CLI details cost a few attempts and are recorded so they need not be rediscovered: `llama.exe` is now a **multicall** binary
+(`llama.exe cli ...`), `--draft-max` was **removed** (use `--spec-draft-n-max`), and `-no-cnv` no longer exists. The speculative
+type is inferred from the drafter GGUF's metadata, so `-md dspark-...gguf` alone selects `draft-dspark`.
+
+**Then it refused the model, in two stages.**
+
+    llama_model_load: error loading model: check_tensor_dims: tensor 'blk.24.attn_q.weight' not found
+
+The trunk declares `inkling2.block_count = 48` but physically holds `blk.0..blk.23` - 24 layers. Our engine reads 48 as the visit
+count of the loop-core schedule (24 physical layers, 48 visits, the accounting settled earlier in this document); upstream reads it
+as the layer count and demands 48 layer tensors. Patching the single value to 24 in a copy (`tools/gguf_patch_kv.py`, a same-size
+in-place rewrite) produced the second and decisive error:
+
+    key inkling2.attention.head_count has wrong array length; expected 24, got 48
+
+So the file is **visit-indexed throughout**, not merely in `block_count`: its per-layer arrays carry 48 entries. Upstream wants
+physical-layer indexing. That is not a byte patch - it is a header rewrite with a data shift, because dropping array entries changes
+the header length and moves every tensor offset.
+
+And the entries cannot simply be truncated to the first 24: under the schedule read from the engine's own code (visits 0-5 = L0-L5,
+6-17 = L6-L17, 18-29 = the core again, 30-41 = the core again, 42-47 = L18-L23) the first 24 visit entries cover L0-L17 twice over
+and **omit L18-L23 entirely**. The physical selection is `[0..17] + [42..47]`. Getting that wrong would silently miswire two thirds
+of the layers.
+
+**Where this leaves the reference goal.** A runnable upstream exists, but there is no trunk it can load on this machine: the only
+local export is visit-indexed. Reaching a reference therefore needs either a physical-indexed export of the trunk, or a header
+rewriter that maps the 48-entry visit-indexed arrays down to 24 physical entries using the schedule above. The 8.5 GB patched copy
+was deleted rather than left to rot on disk.
+
+**This also reframes the whole port.** If the model's own metadata is visit-indexed, then a drafter consuming "taps at 4 target
+layers" is consuming *visits*, and every intermediate I have computed this session used engine dumps taken at visit indices - which
+is consistent with the design rather than a mistake. What has never been checked is whether the drafter's `ctx_mix` expects the four
+taps in visit order or in physical-layer order, and that question is now answerable from the model file rather than by guessing.
