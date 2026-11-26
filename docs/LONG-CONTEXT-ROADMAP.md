@@ -1329,3 +1329,27 @@ measured at 480 ms - but nothing further should be tried before that number exis
 
 Also recorded: this session never checked compiler WARNINGS until now, only `" error"`. That is how a silently-ignored
 pragma could have hidden - it did not, but the check should be part of the build loop from here.
+
+## `q` is not a threading problem, and the label is again wider than the thing
+
+Two measurements killed the threading explanation outright:
+
+    grep omp_set_num_threads / omp_set_dynamic / omp_set_max_active_levels   -> none anywhere in src/
+    OMP_NUM_THREADS=8 forced, 60-token prefill                               -> q 0.862 s (unchanged, 15.8 %)
+
+`in2_matvec_quant` contains no OpenMP at all (checked, 0 hits in its body), so nesting was never the blocker either, and
+with the process-wide team size forced to 8 the `q` interval does not move by a millisecond. **11.9 GMAC/s is therefore not
+a threading measurement - it is what that interval costs.**
+
+And the interval is wider than the label says. FP2 markers bound the phases, and the `q` interval is FP2(1) at line 130 to
+FP2(2) at line 155 - twenty-five lines, of which the `wq` matvec is about six. Everything between `mix+gates` and `q` is
+priced into "q": the `xq` preparation, the norms, the clip and the tau scaling. So the 0.862 s does not belong to `wq` until
+a marker separates it.
+
+**This is the third time this session that a label was wider than the work it names** - `sliding` measured a layer class, the
+MoE histogram measured decode positions, and now `q` measures a 25-line interval. The rule that keeps proving true: a phase
+name is a bookmark, not a definition; read the two marker lines and see what lies between them before attributing time.
+
+The next step is one inserted marker between the `xq` preparation and the `wq` projection, then re-read the table. That is a
+single line, it settles whether `q` is the matvec or the preparation, and it is the only way to know which of the two - if
+either - is worth optimising. No further attempt on this component until that line exists.
