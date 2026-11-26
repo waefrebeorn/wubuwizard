@@ -1105,3 +1105,36 @@ anomaly, so it belongs next to rule 75 rather than in the narrative.
 State after this: full layers 0.097 s and at the kernel's rate; sliding 0.390 s of which MoE is 0.205 s (scaling 3.4x,
 healthy) and the rest is small. Steady-state decode 0.164 s/token. There is no remaining phase that is an order of
 magnitude below its format's rate - the 20x anomaly is closed, and what is left is the MoE's own volume.
+
+## Wave 14 - closing verification
+
+closing verification after today's changes: 12/12 oracle parity, 6.2 tok/s decode
+
+Final state of the working tree, verified on the built binary rather than from notes.
+
+PARITY - full oracle P1, 12 tokens, exact:
+    149876 220 36838 182189 149933 220 50843 11 149984 149933 151534 149919
+This covers the whole session's changes: the gate/wo borrow fix, IN2_FULL_KERNEL as the default, the resident device
+tier, the 320-slot slab cache, and the reverted attention experiment.
+
+THROUGHPUT, steady state (per-token layer time from the phase table, not a run average):
+    0.160 / 0.162 / 0.157 s per token = 6.2 tok/s at 8 threads
+against upstream llama.cpp's 4.31 tok/s on the same file and box, i.e. 1.44x.
+
+End-to-end 16-token runs before and after today's fix: 4.21-4.23 -> 4.83-4.88 tok/s (+15%). The 32-token figures
+(4.44, 4.98) carry the usual contention spread and should not be quoted as a rate.
+
+WHERE THE TIME IS NOW, and it is no longer a defect:
+    full layers    0.097 s   at the kernel's rate (was 0.313 s, a 20x anomaly)
+    sliding layers 0.390 s   of which MoE 0.205 s scaling 3.4x, everything else small
+    decode total   0.160 s/token
+
+The MoE is 4.6 G weights per token (72 visits x 8 of 128 experts x 8 M weights) at ~46% of the single-thread kernel
+rate across 8 threads. That is the format's own volume of arithmetic, not a pathology: at 0.33 B/weight it is 1.5 GB of
+reads per token, which is the 1,535 MB traffic figure from rule 44 arriving from the other direction. Rule 64 already
+measured that speculative batching cannot pay here (rho(9) = 7.83), so the decode lever is fewer expert weights or
+better expert locality, neither of which is a kernel fix.
+
+No remaining phase measures an order of magnitude below its format's rate. The session's throughput work is done; what
+is left of the original goal is long context, which is memory- and architecture-bound and has its own reference
+(long-context-kv-budget, and the exact-replay stack in Wave 10).
