@@ -163,3 +163,52 @@ empirical hope. At b=4 it is 18 MB and 0.009 MSE, 170x smaller.
 What it does not buy: nothing here says anything about retrieval *quality* on real embeddings. The error is on random
 unit vectors. Whether 3.2% squared coordinate error preserves the neighbour ordering of real encoder outputs is a
 separate measurement that needs actual embeddings, and the caveat section above is still the architectural decision.
+
+## Verification 2: does the quantiser preserve neighbour ORDER? Only with a re-rank
+
+The distortion bound is now established, but a bound on `||x - x_hat||^2` does not by itself preserve the top-10 by
+inner product, and that is the only thing retrieval cares about. `tools/turboquant_recall.c` measures it on data with
+the geometry real embeddings have - clustered and anisotropic (C centres in a K-dimensional subspace, small noise,
+normalised) - rather than uniform on the sphere, because uniform data is the easy case.
+
+Corpus 20k items, 200 queries, ground truth = exact top-10:
+
+    d=32, 200 clusters, intrinsic dim 8
+    bits  recall@10   +re-rank top-100   bytes/item
+    1     0.235       0.946              6.0
+    2     0.225       0.938              10.0
+    3     0.310       0.989              14.0
+    4     0.446       0.998              18.0
+
+    d=128, 200 clusters, intrinsic dim 32
+    1     0.275       0.997              18.0
+    2     0.253       0.997              34.0
+    3     0.312       0.999              50.0
+    4     0.446       1.000              66.0
+
+    d=32, 500 clusters, intrinsic dim 16  (more clusters -> easier discrimination)
+    1     0.433       1.000              6.0
+    2     0.410       1.000              10.0
+    3     0.486       1.000              14.0
+    4     0.624       1.000              18.0
+
+Two conclusions, and the first one is a negative result that changes the architecture:
+
+**Quantised scoring ALONE is not good enough.** Recall@10 by quantised inner product is 0.23-0.62. The reason is
+structural rather than a defect: within a cluster the neighbours are near-ties (noise is 0.35/sqrt(d) per coordinate),
+so a 3 % coordinate error reshuffles the top ten even when it puts every true neighbour in the top hundred. Anyone
+proposing "quantise and search" without a re-rank is proposing 30 % recall.
+
+**The two-stage design recovers essentially all of it.** Take the quantised top-100, re-score those exactly, keep the
+top-10: recall is 0.938-1.000 across every configuration tested, including b=1 at 6 bytes per item. That is the whole
+argument for the architecture, and it is now measured rather than assumed.
+
+Cost accounting for the two stages at d=32, b=3, 1M items: the scan touches 14 MB, and the re-rank touches 100 items x
+4 B x 32 dims = 12.8 KB. So the exact stage is ~1000x cheaper than the scan and is not a meaningful part of the query
+cost. The scan is the query cost, and it is 14 MB against 3.07 GB - which is why this is worth building.
+
+One caveat that follows from these numbers and should be stated before anyone tunes anything: recall@10 quantised-only
+did not improve monotonically with bit-width in the first two tables (0.235 at b=1 above 0.225 at b=2 on d=32; 0.275
+above 0.253 on d=128). That is not a bug in the codebook - the probe showed MSE falling monotonically. It is the ranking
+metric saturating against near-ties: past a point, more bits do not change WHICH items are top-10 because the top-100 set
+is already correct. Bit-width buys the candidate set, and the candidate set is what the re-rank consumes.
