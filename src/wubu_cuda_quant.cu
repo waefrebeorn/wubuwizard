@@ -797,6 +797,11 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
                                          int K, int n_cols, int64_t col_stride_bytes)
 {
     if (!h_w || !h_act || !h_y || wbytes == 0 || act_bytes <= 0 || K <= 0 || n_cols <= 0) return -1;
+    /* Only types with a kernel whose numbers have been checked against a reference may be resident. The generic
+     * wubu_cuda_quant_matvec returns success and writes nothing (Q8_0 did exactly that: 0 of 512 rows non-zero), so
+     * letting an unverified type through here produces zeros for that tensor and quietly wrong tokens - measured as
+     * the last token of a 6-token greedy run moving from 220 to 167815 the first time this gate was missing. */
+    if (type != 8 && type != 16 && type != 22 && type != 23) return -1;
 
     int slot = -1;
     for (int i = 0; i < g_res_n; ++i) if (g_res_key[i] == h_w && g_res_bytes[i] == wbytes) { slot = i; break; }

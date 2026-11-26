@@ -612,10 +612,29 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                         op[i] = Y + (size_t)(g + i) * n_out;
                     }
                     const clock_t _k0 = clock();
+                    /* LP-22: the resident tier gets first refusal. Same weights, different address space - the card
+                     * receives the quantised activation (2.4 KB at n_in=2304 for q8_0) instead of the matrix (5.6 MB),
+                     * which is where a decode step actually spends its time. Only nn==1 is taken because the resident
+                     * entry runs the single-token kernel; a prefill batch falls through to the CPU kernels unchanged.
+                     * Experts are excluded by name: 48x128 slabs is far more than the resident tier can hold. */
+                    int gpu_took = 0;
+                    if (nn == 1 && getenv("IN2_GPU_DENSE") && t && t->info && t->info->name[0] &&
+                        strstr(t->info->name, "exps") == NULL) {
+                        in2_gpu_init();
+                        if (in2_gpu_state == 1 &&
+                            in2_gpu_resident(ty, base, (size_t) rb * (size_t) n_out, ap[0],
+                                             (int) (ablk * (size_t) nab), op[0], n_in, n_out, (int64_t) rb) == 0) {
+                            gpu_took = 1;
+                            if (in2_gpu_calls++ == 0)
+                                fprintf(stderr, "GPU tier: engaged (%s)\n", t->info->name);
+                        }
+                    }
+                    if (!gpu_took) {
 #ifdef _WIN32
                     if (!in2_rows_parallel(ty, base, (size_t)rb, n_in, ap, nn, op, n_out))
 #endif
                         wubu_iq_rows(ty, base, (size_t)rb, n_in, ap, nn, op, 0, n_out);
+                    }
                     if (ty >= 0 && ty < 256) {
                         in2_ty_sec[ty] += (double)(clock() - _k0) / (double)CLOCKS_PER_SEC;
                         in2_ty_calls[ty] += 1;
