@@ -155,3 +155,34 @@ vector, and the corrected numbers are
 
 Same failure pattern as the degenerate `oracle exact len=0` comparisons earlier in this project: a number that cannot fail,
 reported as if it had been checked.
+
+## Stage 2 runs on real weights - but the activation scale grows, and I do not yet claim it is correct
+
+Wiring resolved from code, not guessed:
+
+    layer il mixes the taps with softmax(fuse_w[il]) normalised by dspark.layers.il.dflare_norm.weight
+        (call site :1445-1449 passes il as the row and dflare_norm as norm_w) - **not** dspark.norm.weight
+    ctx k/v = k_proj_ctx / v_proj_ctx applied to that fused context, kv_ctx_fused = [M, 2048] then split
+    per-head RMSNorm over 128 then NeoX half-split RoPE, theta 1e6, pairs (d, d+64)
+    GQA kh = h/3 (24 q, 8 kv), scale = 1/sqrt(128), non-causal over ctx ++ own block, online softmax
+
+`tools/dspark_stage2.py` runs all three layers against the extracted f32 weights and produces finite output:
+
+    layer 0: fuse w=[0.093 0.113 0.688 0.106]  ctx=1x2304  out_rms= 5.5620
+    layer 1: fuse w=[0.330 0.222 0.348 0.100]  ctx=1x2304  out_rms= 7.8600
+    layer 2: fuse w=[0.180 0.060 0.287 0.473]  ctx=1x2304  out_rms=13.8959
+    out (8, 2304) rms=13.8959 finite=True min=-71.1 max=47.1
+
+**That growth is a red flag, not a result.** Each layer multiplies the state RMS by roughly 1.4-1.8x, which a 3-layer stack
+with pre-norms should not do. Two candidate causes, in order of likelihood:
+
+1. My block input is a placeholder - `taps[3]` repeated 8x. The real block state is the embedding of the 8 draft slots, so the
+   magnitudes here mean nothing. This alone could explain a rising scale.
+2. A genuine wiring error, most likely that the block state should be re-normalised at init (their `dflare_norm` may apply to
+   the state and not only to the fused context) or that I have SwiGLU/`down_proj` orientation wrong.
+
+Until one of those is excluded, this is "the shapes compose and the code runs", not "stage 2 is ported". The diagnostic is to
+feed a real block state - embed 8 token ids - instead of the placeholder and see whether the growth persists.
+
+Also corrected: `dspark.norm.weight` is **not** the norm used in tap mixing (stage 1 used it, wrongly); the mixing norm is the
+per-layer `dflare_norm`. `dspark.norm.weight` is used elsewhere - final output, still to be located.
