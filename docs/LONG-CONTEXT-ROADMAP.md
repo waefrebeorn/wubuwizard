@@ -1484,3 +1484,39 @@ Where the session actually ends, all measured: prefill 5.3 s / 60 tokens with Mo
 34 GMAC/s, efficient), attention 7.5 % (3.8 % won by parallelising it), decode 5.8 tok/s entirely in the forward. The engine
 is not hiding a 10x; it is running its kernels at the rates this 6-core laptop can sustain, and the gaps that remain are
 algorithmic (a drafter - upstream's 1.7-3.1x at unchanged tokens) rather than structural.
+
+## Prompt-lookup speculation: measured acceptance on this engine's own output
+
+Drafted nothing, implemented nothing - just measured what a prompt-lookup drafter WOULD have accepted on 64 tokens this
+engine actually generated (60-token text prompt):
+
+    n = 64   distinct tokens = 11   (the output settles into a 12-token cycle)
+
+    k=1  draftable 52/63   accepted 42   80.8 %
+    k=2  draftable 50/62   accepted 50  100.0 %
+    k=3  draftable 49/61   accepted 49  100.0 %
+    k=4  draftable 48/60   accepted 48  100.0 %
+
+So on THIS output, a suffix-match drafter of length >= 2 would have been accepted every single time, and would have skipped
+~80 % of the forward passes needed to produce those 64 tokens.
+
+**The honest caveat, which matters more than the number:** the output is degenerate - 11 distinct tokens repeating a 12-token
+cycle - because the prompt is a junk text file and the generation has fallen into a loop. A 100 % acceptance rate on a
+repeating sequence says nothing about prose, where the literature puts prompt-lookup at 1.3-2x. What it does establish is
+that the mechanism is available to this engine at zero model cost: the history is already in `toks[]`, the matcher is a
+suffix scan, and verification needs only `in2_forward_at(..., n_draft+1, ...)` - the same call the prefill path already makes
+with multiple tokens.
+
+**Parity is preserved by construction, not by testing:** the drafter only proposes; acceptance compares the target's own
+greedy argmax against the proposal. Any token that is emitted is a token the plain loop would have emitted from the same
+logits, so the 12-token oracle is a hard gate on the whole change rather than an approximation check.
+
+Implementation sketch for whoever picks this up (do NOT begin it without room to build and gate):
+1. in `tools/inkling_gen.c`'s step loop, before the forward, match the longest suffix of `toks[0..n)` that occurs earlier
+   and take up to K tokens that followed it;
+2. call `in2_forward_at` once with the K drafted tokens appended (it already accepts n > 1);
+3. accept while argmax(logits[j]) == draft[j], then emit the first mismatch - one extra forward saved per accepted token;
+4. gate: 12-token oracle identical, and only then look at tok/s.
+
+This is the one remaining lever the measurements point to: decode is 172 ms/token and entirely forward-bound, the forward is
+already near this laptop's per-thread rates, so the only way to go faster at identical outputs is to need fewer forwards.
