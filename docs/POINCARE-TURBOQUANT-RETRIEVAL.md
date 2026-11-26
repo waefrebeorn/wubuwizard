@@ -1065,3 +1065,57 @@ refusals that read exactly like missing kernel support.
 
 Rule from here on: **before any statement about GPU behaviour, compare the DLL's mtime against `src/wubu_cuda_*.cu`,
 and rebuild if it is older.** The check is one `ls`, and skipping it has now cost two wrong findings.
+
+## The tandem GPU is real, and it is worth 7-21 % on decode - not on prefill
+
+Everything above measured prefill, where it turns out the GPU cannot engage at all. The dispatch gate in
+`wubu_inkling2_fwd.c` requires **`nn == 1`** - one activation row - so a prompt batch falls through to the CPU by
+construction. My "GPU on is 6.2 % slower" reading was taken on a 97-token prefill, i.e. on the one phase where the device
+is guaranteed to do nothing but pay its initialisation. Measuring decode instead:
+
+    32 tokens   GPU off  7765 ms  (4.43 tok/s)
+                GPU on   6650 ms  (5.36 tok/s)     +21 %, ids identical across all 32
+
+    24 tokens, interleaved A/B on an idle box
+                off 5510 / 5676 ms      on 5140 / 5112 ms      ~7-10 %
+
+So the device path works, preserves the token sequence exactly, and is worth roughly 7-21 % depending on length. That is
+the first measured tandem win in this project, and it came from testing the right phase rather than the convenient one.
+
+### Why it is only 5 % of the work
+
+`IN2_TIMETY=1` on decode, per type:
+
+    type                 share    rate
+    16  IQ2_XXS          18.0 %   10.19 GOPS
+    42  Q2_0             17.5 %   10.20 GOPS
+    17  IQ2_XS           15.4 %   11.26 GOPS
+    40  NVFP4            13.3 %    6.11 GOPS
+    22  IQ2_S            11.1 %    6.81 GOPS
+    19  IQ1_S            10.9 %    7.96 GOPS
+    23  IQ4_XS            6.8 %    5.79 GOPS
+     8  Q8_0              5.0 %   43.95 GOPS
+
+The GPU accepts **only type 8**, and the trace confirms it (`NT-GPU ok ty=8`; types 12, 13, 14, 18 refuse with rc=-1).
+The six MoE types that are 75 % of decode time never reach the device because the gate excludes them by name
+(`strstr(t->info->name, "exps") == NULL`), deliberately: 48 x 128 expert slabs is 7.25 GB and will not fit beside the
+model on a 6 GB card.
+
+### Opening the experts measured a 14 % LOSS, so the exclusion is correct
+
+Behind a new `IN2_GPU_EXP` flag, allowing expert tensors through the same resident tier:
+
+    off                2333 ms
+    dense only         2335 ms
+    dense + experts    2658 ms      +14 % slower
+
+Because the experts are not resident they stream: each call pays the transfer of a slab that cannot stay on the card, and
+8 of 128 experts are chosen per token so the access pattern is unpredictable. The name filter is not an oversight, it is
+the correct default, and it was reverted rather than kept behind a flag that only ever loses.
+
+### What that leaves
+
+The device path is bounded by residency, not by arithmetic. A hot-expert cache - keeping the experts that the router
+actually selects most often resident and streaming only misses - is the only way to move the 75 % and it is a real
+feature, not a flag. Until then the honest summary is: **the GPU contributes ~5 % of the work and buys 7-21 % of decode
+speed; prefill (the phase that decides whether long context is usable at all) is CPU-only by construction.**
