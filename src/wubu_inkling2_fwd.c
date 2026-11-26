@@ -1921,6 +1921,7 @@ static const unsigned char *in2_expert_slab(gguf_ctx *ctx, const wubu_in2_tensor
 int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
             int il, const float *x, int n_tok, float *out)
 {
+    if (getenv("IN2_MOE_NTOK")) fprintf(stderr, "MOENT il=%d n_tok=%d%c", il, n_tok, 10);
     const wubu_in2_layer_t *L = &m->layer[il];
     const int d = cfg->d_model, NE = cfg->n_expert, TOPK = cfg->n_expert_used, DFF = cfg->d_ff_expert;
     /* Borrowed: the router matrix is a read-only matvec weight and was being copied (1.1 MB) and freed on every visit. */

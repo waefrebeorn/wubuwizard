@@ -721,3 +721,26 @@ is the cheapest thing in this document.
 
 Method note, because this is the third time: I have twice now "proved" something by reading call sites and been contradicted
 by the measurement. Reading tells you what CAN happen; only the trace tells you what DID.
+
+## Trace settles it: prefill gives MoE the whole token block - 48 calls of n_tok=120
+
+Three lines at the top of `in2_moe` under `IN2_MOE_NTOK`, one 120-token prompt, one generated token:
+
+    48  n_tok=120
+
+So the block IS there: one `in2_moe` call per layer, each carrying all 120 tokens. Step 1 of the grouped-GEMM plan - "build a
+token-blocked MoE stage" - is therefore **already done at the entry point**, and the histogram's earlier silence about
+prefill was an artifact of where the counter sits inside the function, not evidence about the block size.
+
+What that leaves: the block arrives at `in2_moe` and is then broken apart. The evidence is the same histogram - 383 routings
+for a 480-token prompt is 2 tokens' worth, which means the routing counter sees the decode-sized path, not 480x8 - and the
+`in2_moe_batch` call at fwd.c:1951 sits between the block arriving and the work happening. So the remaining question is
+narrow and mechanical: **inside `in2_moe`/`in2_moe_batch`, are the block's tokens gathered by expert (M = rows per expert,
+which is what the 8-column tile needs) or dispatched one at a time?**
+
+That is now the only unknown, and it is a single function to read with the block size already confirmed at 120. If the
+gather exists, the work is wiring the GPU kernel to it. If it does not, the work is adding the gather - and the earlier
+sizing says a 128-token chunk already yields mean M = 8 per expert, which is exactly what arrives here.
+
+Also: this closes the loop on three consecutive notes. The layer count, the export table, and this all resolved the same way
+- a thirty-second trace or file query beat three rounds of reasoning about the code. The trace should have been step one.
