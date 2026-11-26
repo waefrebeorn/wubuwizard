@@ -1152,3 +1152,45 @@ port of the routing table.
 
 Recording the instrument itself: it is env-gated, writes only when `IN2_MOE_HIST=1`, and answered in one 16-token run a
 question that would otherwise have been answered by building the cache and hoping.
+
+## The hot set drifts, so the cache must be an LRU - and that changes the size it needs
+
+`IN2_MOE_IDS=1` (adds a token-stamped dump next to the histogram) over a 64-token run, 3024 routing records. The
+sequence was then replayed offline, which costs nothing and needs no engine change.
+
+A **static** hot set - the top-N experts per layer learned from the first half of the run - covers only this much of the
+second half:
+
+    16/layer   0.91 GB   43.7 % hit
+    32/layer   1.81 GB   63.2 % hit
+
+against 82 % for the same 32 experts *within* a half. So the routing distribution moves: a cache built from an
+observation window is already stale by the time it is used. That rules out the obvious design (profile, pin the top 32,
+ship it) and is the reason this was measured before the cache existed.
+
+An **LRU** per layer, replayed over the same sequence:
+
+    8/layer    0.45 GB   40.4 % hit   14229 evictions
+    16/layer   0.91 GB   63.8 % hit    8383
+    24/layer   1.36 GB   73.3 % hit    5878
+    32/layer   1.81 GB   79.0 % hit    4322
+    48/layer   2.72 GB   85.7 % hit    2312
+    64/layer   3.62 GB   89.5 % hit    1012
+
+LRU at 32 beats a static 32 by **15.8 points** (79.0 vs 63.2) at identical size, and at 48 it reaches 85.7 % - close to
+the within-window ceiling of the static case. Against a 6 GB card carrying a 1.22 GB dense set:
+
+    32/layer  cache 1.81 GB + dense 1.22 GB = 3.03 GB   79 % of MoE hits
+    48/layer  cache 2.72 GB + dense 1.22 GB = 3.94 GB   86 % of MoE hits
+
+Both fit, and 48 is the better trade while leaving room for activations and a KV slice.
+
+### What this decides, and what it does not
+
+Decided: **LRU, 48 experts per layer, ~2.7 GB, ~86 % hit rate** - and the cache is worth building, because the
+alternative measured 14 % slower when everything streamed and this leaves only 14 % streaming.
+
+Not decided: a 14 % miss path still pays PCIe, so the net is only positive if a hit is genuinely cheaper than the CPU
+route it replaces - that is an end-to-end measurement, not an extrapolation from hit rate. And every number here comes
+from one prompt and one 64-token run; a second prompt with different subject matter could move the curve, so the cache
+needs a hit-rate counter that reports live rather than trusting this table.

@@ -1863,6 +1863,13 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                        atexit(moe_hist_dump); moe_hist_set(mh); }
             for (int k = 0; k < got && k < TOPK; ++k)
                 if (il >= 0 && il < 64 && idx[k] >= 0 && idx[k] < 512) mh[(size_t)il * 512 + idx[k]]++;
+            /* IN2_MOE_IDS: the same picks stamped with the token ordinal, so hot-set drift over a long run can be
+             * split into halves and compared. The aggregate histogram cannot show drift. */
+            if (getenv("IN2_MOE_IDS")) {
+                { static long mhseq = 0; fprintf(stderr, "MOEIDS %ld %d", mhseq++, il); }
+                for (int k = 0; k < got && k < TOPK; ++k) fprintf(stderr, " %d", idx[k]);
+                fprintf(stderr, "%c", 10);
+            }
         }
         for (int i = 0; i < d; ++i) out[(size_t)t * d + i] = 0.0f;
         /* Experts are independent, so the k loop is the natural parallel axis: with n_tok == 1 it is the only one
