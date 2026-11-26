@@ -3699,51 +3699,30 @@ WUBU_EXPORT int wubu_cuda_check_xxs(const void *d_w, int type, const void *d_q8,
 }
 
 
-/* Self-test for the IQ2 device kernels, callable with no engine, no GGUF and no cache in the way.
- * Allocates host slabs of pseudo-random bytes (validity does not matter - the question is only whether the kernel
- * writes anything at all), runs the same kernel the resident path calls, and returns the number of non-zero outputs
- * plus the largest magnitude seen. A zero return from this proves the kernel/dispatch is the fault; a non-zero return
- * moves the hunt back into the caller. */
-WUBU_EXPORT int wubu_cuda_selftest_iq2(int type, int K, int n_cols, int64_t row_bytes, float *out_maxabs)
+/* Isolation test: run the same kernel the resident path calls, on bytes the CALLER supplies, and hand back y.
+ * With the engine's own wubu_iq_rows run on the identical slab, this separates "the kernel is wrong" from "the slab it
+ * was given was wrong" - the distinction that engine-level instrumentation could not make. */
+WUBU_EXPORT int wubu_cuda_selftest_iq2_run(int type, const void *h_w, size_t wbytes, const void *h_q8, int q8_bytes,
+                                           int K, int n_cols, int64_t row_bytes, float *h_y_out)
 {
-    if (K <= 0 || n_cols <= 0 || row_bytes <= 0) return -1;
-    const size_t wb = (size_t) row_bytes * (size_t) n_cols;
-    unsigned char *h_w = (unsigned char *) malloc(wb);
-    unsigned char *h_q8 = (unsigned char *) calloc(1, (size_t) (K / QK_K) * sizeof(float) + (size_t) (K / QK_K) * (QK_K + QK_K / 16));
-    float *h_y = (float *) malloc((size_t) n_cols * sizeof(float));
-    if (!h_w || !h_q8 || !h_y) { free(h_w); free(h_q8); free(h_y); return -2; }
-    for (size_t i = 0; i < wb; ++i) h_w[i] = (unsigned char) ((i * 37u + 11u) & 0xFFu);
-    /* activation: d = 1.0h per block, qs patterned, so the dot is non-degenerate if the kernel reads it */
-    for (int b = 0; b < K / QK_K; ++b) {
-        unsigned char *blk = h_q8 + (size_t) b * (sizeof(float) + QK_K + QK_K / 16);
-        ((unsigned short *) blk)[0] = 0x3C00;
-        memset(blk + sizeof(float), 3, QK_K);
-        memset(blk + sizeof(float) + QK_K, 0, QK_K / 16);
-    }
+    if (!h_w || !h_q8 || !h_y_out || K <= 0 || n_cols <= 0 || row_bytes <= 0 || wbytes == 0) return -1;
     void *d_w = NULL, *d_q8 = NULL, *d_y = NULL;
-    if (cudaMalloc(&d_w, wb) != cudaSuccess) { free(h_w); free(h_q8); free(h_y); return -3; }
-    if (cudaMalloc(&d_q8, (size_t) (K / QK_K) * (sizeof(float) + QK_K + QK_K / 16)) != cudaSuccess) { cudaFree(d_w); free(h_w); free(h_q8); free(h_y); return -3; }
-    if (cudaMalloc(&d_y, (size_t) n_cols * sizeof(float)) != cudaSuccess) { cudaFree(d_w); cudaFree(d_q8); free(h_w); free(h_q8); free(h_y); return -3; }
-    cudaMemcpy(d_w, h_w, wb, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_q8, h_q8, (size_t) (K / QK_K) * (sizeof(float) + QK_K + QK_K / 16), cudaMemcpyHostToDevice);
+    if (cudaMalloc(&d_w, wbytes) != cudaSuccess) return -3;
+    if (cudaMalloc(&d_q8, (size_t) q8_bytes) != cudaSuccess) { cudaFree(d_w); return -3; }
+    if (cudaMalloc(&d_y, (size_t) n_cols * sizeof(float)) != cudaSuccess) { cudaFree(d_w); cudaFree(d_q8); return -3; }
+    cudaMemcpy(d_w, h_w, wbytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_q8, h_q8, (size_t) q8_bytes, cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, (size_t) n_cols * sizeof(float));
-
     const int rc = (type == 16)
         ? wubu_cuda_matvec_iq2xxs(d_w, d_q8, (float *) d_y, K, n_cols, row_bytes, 1)
         : (type == 22)
         ? wubu_cuda_matvec_iq2s_v2(d_w, d_q8, (float *) d_y, K, n_cols, row_bytes)
+        : (type == 23)
+        ? wubu_cuda_matvec_iq4xs(d_w, d_q8, (float *) d_y, K, n_cols, row_bytes)
         : -4;
-
-    cudaError_t sync = cudaDeviceSynchronize();
-    cudaMemcpy(h_y, d_y, (size_t) n_cols * sizeof(float), cudaMemcpyDeviceToHost);
-    int nonzero = 0; float mx = 0.0f;
-    for (int i = 0; i < n_cols; ++i) {
-        if (h_y[i] != 0.0f) nonzero++;
-        if (fabsf(h_y[i]) > mx) mx = fabsf(h_y[i]);
-    }
-    if (out_maxabs) *out_maxabs = mx;
+    const cudaError_t sync = cudaDeviceSynchronize();
+    cudaMemcpy(h_y_out, d_y, (size_t) n_cols * sizeof(float), cudaMemcpyDeviceToHost);
     cudaFree(d_w); cudaFree(d_q8); cudaFree(d_y);
-    free(h_w); free(h_q8); free(h_y);
     if (sync != cudaSuccess) return -5;
-    return (rc != 0) ? rc : nonzero;
+    return rc;
 }

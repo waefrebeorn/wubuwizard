@@ -1439,3 +1439,44 @@ distinction five sessions of engine-level instrumentation failed to make.
 
 Verified unchanged by all of the above: oracle 12/12 exact on CPU and with `IN2_GPU_DENSE=1`; 24-token decode
 5440 -> 5102 ms.
+
+## Isolation result: the IQ2 kernels are correct and the resident cache is what corrupts expert rows
+
+A self-test that runs the device kernel on caller-supplied bytes - no cache, no engine, no GGUF - and compares against
+the engine's own `wubu_iq_rows` on the identical slab:
+
+    SELFTEST ty=16 cpu0=252.85 dev0=252.85 max_abs=1.221e-04 max|cpu|=2.021e+03 rel=6.04e-08
+
+**The kernel is right.** The first two runs of that test reported `dev0=0`, and the reason was the same thing measured
+one step earlier: the self-test ran *before* `in2_gpu_init` had uploaded the tables, so the kernel had no grid. With the
+upload done first it agrees with the CPU to 6e-08.
+
+Then the same comparison end to end, at the expert call site, 242 rows:
+
+    through the resident cache   114 good / 242     ty=16 27/136, ty=22 37/56, ty=23 50/50
+    cache bypassed (stateless)   242 good / 242     ty=16 136/136, ty=22 56/56, ty=23 50/50
+                                                   medians 1.2e-07, 1.1e-07, 1.2e-07
+
+So with the identical kernel, identical slab and identical activation, the **cache path** produces wrong rows and the
+stateless path produces exact ones. The defect is in the resident tier's slot handling for these slices - not in the
+quantiser, not in the table upload, not in the offset arithmetic (a bounds guard never fired), and not in the kernel
+(just proven on synthetic data).
+
+### Why this does not yet ship
+
+Routing expert tensors through the stateless entry by default made the engine emit `id=0` tokens - degenerate, though
+the per-call values are exact. So a third defect sits above the kernel: something in how expert output is consumed or
+accumulated differs between the two paths. That change and its measurement scaffolding were reverted, and the tree is
+back to the verified-green state:
+
+    CPU only         12/12 oracle exact
+    IN2_GPU_DENSE=1  12/12 oracle exact
+
+### The three-line summary of nine rounds on this path
+
+  - kernel correct (6e-08 on identical bytes)          -> stop looking at the kernel
+  - table upload was genuinely missing and is fixed    -> ty=22 0/56 zeros -> 37/56 exact
+  - the resident cache corrupts expert slabs           -> 114/242 vs 242/242 stateless
+
+The next step is narrow for the first time: diff one expert's cached slot against its own `src` bytes inside the DLL,
+which is a ten-line check inside `wubu_cuda_resident_matvec_id`, not another engine-level experiment.
