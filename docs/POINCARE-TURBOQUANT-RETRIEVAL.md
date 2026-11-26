@@ -732,3 +732,42 @@ prefill and the dense matvecs are the rest - both dominated by dequantising IQ2 
 The next optimisation target is therefore **dequantisation throughput**, not loop order, not SIMD flags, and not
 batching: the engine converts a 7.90 GB IQ2_XXS weight set to f32 to use it, at 1.17 G w/s. Every one of the three
 things I proposed last message attacks the wrong layer of the problem.
+
+## Where the time actually is: MoE, and the IQ2 dot kernel underneath everything
+
+Phase ledger for a 49-token prefill (IN2_TIME=1, aggregated over the step): **MoE is 1.99 s of the 4.48 s, 44 %**, at
+30+ invocations averaging 40-53 ms each with `[expert-major]`. HEAD is 0.089 s for 201024 x 2304. The rest is the dense
+matvecs. So prefill time is one thing seen from two angles: many small IQ2 weight sweeps.
+
+At 8 experts of 2304x1152 twice per layer, one MoE call is ~85 MMAC in ~40 ms = **2.1 GMAC/s**, which is the same rate
+the dense path reports (1.17 G w/s). Everything in the engine runs at that rate, which is why no single phase stands out
+as "the slow one" - they are all the same kernel.
+
+Four hypotheses are now eliminated by measurement, not argument:
+
+| hypothesis | test | result |
+|---|---|---|
+| weight-read bound, so batching wins | 64 tokens, token-outer vs row-outer | **1.01x** - ALU-bound |
+| not vectorised, so `-mavx2` wins | engine built `-mavx2 -mfma` | bit-identical tokens, **no time change** |
+| kernels scalar, AVX2 unused | `grep IQ_AVX2` | `#define IQ_AVX2 __attribute__((target("avx2,fma,f16c")))` - **already vectorised** |
+| MoE not threaded across experts | `IN2_THREADS` 1/4/8 | 12.26 s -> 6.10 s -> 5.14 s - **already threaded (2.4x)** |
+
+The fourth row is worth reading carefully: 8 threads on a 6C/12T Ryzen gives 2.4x, not 8x, on work that is ALU-bound.
+That sublinearity is itself evidence for contention inside the kernel rather than for spare capacity.
+
+### The one remaining lever, and its honest size
+
+The engine is at **~2 GMAC/s** with AVX2, threading, and a fused dequant-and-dot already in place (`DQ to_f32 calls 5492`
+against `borrow hit 7128` per step means weights are being reused from a dequant cache rather than re-expanded per token,
+so the dequantisation is not the repeated cost it looked like - the packed dot is). A well-tuned IQ2_XXS dot on Zen4
+reaches roughly an order of magnitude more, and the reason ours does not is that IQ2 is a *lookup* format: every
+8-element block indexes a 256-entry grid by 19 bits and applies per-element signs, so the inner loop is repeated gather
+and sign-mask work that generic vectorisation cannot turn into a clean FMA chain. Closing that gap is a dedicated kernel
+project - write the block dot so the grid lookup is hoisted and batched (maddubs against the grid table, ggml's
+`iq2_xxs` approach), then verify it block-for-block against the current one before it goes anywhere near the forward.
+
+That is the decision taken here: **the next work item is the IQ2 dot kernel, not more plumbing.** Every cheaper
+hypothesis has now been measured and closed, and the four retractions in this document are all cases where I assumed
+instead of measuring. The order of operations for the kernel is fixed in advance: extract one real IQ2 tensor and its
+activations, time the current `wubu_iq_rows` against a standalone replacement, and only integrate if the replacement is
+both faster and bit-identical over that tensor.
