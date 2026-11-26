@@ -1195,3 +1195,42 @@ sequence-dimension work on this box.
 Two things this entry is careful not to repeat: the previous figure was produced by arithmetic on a table I invented
 rather than by asking the engine, and it survived one commit before being checked. The number that settles this class of
 question is `in2_kv_bytes()` - one line of output - and it should be the first thing consulted, not the last.
+
+## Wave 16 - q8 KV: the spec, the parity gate, and why q8 before q4
+
+q8 KV: implementation spec, with the parity strategy that makes it shippable
+
+Confirmed by reading the struct: in2_kv_t holds `float *k, *v` for the post-conv keys/values and `float *kraw, *vraw`
+for the 3 pre-conv rows the 4-tap conv needs. Everything is f32 and there is no quantisation code anywhere in
+wubu_inkling2_kv.c. So this is a storage-format change, not a flag.
+
+WHY q8 AND NOT q4: q8_0 is 34 B per 32 elements = 1.06 B/elt, a 3.8x reduction, and it is the format llama.cpp itself
+uses for -ctk q8_0, so a reference exists to validate against. At 512k that is 34.4 / 3.8 = 9.1 GB of KV against 7.9 GB
+of model - it fits. q4 would halve it again but moves further from any reference and rule 59 already says precision is
+the weaker lever; take q8 first, measure the quality, and only then decide if q4 is needed for 1M.
+
+THE CHANGE, in dependency order:
+ 1. in2_kv_t: `float *k, *v` become `unsigned char *kq, *vq` (raw quantised blocks) plus `size_t row_bytes_q`.
+    Keep `kraw, vraw` as f32 - they are 3 rows per visit, 0.5 MB total, and quantising them would perturb the conv
+    input for no memory gain.
+ 2. in2_kv_bytes(): must use row_bytes_q so the startup line reports the real footprint (this is the number that was
+    missing for the whole session - it should be quoted before and after).
+ 3. in2_kv_store_row_k/v: quantise the incoming f32 row into the visit's slot with wubu_iq-style q8_0 blocks
+    (one fp16 scale per 32 elements). The quantiser does not exist for q8_0 in this repo as a store path; ggml's
+    quantize_row_q8_0 is the reference implementation to copy, exactly as the dequantiser was.
+ 4. in2_kv_k()/in2_kv_v(): these return `float *` and are read in the attention inner loop, so a dequantise-on-read
+    breaks the contract. Keep a ONE-ROW scratch per visit: dequantise row `pos` into it and return that pointer.
+    That is safe only because attention reads a row at a time and never holds two rows across calls - verify that
+    before relying on it, since in2_layer_full reads K and V rows in the same key loop.
+ 5. The conv streaming path (in2_conv_stream_*, in2_kv_store_raw) reads kraw/vraw and is unaffected.
+
+THE PARITY STRATEGY, which is the part that makes this shippable rather than a regression: quantised KV cannot be
+bit-identical to f32 KV, so the gate is not the f32 oracle. Start llama.cpp with -ctk q8_0 -ctv q8_0 on a free port,
+confirm it loads this file, and require the engine to match THAT token stream, exactly as rule 8 already prescribes for
+a backend difference. Keep f32 KV as the default and make q8 opt-in until the q8-vs-q8 comparison is exact, then
+re-measure decode with q8 (it also cuts KV reads per token, so it should be faster as well as smaller).
+
+WHAT TO MEASURE FIRST, before any code: `IN2_KV_POS=65536 ./gen_fast.exe 2 ...` prints the allocation, and
+WorkingSetSize after a real long-prompt run is the residency check rule 60 demands - a calloc reservation is not
+residency. Those two numbers give the honest starting point; the spec above is written so that the same command reports
+the improvement afterwards.
