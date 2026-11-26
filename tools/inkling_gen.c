@@ -223,7 +223,7 @@ int main(int argc, char **argv)
 
 
     const double t_start_lookup = wall_now();
-    if (getenv("IN2_LOOKUP")) {
+    if (getenv("IN2_LOOKUP") && atoi(getenv("IN2_LOOKUP")) != 0) {
         /* Prompt-lookup speculative decoding. Parity is by construction: the drafter only PROPOSES, and a draft is accepted
          * only when the target's own greedy argmax at that position equals it, so every emitted token is one the plain
          * loop would have emitted from the same logits. */

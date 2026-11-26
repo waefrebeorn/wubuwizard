@@ -1979,3 +1979,31 @@ residual conv runs, not in the projections or the cache.
 
 This is the most consequential finding of the session and it was invisible to every previous test: the engine's own oracle
 only ever exercised `pos0 == 0`.
+
+## Speculative decoding works and is parity-clean - measured 1.22x, best case, on looping output
+
+With the conv fix in, on a 60-token prompt generating 64 tokens (the model falls into a 12-token cycle here, so acceptance
+is the ceiling case):
+
+    plain        64 tokens in 18.5 s = 3.45 tok/s
+    lookup K=4   23 forwards / 64 tokens (0.36 fwd/token), drafted 44, accepted 44 = 100 %, 15.2 s = 4.21 tok/s
+    lookup K=8   15 forwards / 64 tokens (0.23 fwd/token), drafted 56, accepted 56 = 100 %, 15.2 s = 4.21 tok/s
+    oracle       15/15 identical in every configuration
+
+**1.22x**, bit-identical, with 100 % acceptance - a best case on degenerate looping output, not a typical-text number. Stated
+that way deliberately: on non-repetitive text the suffix drafter will miss far more often and the speedup will be smaller.
+
+Why 2.8x fewer forwards is only 1.22x wall time - the fixed cost of a forward dominates:
+
+    plain   18.5 s / 64 = 289 ms per forward (1 token each)
+    lookup  15.2 s / 23 = 661 ms per forward (up to 5 tokens each)
+
+Solving the two points gives roughly **200 ms fixed + 90 ms per token** inside `in2_forward_at`. So the lever has moved: it is
+no longer per-token arithmetic, it is the ~200 ms constant that is paid on every call regardless of token count. K=8 does not
+beat K=4 because the per-token term grows alongside the fixed one.
+
+That constant is now the single best-measured target in the engine, and it is the same constant that makes decode 172 ms/token
+in the earlier measurements: 72 visits of fixed per-layer work that scales far less than linearly with token count.
+
+Also fixed in this change: `IN2_LOOKUP` was presence-tested, so `IN2_LOOKUP=0` enabled speculation. It now parses the value,
+which is why the baseline above is the first honest one.
