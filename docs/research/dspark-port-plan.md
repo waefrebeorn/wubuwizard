@@ -786,3 +786,41 @@ The engine's layer-rms growth (1.75 -> 2.67 -> 4.47) also appeared in the Strata
 **What is left** is the ctx/tap wiring: which residual point the four taps are taken from, whether the mask rows are ordered
 as assumed, and whether the block queries are meant to see the ctx with the same RoPE base they are given. Those are checkable
 one at a time against the trace above, and none of them is the arithmetic this project spent two days suspecting.
+
+## The 1/7 was a space coincidence - corrected - and tap selection is eliminated as the unlock
+
+The first tap set I tried (`L11_p0, L17_p0, L11_p1, L17_p1`, the engine's own `src_next` definition) produced MATCH 1/7 where the
+original set gave 0/7, and sharper per-slot logits. I called that a breakthrough signal. **It was not.** Checking *which* index
+matched: the match is at position 5, where the oracle token is `220` - a space. A space is the single most likely token in any
+continuation, so matching it is not evidence of a working drafter.
+
+Scanning all 24 orderings of that tap set makes the point quantitatively:
+
+    8 orders -> 1/7     16 orders -> 0/7     no order above 1/7
+
+If tap order were the missing piece, some ordering would separate from the rest. None does; the eight 1/7 results are the same
+space match seen from different angles.
+
+**Out-of-sample check.** A second prompt was built specifically for this, and the first attempt had to be thrown away: repeating one
+sentence nine times made the engine loop on `1377 68014`, and a looping oracle lets a broken drafter "succeed" by accident. The
+third prompt (263 tokens, seven distinct sentences) produces seven *unique* oracle tokens:
+`34541 150463 195644 149880 150422 149878 177853`. Against that:
+
+    taps L05_p0,L11_p1,L17_p2,L23_p2      0/7
+    taps L11_p0,L17_p0,L11_p1,L17_p1      0/7
+    taps L11_p1,L17_p1,L11_p2,L17_p2      0/7
+
+**Eliminated, with the measurement that eliminates it:** tap identity, tap order, tap phase. Note also a mechanical detail worth
+recording: only the `p0` pass dumps the full sequence when `n_gen > 1` (`p1`/`p2` dumps come out as single rows, 9216 B); with
+`n_gen = 1` all passes carry the full 263 positions. Greedy decode is deterministic, so taps can be taken from a `n_gen = 1` run
+and the oracle from a longer one on the same prompt - which is what the out-of-sample test above does.
+
+**Where this leaves the port.** Every input-side hypothesis is now eliminated with measurements: architecture (read from upstream),
+weights (decoded and cross-checked), vocab (identical), norms (multiplicative, verified), RoPE (both conventions), positions
+(T vs T-1), taps (identity, order, phase), and numerics (nothing saturates). What remains is not another guessable detail: it is
+that no intermediate value from this implementation has ever been compared against a *running* reference.
+
+**Next step, and it is not another hypothesis:** build upstream llama.cpp locally with MSVC. The shipped `build-ref` binary cannot
+run here (private UCRT import), but a local build will, and `common/speculative.cpp` already implements `draft-dspark` against this
+exact drafter GGUF. That gives a reference that can be executed on this machine, for this model, with intermediate values to
+compare - the thing every failed hypothesis this session was missing.
