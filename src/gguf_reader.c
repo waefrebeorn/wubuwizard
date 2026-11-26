@@ -2448,3 +2448,12 @@ int gguf_read_raw_tensor(gguf_ctx *ctx, gguf_tensor_info *tensor, void *output) 
     if (n_read != (size_t)raw_size) return 0;
     return (int)raw_size;
 }
+
+/* ---------------------------------------------------------------------------
+ * Accessors for the CUDA upload path (LP-22). The tables are static here and
+ * the device IQ2_XXS kernel needs exactly these bytes; the engine hands them to
+ * the DLL once instead of the DLL taking a link dependency on this file.
+ * ------------------------------------------------------------------------- */
+const void *wubu_iq2xxs_grid_bytes(void)   { return (const void *) iq2xxs_grid; }
+const void *wubu_iq2xxs_ksigns_bytes(void) { return (const void *) ksigns_iq2xs; }
+const void *wubu_iq4nl_bytes(void)         { return (const void *) kvalues_iq4nl; }

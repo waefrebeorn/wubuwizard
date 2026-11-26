@@ -288,6 +288,67 @@ void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out)
  * quantised expert itself is only ~1.5 MB (IQ2_XS) + ~0.8 MB (Q2_0). That is a 14x amplification, times 8
  * experts times 20 sliding layers - 5 GB of transient traffic per token that carries no information.
  * Fused, the traffic is the quant bytes plus a 9 KB row that is reused. */
+/* ---------------- optional device weight tier (LP-22) ----------------
+ *
+ * gen_fast.exe must not link the CUDA library: the engine has to run on a box with no card, and a hard import would
+ * turn that into a missing-DLL dialog instead of a slower token. So the entry points are resolved once, lazily, and
+ * every call site falls back to the CPU kernel whenever they are missing.
+ */
+static void *in2_gpu_res_fn;
+static int   in2_gpu_state;      /* 0 = untried, 1 = ready, -1 = not available */
+static double in2_gpu_sec;
+static int64_t in2_gpu_calls;
+
+#ifdef _WIN32
+typedef int (*in2_gpu_res_sig)(int, const void *, size_t, const void *, int, float *, int, int, int64_t);
+typedef int (*in2_gpu_up_sig)(const void *, const void *);
+extern const void *wubu_iq2xxs_grid_bytes(void);
+extern const void *wubu_iq2xxs_ksigns_bytes(void);
+
+static void in2_gpu_init(void)
+{
+    if (in2_gpu_state) return;
+    in2_gpu_state = -1;
+    const char *nm = getenv("IN2_CUDA_DLL");
+    HMODULE h = LoadLibraryA(nm && nm[0] ? nm : "wubu_cuda.dll");
+    if (!h) return;
+    in2_gpu_res_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec");
+    if (!in2_gpu_res_fn) return;
+    /* The IQ2_XXS kernel reads a grid and a sign table that the library cannot supply itself without linking this
+     * translation unit; the engine has both, so it hands them over once. */
+    in2_gpu_up_sig up = (in2_gpu_up_sig) (void *) (size_t) GetProcAddress(h, "wubu_cuda_upload_iq2xxs");
+    if (up) up(wubu_iq2xxs_grid_bytes(), wubu_iq2xxs_ksigns_bytes());
+    /* IQ4_XS is the output head's format and its kernel reads a 16-entry non-linear table. Without this the head
+     * returns zeros while every call still reports success, which is how the first attempt produced id=0 logit=0. */
+    {
+        typedef int (*iq4nl_sig)(const void *);
+        iq4nl_sig t4 = (iq4nl_sig) (void *) (size_t) GetProcAddress(h, "wubu_cuda_upload_table_iq4nl");
+        extern const void *wubu_iq4nl_bytes(void);
+        if (t4) t4(wubu_iq4nl_bytes());
+    }
+    {
+        typedef int (*iq2xs_sig)(const void *);
+        iq2xs_sig t2 = (iq2xs_sig) (void *) (size_t) GetProcAddress(h, "wubu_cuda_upload_tables_iq2xs");
+        (void) t2;
+    }
+    in2_gpu_state = 1;
+}
+
+static int in2_gpu_resident(int type, const void *w, size_t wbytes, const void *act, int act_bytes,
+                            float *y, int K, int n_cols, int64_t stride)
+{
+    return ((in2_gpu_res_sig) in2_gpu_res_fn)(type, w, wbytes, act, act_bytes, y, K, n_cols, stride);
+}
+#else
+static void in2_gpu_init(void) { in2_gpu_state = -1; }
+static int in2_gpu_resident(int t, const void *w, size_t wb, const void *a, int ab, float *y,
+                            int K, int nc, int64_t st)
+{ (void) t; (void) w; (void) wb; (void) a; (void) ab; (void) y; (void) K; (void) nc; (void) st; return -1; }
+#endif
+
+double in2_gpu_seconds(void) { return in2_gpu_sec; }
+long long in2_gpu_call_count(void) { return (long long) in2_gpu_calls; }
+
 int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
                      const float *x, int n_out, int n_in, float *y)
 {
@@ -331,7 +392,31 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                     else          in2_q8k_quantise(x, n_in / 256, (in2_q8k_blk *)actbuf);
                     const void *ap[1] = { actbuf };
                     float *op[1] = { y };
-                    { const clock_t _q0 = clock();
+                    int gpu_done = 0;
+                    /* Same weights, different address space. Per call the card receives the quantised activation
+                     * (2.4 KB at n_in=2304 for q8_0) instead of the matrix (5.6 MB), so the dense tier stops paying
+                     * the read that dominates a token. Experts are excluded by name: they are 48x128 distinct slabs,
+                     * far more than the resident tier holds, and they are the thing the cache policy is for. */
+                    if (getenv("IN2_GPU_DENSE") && t->info && t->info->name[0] &&
+                        strstr(t->info->name, "exps") == NULL) {
+                        in2_gpu_init();
+                        if (in2_gpu_state == 1) {
+                            const int act_bytes = q8_0_act
+                                ? (n_in / 32) * (int) sizeof(in2_q8_0_blk)
+                                : (n_in / 256) * (int) sizeof(in2_q8k_blk);
+                            const clock_t _g0 = clock();
+                            if (in2_gpu_resident(ty_mv, src, (size_t) rb * (size_t) n_out, actbuf, act_bytes,
+                                                 y, n_in, n_out, (int64_t) rb) == 0) {
+                                gpu_done = 1;
+                                in2_gpu_sec += (double) (clock() - _g0) / (double) CLOCKS_PER_SEC;
+                                if (in2_gpu_calls == 0)
+                                    fprintf(stderr, "GPU tier: resident dense matvec engaged (%s)\n",
+                                            t->info->name);
+                                in2_gpu_calls += 1;
+                            }
+                        }
+                    }
+                    if (!gpu_done) { const clock_t _q0 = clock();
                     wubu_iq_rows(ty_mv, src, (size_t)rb, n_in, ap, 1, op, 0, n_out);
                     if (ty_mv >= 0 && ty_mv < 256) {
                         in2_ty_sec[ty_mv] += (double)(clock() - _q0) / (double)CLOCKS_PER_SEC;

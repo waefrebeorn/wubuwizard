@@ -715,6 +715,83 @@ WUBU_EXPORT int wubu_cuda_upload_iq2xxs(const void *grid_256_u64, const void *ks
     return 0;
 }
 
+/* ---------------- resident weight tier (LP-22) ----------------
+ *
+ * Keyed on the HOST pointer of the mapped weights: the GGUF mapping is immutable for the life of the process, so a
+ * given pointer always names the same bytes and needs no invalidation. Slots are limited and never evicted - the
+ * dense tier of this model is 48 layers x 5 tensors plus the head, so 96 is enough and eviction would only add a
+ * way to be wrong. Experts are deliberately excluded by the caller: 48x128 slabs is far beyond any slot count.
+ */
+#define WUBU_RES_SLOTS 96
+/* Declared here because this block sits above both definitions; the entry points are defined further down. */
+WUBU_EXPORT int wubu_cuda_quant_matvec(const void *d_w, int type, const void *d_xq8, float *d_y,
+                                       int K, int n_cols, int64_t col_stride_bytes);
+WUBU_EXPORT int wubu_cuda_matvec_iq2xxs(const void *d_w, const void *d_q8, float *d_y,
+                                        int K, int n_cols, int64_t col_stride_bytes, int n_tok);
+WUBU_EXPORT int wubu_cuda_matvec_iq2xs(const void *, const void *, float *, int, int, int64_t);
+WUBU_EXPORT int wubu_cuda_matvec_iq3xxs(const void *, const void *, float *, int, int, int64_t);
+WUBU_EXPORT int wubu_cuda_matvec_iq4xs(const void *, const void *, float *, int, int, int64_t);
+static void   *g_res_d[WUBU_RES_SLOTS];
+static const void *g_res_key[WUBU_RES_SLOTS];
+static size_t  g_res_bytes[WUBU_RES_SLOTS];
+static int     g_res_n;
+static void   *g_res_act, *g_res_y;
+static size_t  g_res_act_cap, g_res_y_cap;
+
+WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbytes,
+                                         const void *h_act, int act_bytes, float *h_y,
+                                         int K, int n_cols, int64_t col_stride_bytes)
+{
+    if (!h_w || !h_act || !h_y || wbytes == 0 || act_bytes <= 0 || K <= 0 || n_cols <= 0) return -1;
+
+    int slot = -1;
+    for (int i = 0; i < g_res_n; ++i) if (g_res_key[i] == h_w && g_res_bytes[i] == wbytes) { slot = i; break; }
+    if (slot < 0) {
+        if (g_res_n >= WUBU_RES_SLOTS) return -2;
+        if (cudaMalloc(&g_res_d[g_res_n], wbytes) != cudaSuccess) return -3;
+        if (cudaMemcpy(g_res_d[g_res_n], h_w, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(g_res_d[g_res_n]); g_res_d[g_res_n] = NULL; return -4;
+        }
+        g_res_key[g_res_n] = h_w;
+        g_res_bytes[g_res_n] = wbytes;
+        slot = g_res_n++;
+    }
+    if ((size_t) act_bytes > g_res_act_cap) {
+        if (g_res_act) { cudaFree(g_res_act); g_res_act = NULL; }
+        if (cudaMalloc(&g_res_act, (size_t) act_bytes) != cudaSuccess) { g_res_act_cap = 0; return -5; }
+        g_res_act_cap = (size_t) act_bytes;
+    }
+    const size_t ybytes = (size_t) n_cols * sizeof(float);
+    if (ybytes > g_res_y_cap) {
+        if (g_res_y) { cudaFree(g_res_y); g_res_y = NULL; }
+        if (cudaMalloc(&g_res_y, ybytes) != cudaSuccess) { g_res_y_cap = 0; return -6; }
+        g_res_y_cap = ybytes;
+    }
+    if (cudaMemcpy(g_res_act, h_act, (size_t) act_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return -7;
+
+    const int rc = (type == 16)
+        ? wubu_cuda_matvec_iq2xxs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes, 1)
+        : (type == 17)
+        ? wubu_cuda_matvec_iq2xs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
+        : (type == 18)
+        ? wubu_cuda_matvec_iq3xxs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
+        : (type == 23)
+        ? wubu_cuda_matvec_iq4xs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
+        : wubu_cuda_quant_matvec(g_res_d[slot], type, g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes);
+    if (rc != 0) return -8;
+    if (cudaMemcpy(h_y, g_res_y, ybytes, cudaMemcpyDeviceToHost) != cudaSuccess) return -9;
+    return 0;
+}
+
+WUBU_EXPORT int wubu_cuda_resident_stats(int *slots, double *mb)
+{
+    double m = 0.0;
+    for (int i = 0; i < g_res_n; ++i) m += (double) g_res_bytes[i] / 1048576.0;
+    if (slots) *slots = g_res_n;
+    if (mb) *mb = m;
+    return 0;
+}
+
 /* Resident-slab benchmark: upload the weights ONCE, then time only the kernel.
  *
  * Every other entry in this file pays a host->device copy per call, which at a 1.3 MB slab is the whole measurement.
