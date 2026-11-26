@@ -10,9 +10,16 @@ set -euo pipefail
 
 UP="${UP:-C:/Users/eman5/WuBu/research/upstream-ggml}"
 OUT="${OUT:-gen_fast.exe}"
+# Extra flags for experiments (e.g. EXTRA="-march=znver4"). Keep the canonical line flag-for-flag reproducible: an
+# experiment writes a different OUT and never edits this file.
+EXTRA="${EXTRA:-}"
 cd "$(dirname "$0")/.."
 
-gcc -O2 -std=c11 -fopenmp \
+# -O3, measured on the target box (Ryzen 5 8645HS, 6C/12T): 16-token decode 3.27 -> 3.45 tok/s, three interleaved
+# reps each, and token-for-token parity unchanged (34/34 on the three oracle prompts). -march=znver4 on top adds ~1%
+# and costs a portable binary, because the hot kernels are hand-written AVX2 selected by target("avx2,fma,f16c")
+# attributes and never see this flag; pass EXTRA="-march=znver4" to try it locally.
+gcc -O3 -std=c11 -fopenmp $EXTRA \
   -I include -I include/win32 -I "$UP/ggml/src" -I "$UP/ggml/include" \
   -DWUBU_BUILD_WIN -include wubu_win.h \
   -o "$OUT" \
