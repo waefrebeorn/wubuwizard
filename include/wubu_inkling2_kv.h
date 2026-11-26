@@ -25,6 +25,13 @@ typedef struct {
     /* IN2_TQ_VERIFY: parallel f32 shadow of every stored row, so a read can be checked against what was written.
      * Distinguishes a slot mismatch from a decode error from a bug outside the KV path. */
     float *kshad, *vshad;
+    /* Per-visit dequantised mirror. The accessors return ONE scratch row, so every attention access re-decodes that row
+     * (TurboQuant decode + 1024-point WHT); with 64 sliding visits x 1024 window rows x 1024 query rows that is ~7.5e7
+     * decodes and it is 78-80 % of prefill layer time. The mirror makes it one decode per (visit,pos): 1024x fewer.
+     * window_rows * dim, NOT rows-total * dim - the latter is 288 MB next to a 7.9 GB model. kitag[pos] holds the visit
+     * id that filled the slot (-1 empty), so a new visit invalidates every slot for free. */
+    float *kmir, *vmir;
+    int   *kitag, *vitag;
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */

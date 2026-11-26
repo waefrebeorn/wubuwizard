@@ -982,3 +982,27 @@ Why this is the right next change and not another experiment:
 Not implemented here: it touches the KV struct in `include/wubu_inkling2_kv.h`, both alloc sites in `in2_kv_init`
 (~:151 and ~:159), `in2_kv_free`, and the two accessors - five edit sites with a build-and-gate cycle, which needs room to
 verify that this session no longer has. The oracle (12 tokens, exact) is the gate to re-establish before and after.
+
+## IMPLEMENTED: the per-visit KV mirror, and it is a 4.8x win in compressed-KV mode
+
+Five edits as specced (struct in `include/wubu_inkling2_kv.h`, both alloc sites, `in2_kv_free`, both accessors), window-sized
+mirror with visit-id tags so invalidation is free. Oracle stays exact in every configuration tested (12/12, 94-byte IDS).
+
+    60-token prefill, PHASE timings:
+
+    f32 KV (default)     layers 5.713 -> 5.661 s     sliding 4.449 -> 4.396 s     (flat, 1.2 %)
+    TQ-6 KV              layers ~28.7 s -> 5.932 s                                (4.8x)
+                         sliding 4.642 s, moe 2.340 s, oracle exact
+
+The two results together are the important part:
+
+1. **In the default f32 configuration the mirror changes nothing (1.2 %)** - because TurboQuant is off, `kv->tq` is NULL, and
+   the decode-on-read path the mirror targets is not active. The 78-80 % sliding cost there is ordinary attention arithmetic
+   and f32 KV traffic, not decode. My earlier attribution of that 80 % to TurboQuant decode was wrong for the default config.
+2. **In compressed-KV mode it is a 4.8x prefill win** (28.7 s -> 5.93 s at 60 tokens) and TQ-6 is now within 4 % of f32
+   (5.932 vs 5.661 s) while holding the 12.06 KB/token footprint. That is the configuration the long-context roadmap needs,
+   and until now its prefill cost was prohibitive.
+
+So the honest statement of what this change does: it does not speed up the engine as configured today, and it makes the
+memory-efficient configuration viable. The 78-80 % sliding share at f32 remains unexplained and is the next thing to profile,
+with `in2_kv_k` now proven not to be its cause in that path.

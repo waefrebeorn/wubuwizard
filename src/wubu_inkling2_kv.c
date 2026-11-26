@@ -150,6 +150,15 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
         }
         kv->kscr = (float *)malloc((size_t)dim * sizeof(float));
         kv->vscr = (float *)malloc((size_t)dim * sizeof(float));
+        if (kv->n_pos_max > 0) {   /* per-visit mirror, window-sized: see the header comment */
+            const size_t mr = (size_t)kv->n_pos_max * (size_t)dim;
+            kv->kmir  = (float *)malloc(mr * sizeof(float));
+            kv->vmir  = (float *)malloc(mr * sizeof(float));
+            kv->kitag = (int *)malloc((size_t)kv->n_pos_max * sizeof(int));
+            kv->vitag = (int *)malloc((size_t)kv->n_pos_max * sizeof(int));
+            if (!kv->kmir || !kv->vmir || !kv->kitag || !kv->vitag) { in2_kv_free(kv); return -1; }
+            for (int i = 0; i < kv->n_pos_max; ++i) { kv->kitag[i] = -1; kv->vitag[i] = -1; }
+        }
         if (!kv->kq || !kv->vq || !kv->kn || !kv->vn || !kv->encsc || !kv->kscr || !kv->vscr) { in2_kv_free(kv); return -1; }
     } else if (getenv("IN2_KV_Q8")) {
         kv->q8 = 1;
@@ -158,6 +167,15 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
         kv->vq   = (unsigned char *)calloc(1, elems / (size_t)dim * kv->rowq);
         kv->kscr = (float *)malloc((size_t)dim * sizeof(float));
         kv->vscr = (float *)malloc((size_t)dim * sizeof(float));
+        if (kv->n_pos_max > 0) {   /* per-visit mirror, window-sized: see the header comment */
+            const size_t mr = (size_t)kv->n_pos_max * (size_t)dim;
+            kv->kmir  = (float *)malloc(mr * sizeof(float));
+            kv->vmir  = (float *)malloc(mr * sizeof(float));
+            kv->kitag = (int *)malloc((size_t)kv->n_pos_max * sizeof(int));
+            kv->vitag = (int *)malloc((size_t)kv->n_pos_max * sizeof(int));
+            if (!kv->kmir || !kv->vmir || !kv->kitag || !kv->vitag) { in2_kv_free(kv); return -1; }
+            for (int i = 0; i < kv->n_pos_max; ++i) { kv->kitag[i] = -1; kv->vitag[i] = -1; }
+        }
         if (!kv->kq || !kv->vq || !kv->kscr || !kv->vscr) { in2_kv_free(kv); return -1; }
     } else {
         kv->k    = (float *)calloc(elems, sizeof(float));
@@ -177,6 +195,7 @@ void in2_kv_free(in2_kv_t *kv)
     free(kv->kq); free(kv->vq); free(kv->kscr); free(kv->vscr); free(kv->cap); free(kv->off);
     wubu_tqvec_free(kv->tq); free(kv->kn); free(kv->vn); free(kv->encsc);
     free(kv->kshad); free(kv->vshad);
+    free(kv->kmir); free(kv->vmir); free(kv->kitag); free(kv->vitag);
     memset(kv, 0, sizeof *kv);
 }
 
@@ -184,6 +203,8 @@ float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
 {
     if (!kv || (!kv->k && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->kmir && kv->kitag && pos < kv->n_pos_max && kv->kitag[pos] == visit)
+        return kv->kmir + (size_t) pos * (size_t) kv->dim;   /* already decoded for this visit */
     if (kv->tq) {
         wubu_tqvec_decode(kv->tq, kv->kq + el * kv->rowq, kv->kscr);
         const float s = kv->kn ? kv->kn[el] : 1.0f;
@@ -203,7 +224,11 @@ float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
                         visit, pos, el, kv->dim, mx, at, (double)ref[0], (double)kv->kscr[0], 10);
             }
         }
-        return kv->kscr;
+        if (kv->kmir && kv->kitag && pos < kv->n_pos_max) {
+        memcpy(kv->kmir + (size_t) pos * (size_t) kv->dim, kv->kscr, (size_t) kv->dim * sizeof(float));
+        kv->kitag[pos] = visit;
+    }
+    return kv->kscr;
     }
     if (kv->q8) {
         kvq8_dequantize_row(kv->kq + el * kv->rowq, kv->kscr, kv->dim);
@@ -216,6 +241,8 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 {
     if (!kv || (!kv->v && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->vmir && kv->vitag && pos < kv->n_pos_max && kv->vitag[pos] == visit)
+        return kv->vmir + (size_t) pos * (size_t) kv->dim;   /* already decoded for this visit */
     if (kv->tq) {
         wubu_tqvec_decode(kv->tq, kv->vq + el * kv->rowq, kv->vscr);
         const float s = kv->vn ? kv->vn[el] : 1.0f;
@@ -235,7 +262,11 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
                         visit, pos, el, kv->dim, mx, at, (double)ref[0], (double)kv->vscr[0], 10);
             }
         }
-        return kv->vscr;
+        if (kv->vmir && kv->vitag && pos < kv->n_pos_max) {
+        memcpy(kv->vmir + (size_t) pos * (size_t) kv->dim, kv->vscr, (size_t) kv->dim * sizeof(float));
+        kv->vitag[pos] = visit;
+    }
+    return kv->vscr;
     }
     if (kv->q8) {
         kvq8_dequantize_row(kv->vq + el * kv->rowq, kv->vscr, kv->dim);
