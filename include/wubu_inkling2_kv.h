@@ -6,8 +6,10 @@ typedef struct {
     int    n_visit;     /* layer visits per forward = stored layers + extra loop passes */
     int    dim;         /* key/value width */
     int    window;      /* sliding window in positions; 0 = full attention, grows with context */
-    int    n_pos_cap;   /* rows allocated per visit */
+    int    n_pos_cap;   /* MAX rows allocated to any single visit (kept for the uniform case) */
     int    n_stored;    /* positions stored so far */
+    int   *cap;         /* rows per visit; NULL means every visit gets n_pos_cap */
+    size_t *off;        /* element offset of each visit inside k/v; NULL means uniform stride */
     float *k, *v;       /* post-conv keys/values, [n_visit][n_pos_cap][dim] */
     float *kraw, *vraw; /* pre-conv rows for the 4-tap causal conv, [n_visit][3][dim] */
 } in2_kv_t;
@@ -23,6 +25,10 @@ void      in2_conv_stream_res(int vvis, const float *x, int n_tok, int ch, const
 void      in2_conv_stream_moe(int vvis, const float *x, int n_tok, int ch, const float *w, int k, float *out);
 
 int   in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap);
+/* rows[v] = how many positions visit v must hold: the context for a full-attention visit, the sliding
+ * window for the rest. This is what makes a long context affordable - see the .c file. */
+int   in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const int *rows);
+size_t in2_kv_bytes(const in2_kv_t *kv);
 void  in2_kv_free(in2_kv_t *kv);
 float *in2_kv_k(in2_kv_t *kv, int visit, int pos);
 float *in2_kv_v(in2_kv_t *kv, int visit, int pos);

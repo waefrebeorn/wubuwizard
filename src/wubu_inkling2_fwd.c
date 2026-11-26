@@ -986,8 +986,26 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
          * IN2_KV_POS lowers it for short-context work. */
         static in2_kv_t boot;
         const char *pz = getenv("IN2_KV_POS");
-        const int cap = pz ? atoi(pz) : 1024;
-        if (in2_kv_init(&boot, 72, kdim, cap, cap) == 0) { g_kv = &boot; g_kv_window = cap; }
+        const int ctx  = pz ? atoi(pz) : 1024;
+        /* PER-VISIT CAPACITY. IN2_KV_TRACE puts full attention at visits 5,11,17,23,29,35,41,47 only - every other
+         * visit is sliding and can never read past cfg->swa_window (1024 in this model). Allocating `ctx` rows for all
+         * 72 visits, as this line used to, is what made a long context unaffordable: 72 x 1M x 1024 x 4 B x 2 = 603 GB
+         * for a 1M context. Sized per visit the same context is 8 x 1M x 1024 x 8 B = 68.7 GB in f32, and the 64
+         * sliding visits stay at 1024 rows forever (0.5 GB). The layer rule is the same one is_full_attn_layer uses,
+         * restated here because the cache is built before the model is loaded. */
+        const int swa = cfg->swa_window > 0 ? cfg->swa_window : 1024;
+        const int rb  = cfg->attn_res_block > 1 ? cfg->attn_res_block : 6;
+        int *rows = (int *)malloc(72 * sizeof(int));
+        if (rows) {
+            for (int v = 0; v < 72; ++v)
+                rows[v] = (v < 48 && (v % rb) == (rb - 1)) ? ctx : (swa < ctx ? swa : ctx);
+            if (in2_kv_init_pervisit(&boot, 72, kdim, swa, rows) == 0) {
+                g_kv = &boot; g_kv_window = swa;
+                fprintf(stderr, "KV    ctx=%d rows/visit: %d full x %d + %d sliding x %d = %.1f MB\n",
+                        ctx, 8, ctx, 64, swa, (double) in2_kv_bytes(&boot) / 1048576.0);
+            }
+            free(rows);
+        }
     }
     if (!g_kv2 && in2_kv_enabled()) {
         /* The residual and MoE convs only ever need the last three rows, so this record is a 3-row window per

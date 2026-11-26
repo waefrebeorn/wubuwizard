@@ -26,27 +26,76 @@
 #include <string.h>
 #include <math.h>
 
-static int in2_kv_row_slot(const in2_kv_t *kv, int pos)
+static int in2_kv_cap(const in2_kv_t *kv, int visit)
 {
-    if (kv->window > 0) return pos % kv->window;
-    return pos;
+    return kv->cap ? kv->cap[visit] : kv->n_pos_cap;
+}
+
+static size_t in2_kv_off(const in2_kv_t *kv, int visit)
+{
+    return kv->off ? kv->off[visit] : (size_t)visit * (size_t)kv->n_pos_cap;
+}
+
+/* Ring within the visit's own capacity. A full-attention visit is sized to the context, so pos % cap == pos for every
+ * position that exists; a sliding visit wraps inside its window. Uniform-capacity callers therefore behave exactly as
+ * before, which is why this change cannot alter a single key. */
+static int in2_kv_row_slot(const in2_kv_t *kv, int visit, int pos)
+{
+    const int cap = in2_kv_cap(kv, visit);
+    if (cap <= 0) return pos;
+    return pos % cap;
 }
 
 int in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap)
 {
     if (!kv || n_visit <= 0 || dim <= 0 || n_pos_cap <= 0) return -1;
+    int *rows = (int *)malloc((size_t)n_visit * sizeof(int));
+    if (!rows) return -1;
+    for (int v = 0; v < n_visit; ++v) rows[v] = n_pos_cap;
+    const int rc = in2_kv_init_pervisit(kv, n_visit, dim, window, rows);
+    free(rows);
+    return rc;
+}
+
+size_t in2_kv_bytes(const in2_kv_t *kv)
+{
+    if (!kv || !kv->cap) return 0;
+    size_t rows = 0;
+    for (int v = 0; v < kv->n_visit; ++v) rows += (size_t)kv->cap[v];
+    return rows * (size_t)kv->dim * sizeof(float) * 2u;
+}
+
+int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const int *rows)
+{
+    if (!kv || n_visit <= 0 || dim <= 0) return -1;
     memset(kv, 0, sizeof *kv);
     kv->n_visit = n_visit;
     kv->dim = dim;
     kv->window = window;
-    kv->n_pos_cap = n_pos_cap;
 
-    /* sliding layers only ever hold `window` rows; full layers hold the whole context. Callers pass a window
-     * of 0 for a full layer and the same n_pos_cap in both cases, so the cap is authoritative here. */
-    const size_t rows = (size_t)n_pos_cap;
-    const size_t elems = rows * (size_t)dim;
-    kv->k    = (float *)calloc(elems * (size_t)n_visit, sizeof(float));
-    kv->v    = (float *)calloc(elems * (size_t)n_visit, sizeof(float));
+    kv->cap = (int *)malloc((size_t)n_visit * sizeof(int));
+    kv->off = (size_t *)malloc((size_t)n_visit * sizeof(size_t));
+    if (!kv->cap || !kv->off) { in2_kv_free(kv); return -1; }
+
+    size_t total = 0;
+    int maxcap = 0;
+    for (int v = 0; v < n_visit; ++v) {
+        /* NULL rows means the old uniform behaviour: every visit gets the same capacity (passed as n_pos_cap by
+         * in2_kv_init, which forwards here with rows == NULL and cap 0 - see below). */
+        kv->cap[v] = rows ? rows[v] : 0;
+        if (kv->cap[v] <= 0) { free(kv->cap); free(kv->off); memset(kv, 0, sizeof *kv); return -1; }
+        kv->off[v] = total;
+        total += (size_t)kv->cap[v];
+        if (kv->cap[v] > maxcap) maxcap = kv->cap[v];
+    }
+    kv->n_pos_cap = maxcap;
+
+    /* The cache is one allocation laid out visit by visit at the offsets just computed. Sizing it from the sum of the
+     * per-visit rows is the entire point: a 1M context over 8 full visits plus 64 sliding visits costs
+     * 8 x 1M x 1024 x 8 B = 68.7 GB in f32, against 603 GB for the uniform layout that in2_kv_init used to build. */
+    const size_t elems = total * (size_t)dim;
+    kv->k    = (float *)calloc(elems, sizeof(float));
+    kv->v    = (float *)calloc(elems, sizeof(float));
     kv->kraw = (float *)calloc((size_t)n_visit * 3u * (size_t)dim, sizeof(float));
     kv->vraw = (float *)calloc((size_t)n_visit * 3u * (size_t)dim, sizeof(float));
     if (!kv->k || !kv->v || !kv->kraw || !kv->vraw) { in2_kv_free(kv); return -1; }
@@ -57,20 +106,20 @@ int in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap)
 void in2_kv_free(in2_kv_t *kv)
 {
     if (!kv) return;
-    free(kv->k); free(kv->v); free(kv->kraw); free(kv->vraw);
+    free(kv->k); free(kv->v); free(kv->kraw); free(kv->vraw); free(kv->cap); free(kv->off);
     memset(kv, 0, sizeof *kv);
 }
 
 float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
 {
-    if (!kv || !kv->k || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_cap) return NULL;
-    return kv->k + ((size_t)visit * (size_t)kv->n_pos_cap + (size_t)in2_kv_row_slot(kv, pos)) * (size_t)kv->dim;
+    if (!kv || !kv->k || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= in2_kv_cap(kv, visit)) return NULL;
+    return kv->k + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
 }
 
 float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 {
-    if (!kv || !kv->v || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_cap) return NULL;
-    return kv->v + ((size_t)visit * (size_t)kv->n_pos_cap + (size_t)in2_kv_row_slot(kv, pos)) * (size_t)kv->dim;
+    if (!kv || !kv->v || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= in2_kv_cap(kv, visit)) return NULL;
+    return kv->v + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
 }
 
 /* A sliding ring slot is only valid while it still holds the position asked for; once the window has moved
