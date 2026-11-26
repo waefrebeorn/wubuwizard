@@ -805,6 +805,18 @@ static size_t  g_res_bytes[WUBU_RES_SLOTS];
 static int64_t g_res_ident[WUBU_RES_SLOTS];
 /* a caller-supplied ident wins when non-zero (expert slices); pointer key otherwise (dense tensors) */
 static int     g_res_n;
+/* The resident tier keeps ONE activation staging buffer, ONE output buffer and ONE slab table, all shared, and the
+ * engine calls it from OpenMP threads. That race was the whole of the corrupt-expert mystery: 8 threads -> 111-114 of
+ * 242 expert rows correct; 1 thread -> 242/242 exact, same kernel and same slabs. Serialise the entry. */
+#include <atomic>
+static std::atomic<int> g_res_lock{0};
+static void res_lock(void)   { int e = 0; while (!g_res_lock.compare_exchange_weak(e, 1, std::memory_order_acquire)) e = 0; }
+static void res_unlock(void) { g_res_lock.store(0, std::memory_order_release); }
+struct ResGuard {
+    ResGuard(void) { res_lock(); }
+    ~ResGuard(void) { res_unlock(); }
+};
+
 static int     g_res_full_warned;   /* a full slab is a silent CPU fallback for every later tensor */
 static void   *g_res_act, *g_res_y;
 static void   *g_pin_act, *g_pin_y;      /* page-locked staging: the pageable copies were the per-call cost */
@@ -827,6 +839,7 @@ WUBU_EXPORT int wubu_cuda_resident_matvec_id(int type, int64_t ident, const void
                                             const void *h_act, int act_bytes, float *h_y,
                                             int K, int n_cols, int64_t col_stride_bytes)
 {
+    ResGuard _guard;  /* serialises the shared staging and output buffers against the engine threads */
     if (!h_w || !h_act || !h_y || wbytes == 0 || act_bytes <= 0 || K <= 0 || n_cols <= 0) return -1;
     /* Only types with a kernel whose numbers have been checked against a reference may be resident. The generic
      * wubu_cuda_quant_matvec returns success and writes nothing (Q8_0 did exactly that: 0 of 512 rows non-zero), so

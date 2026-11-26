@@ -1480,3 +1480,37 @@ back to the verified-green state:
 
 The next step is narrow for the first time: diff one expert's cached slot against its own `src` bytes inside the DLL,
 which is a ten-line check inside `wubu_cuda_resident_matvec_id`, not another engine-level experiment.
+
+## Found and fixed: the corrupt expert rows were a thread race on the resident tier's shared buffers
+
+Three measurements, same kernel, same slabs, same tables, only the concurrency differing:
+
+    8 threads, resident cache        111-114 good of 242 expert rows
+    1 thread,  resident cache        242 / 242 exact
+    8 threads, resident cache + lock 242 / 242 exact
+
+The resident entry keeps **one** activation staging buffer (`g_res_act`, `g_pin_act`) and **one** output buffer
+(`g_res_y`) for every caller, and the engine calls it from OpenMP threads. Thread A overwrites the activation while
+thread B is still reading it, and the kernel - which was proven correct on synthetic data at 6e-08 - faithfully returns
+the wrong answer for the mixed-up input. That is why the failure looked per-call rather than per-tensor, why it was
+uniform across layers and quant types, why it survived a bounds guard, eviction changes and identity keying, and why the
+same code was exact whenever it happened to run on one thread.
+
+The fix is a `ResGuard` RAII lock in `wubu_cuda_resident_matvec_id` (a `std::atomic<int>` spin, because nvcc's Windows
+host has no `__sync` builtins). Verified:
+
+    device vs CPU, 242 expert rows, 8 threads:  136/136 ty=16, 56/56 ty=22, 50/50 ty=23, medians 1.1-1.2e-07
+    oracle, all three configurations identical:
+      CPU only, IN2_GPU_DENSE=1, IN2_GPU_DENSE=1 IN2_GPU_MOE=1 IN2_RES_GB=3.0  ->  the same 15 tokens
+
+**MoE runs on the device and produces the reference answer.** That is the milestone: the expert path has been either
+refused or silently wrong since this project began.
+
+### What it is not worth yet
+
+    24-token decode    CPU 5440 ms | GPU dense 5142 ms (-5.5 %) | GPU dense + experts 5236 ms (+1.8 % vs dense)
+
+Offloading the experts is currently a **small loss**, because the lock serialises the entry and every expert call still
+uploads a ~1 MB slab over PCIe. Correctness had to come first and does. The payoff now depends on the cache actually
+hitting, which it finally can - the hit/miss counters are trustworthy for the first time, and the hot set is known to be
+concentrated (top-32 experts ~82 % of picks). That is the next measurement, not another diagnosis.
