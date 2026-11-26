@@ -30,6 +30,7 @@ gcc -O3 -std=c11 -fopenmp $EXTRA \
   src/wubu_inkling2_fullseq.c \
   src/wubu_inkling2_model.c \
   src/wubu_inkling2_kv.c \
+  src/wubu_kv_q8.c \
   src/wubu_gguf_tokenizer.c \
   src/wubu_tokenizer.c \
   src/wubu_spawn.c \

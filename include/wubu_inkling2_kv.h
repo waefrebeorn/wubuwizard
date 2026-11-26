@@ -13,8 +13,12 @@ typedef struct {
     int    n_stored;    /* positions stored so far */
     int   *cap;         /* rows per visit; NULL means every visit gets n_pos_cap */
     size_t *off;        /* element offset of each visit inside k/v; NULL means uniform stride */
-    float *k, *v;       /* post-conv keys/values, [n_visit][n_pos_cap][dim] */
+    float *k, *v;       /* post-conv keys/values, [n_visit][n_pos_cap][dim]; NULL when q8 is on */
     float *kraw, *vraw; /* pre-conv rows for the 4-tap causal conv, [n_visit][3][dim] */
+    unsigned char *kq, *vq; /* q8_0 blocks when q8 is on, else NULL: rows * rowq bytes each */
+    float *kscr, *vscr; /* ONE dequantised row per array, returned by the accessors (read-only) */
+    size_t rowq;        /* bytes per quantised row */
+    int    q8;          /* 1 = keys/values are stored as q8_0 */
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */

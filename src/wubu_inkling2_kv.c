@@ -21,6 +21,7 @@
  * C11 only, no allocation on the read path, no global state.
  */
 #include "wubu_inkling2_kv.h"
+#include "wubu_kv_q8.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -65,6 +66,7 @@ size_t in2_kv_bytes(const in2_kv_t *kv)
     if (!kv || !kv->cap) return 0;
     size_t rows = 0;
     for (int v = 0; v < kv->n_visit; ++v) rows += (size_t)kv->cap[v];
+    if (kv->q8) return rows * kv->rowq * 2u;
     return rows * (size_t)kv->dim * sizeof(float) * 2u;
 }
 
@@ -98,11 +100,21 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
      * per-visit rows is the entire point: a 1M context over 8 full visits plus 64 sliding visits costs
      * 8 x 1M x 1024 x 8 B = 68.7 GB in f32, against 603 GB for the uniform layout that in2_kv_init used to build. */
     const size_t elems = total * (size_t)dim;
-    kv->k    = (float *)calloc(elems, sizeof(float));
-    kv->v    = (float *)calloc(elems, sizeof(float));
+    kv->q8   = getenv("IN2_KV_Q8") != NULL;
+    if (kv->q8) {
+        kv->rowq = kvq8_row_bytes(dim);
+        kv->kq   = (unsigned char *)calloc(1, elems / (size_t)dim * kv->rowq);
+        kv->vq   = (unsigned char *)calloc(1, elems / (size_t)dim * kv->rowq);
+        kv->kscr = (float *)malloc((size_t)dim * sizeof(float));
+        kv->vscr = (float *)malloc((size_t)dim * sizeof(float));
+        if (!kv->kq || !kv->vq || !kv->kscr || !kv->vscr) { in2_kv_free(kv); return -1; }
+    } else {
+        kv->k    = (float *)calloc(elems, sizeof(float));
+        kv->v    = (float *)calloc(elems, sizeof(float));
+    }
     kv->kraw = (float *)calloc((size_t)n_visit * 3u * (size_t)dim, sizeof(float));
     kv->vraw = (float *)calloc((size_t)n_visit * 3u * (size_t)dim, sizeof(float));
-    if (!kv->k || !kv->v || !kv->kraw || !kv->vraw) { in2_kv_free(kv); return -1; }
+    if ((!kv->q8 && (!kv->k || !kv->v)) || !kv->kraw || !kv->vraw) { in2_kv_free(kv); return -1; }
     kv->n_stored = 0;
     return 0;
 }
@@ -110,33 +122,48 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
 void in2_kv_free(in2_kv_t *kv)
 {
     if (!kv) return;
-    free(kv->k); free(kv->v); free(kv->kraw); free(kv->vraw); free(kv->cap); free(kv->off);
+    free(kv->k); free(kv->v); free(kv->kraw); free(kv->vraw);
+    free(kv->kq); free(kv->vq); free(kv->kscr); free(kv->vscr); free(kv->cap); free(kv->off);
     memset(kv, 0, sizeof *kv);
 }
 
 float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
 {
-    if (!kv || !kv->k || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
-    return kv->k + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
+    if (!kv || (!kv->k && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
+    const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->q8) {
+        kvq8_dequantize_row(kv->kq + el * kv->rowq, kv->kscr, kv->dim);
+        return kv->kscr;   /* read-only, valid until the next in2_kv_k() call - no caller holds two K rows */
+    }
+    return kv->k + el * (size_t)kv->dim;
 }
 
 float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 {
-    if (!kv || !kv->v || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
-    return kv->v + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
+    if (!kv || (!kv->v && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
+    const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->q8) {
+        kvq8_dequantize_row(kv->vq + el * kv->rowq, kv->vscr, kv->dim);
+        return kv->vscr;
+    }
+    return kv->v + el * (size_t)kv->dim;
 }
 
 void in2_kv_store_post_k(in2_kv_t *kv, int visit, int pos, const float *row)
 {
-    if (!kv || !kv->k || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
-    float *dst = kv->k + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
+    if (!kv || (!kv->k && !kv->q8) || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
+    const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->q8) { kvq8_quantize_row(row, kv->kq + el * kv->rowq, kv->dim); return; }
+    float *dst = kv->k + el * (size_t)kv->dim;
     memcpy(dst, row, (size_t)kv->dim * sizeof(float));
 }
 
 void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
 {
-    if (!kv || !kv->v || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
-    float *dst = kv->v + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
+    if (!kv || (!kv->v && !kv->q8) || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
+    const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->q8) { kvq8_quantize_row(row, kv->vq + el * kv->rowq, kv->dim); return; }
+    float *dst = kv->v + el * (size_t)kv->dim;
     memcpy(dst, row, (size_t)kv->dim * sizeof(float));
 }
 

@@ -1353,3 +1353,38 @@ open-ended one.
 
 ## Wave 19 - q8 KV: 3.76x smaller and wrong - reverted, with three candidate causes
 
+
+## Wave 20 - q8 KV SHIPPED: 3.76x smaller, parity intact, 256k fits
+
+q8 KV lands: 3.76x smaller, identical tokens on both oracles, 256k now fits
+
+The collapse was one line. in2_kv_off() returns a ROW offset - in2_kv_k multiplies it by dim - but the struct comment
+says "element offset of each visit inside k/v", and I believed the comment. My byte offset was el/dim*rowq, which
+divides an already-row-quantity by dim, so every store and every read resolved to row 0. The model then saw one key
+repeated for every position, which is exactly the "of of of of" loop. Fixed to el*rowq, four expressions.
+
+Results, IN2_KV_Q8=1 versus the f32 default:
+
+    KV @ 131072     8704.0 MB  ->  2312.0 MB     = 3.763x, the exact 34/32-vs-4-bytes ratio
+    P1 12 tokens    identical, token for token: 149876 220 36838 182189 149933 220 50843 11 149984 149933 151534 149919
+    P2 10 tokens    identical to the f32 path, token for token
+    text            "The capital of the Ottoman Empire was Constantinople," - same sentence
+    decode, 16 tok  4.90 / 4.88  ->  4.78 / 4.74 tok/s   (-2.5%, the dequantise-on-read cost)
+
+So q8 KV is free in quality on everything measured and costs 2.5% of decode rate. It is opt-in (IN2_KV_Q8) and the f32
+path is untouched and bit-identical, which is what the store refactor bought.
+
+The long-context position, now measured rather than estimated:
+
+    ctx 65536    f32 4.83 GB   q8 1.28 GB   q8+model  9.18 GB   fits
+    ctx 131072   f32 9.13 GB   q8 2.42 GB   q8+model 10.32 GB   fits
+    ctx 262144  f32 17.72 GB   q8 4.71 GB   q8+model 12.61 GB   fits
+    ctx 393216  f32 26.31 GB   q8 6.99 GB   q8+model 14.89 GB   tight
+
+**256k now fits on a 16 GB box**, up from a 64k ceiling this morning - a 4x extension of reachable context, with parity
+intact on every oracle. 512k still needs q4 (9.27 GB) and does not fit beside the model at f32 or q8.
+
+Two things worth keeping from this one: the struct comment was wrong and cost a whole build-and-diagnose cycle, so a
+comment stating a UNIT is a claim to verify against the arithmetic that consumes it, not documentation; and the
+two-step discipline (quantiser standalone, then store refactor bit-identical, then the format swap) meant that when the
+swap failed, exactly one line was suspect and it was found on the first hypothesis that the arithmetic could explain.
