@@ -1262,3 +1262,39 @@ So the real finding is narrower and more actionable than the last one:
 That makes the next step a correctness gate, not a performance one: for one expert slice, compare the device matvec
 against the CPU kernel on the same bytes, with every call reported. Performance work on MoE resumes after that gate
 passes - the LRU sizing and hit rates are already measured and waiting.
+
+## The expert gate does not merely give wrong answers, it segfaults - so MoE-on-GPU is a stability defect
+
+The correctness gate (`IN2_GPU_CHECK=1`: when the device takes a matvec, recompute the same row with the CPU kernel and
+print worst-abs) was written to answer one question - are the expert kernels right? It never fired:
+
+    GPUCHECK lines: 0
+
+because no expert matvec ever returns success. With the expert gate open, the eviction budget set, and the check
+enabled, the process **dies with SIGSEGV**:
+
+    exit: Segmentation fault
+    refused ty=14 rc=-1
+    ok      ty=8
+
+So the earlier parity change when the expert gate was open (token 5: `34361 149933 145038` instead of
+`36838 182189 149933`) was not a precision problem to be measured - it was the leading edge of a crash. That is a
+different and more serious class than everything else in this document, and it means the MoE device path has never been
+in a state where its arithmetic could be judged at all.
+
+Everything from that attempt is reverted; what remains, and is verified:
+
+    gen_fast.exe oracle (CPU only)                     12/12 exact
+    gen_fast.exe oracle with IN2_GPU_DENSE=1           12/12 exact
+    ... with IN2_GPU_DENSE=1 IN2_RES_GB=3.0            12/12 exact   (eviction active, never triggers)
+
+A segfault in the hot path also cannot be instrumented away: adding the comparison to the matvec dispatch is what made
+it obvious, but no amount of extra printing will localise it, because the fault is below the C level. The next attempt
+needs a **minimal reproducer** - one expert tensor, one activation row, one resident call, in a standalone harness
+(`tools/gpu_expert_slice.c`) - rather than another flag on a 48-layer forward pass.
+
+Recorded so the next session does not repeat this: three separate attempts on the MoE device path (open the gate
+measured 14 % slower, eviction added, correctness check added) all ended in either a slowdown or a crash, and the only
+thing that moved forward was the routing analysis that says a cache would be worth 86 %. The cache is not the blocker.
+The blockers, in order, are: expert slices crash on the device; the per-type trace hides outcomes after the first; and
+only then is any hit-rate question worth asking.
