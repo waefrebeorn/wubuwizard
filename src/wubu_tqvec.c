@@ -174,11 +174,21 @@ static void tqv_unrotate(const wubu_tqvec *c, const double *z, float *out)
 
 static int tqv_nearest(const wubu_tqvec *c, double v)
 {
-    int best = 0; double bd = fabs(v - c->cent[0]);
-    for (int k = 1; k < c->ncent; ++k) {
-        const double dd = fabs(v - c->cent[k]);
-        if (dd < bd) { bd = dd; best = k; }
+    /* cent[] is monotone - it is built by walking a CDF - so the nearest centroid is the bisection point, not a scan
+     * over all 2^b of them per coordinate. At b=6 that is 6 comparisons instead of 64 on the inner loop of EVERY row
+     * written during prefill, which is where the 6-bit path spends 3-5x the f32 prefill time.
+     * Exact, not approximate: same index, same bits. On a run of equal centroids it walks to the run's first index,
+     * because the linear scan it replaces kept the lowest index on a tie. */
+    int lo = 0, hi = c->ncent - 1;
+    if (c->ncent <= 1) return 0;
+    if (v <= c->cent[0]) return 0;
+    if (v >= c->cent[hi]) return hi;
+    while (hi - lo > 1) {
+        const int mid = (lo + hi) >> 1;
+        if (c->cent[mid] <= v) lo = mid; else hi = mid;
     }
+    int best = (fabs(v - c->cent[lo]) <= fabs(v - c->cent[hi])) ? lo : hi;
+    while (best > 0 && c->cent[best - 1] == c->cent[best]) --best;
     return best;
 }
 

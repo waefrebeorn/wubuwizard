@@ -1738,3 +1738,23 @@ hold.
 
 Prefill remains the other wall and is unchanged by any of this: 262k measured ~35 h at 6 bits, so even 512k context is
 reachable in capacity long before it is reachable in time.
+
+## KV encode: the nearest-centroid scan is now a bisection (exact, unmeasured for speed yet)
+
+`tqv_nearest` scanned **all 2^b centroids per coordinate** on every row written - 64 comparisons at b=6, over 1024
+coordinates, for every KV row of every visit during prefill. The centroid table is monotone (built by walking a CDF), so
+the nearest entry is the bisection point:
+
+    6 comparisons instead of 64 at b=6, same index, same bits
+
+Duplicate runs walk back to the run's first index so tie-breaking matches the linear scan it replaces. Verified
+behaviour-preserving against the recorded baseline rather than by eye:
+
+    IN2_KV_TQ=6   ... 149984 149933 150056 151304      <- identical to the documented 10/12 set
+    f32           12/12 exact                           <- unchanged
+
+**Not yet measured for speed.** The prefill A/B needs the 49-token prompt path (`IN2_TEXT_FILE` plus argv[3]); the prompt
+file now tokenises to 2 tokens, so a 1.47 s f32 vs 1.60 s TQ run says nothing about the 4.484 s / 14.234 s baseline
+recorded earlier. Re-establish that harness before quoting any prefill improvement - the encode inner loop is 8x cheaper
+by construction, but construction is not measurement, and this thread has already produced four numbers that died that
+way.
