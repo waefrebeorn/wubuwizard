@@ -1293,3 +1293,33 @@ the second added the fp16 scale term, d*(0.5 + 127*2^-11), and still failed at 5
 practical envelope, 0.53% of block max, and prints the measured worst so a regression is visible as a number. The
 quantiser was never wrong - both failures were my tolerance, and the give-away is that the error stayed a stable 5% over
 a bound rather than scattering.
+
+### Integration blocker: the accessor is a write pointer, so stores need their own path
+
+q8 KV integration blocker found before writing it: in2_kv_k is a WRITE pointer
+
+The spec said "keep one dequantise-on-read scratch per array and return it from in2_kv_k". That cannot work, because
+the engine STORES the post-conv K and V rows by writing through the accessor:
+
+    fwd.c:1263-1264        float *ck = in2_kv_k(g_kv, vis, gp); if (ck) memcpy(ck, k + t*kdim, ...);
+    fwd.c:1270-1271        float *cv = in2_kv_v(...);            if (cv) memcpy(cv, row, ...);
+    fullseq.c:239-242      ck = in2_kv_k(...); cv = in2_kv_v(...); if (ck) memcpy(...); if (cv) memcpy(...);
+
+Four sites, and they are the only writers of kv->k / kv->v (in2_kv_store_row_k writes kraw, the pre-conv history, not the
+cache). So a scratch returned from the accessor would receive the data and drop it - every read afterwards would return
+whatever the scratch held last, which is a silent wrong-answer defect of exactly the class that has cost this session
+most.
+
+Corrected design: the accessor becomes READ-ONLY and dequantises, and the four write sites move to a new
+`in2_kv_store_post_k/in2_kv_store_post_v(kv, visit, pos, const float *row)` which quantises into the slot. That is a
+strictly better shape anyway - it puts the quantiser on the store side where the format lives, and leaves the read path
+as a pure dequantise - but it is 4 call sites rather than 0, and it must land in the same commit as the storage change
+or the engine writes into a scratch row.
+
+Two things this changes about the ordering: the parity gate is still llama.cpp with -ctk q8_0, and the first milestone is
+now "f32 path bit-identical with the new store helper in place, q8 off" - that proves the refactor before the format
+changes anything, which is the same two-step discipline that worked for the borrow conversions.
+
+Cost so far: the quantiser is written and verified (1.06 B/element, worst error 0.44% of block max), the memory budget is
+measured (q8 reaches ~256k, q4 needed for 512k), the dequantise-on-read scratch is proven safe against row aliasing, and
+this entry removes the one assumption that would have made the integration silently wrong.
