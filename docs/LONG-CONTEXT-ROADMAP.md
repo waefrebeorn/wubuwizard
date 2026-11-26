@@ -107,3 +107,26 @@ does not regress past the 67 ms/token VRAM bandwidth floor, and the reference-ex
   micro-benchmark and 0.87x in the engine; three intermediate claims were retracted. Measure at the engine, or say
   "unmeasured".
 - **The engine stays unaware of the domain.** No retrieval logic inside the forward pass; retrieval belongs beside it.
+
+## LP-05 baseline, measured — the card is not the problem, the kernels are
+
+The existing CUDA IQ2_XXS matvec path (`wubu_cuda_moe_batch`, 8 expert slabs of 2304x2304 IQ2_XXS, tables uploaded,
+`rc=0`), against the CPU ceiling measured the same way:
+
+    GPU, 1 batched launch (8 slabs)     30.77 GMAC/s      <- 2.6x the CPU
+    GPU, 8 separate launches            12.38 GMAC/s
+    CPU, best batched case              11.93 GMAC/s
+    this card's tensor-core GEMM        11.82 TMAC/s      <- 384x the IQ2 kernel
+
+Caveat carried forward honestly: the price tool's reference magnitude is 4.03e-37, i.e. the activations are essentially
+zero. Values do not change a quantised matvec's cost, so the timing stands as a kernel-throughput number, but **this
+particular run is not evidence about accuracy** and must not be quoted as such.
+
+So LP-05 is not "use the GPU". The GPU is already 2.6x the CPU and still 384x off the hardware's own GEMM throughput,
+because the kernel everyone has is a dequantise-then-dot matvec, not a tensor-core MMA path. **LP-05 = write an IQ2_XXS
+MMA kernel** (2-bit codes unpacked in registers/shared memory, fed to mma.sync, accumulated in fp32), which is the only
+construction that reaches the measured 23.7 TFLOP/s, and it is an XL pad that closes the last order of magnitude.
+
+Its gate, in order: (1) bit-identical or oracle-identical output against `wubu_cuda_selftest_iq2_run` on the same bytes,
+(2) measured GMAC/s above 300 (10x the current kernel) before any engine wiring, (3) 12/12 oracle after wiring, with the
+accumulation-order parity question answered explicitly rather than assumed.
