@@ -1758,3 +1758,25 @@ file now tokenises to 2 tokens, so a 1.47 s f32 vs 1.60 s TQ run says nothing ab
 recorded earlier. Re-establish that harness before quoting any prefill improvement - the encode inner loop is 8x cheaper
 by construction, but construction is not measurement, and this thread has already produced four numbers that died that
 way.
+
+## Retraction: the centroid bisection is 3 % SLOWER, and the prefill wall is measured at 7.5x
+
+The bisection replaced 64 comparisons with 6 on the inner loop of every KV row written during prefill. It is exact, it is
+obviously fewer operations, and measured end to end it is **worse**:
+
+    120-token prefill, IN2_KV_TQ=6     linear scan 96.31 s | bisection 99.23 s     (-3 %)
+    120-token prefill, f32                          13.21 s
+
+So the scan was never the cost - 64 fabs against a row that also does a 1024-point Walsh-Hadamard and a quantise pass is
+noise - and the bisection's branch mispredictions made it slightly negative. Reverted; the original encoder is restored and
+the tree is green (`f32 12/12`, `IN2_KV_TQ=6 12/12`, now identical rather than the older 10/12).
+
+The measurement that matters came out of the same harness, and it is the real shape of the wall:
+
+    120 tokens   f32 0.110 s/token    TQ-6 0.827 s/token     7.5x slower
+    480 tokens   f32 0.120 s/token    TQ-6 exceeded 560 s     > 9x slower
+
+The cost is not the codebook search and it is not the Hadamard. It scales with context, not with the per-row work, which
+points at the encode running over more rows per visit as the sliding window fills. That is the next thing to instrument,
+with the harness now working: `IN2_TEXT_FILE=<file> ./gen_fast.exe N --text x` (the `--text` is required; without it the
+file is silently ignored and the prompt is argv[3]).
