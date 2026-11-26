@@ -243,6 +243,43 @@ void wubu_inkling2_model_print(const wubu_inkling2_model_t *m, const wubu_inklin
 static HANDLE  g_map_h = NULL;
 static const unsigned char *g_view = NULL;
 static int64_t g_view_size = 0;
+/* Fault the mapped model in as one batched request instead of one page fault at a time. A decode step touches ~1.5 GB
+ * of weights; when the mapping is larger than the working set Windows trims it between steps and every re-touch costs a
+ * soft fault - measured 83,000-107,000 faults per step on this model, with zero disk reads, because the pages are in the
+ * file cache and only the PTEs are gone. PrefetchVirtualMemory is the supported way to install those PTEs in bulk.
+ * Returns the number of bytes the OS accepted, so the caller can tell "not supported" (0) from "done". */
+static int in2_try_map(gguf_ctx *ctx);   /* defined below; prefetch_all may run before the first tensor read */
+
+int64_t wubu_inkling2_prefetch_all(gguf_ctx *ctx)
+{
+#ifdef _WIN32
+    /* The mapping is created lazily on the first tensor read, so a caller that runs before any tensor access would
+     * otherwise prefetch nothing at all. Map now if needed. */
+    if (!g_view && ctx) in2_try_map(ctx);
+    if (!g_view || g_view_size <= 0) return 0;
+    /* WIN32_MEMORY_RANGE_ENTRY / PrefetchVirtualMemory need _WIN32_WINNT >= 0x0602, which this mingw default does not
+     * define, so declare the ABI here and resolve the entry point at runtime. That also degrades cleanly on a system
+     * without the API instead of failing to link. */
+    typedef struct { PVOID VirtualAddress; SIZE_T NumberOfBytes; } wubu_mem_range;
+    typedef BOOL (WINAPI *wubu_pvm_fn)(HANDLE, ULONG_PTR, wubu_mem_range *, ULONG);
+    static wubu_pvm_fn pvm = (wubu_pvm_fn) (void *) 0;
+    static int probed = 0;
+    if (!probed) {
+        HMODULE k = GetModuleHandleA("kernel32.dll");
+        pvm = k ? (wubu_pvm_fn) (void *) GetProcAddress(k, "PrefetchVirtualMemory") : NULL;
+        probed = 1;
+    }
+    if (!pvm) return 0;
+    wubu_mem_range range;
+    range.VirtualAddress = (PVOID) g_view;
+    range.NumberOfBytes = (SIZE_T) g_view_size;
+    /* Advisory: under memory pressure the OS may fault in only part of the range, so the return value is a success flag
+     * rather than a byte count. */
+    return pvm(GetCurrentProcess(), 1, &range, 0) ? g_view_size : 0;
+#else
+    return 0;
+#endif
+}
 static int     g_map_state = 0;   /* 0 = untried, 1 = mapped, -1 = unavailable */
 
 static int in2_try_map(gguf_ctx *ctx)

@@ -146,6 +146,9 @@ int  wubu_inkling2_read(gguf_ctx *ctx, const wubu_in2_tensor_t *t, void *dst, in
 
 /* Reads a tensor as F32 (dequantising if needed) into a caller buffer. */
 int  wubu_inkling2_read_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, float *dst, int64_t max_elems);
+/* Batch-fault the whole mapped model (Windows PrefetchVirtualMemory). Advisory: returns bytes accepted, 0 if the
+ * model is not mmapped or the OS declined. Costs RAM equal to the model size. */
+int64_t wubu_inkling2_prefetch_all(gguf_ctx *ctx);
 /* Reads ONE row of a 2-D tensor as F32. Bit-identical to the same slice of wubu_inkling2_read_f32 when the rows are
  * block-aligned; returns WUBU_INKLING2_ERR_SHAPE when they are not, so callers keep a whole-tensor fallback. */
 int  wubu_inkling2_read_row_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t row, float *dst, int64_t max_elems);

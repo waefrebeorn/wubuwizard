@@ -44,6 +44,33 @@ static void emit_piece(const char *s)
 /* clock() is CPU time and sums across threads, so under a 4-thread build it reports ~2.6x the wall time and its
  * per-step rows cannot be summed against an external `date +%s%N`. Use a monotonic wall clock for everything the
  * user reads. */
+/* Page-fault and real-I/O deltas: the two numbers that say whether a decode step is faulting through an mmap or
+ * actually reading from disk. A 7.9 GB model on a 16 GB box cannot keep everything resident, so "compute-bound" and
+ * "fault-bound" look identical on a wall clock - this separates them. */
+#ifdef _WIN32
+#include <psapi.h>
+static unsigned long long g_ws = 0;
+static void fault_now(unsigned long long *flt, unsigned long long *rd_bytes, unsigned long long *rd_ops)
+{
+    PROCESS_MEMORY_COUNTERS pmc;
+    IO_COUNTERS io;
+    *flt = 0; *rd_bytes = 0; *rd_ops = 0;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) {
+        *flt = (unsigned long long) pmc.PageFaultCount;
+        g_ws = (unsigned long long) pmc.WorkingSetSize;
+    }
+    if (GetProcessIoCounters(GetCurrentProcess(), &io)) {
+        *rd_bytes = (unsigned long long) io.ReadTransferCount;
+        *rd_ops = (unsigned long long) io.ReadOperationCount;
+    }
+}
+#else
+static void fault_now(unsigned long long *flt, unsigned long long *rd_bytes, unsigned long long *rd_ops)
+{
+    *flt = 0; *rd_bytes = 0; *rd_ops = 0;
+}
+#endif
+
 static double wall_now(void)
 {
 #if defined(_WIN32)
@@ -99,6 +126,13 @@ int main(int argc, char **argv)
 
     double t_step = wall_now(); double t_total = 0.0; int used_cache = 0;
     fprintf(stderr, "LOAD wall: %.2f s (open+probe+load, before first token)\n", t_step - t_proc);
+    /* IN2_PREFETCH_ALL=1 batch-faults the whole mapping before timing starts. This is the experiment that separates
+     * "the step is doing arithmetic" from "the step is re-faulting a trimmed mapping": it changes no maths at all. */
+    if (getenv("IN2_PREFETCH_ALL")) {
+        const double tp0 = wall_now();
+        const int64_t got = wubu_inkling2_prefetch_all(ctx);
+        fprintf(stderr, "PREFETCH_ALL %.1f MB in %.2f s\n", (double) got / 1048576.0, wall_now() - tp0);
+    }
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
 
@@ -111,11 +145,14 @@ int main(int argc, char **argv)
          * 34/34 oracle tokens match with it enabled, and the two paths produce bit-identical hidden states. IN2_NO_KV
          * forces the full recompute for debugging. */
         const int incremental = getenv("IN2_NO_KV") == NULL && step > 0;
+        unsigned long long f0, r0, o0, f1, r1, o1;
+        fault_now(&f0, &r0, &o0);   /* before the timer, so the delta covers the forward exactly */
         const double t_f0 = wall_now();
         const int rc = incremental
             ? in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits)
             : in2_forward_at(ctx, &m, &cfg, toks, n, 0, h, logits);
         const double t_f1 = wall_now();
+        fault_now(&f1, &r1, &o1);
         if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "step %d rc=%d\n", step, rc); return rc; }
         used_cache |= incremental;
         int best = 0; float bv = -1e30f;
@@ -125,8 +162,12 @@ int main(int argc, char **argv)
         const double dt = t_after - t_step;
         t_step = t_after;
         t_total += dt;
-        printf("gen[%d] id=%d logit=%.4f  %.3fs wall (fwd %.3fs + %.3fs other)  (%.2f tok/s at prefix %d)\n",
-               step, best, bv, dt, t_f1 - t_f0, dt - (t_f1 - t_f0), dt > 0 ? 1.0 / dt : 0.0, n);
+        printf("gen[%d] id=%d logit=%.4f  %.3fs wall (fwd %.3fs + %.3fs other)  (%.2f tok/s at prefix %d)"
+               "  faults %llu  disk %.1f MB / %llu reads\n",
+               step, best, bv, dt, t_f1 - t_f0, dt - (t_f1 - t_f0), dt > 0 ? 1.0 / dt : 0.0, n,
+               f1 - f0, (double) (r1 - r0) / 1048576.0, o1 - o0);
+        printf("      ws %.0f MB  faults/MB-touched %.0f\n",
+               (double) g_ws / 1048576.0, (f1 - f0) ? 1535.0 / ((double) (f1 - f0) * 4096.0 / 1048576.0) : 0.0);
         if (getenv("IN2_TOPK")) {
             /* Top-k of the same distribution, so a near-tie can be judged against llama-server's
              * completion_probabilities instead of only by the argmax. */
