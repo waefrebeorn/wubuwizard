@@ -158,6 +158,40 @@ int main(int argc, char **argv)
     }
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
+    if (getenv("IN2_BATCH_PROBE")) {
+        /* Is a batched forward (n_tok>1) bit-identical to sequential single-token stepping at the same positions?
+         * Writes two logit rows: position 0 and position 1, either from one 2-token call or from two 1-token calls.
+         * Run twice (IN2_BATCH_PROBE=0 and =1) and diff the files - speculation is only reachable if they match. */
+        const int batched = atoi(getenv("IN2_BATCH_PROBE")) != 0;
+        const char *out = getenv("IN2_PROBE_OUT");
+        if (!out) { fprintf(stderr, "IN2_PROBE_OUT not set\n"); return 2; }
+        float *row0 = (float *)calloc(cfg.vocab_size, sizeof(float));
+        float *row1 = (float *)calloc(cfg.vocab_size, sizeof(float));
+        if (batched) {
+            float *la = (float *)calloc((size_t)2 * cfg.vocab_size, sizeof(float));
+            if (!la || !row0 || !row1) { fprintf(stderr, "probe oom\n"); return 2; }
+            in2_set_logits_all(la);
+            const int rc = in2_forward_at(ctx, &m, &cfg, toks, 2, 0, h, logits);
+            in2_set_logits_all(NULL);
+            if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe batched rc=%d\n", rc); return rc; }
+            memcpy(row0, la, sizeof(float) * cfg.vocab_size);
+            memcpy(row1, la + cfg.vocab_size, sizeof(float) * cfg.vocab_size);
+        } else {
+            if (!row0 || !row1) { fprintf(stderr, "probe oom\n"); return 2; }
+            int rc = in2_forward_at(ctx, &m, &cfg, &toks[0], 1, 0, h, row0);
+            if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe seq0 rc=%d\n", rc); return rc; }
+            rc = in2_forward_at(ctx, &m, &cfg, &toks[1], 1, 1, h, row1);
+            if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe seq1 rc=%d\n", rc); return rc; }
+        }
+        FILE *fp = fopen(out, "wb");
+        if (!fp) { fprintf(stderr, "probe cannot write %s\n", out); return 2; }
+        fwrite(row0, sizeof(float), cfg.vocab_size, fp);
+        fwrite(row1, sizeof(float), cfg.vocab_size, fp);
+        fclose(fp);
+        fprintf(stderr, "PROBE wrote 2 x %d floats (batched=%d) to %s\n", cfg.vocab_size, batched, out);
+        return 0;
+    }
+
 
     const double t_start_lookup = wall_now();
     if (getenv("IN2_LOOKUP")) {

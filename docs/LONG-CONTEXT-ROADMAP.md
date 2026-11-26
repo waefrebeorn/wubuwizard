@@ -1837,3 +1837,52 @@ Next step, now unambiguous: measure batched-vs-sequential equivalence directly -
 each row's logits and stored K/V bytes against two 1-token calls at the same positions. If they differ, quantify by how much
 and locate the kernel (attention vs the two convs vs MoE). That measurement decides whether prompt-lookup speculation is
 reachable at all without changing the batched kernels.
+
+## MEASURED: the batched path IS bit-identical to sequential - so the ring is the suspect
+
+Probe added to the generator (`IN2_BATCH_PROBE=0|1`, `IN2_PROBE_OUT=path`) writes two logit rows: from two 1-token forwards
+at positions 0 and 1, versus one 2-token forward over the same tokens. Comparing all 201,024 entries of each row:
+
+    pos0: max|diff| = 0 over every real vocab entry, argmax 220    vs 220    SAME
+    pos1: max|diff| = 0 over every real vocab entry, argmax 149879 vs 149879 SAME
+
+(966 entries differ by 1e30 - those are the padded-vocab sentinels, identical in sign and position, and they never win the
+argmax.) So **the claim "the batched path is not bit-identical" is FALSE, retracted before it was written into a conclusion.**
+`in2_forward_at` with n_tok = 2 reproduces the sequential result exactly at low positions.
+
+That moves the speculation failure to the remaining structural difference: **the ring**. Verification writes rows at
+`n..n+K-1` through `pos % cap`. On a sliding visit whose cap is the window, those writes wrap and **overwrite rows for earlier
+positions that are still live** - and no tag can restore overwritten data, only mark it invalid. The plain path never writes
+ahead, so it never evicts a live row. This is exactly the FIFO objection, and it predicts the observed shape: correct until
+the sequence is long enough to wrap (token 13), and independent of how many drafts are accepted (measured: accepted 0).
+
+Two candidate fixes, both already scoped:
+1. **slack**: size each sliding visit's cap to `window + K`, so verification's lookahead cannot reach a live row. Cheapest,
+   costs `K/window` extra memory (at window 1024, K 4: +0.4 %).
+2. **HIVE-backed rows**: no aliasing at all, O(1) erase, per-position addressing - the larger change, and the one that also
+   makes a long-context row store sane.
+
+## LoopCD: a nearly-free decoder for looped transformers, and this model is one
+
+Source: arXiv 2610.02185, "Decoding Looped Transformers Better for (Almost) Free" (Apple), plus oMLX 0.8.4 shipping it for this
+exact model.
+
+Mechanism: a looped transformer's final prediction can be **contrasted with an earlier recurrent pass** to guide token
+selection, training-free.
+- **LoopCD-Logits**: run both states through the output layers (one extra head pass).
+- **LoopCD-Hidden**: combine the two hidden states before the single output pass - **zero extra output overhead**.
+
+Published gains: Ouro-2.6B-Thinking AIME 2024 61.88 % -> 73.33 % (Logits); Huginn HumanEval 22.56 % -> 31.71 % (Hidden); up
+to 48.2 % fewer FLOPs at equal quality. oMLX reports, for this model, ARC-Challenge 69.62 -> 71.93 and HumanEval 152 -> 155 of
+164, at a cost of 9-13 % decode speed, off by default.
+
+Why it fits here: our engine already runs the three core passes (layers 6..17, `num_loops = 3`), so the *first* pass's hidden
+state exists at the moment the core finishes its first traversal - capturing it is one `memcpy` of `d` floats per token.
+
+**Hard constraint, stated before anyone wires it:** LoopCD changes token choice by construction. It therefore **fails this
+project's bit-identical oracle on purpose**. It can only ever be an opt-in quality mode (`IN2_LOOPCD=hidden|logits`), never
+the default and never part of a parity claim. Any future run that enables it must not report oracle equality.
+
+Also from the same release, directly relevant to a 6 GB card: oMLX now keeps **Inkling 2 experts on SSD**, taking a 24 GB Mac
+from 17.0 GB to 10.2 GB and letting a 14.8K prompt run that previously exhausted memory. Our engine already streams experts
+from SSD (`IN2_RES_GB`); their result is evidence the approach scales to a prompt length we currently cannot fit.
