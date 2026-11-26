@@ -271,3 +271,77 @@ Two results worth carrying although they are not pads: KTransformers is the only
 device (16 tok/s on a 24 GB GPU) and it gets there by attending ~16k of blocks, not by shrinking KV to fit; and
 llama.cpp hit a hard bug at `n_kv * n_ubatch = 2^32`, so mask or index arithmetic added for long context must be
 64-bit. This engine has no masks and its KV offsets are already size_t, so that bug class does not apply as it stands.
+
+## Wave 9 — tandem GPU (CPU and GPU busy on the same token)
+
+Three engines already do this on hardware close to this box, and they converge on one design. Strata (Niko1221) is
+written for exactly this problem - a 125B model on 12 GB of VRAM, 64 GB of RAM and a six-core desktop - and its own
+description puts the split as follows: the GPU holds attention and the DeltaNet mixers, the gated-residual weights,
+the routers, the shared experts, the output head, the MTP draft layer, part of the KV cache, and an **expert cache**
+that fills the rest of VRAM with the most-used experts and adapts during the conversation; the CPU computes the
+experts the GPU does not hold **in place, at the same time as the GPU works on the cached ones**. The concurrency is
+explicit and worth stealing: for each layer the GPU writes the chosen expert ids into a small block of pinned host
+memory (a "doorbell") and the CPU **spins on the doorbell instead of waiting on the driver**, immediately splitting
+the experts into cache hits (GPU), copies to stream (copy engine, concurrently) and CPU work. Strata reports copying
+55% of the misses for i-quant files but only 20% for Q2_0, because "whose CPU needs the RAM bandwidth itself" - i.e.
+the fetch/compute split is a function of what else the CPU is doing, not a constant.
+
+Avalon (a Ryzen 7 3800XT + RX 7900 XT 20 GB, PCIe 3.0 x16, measured 33-35 GB/s of DDR4) runs the same shape and is
+the best-measured datapoint for the payoff: **66.1 t/s on a short prompt / 98.4 with MTP**, **57.3 / 81.1 t/s at 256k
+context**, 1,854 t/s prefill. Its warning is the one that matters for us: refusing the split and keeping all experts
+on the CPU "throws away the VRAM tier entirely and drops you back to baseline speed".
+
+project-maya is where this repo's CPU kernels came from, and it contributes the four details that make a split engine
+actually fast: (a) a **static per-layer placement plan** ("1-2 PCIe fetches/layer, up to 7 CPU", PR #234) rather than
+per-token optimisation; (b) **multi-token expert rows** so several tokens sharing an expert decode the weights once,
+bit-identically - measured 455/681/889/1794/3554 us against 333/375/434/864/1684 us for 1/2/3/4/8/16 tokens, i.e.
+~2.1x at 4 and 16 tokens (PR #154), which is the same change this repo landed in d17b51f; (c) an **AVX-512 one-token
+IQ2_XXS row that reads neither the codebook nor the sign table** (PR #227), because ggml's AVX2 dot "spends most of a
+block on the codebook: 32 scalar grid loads and 32 sign-table loads per 256 values", worth +6-8% decode; (d)
+**Aged-LFU VRAM eviction with a promotion floor** (PROMOTE_MIN) to stop expert-promotion thrash.
+
+### The budget for THIS box, from the file
+
+    Inkling-2-Mini-UD-IQ2_XXS.gguf   12,444 MiB of tensors
+      experts              11,360 MiB   91.3%
+      attention               587 MiB    4.7%
+      head+embed              469 MiB    3.8%
+      norms/scales/small       28 MiB    0.2%
+    non-expert total        1,084 MiB   -> fits VRAM outright
+    VRAM free (6141 total)   5,920 MiB
+    left for expert cache + KV  4,836 MiB  = 43% of the expert population
+      (KV costs 64 MiB at 1k ctx for the 8 full visits, 1,024 MiB at 16k)
+
+So the split is not a compromise, it is arithmetic that happens to be favourable: **every non-expert tensor is 1,084
+MiB and can live in VRAM permanently**, and 43% of the expert population fits on top of it. Per token the engine reads
+dense 696 MB, experts 369 MB, head 469 MB; moving dense and head to VRAM puts 1.17 GB of the 1.53 GB token on a
+192 GB/s link and leaves the CPU only the expert misses.
+
+One measurement decides the fetch/compute ratio, and it comes out in favour of fetching: PCIe 4.0 **x8** on this
+laptop is ~10-13 GB/s real (nvidia-smi reports link width 8), so an 0.83 MB expert slab costs ~70-85 us to copy,
+against ~119 us to compute on the CPU at this engine's measured 7 GB/s. Fetching a miss is therefore faster than
+computing it whenever the link is idle - which is exactly why Strata streams 55% of i-quant misses rather than
+computing them, and why its share drops when the CPU needs the bandwidth.
+
+### What already exists here, and what does not
+
+Already in the tree, unused by the Inkling path: `src/wubu_cuda_quant.cu` (device-side IQ2_S block dot with the grid
+and sign tables resident as `__device__` symbols, plus a generic type-dispatched `matvec_kernel`),
+`src/gpu_wubu.cu` (a VRAM weight cache: `wc_get`, `gpu_wubu_matmul{,_nt,_tx}`, `gpu_wubu_mark_weights_dirty` and a
+generation counter), `src/wubu_model_gpu.cu` (1,559 lines), `src/flash_attn_*.cu`, `src/kv_arena.cu`. CUDA 13.5
+builds; the card is compute capability 8.9 (Ada). So the device side is further along than the CPU side was, and what
+is missing is exactly the part the three engines above are built around: a **tandem scheduler** - a placement plan,
+the doorbell, and the CPU/GPU split - not more kernels.
+
+### Pads
+
+- **LP-21 - the doorbell and the split loop.** Gate: one layer executes with the GPU doing the attention projections
+  and the CPU doing the expert misses concurrently, and the token is bit-identical to the CPU-only path. No timing
+  claim until the tokens match.
+- **LP-22 - resident non-expert tier.** Gate: the 1,084 MiB of attention + head + routers + shared experts live in
+  VRAM and the CPU never reads them again; measured as a decode step that issues no host reads for those tensors.
+- **LP-23 - expert cache with Aged-LFU + promotion floor.** Gate: cache hit rate measured over a long generation, no
+  promotion thrash (hit rate must not fall while the cache is full), and a documented fetch-versus-compute decision
+  rule using the ~70-85 us copy against ~119 us compute figures above.
+- **LP-24 - the AVX-512 one-token IQ2_XXS row without the codebook** (maya PR #227's trick): the CPU lane is the
+  long pole for misses, and this is +6-8% on it in their measurement.
