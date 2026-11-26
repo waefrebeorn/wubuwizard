@@ -1060,3 +1060,23 @@ So: worth turning on for prompt ingestion, irrelevant to the decode rate, and NO
 survives at 0.097 s = 1.17 G w/s, still ~16x below the 18.3 G w/s kernel, and still 1.02x across thread counts - it is
 the same class of defect the switch just fixed for q, in a phase the switch does not cover. That is the next target and
 it is one phase wide.
+
+### Correction: the gate/wo win is real, its mechanism is not dequant traffic
+
+correction: the dequant-cache explanation for the gate/wo win is FALSE
+
+Checked it instead of leaving it as a plausible story. The dequant counters are IDENTICAL in both configurations:
+
+    IN2_NO_FULL_KERNEL=1   564 entries, 558 MB, 0 uncached;  f32 produced 557.5 MB, copied 102.9 MB, miss 235 hit 2735
+    default                564 entries, 558 MB, 0 uncached;  f32 produced 557.5 MB, copied 102.9 MB, miss 235 hit 2735
+
+So removing the unused wgate/wo borrow did not change dequant traffic at all, and the cache was not being thrashed by
+it. The 9.7x on f_gate+wo (0.097 -> 0.010 s) and the +15% end-to-end are measured and reversible in both directions, but
+the mechanism connecting "an unused borrow" to that much time is NOT established by these counters.
+
+Most likely remaining explanation, unverified: in2_tensor_borrow on a 28 MB f32 tensor does real work even on a cache
+hit (pointer bookkeeping, or an LRU touch that reorders the table), and it is called twice per full-layer visit, 8
+visits per token, for data the kernel path discards. The 558 MB / 564-entry cache is also sitting right at the
+512-entry cap noted in rule 50, so a touch that reorders it could matter beyond its own cost. That is a hypothesis with
+a test - time in2_tensor_borrow alone on a cached tensor - and until that runs, the register should say the fix is
+verified and its mechanism is not.
