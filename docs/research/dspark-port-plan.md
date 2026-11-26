@@ -591,3 +591,23 @@ The honest conclusion is that these are two implementations, and the port I buil
 Before any more hypothesis work, the drafter GGUF that upstream actually reads should be fetched and its tensor table compared
 with the Strata pack. If it carries `ctx_mix` / `ctx_norm` / `markov_w2`, then the pack I decoded is a different generation and
 the 0/7 is explained without my maths being wrong anywhere.
+
+## Parsed tensor table at last: the main model has no drafter tensors (was a grep before, now a real table)
+
+`tools/gguf_names.py` reads a GGUF's metadata and tensor-info section without touching the data, so it works on multi-GB files
+and cannot hit the array-field `MemoryError` that killed the earlier struct walk. On the main checkpoint:
+
+    Inkling-2-Mini-UD-IQ2_XXS.gguf: v3, 734 tensors, 62 kv pairs
+    tensors matching "dspark": 0
+
+That finally replaces the weakest claim in this project - "no MTP head, based on a 40 MB string grep that matched `smtplib` and
+`Beagle` in the vocabulary" - with an actual parse of all 734 tensor entries. The drafter is definitively a separate file, which
+is why the pack ships 54 `dspark.*` tensors and the checkpoint ships none.
+
+Both drafter files exist on the hub at exactly the sizes their layout test documents:
+
+    dspark-Inkling-2-Mini-Q8_0.gguf        503,889,952 B   (mainline "dflash": ctx_mix / ctx_norm / markov_w2)
+    dspark-Inkling-2-Mini-Q8_0_Old.gguf    402,278,560 B   (the layout the engines read)
+
+The mainline one is downloading to `C:/Users/eman5/models/inkling-2-drafter/`. When it lands, `gguf_names.py --skeleton` on it
+against the Strata pack's 54 names answers the question that matters: same drafter, or a different generation.
