@@ -111,6 +111,8 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
     kv->n_row_total = nrows;
     kv->kpostag = (int *)calloc(nrows, sizeof(int));
     kv->vpostag = (int *)calloc(nrows, sizeof(int));
+    kv->ksnap = (float *)malloc(sizeof(float) * (size_t)n_visit * 3u * (size_t)dim);
+    kv->vsnap = (float *)malloc(sizeof(float) * (size_t)n_visit * 3u * (size_t)dim);
     /* Measured with the f32 shadow check (IN2_TQ_VERIFY): a stored row has norm ~24.87 and quantising it at b=4
      * leaves 0.31-0.39 absolute error (1.6 %), which is enough to change greedy output on this model; at b=6 it is
      * ~0.12 (0.5 %) and the answer is correct. So clamp below 6 rather than emit a wrong answer. */
@@ -199,7 +201,7 @@ void in2_kv_free(in2_kv_t *kv)
     wubu_tqvec_free(kv->tq); free(kv->kn); free(kv->vn); free(kv->encsc);
     free(kv->kshad); free(kv->vshad);
     free(kv->kmir); free(kv->vmir); free(kv->kitag); free(kv->vitag);
-    free(kv->kpostag); free(kv->vpostag);
+    free(kv->kpostag); free(kv->vpostag); free(kv->ksnap); free(kv->vsnap);
     memset(kv, 0, sizeof *kv);
 }
 
@@ -347,6 +349,23 @@ void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
 
 /* A sliding ring slot is only valid while it still holds the position asked for; once the window has moved
  * past it the slot belongs to a newer key. Callers use this to fall back instead of attending to stale rows. */
+int in2_kv_conv_save(in2_kv_t *kv)
+{
+    if (!kv || !kv->ksnap || !kv->vsnap || !kv->kraw || !kv->vraw) return -1;
+    const size_t n = (size_t)kv->n_visit * 3u * (size_t)kv->dim;
+    memcpy(kv->ksnap, kv->kraw, n * sizeof(float));
+    memcpy(kv->vsnap, kv->vraw, n * sizeof(float));
+    return 0;
+}
+
+void in2_kv_conv_restore(in2_kv_t *kv)
+{
+    if (!kv || !kv->ksnap || !kv->vsnap || !kv->kraw || !kv->vraw) return;
+    const size_t n = (size_t)kv->n_visit * 3u * (size_t)kv->dim;
+    memcpy(kv->kraw, kv->ksnap, n * sizeof(float));
+    memcpy(kv->vraw, kv->vsnap, n * sizeof(float));
+}
+
 void in2_kv_rewind(in2_kv_t *kv, int from_pos)
 {
     if (!kv || from_pos < 0) return;

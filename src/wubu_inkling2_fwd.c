@@ -214,6 +214,29 @@ void in2_kv_begin(int pos0) { g_visit = 0; g_kv_pos = pos0; }
  * with the same visit numbering (kraw = residual stream, vraw = moe stream). Missing these is why a 1-token step
  * produced different tokens from a full recompute: K and V were cached, these two were still pad-with-zeros. */
 static in2_kv_t *g_kv2;
+
+/* Sequence-state rollback for speculative verification. g_kv carries the residual stream's 4-tap conv history, g_kv2 the
+ * attention-output and MoE convs (window 3). Save before verifying drafts, restore + rewind when fewer are accepted than
+ * were verified, and replay the accepted tokens so both histories are rebuilt at the true prefix. */
+int in2_state_save(void)
+{
+    int rc = -1;
+    if (g_kv)  { if (in2_kv_conv_save(g_kv)  == 0) rc = 0; }
+    if (g_kv2) { if (in2_kv_conv_save(g_kv2) == 0) rc = 0; }
+    return rc;
+}
+
+void in2_state_restore(void)
+{
+    if (g_kv)  in2_kv_conv_restore(g_kv);
+    if (g_kv2) in2_kv_conv_restore(g_kv2);
+}
+
+void in2_state_rewind(int from_pos)
+{
+    if (g_kv)  in2_kv_rewind(g_kv,  from_pos);
+    if (g_kv2) in2_kv_rewind(g_kv2, from_pos);
+}
 int g_kv_window = 0;   /* ring size of the K/V cache, 0 = linear slots */
 
 static void in2_conv_stream(in2_kv_t *kvc, int vvis, int which, const float *x, int n_tok,

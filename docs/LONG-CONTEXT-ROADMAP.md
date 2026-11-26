@@ -1788,3 +1788,24 @@ Provenance note: the tag scheme is what Strata does with `slot_pos_[pos % kRing]
 rather than per-slot and uses a bounded range clear instead of an epoch bump, so a rejected draft costs O(visits x K) writes
 rather than invalidating the whole cache. For K <= 8 that is ~1.5 K writes per reject, which is nothing next to a 172 ms
 forward.
+
+## Rollback infrastructure is complete: both caches, both kinds of state
+
+Four pieces, each independently gated, all passing 15/15:
+
+1. `kpostag`/`vpostag` per row (`pos+1` live, `-1` invalidated, `0` never written) with the accessors refusing a mismatched
+   row, and `in2_kv_rewind(kv, from_pos)` invalidating a range and pulling `n_stored` back;
+2. `in2_kv_conv_save/restore` over `kraw`/`vraw` - the four-tap causal conv's three rows per visit, 1.77 MB total;
+3. `in2_state_save/restore/rewind` in `fwd.c`, which apply to **both** caches: `g_kv` carries the residual stream's conv
+   history and `g_kv2` (window 3) the attention-output and MoE convs. Covering only one of them would have reproduced the
+   five-tokens-then-wrong signature while looking fixed;
+4. the per-position logits support (`in2_set_logits_all`) from earlier.
+
+Why the conv history had to be handled separately: it is advanced by `memmove` inside `in2_kv_store_row_k/v`, so a K+1
+verification pass shifts it K+1 times. Invalidating K/V rows does nothing to it - the next pass would convolve against draft
+history. The snapshot is taken *before* verification and restored only when fewer drafts are accepted than were verified.
+
+The remaining policy decision, which the loop must implement: after a partial accept, restore the history to the
+pre-verification snapshot, rewind the K/V rows to the accepted prefix, then **replay the accepted tokens** in one short
+forward. Replaying is what rebuilds both conv histories at the true prefix; it costs one forward over `acc <= K` tokens and
+happens only on a reject. Full acceptance needs no restore at all.

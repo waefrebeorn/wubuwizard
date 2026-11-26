@@ -37,6 +37,10 @@ typedef struct {
      * whatever position last wrapped onto it - which is what broke speculative verification. */
     int   *kpostag, *vpostag;
     size_t n_row_total;
+    /* The 4-tap causal conv keeps three rows per visit in kraw/vraw, advanced by memmove. Invalidating K/V rows
+     * does not undo that, so a rejected draft would convolve against draft history. These hold the pre-verification
+     * state: 3 x dim per visit each (1.77 MB total at 72 visits x 1024 dim). */
+    float *ksnap, *vsnap;
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */
@@ -46,6 +50,14 @@ void      in2_kv_advance(void);
 /* Invalidate every row at or beyond from_pos and pull n_stored back. O(visits x range); the range is a rejected
  * draft, so single digits in practice. from_pos == n_stored is a no-op. */
 void      in2_kv_rewind(in2_kv_t *kv, int from_pos);
+/* Save/restore the conv history (kraw/vraw). Call save before a speculative verification pass and restore when
+ * fewer drafts are accepted than were verified, then rewind the K/V rows to the accepted prefix. */
+int       in2_kv_conv_save(in2_kv_t *kv);
+/* Both caches at once: g_kv holds the residual stream history, g_kv2 the two convs. A rollback must cover both. */
+int       in2_state_save(void);
+void      in2_state_restore(void);
+void      in2_state_rewind(int from_pos);
+void      in2_kv_conv_restore(in2_kv_t *kv);
 void  in2_kv_begin(int pos0);
 void  in2_kv_store_row_k(in2_kv_t *kv, int visit, const float *row);
 void      in2_kv_store_row_v(in2_kv_t *kv, int visit, const float *row);
