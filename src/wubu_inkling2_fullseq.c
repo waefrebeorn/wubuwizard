@@ -84,9 +84,10 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     }
 
     for (int sl = 0; sl < 3 && msgs; ++sl) {
-        float *dw = in2_tensor_to_f32(ctx, &L->loop_down[sl], NULL);
-        float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[sl], NULL);
-        float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[sl], NULL);
+        /* Borrowed: read-only message-gate weights. These were copied and freed per visit. */
+        const float *dw = in2_tensor_borrow(ctx, &L->loop_down[sl]);
+        const float *fw = in2_tensor_borrow(ctx, &L->loop_forget[sl]);
+        const float *gw = in2_tensor_borrow(ctx, &L->loop_gain[sl]);
         if (dw && fw && gw) {
             for (int t = 0; t < n_tok; ++t) {
                 float *dst = state + (size_t)t * 3 * d + (size_t)sl * d;
@@ -96,7 +97,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
                 free(gated);
             }
         }
-        free(dw); free(fw); free(gw);
+        /* dw/fw/gw are borrowed from the dequant cache, not owned here */
     }
 
     float *xq = (float *)calloc(ND, sizeof(float));
@@ -362,9 +363,9 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
             in2_mix(blocks, n_blocks, n_tok * d, t * d, res + (size_t)t * d, fq, 1, d, eps,
                     mixed + (size_t)t * d);
             if (msgs) {
-                float *dw = in2_tensor_to_f32(ctx, &L->loop_down[3], NULL);
-                float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[3], NULL);
-                float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[3], NULL);
+                const float *dw = in2_tensor_borrow(ctx, &L->loop_down[3]);
+                const float *fw = in2_tensor_borrow(ctx, &L->loop_forget[3]);
+                const float *gw = in2_tensor_borrow(ctx, &L->loop_gain[3]);
                 if (dw && fw && gw) {
                     float *gated = (float *)calloc((size_t)d, sizeof(float));
                     in2_message_gate(mixed + (size_t)t * d, msgs + ((size_t)t * 4 + 3) * d, dw, fw, gw,
@@ -372,7 +373,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
                     memcpy(mixed + (size_t)t * d, gated, sizeof(float) * d);
                     free(gated);
                 }
-                free(dw); free(fw); free(gw);
+                /* dw/fw/gw are borrowed from the dequant cache, not owned here */
             }
             in2_rmsnorm(mixed + (size_t)t * d, fn, d, eps, moein + (size_t)t * d);
         }

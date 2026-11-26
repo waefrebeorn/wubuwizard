@@ -189,6 +189,15 @@ int main(int argc, char **argv)
     if (n_gen > 0 && t_total > 0)
         fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (%s)\n",
                 n_gen, t_total, (double)n_gen / t_total, used_cache ? "KV cache" : "full recompute");
+    /* What the f32 materialisation path actually moved. `to_f32` copies on a cache hit and dequantises on a miss;
+     * `borrow` hands out the table's own pointer. Bytes/token from the GGUF say nothing about this traffic, so it has
+     * to be counted where it happens (counters live in wubu_inkling2_fwd.c). */
+    {
+        extern unsigned long long in2_dq_produced, in2_dq_copied, in2_dq_fast_calls, in2_dq_borrow_hit, in2_dq_borrow_miss;
+        fprintf(stderr, "DQ    f32 produced %.1f MB, copied %.1f MB, borrow miss %llu hit %llu, to_f32 calls %llu\n",
+                (double) in2_dq_produced / 1048576.0, (double) in2_dq_copied / 1048576.0,
+                in2_dq_borrow_miss, in2_dq_borrow_hit, in2_dq_fast_calls);
+    }
     /* The ids alone do not say whether the output is coherent, which is the whole question a generation run is
      * asking. Decode with the vocab inside the same .gguf, in detok's rules, so a human can judge the result here. */
     {

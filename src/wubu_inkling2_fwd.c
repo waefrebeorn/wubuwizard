@@ -1407,7 +1407,8 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
 {
     const wubu_in2_layer_t *L = &m->layer[il];
     const int d = cfg->d_model, NE = cfg->n_expert, TOPK = cfg->n_expert_used, DFF = cfg->d_ff_expert;
-    float *Wr = in2_tensor_to_f32(ctx, &L->router, NULL);
+    /* Borrowed: the router matrix is a read-only matvec weight and was being copied (1.1 MB) and freed on every visit. */
+    const float *Wr = in2_tensor_borrow(ctx, &L->router);
     float *cb = in2_tensor_to_f32(ctx, &L->exp_bias, NULL);
     float *gs = in2_tensor_to_f32(ctx, &L->gate_up_scale, NULL);
     float *ds = in2_tensor_to_f32(ctx, &L->down_scale, NULL);
@@ -1423,7 +1424,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
         fprintf(stderr, "[moe L%d] d=%d NE=%d TOPK=%d DFF=%d scale=%.3f bufs=%p/%p/%p/%p/%p rc=%d\n",
                 il, d, NE, TOPK, DFF, (double)cfg->expert_weights_scale, (void*)gu, (void*)dn, (void*)g,
                 (void*)act, (void*)eo, rc);
-    if (rc != WUBU_INKLING2_OK) { free(Wr); free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo); return rc; }
+    if (rc != WUBU_INKLING2_OK) { free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo); return rc; }
 
     const clock_t moe_t0 = clock();
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
@@ -1500,7 +1501,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
             for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * eo[i] * dsc;
         }
     }
-    free(Wr); free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
+    free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
     if (getenv("IN2_TIME"))
         fprintf(stderr, "  moe L%-2d %.3fs%s\n", il, (double)(clock() - moe_t0) / (double)CLOCKS_PER_SEC,
                 getenv("IN2_STAGE") ? " [staged]" : " [fused]");
@@ -1884,6 +1885,14 @@ size_t in2_dq_bytes;   /* bytes currently held by the dequant cache */
  * inside the insert path, which meant the eviction code could not see it. */
 static size_t dq_budget = 0;
 long in2_dq_miss;      /* dequantisations that could not be cached (table full or over budget) */
+/* Traffic accounting for the f32 materialisation path. `to_f32` copies on a cache hit and dequantises on a miss;
+ * `borrow` hands out the table's own buffer. Without these the cost of turning quantised weights into floats is
+ * invisible - the GGUF byte counts say nothing about it. */
+unsigned long long in2_dq_produced;   /* f32 bytes dequantised (cache miss) */
+unsigned long long in2_dq_copied;     /* f32 bytes memcpy'd out of the cache (hit) */
+unsigned long long in2_dq_fast_calls; /* calls into in2_tensor_to_f32 */
+unsigned long long in2_dq_borrow_hit; /* borrow hits: no copy, no dequant */
+unsigned long long in2_dq_borrow_miss;/* borrow misses: dequantised and installed */
 
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
 {
@@ -1896,12 +1905,17 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
      * gave: attn_res_q is a 2304-float vector (9 KB), measured from the GGUF header, not a 2304x2304 matrix.
      * caller's ownership contract is unchanged. IN2_NO_DQ_CACHE disables it. */
     const int cache_on = g_force_cache || getenv("IN2_NO_DQ_CACHE") == NULL;
+    ++in2_dq_fast_calls;
     if (cache_on) {
         for (int i = 0; i < in2_dq_n; ++i) {
             if (in2_dq_tab[i].key == t->info) {
                 float *cp = (float *)malloc((size_t)in2_dq_tab[i].n * sizeof(float));
                 if (!cp) return NULL;
                 memcpy(cp, in2_dq_tab[i].buf, (size_t)in2_dq_tab[i].n * sizeof(float));
+                in2_dq_copied += (unsigned long long) in2_dq_tab[i].n * sizeof(float);
+                if (in2_dq_tab[i].n > 262144)   /* >1 MB of floats: these are the ones worth naming */
+                    fprintf(stderr, "DQTRACE copy %-40s %.1f MB\n", t->info->name ? t->info->name : "?",
+                            (double) in2_dq_tab[i].n * sizeof(float) / 1048576.0);
                 if (n_out) *n_out = in2_dq_tab[i].n;
                 return cp;
             }
@@ -1911,6 +1925,7 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
     float *buf = (float *)malloc((size_t)ne * sizeof(float));
     if (!buf) return NULL;
     if (wubu_inkling2_read_f32(ctx, t, buf, ne) != WUBU_INKLING2_OK) { free(buf); return NULL; }
+    in2_dq_produced += (unsigned long long) ne * sizeof(float);
 
     /* Byte budget, not just an entry count: 512 entries of "whatever was touched" is unbounded in practice, and the
      * model is 8.5 GB on a 16 GB box. Measured peak working set of a 24-token run was 10.1 GB; the cache is a pure
@@ -1957,7 +1972,8 @@ const float *in2_tensor_borrow(gguf_ctx *ctx, const wubu_in2_tensor_t *t)
      * was ~448 MB of pure memcpy per decode token, 11 ms per full-layer visit, and it made the full-attention
      * layers look 10x more expensive than sliding ones doing identical arithmetic. Look the table up directly. */
     for (int i = 0; i < in2_dq_n; ++i)
-        if (in2_dq_tab[i].key == t->info) return in2_dq_tab[i].buf;
+        if (in2_dq_tab[i].key == t->info) { ++in2_dq_borrow_hit; return in2_dq_tab[i].buf; }
+    ++in2_dq_borrow_miss;
 
     const int saved = in2_dq_force_begin();
     int64_t ne = 0;
