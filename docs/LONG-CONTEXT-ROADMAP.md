@@ -2062,3 +2062,29 @@ So the honest ranking of remaining work, all measured:
 1. acceptance rate on real text - the multiplier on everything above;
 2. MoE efficiency at small M (1.4 ms per visit at M = 1);
 3. `q` at 13 % (already at the engine's best rate, so this is only addressable by fewer forwards).
+
+## Decode: residency is inert, and thread scaling saturates at 2.0x on eight threads
+
+Two measurements aimed at the MoE weight traffic behind the 69 ms/token:
+
+1. **`IN2_RES_GB=5000` changes nothing** - 12 tokens in 2.6 s with or without it, and **no `RESSTAT` line is printed at all**, so
+   the resident allocator is not engaged on the decode path in this configuration. The earlier 97.7 % hit rate came from a run
+   where the tier was actually wired (the prefill probe), and it does not apply here. Treat "experts sit in VRAM" as unproven
+   for decode until a run prints RESSTAT.
+2. **Thread scaling on decode saturates at 2.0x**:
+
+       1 thread  5.2 s   2.32 tok/s
+       2        3.7 s   3.27
+       4        2.8 s   4.34
+       8        2.6 s   4.60
+      12        2.6 s   4.57
+
+   2.0x on six physical cores, flat from 8 threads up. So decode is *not* purely bandwidth-bound - it does respond to threads -
+   but the response is half of what the core count should give. At M = 1 there are only eight experts per visit to spread, so
+   each thread gets a sliver of work and the fork/join cost sits next to it.
+
+That closes the three obvious explanations for the 1.4 ms/visit figure: not residency (inert), not bandwidth (scales with
+threads), and not a single hot kernel (it is 48 small visits). It is the shape of the work: many tiny parallel units.
+
+Which is the same conclusion from a third direction: **the fix for decode MoE is larger M, and larger M comes from acceptance.**
+Everything measured today points at the same lever.
