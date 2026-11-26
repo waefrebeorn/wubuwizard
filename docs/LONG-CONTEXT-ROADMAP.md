@@ -775,3 +775,36 @@ Revised position, replacing the earlier plan:
 So the next question is not "build the gather" but "**is there a shape where the GPU's 400-700 GMAC/s survives the round
 trips**", e.g. keeping gathered activations resident across all 24 layers and issuing one launch per layer instead of one
 per expert. Anything that still returns to the host per expert cannot win, and that is now measured rather than predicted.
+
+## The prefill cost structure, measured by quant type (this supersedes the MAC-share estimates)
+
+`IN2_TIMETY=1`, 120-token prompt. Per-type wall time, share, and realised throughput:
+
+    TY  8  calls= 6615   1.356 s   6.1 %    76.49 GOPS
+    TY 12  calls=  525   0.064 s   0.3 %   124.42 GOPS
+    TY 13  calls=  585   0.093 s   0.4 %   113.78 GOPS
+    TY 14  calls= 1590   0.325 s   1.5 %    91.58 GOPS
+    TY 16  calls= 1016   3.746 s  16.9 %    23.13 GOPS
+    TY 17  calls=  946   3.573 s  16.1 %    22.82 GOPS
+    TY 18  calls=   45   0.021 s   0.1 %   121.34 GOPS
+    TY 19  calls=  524   3.257 s  14.7 %    12.52 GOPS
+    TY 22  calls=  366   1.786 s   8.1 %    19.97 GOPS
+    TY 23  calls=  25   0.084 s   0.4 %     5.51 GOPS
+    TY 40  calls=  865   2.881 s  13.0 %    13.27 GOPS
+    TY 42  calls= 1986   4.959 s  22.4 %    16.95 GOPS
+
+Reading it:
+
+- **Five types carry 83 % of prefill**: TY 42 (22.4 %), TY 16 (16.9), TY 17 (16.1), TY 19 (14.7), TY 40 (13.0). Only TY 8
+  (Q8_0, 6,615 calls) is fast, at 76 GOPS - many small ops, so call overhead is not the problem; the *big* quantised
+  matvecs are simply slow per operation.
+- Realised rates are 12.5-23.1 GOPS = **6.3-11.6 GMAC/s per call stream**, i.e. the engine is running the same handful of
+  kernels well below their own ceiling (the batched CPU probe measured 11.93 GMAC/s single-stream and the GPU kernel
+  measured 373-648 GMAC/s).
+- **TY 19 is the worst offender per byte moved** (12.52 GOPS) and TY 42 has the largest share by far (4.96 s of ~22 s).
+
+What this changes: every MAC-share argument earlier in this document (the 0.8 %, the 83 %, the ~20x) was a share of
+*operations*. The engine's time is not distributed like its operations - it is distributed like this table. **Optimise TY 42
+and TY 16/17 first; they are 55 % between them.** The identity of each type in terms of which tensors it serves (dense
+attention projections vs expert gate_up/down) is the one mapping still to confirm, and it is a one-line print away - after
+which the decision of what to move to the GPU, if anything, is made on measured time rather than assumed proportions.
