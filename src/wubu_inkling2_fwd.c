@@ -295,6 +295,11 @@ void in2_rmsnorm(const float *x, const float *w, int n, float eps, float *out)
  * every call site falls back to the CPU kernel whenever they are missing.
  */
 static void *in2_gpu_res_fn;
+/* Identity-keyed twin of the resident entry. The pointer-keyed one cannot serve expert slices: the engine stages a
+ * miss into a per-call buffer that the allocator hands back at the same address for every expert of one size, so two
+ * experts collide on the key and the second is served the first one's bytes (measured: 66 of 153 src pointers reused
+ * within a single tensor, device rel error 3.7-5.3 on the affected rows). */
+static void *in2_gpu_res_id_fn;
 static int   in2_gpu_state;      /* 0 = untried, 1 = ready, -1 = not available */
 static double in2_gpu_sec;
 static int64_t in2_gpu_calls;
@@ -313,6 +318,7 @@ static void in2_gpu_init(void)
     HMODULE h = LoadLibraryA(nm && nm[0] ? nm : "wubu_cuda.dll");
     if (!h) return;
     in2_gpu_res_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec");
+    in2_gpu_res_id_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec_id");
     if (!in2_gpu_res_fn) return;
     /* The IQ2_XXS kernel reads a grid and a sign table that the library cannot supply itself without linking this
      * translation unit; the engine has both, so it hands them over once. */
@@ -338,6 +344,15 @@ static int in2_gpu_resident(int type, const void *w, size_t wbytes, const void *
                             float *y, int K, int n_cols, int64_t stride)
 {
     return ((in2_gpu_res_sig) in2_gpu_res_fn)(type, w, wbytes, act, act_bytes, y, K, n_cols, stride);
+}
+
+/* ident != 0 keys the slab by (tensor file offset + element offset) instead of the host address. */
+static int in2_gpu_resident_id(int type, int64_t ident, const void *w, size_t wbytes, const void *act,
+                               int act_bytes, float *y, int K, int n_cols, int64_t stride)
+{
+    if (!in2_gpu_res_id_fn) return -1;
+    typedef int (*sig_t)(int, int64_t, const void *, size_t, const void *, int, float *, int, int, int64_t);
+    return ((sig_t) in2_gpu_res_id_fn)(type, ident, w, wbytes, act, act_bytes, y, K, n_cols, stride);
 }
 #else
 static void in2_gpu_init(void) { in2_gpu_state = -1; }
@@ -410,15 +425,16 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                      * the read that dominates a token. Experts are excluded by name: they are 48x128 distinct slabs,
                      * far more than the resident tier holds, and they are the thing the cache policy is for. */
                     if (getenv("IN2_GPU_DENSE") && t->info && t->info->name[0] &&
-                        strstr(t->info->name, "exps") == NULL) {
+                        (getenv("IN2_GPU_MOE") || strstr(t->info->name, "exps") == NULL)) {
                         in2_gpu_init();
                         if (in2_gpu_state == 1) {
                             const int act_bytes = q8_0_act
                                 ? (n_in / 32) * (int) sizeof(in2_q8_0_blk)
                                 : (n_in / 256) * (int) sizeof(in2_q8k_blk);
                             const clock_t _g0 = clock();
-                            const int g_rc = in2_gpu_resident(ty_mv, src, (size_t) rb * (size_t) n_out, actbuf,
-                                                              act_bytes, y, n_in, n_out, (int64_t) rb);
+                            const int g_rc = in2_gpu_resident_id(ty_mv, t->file_offset + boff, src,
+                                                                 (size_t) rb * (size_t) n_out, actbuf,
+                                                                 act_bytes, y, n_in, n_out, (int64_t) rb);
                             /* A refusal must never be silent: the first attempt at this path reported success
                              * while the head returned zeros, and the only visible symptom was id=0 logit=0. */
                             if (g_rc != 0 && getenv("IN2_GPU_TRACE")) {
@@ -427,6 +443,28 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                                     warned[ty_mv] = 1;
                                     fprintf(stderr, "GPU refused ty=%d rc=%d n_in=%d n_out=%d (%s)\n",
                                             ty_mv, g_rc, n_in, n_out, t->info->name);
+                                }
+                            }
+                            /* IN2_MOE_CHECK: compare the row the device wrote against the same row from the CPU
+                             * kernel, at the call site that actually serves expert tensors (src/ty_mv/ap/op are in
+                             * scope here; the batched path has a different one and patching that by mistake cost two
+                             * segfaults earlier). Prints n_in so a K that is not a whole number of 256-element blocks
+                             * is visible in the output rather than inferred. */
+                            if (g_rc == 0 && getenv("IN2_MOE_CHECK")) {
+                                float *ref = (float *)malloc((size_t) n_out * sizeof(float));
+                                if (ref) {
+                                    float *opr[1] = { ref };
+                                    wubu_iq_rows(ty_mv, src, (size_t) rb, n_in, ap, 1, opr, 0, n_out);
+                                    double mx = 0.0, mag = 0.0;
+                                    for (int vi = 0; vi < n_out; ++vi) {
+                                        const double dd = fabs((double) y[vi] - (double) ref[vi]);
+                                        if (dd > mx) mx = dd;
+                                        if (fabs((double) ref[vi]) > mag) mag = fabs((double) ref[vi]);
+                                    }
+                                    fprintf(stderr, "MOECHECK ty=%d n_in=%d n_out=%d blk256=%d src=%p (%s) max_abs=%.3e max|ref|=%.3e rel=%.3e%c",
+                                            ty_mv, n_in, n_out, n_in % 256 == 0, (const void *) src, t->info->name, mx, mag,
+                                            mag > 0.0 ? mx / mag : 0.0, 10);
+                                    free(ref);
                                 }
                             }
                             if (g_rc == 0) {

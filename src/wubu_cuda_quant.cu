@@ -797,6 +797,13 @@ static size_t g_res_budget = 0;
 static size_t g_res_used = 0;
 static long g_res_evict = 0, g_res_hit = 0, g_res_miss = 0;
 static size_t  g_res_bytes[WUBU_RES_SLOTS];
+/* Stable identity (tensor file offset + element offset) beside the host-pointer key. The pointer key is not an
+ * identity for expert slices: the engine stages a miss into a per-call buffer that the allocator hands back at the
+ * same address for every expert of the same size, so two experts of one tensor collide and the second is served the
+ * first one's bytes. Measured: 66 of 153 distinct src pointers were reused inside a single tensor while the device
+ * returned rel error 3.7-5.3 on expert rows. */
+static int64_t g_res_ident[WUBU_RES_SLOTS];
+/* a caller-supplied ident wins when non-zero (expert slices); pointer key otherwise (dense tensors) */
 static int     g_res_n;
 static int     g_res_full_warned;   /* a full slab is a silent CPU fallback for every later tensor */
 static void   *g_res_act, *g_res_y;
@@ -804,9 +811,21 @@ static void   *g_pin_act, *g_pin_y;      /* page-locked staging: the pageable co
 
 static size_t  g_res_act_cap, g_res_y_cap;
 
+WUBU_EXPORT int wubu_cuda_resident_matvec_id(int type, int64_t ident, const void *h_w, size_t wbytes,
+                                            const void *h_act, int act_bytes, float *h_y,
+                                            int K, int n_cols, int64_t col_stride_bytes);
+
+/* Back-compat: pointer-keyed callers keep the old name and pass ident = 0. */
 WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbytes,
-                                         const void *h_act, int act_bytes, float *h_y,
-                                         int K, int n_cols, int64_t col_stride_bytes)
+                                        const void *h_act, int act_bytes, float *h_y,
+                                        int K, int n_cols, int64_t col_stride_bytes)
+{
+    return wubu_cuda_resident_matvec_id(type, 0, h_w, wbytes, h_act, act_bytes, h_y, K, n_cols, col_stride_bytes);
+}
+
+WUBU_EXPORT int wubu_cuda_resident_matvec_id(int type, int64_t ident, const void *h_w, size_t wbytes,
+                                            const void *h_act, int act_bytes, float *h_y,
+                                            int K, int n_cols, int64_t col_stride_bytes)
 {
     if (!h_w || !h_act || !h_y || wbytes == 0 || act_bytes <= 0 || K <= 0 || n_cols <= 0) return -1;
     /* Only types with a kernel whose numbers have been checked against a reference may be resident. The generic
@@ -816,7 +835,11 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
     if (type != 8 && type != 16 && type != 22 && type != 23) return -1;
 
     int slot = -1;
-    for (int i = 0; i < g_res_n; ++i) if (g_res_key[i] == h_w && g_res_bytes[i] == wbytes) { slot = i; break; }
+    for (int i = 0; i < g_res_n; ++i) {
+        if (g_res_bytes[i] != wbytes) continue;
+        if (ident != 0) { if (g_res_ident[i] == ident) { slot = i; break; } continue; }
+        if (g_res_key[i] == h_w) { slot = i; break; }
+    }
     if (slot >= 0) { g_res_use[slot] = ++g_res_clock; g_res_hit++; } else g_res_miss++;
     if (slot < 0) {
         if (!g_res_budget) {
@@ -839,6 +862,7 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
             g_res_used -= g_res_bytes[victim];
             g_res_bytes[victim] = 0;
             g_res_key[victim] = NULL;
+            g_res_ident[victim] = 0;
             g_res_evict++;
             /* reuse the freed slot index */
             slot = victim;
@@ -861,6 +885,7 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
         }
         g_res_key[slot] = h_w;
         g_res_bytes[slot] = wbytes;
+        g_res_ident[slot] = ident;
         g_res_use[slot] = ++g_res_clock;
         g_res_used += wbytes;
     }

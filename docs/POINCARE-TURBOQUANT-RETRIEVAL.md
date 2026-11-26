@@ -1333,3 +1333,36 @@ The expert path is a **MUL_MAT_ID-shaped gather**, and the reason three patches 
 entry point - only a contiguous-slab dense matvec. The next change is therefore a new function with its own signature
 (`ids`, `n_ids`, slot map, guard row), written once and gated on its own device gate, rather than another condition
 inside the dense path. That is the first item in `docs/MOE-OFFLOAD-PRIOR-ART.md` and it has not changed.
+
+## The expert rows return ZEROS, and that is a different bug from the one I was chasing
+
+With a device-vs-CPU comparison placed at the *expert* call site (the one that actually serves `ffn_gate_up_exps`, which
+two earlier patches had missed), 242 expert matvecs were checked:
+
+    rel error < 1e-3      72
+    rel error >= 1e-3    170
+    worst 7.03   median 1.000   best 7.1e-08
+
+A **median of exactly 1.000** is the tell: `rel = max|y - ref| / max|ref|` equals 1.0 when `y` is all zeros and the
+reference is not. Most expert matvecs are not computing the wrong thing - they are computing nothing, and the engine
+then adds a zero contribution. That is a different failure from the one inferred earlier, and it is the failure this
+project's own notes already name: *a kernel that returns all zeros is usually missing a table upload, or a type no
+kernel claims.*
+
+Three things were tried against this path and none of them fixed it, which is worth recording so they are not re-tried:
+
+  1. **Layer/slab eviction** (`IN2_RES_GB`) - correct and kept, but the expert rows are zero with or without it.
+  2. **A bounds guard** on `boff + rb*n_out` vs `gguf_raw_size(ty, prod(dims))` - it never fired, so the slices are
+     legitimately inside their tensors.
+  3. **Identity keying.** The pointer key *was* genuinely unsound for this path - 66 of 153 distinct `src` addresses were
+     reused inside a single tensor, because the engine stages a miss into a per-call buffer the allocator hands back at
+     the same address - so the resident entry now takes an `ident` (tensor file offset + element offset) and the DLL keys
+     on it (`wubu_cuda_resident_matvec_id`, back-compat wrapper keeps the old export). Dense parity is exact on the new
+     key, but the expert rows are still 170/242 wrong, so the collision was real **and not the cause**.
+
+What remains, and is now a hypothesis with a specific shape: the device dispatch for the types the experts use (16 IQ2_XXS,
+22 IQ2_S) is reaching a kernel that writes zeros for these shapes. `ty=23` (dense) measures 7.1e-08 on the same path, so
+the entry itself is sound; the difference is the type. The next step is therefore to call `wubu_cuda_matvec_iq2xxs`
+directly from a standalone harness with a known slab and a known activation - not through the resident cache, not through
+the engine - and read what it returns. That is a ten-minute test and it is the only one left that isolates the kernel from
+everything layered on top of it.
