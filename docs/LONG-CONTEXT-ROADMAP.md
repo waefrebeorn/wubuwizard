@@ -668,3 +668,30 @@ cheaper than anything else in this document and it decides whether the headline 
 
 Also worth recording: the first GGUF parse attempt died with MemoryError because an array type was mis-sized and it tried
 to allocate the count as bytes. Read the element type before the length, and skip by size rather than allocating.
+
+## Contradiction closed: the model itself puts experts on layers 0-23 only, so the engine was right
+
+Tensor names straight out of the GGUF (plain string scan, since the structured parse mis-skipped twice):
+
+    blk.N.ffn_gate_up_exps   24 distinct layers    ->  layers 0..23
+    blk.N.ffn_down_exps      24 distinct layers    ->  layers 0..23
+    blk.N.ffn_gate_inp       24 (the router)       ->  layers 0..23
+    blk.N.ffn_norm / ffn_post_conv / ffn_res_query   24 each
+
+Layers 24-47 carry no expert tensors at all. So:
+
+- `block_count` = 48 is correct;
+- the routing histogram's contiguous 0..23 was **the truth, not a bug** - `il` is the model layer index (`m->layer[il]`)
+  and the engine called `in2_moe` for exactly the 24 layers that own experts;
+- Inkling-2-Mini is a **hybrid**: expert layers 0-23, a different FFN in 24-47.
+
+So the only error was mine in assuming MoE ran on all 48 layers, which inflated the MoE MAC share by 2x. Corrected figures:
+
+    MoE, 120-token prefill:   183.5 GMAC (24 expert layers)
+    attention projections:     65.4 GMAC (48 layers)
+    total:                    249 GMAC
+    at 400 GMAC/s:            459 ms + 164 ms = 623 ms = 5.2 ms/token  vs 106.4 ms/token today  -> ~20x
+
+Every "contradiction" in the last three notes dissolved into a single arithmetic slip on the layer factor. The engine was
+correct throughout, and the histogram instrumentation - which I twice suspected of being broken - was reporting the truth
+both times. Worth remembering next time a measurement disagrees with a note: check the note against the file first.
