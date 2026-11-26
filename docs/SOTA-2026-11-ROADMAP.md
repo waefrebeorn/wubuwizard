@@ -1138,3 +1138,33 @@ better expert locality, neither of which is a kernel fix.
 No remaining phase measures an order of magnitude below its format's rate. The session's throughput work is done; what
 is left of the original goal is long context, which is memory- and architecture-bound and has its own reference
 (long-context-kv-budget, and the exact-replay stack in Wave 10).
+
+## Wave 15 - long context costed: 512k reachable, 1M blocked on bytes
+
+long context costed: 512k is reachable at q4 KV, 1M is not without sequence compression
+
+Per-visit KV sizing IS implemented - include/wubu_inkling2_kv.h documents rows[v] as "how many positions visit v must
+hold: the context for a full-attention visit, the sliding window for the rest" - so the 9x saving of rule 53 is in the
+code and long context is blocked on bytes, not on missing machinery. Costing it, with 8 full visits of 8 KV heads x
+128 dims x 2 tensors and the 7.90 GB IQ2_XXS model beside it:
+
+    ctx        KV q8      KV q4      + model (q4)   + model (q8)   fits 16 GB
+    131072     2.15 GB    1.07 GB     8.97 GB        10.05 GB      yes
+    262144     4.29 GB    2.15 GB    10.05 GB        12.19 GB      yes
+    524288     8.59 GB    4.29 GB    12.19 GB        16.49 GB      yes at q4 only
+    1048576   17.18 GB    8.59 GB    16.49 GB        25.08 GB      NO
+
+The sliding visits cost 0.54 GB in total regardless of context (64 x 1024 window), so the whole long-context budget is
+those 8 full visits and it scales linearly with no other term.
+
+Therefore, stated plainly against the standing goal: **512k is reachable on this box at q4 KV and 1M is not** - 1M needs
+8.59 GB of KV against 16 GB total with a 7.90 GB model, which leaves nothing for activations, the dequant cache (558 MB
+measured) or the OS. Rule 59's ordering applies and precision is the weakest lever: q4 is the last quantisation step
+that helps, and going below it loses more quality than the 512k target requires. Beyond 512k the only honest options are
+sequence-dimension compression (fold m tokens into one entry, which divides bytes AND keys AND arithmetic by m) or the
+bit-exact anchor replay in Wave 10, not a smaller KV dtype.
+
+Unverified and next: what the KV dtype actually is today. The header documents per-visit rows but not the element type,
+and no measurement in this session touched KV bytes directly - every KV figure above is arithmetic from the geometry,
+which is exactly the class of number that has been wrong six times today. The check is one run with a long prompt and
+WorkingSetSize read, not an inference.
