@@ -160,3 +160,26 @@ here is achievable, not approximate, (3) require >300 GMAC/s before wiring, (4) 
 order question answered.
 
 That is a self-contained kernel task with an exact reference already in the tree, and it is the last order of magnitude.
+
+## Correction to the paragraph above: it is not a 1:1 instruction swap
+
+I wrote that "the operand layout already matches" and that the change is narrow. Checked against the actual mapping, that
+is wrong and worth correcting before anyone builds on it:
+
+    current:  col = blockIdx.x * warps_per_block + (threadIdx.x / 32)
+              => ONE warp owns ONE output column; lanes split the 256 values of one 66-byte block
+              => warp tile = 1 column x IQ2X_MT tokens
+
+    mma.sync.m16n8k32.s8 warp tile = 16 tokens x 8 columns x 32 k
+              => a warp must own EIGHT columns to fill N=8, and it currently owns one
+
+So the lane mapping has to be rebuilt: `group = lane>>2` / `entry = lane&3` (which splits one block's four grid entries
+across 4 lanes) must become a lane -> (column, k-slice) mapping that produces an 8-column tile, and the cooperative 2-bit
+unpack has to be re-derived for that shape because the four entries of one block now land in four different columns' A/B
+fragments rather than four lanes of the same dot product. The register accumulators, the `IQ2X_MT` token blocking and the
+per-block weight reuse all survive conceptually, but the inner loop does not.
+
+What does NOT change: the reference is still the dp4a kernel, int8 dots are still exact so bit-parity is still achievable
+rather than approximate, and the gate is still >300 GMAC/s before wiring. Only the effort estimate moves - this is an XL
+pad, not a substitution, and the honest statement is that it needs a session of its own rather than a patch on the end of
+this one.
