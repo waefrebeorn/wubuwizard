@@ -348,3 +348,32 @@ headroom - multiplies a fraction of the work that is close to zero. The measured
     engine prefill uses   the CPU path    <-- the actual bottleneck
 
 Fourth instance of the same pattern in this project: the isolated number names the mechanism, never the outcome.
+
+## Why no kernel improvement can reach prefill today: the resident entry has no batch dimension
+
+`src/wubu_inkling2_fwd.c:380`:
+
+    static int in2_gpu_resident_id(int type, int64_t ident, const void *w, size_t wbytes, const void *act,
+                                   int act_bytes, float *y, int K, int n_cols, int64_t stride)
+
+There is no `n_tok`. Every GPU projection the engine issues is **M = 1 by construction**, and the DLL entry behind it
+(`wubu_cuda_resident_matvec_id`) is the same shape. That is the whole explanation for the +2.1 % end-to-end result: the
+8-column kernel needs M >= 8 to win, the engine can never hand it more than one row, so the faster tile is only ever
+reached by a direct test harness.
+
+So the next step is a two-part change and neither part is a kernel:
+1. give the resident entry an `n_tok` (and a matching token-strided activation/输出 layout) at the DLL boundary;
+2. change the projection call sites to pass a token block instead of looping one token at a time - the nine
+   `for (int t = 0; t < n_tok; ++t)` sites already identified.
+
+Only after both does any of the measured kernel headroom (1.73x tile, 2.49x batching, 384x tensor cores) become engine
+throughput. Everything downstream of that is multiplication by a fraction of the work that is currently close to zero.
+
+Standing measured chain, for the next session to start from rather than re-derive:
+
+    engine prefill          0.11 s/token (CPU path)     13.8 s for 120 tokens
+    CPU ceiling             11.9 GMAC/s                 engine already at ~13
+    GPU kernel (M>=8)       373-721 GMAC/s              measured, 8col, bit-identical
+    GPU MoE path            30.8 GMAC/s                 upload-bound, not kernel-bound
+    card tensor cores       11,800 GMAC/s               384x the IQ2 kernel
+    oracle                  12/12 exact in every configuration above
