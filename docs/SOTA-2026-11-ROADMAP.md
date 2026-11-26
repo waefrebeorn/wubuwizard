@@ -179,6 +179,28 @@ at 1M. The gap is not one trick; it is three dimensions multiplied.
   because the indexer plus Top-K bounds the work. That is the same conclusion the Windows measurements reached from
   the other direction - selectivity, not residency, is what makes long context usable.
 
+### The measured 1M wall: 0.13 tok/s from the score loop alone
+
+`tools/attn_wall.c` measures this engine's attention score loop directly, because the bandwidth arithmetic above
+(4.3 tok/s for any all-resident KV) assumes the maths is free and it is not:
+
+    1,048,576 keys x 128 dims, single thread: 0.060 s per (head,visit) pass = 57 ns/key = 2.24 GMAC/s
+    8 full visits x 8 kv heads = 64 passes, x2 for QK and PV = 7.67 s/token => 0.13 tok/s
+
+So at 1M the binding wall is the NUMBER OF KEYS ATTENDED, not the bytes stored, and it binds about 30x harder than
+bandwidth does. Compressing the sequence dimension by m is therefore the master lever rather than an optimisation:
+m=8 projects to ~1 tok/s and m=32 to ~4 tok/s with the heads spread over 6 cores. The loop does vectorise (AVX-512
+vcvtps2pd/vmulpd) but a double reduction cannot be reassociated under -std=c11, so it sits at ~2 cycles/element;
+breaking that chain would change the summation order and void the token-parity contract, which is why the answer is
+fewer keys and not a faster dot product.
+
+Revised Wave 8 order, on the evidence rather than on intuition: **LP-17 still gates everything**, because a needle
+test at 128k-1M is how m, quantisation and selection get validated and prefill at 3.5 tok/s makes such a test
+unaffordable. Then **LP-18 becomes sequence-first**: fold every m tokens into one entry, measure m = 2/4/8/32 on
+retrieval, and only then spend the precision dimension (q8 -> q4/fp4) on what is left. Selection (LP-19) is the
+second lever on the same axis - it reduces the key count per query without changing what is stored - and the two
+compose multiplicatively with quantisation.
+
 Sharpened LP-18: compress along the sequence dimension FIRST (m = 2/4/8, pooled, measured), then precision (q8 ->
 q4/fp4), then consider index reuse. Footprint and read bandwidth both scale with m, and m is the difference between
 a 4.3 tok/s ceiling and a usable one.
