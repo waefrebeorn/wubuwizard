@@ -74,3 +74,34 @@ Notable: with `flags & 1` the directory stride becomes **34 bytes** = 32 B entry
 The `.strata` file is a GGUF-derived but incompatible container; nothing here loads it. The value is design and the
 quality/size ratios, not the bytes. Their SQ-10 pack is 92.35 % same-next-token, which would fail this project's
 bit-identical oracle by construction.
+
+## Verified against the downloaded pack (10,471,526,400 bytes)
+
+Header read with the offsets their own reader uses (`strata_reader.cpp:48-66`: magic at 0, flags u32 at 8, profile u16 at 12,
+num_sections u16 at 14, table at 0x10, engram hash at 0x190). Six entries, each 64 B:
+
+    sec 0: off=10,471,514,112  len=      10,780  flags=0   manifest JSON (matches the 0x2a1c seen at byte 24)
+    sec 1: off=          4,096 len=1,871,628,224 flags=0   weights part A
+    sec 2: off=              0 len=           0 flags=0   empty
+    sec 3: off=10,471,403,520  len=     104,448  flags=1   EXPERT DIRECTORY (34 B stride -> load order present)
+    sec 4: off= 1,871,634,432  len=8,599,769,088 flags=0   expert bodies
+    sec 5: off=10,471,510,016  len=         138  flags=0
+
+**All five non-empty sections hash to their recorded SHA-256.** The pack is intact; the download is not merely the right size.
+
+Section 3 decodes to **3,072 entries at stride 34**, i.e. **24 MoE layers x 128 experts** - exactly the topology our own GGUF
+reports (48 blocks, experts on layers 0-23, 128 experts, 8 used). Independent confirmation from a second engine's file format.
+
+Per-expert quantisation is real and not uniform:
+
+    distinct gu_code_id  = 220      (top: id 0 used by 1,901 experts, then 32:149, 3:145, 43:114, 1:90)
+    distinct dn_code_id  = 150      (top: id 0 used by 2,015 experts, then 2:151, 79:146, 112:119)
+    distinct cluster_id  = 472      (top: 0 for 1,372, 32:148, 20224:146, 28672:121)
+
+So most experts share a default codebook, but ~1,100 gate/up and ~1,050 down codebooks are specialised per expert or cluster.
+That is the mechanism behind 3.17 bits/parameter reaching 92 % same-next-token, and it is the concrete thing to copy: our engine
+gives all 128 experts one IQ2_XXS grid.
+
+The trailing 2-byte `vram_load_order` field parses to values like `[18, 771, 0, 0, 32768, 291, 0, 0, 32768, 48]` - alternating
+zeros and 0x8000 suggest a bit-packed priority rather than a plain index, and it is **not** yet decoded. Recorded as unverified
+rather than guessed.
