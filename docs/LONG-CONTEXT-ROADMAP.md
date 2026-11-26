@@ -420,3 +420,28 @@ instead of one row - and only after that does the 8-column tile's measured 1.73x
 
 Lesson recorded for the next attempt at anything similar: **a missing symbol in objdump output is not evidence of a missing
 export** when the name is long. Match on a prefix, or dump the table and read it.
+
+## Part 2 is ONE function, not nine sites
+
+Correcting my own estimate. The token-batched helper already exists and the attention projections already call it:
+
+    int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
+                      const float *X, int nt, int n_in, int n_out, float *Y)      // fwd.c:628
+    callers: L->wq (:1258), L->wk (:1290), L->wv (:1291), L->wrel (:1378), ...
+
+So the per-token loops I described as "nine sites" are already batched at these projections; what is missing is only that
+`in2_matvec_nt` never tries the GPU. It quantises and runs the CPU fast kernel over nt tokens and falls through to float.
+
+The wiring is therefore one insertion at the top of `in2_matvec_nt`:
+
+1. gate: `IN2_GPU_DENSE` set, `in2_gpu_state == 1`, `nt >= 8`, type in {16, 22}, and the resident entry resolved;
+2. quantise the token block once - `nt` contiguous q8_K act rows, `(n_in/256) * sizeof(in2_q8k_blk)` bytes per row
+   (`in2_q8k_quantise` already does one row; it needs a loop over nt, or a strided variant);
+3. call `wubu_cuda_resident_matvec_nt(ty, t->file_offset + boff, src, rb * n_out, act_block, act_row_bytes, Y,
+   n_in, n_out, rb, nt)` - M = nt is what selects the 8-column tile;
+4. on any non-zero return, fall through to the existing CPU path unchanged.
+
+That is the whole of part 2. The remaining unknowns are small and local: `boff`/`rb` are already computed in the
+neighbouring `in2_matvec_quant`, and the quantise loop is mechanical. It was not attempted here because it still needs a
+build-measure-revert cycle per step and the oracle must be re-gated afterwards - the structure is now known precisely
+enough that the next attempt is a single edit rather than a survey.
