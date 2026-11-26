@@ -888,3 +888,34 @@ implementation should land with a bytes/s-vs-threads curve at 512 KB / 8 MB / 2 
 Negative result worth acting on immediately: with 7.9 GB in 16 GB, the expert-streaming tier is pure pessimisation -
 skip it. Two-level NUMA barriers are NUMA-only. llama.cpp's weight-replication PR is 22-59 % slower than its own
 `--numa distribute`.
+
+## Wave 10 addendum - the serial remainder is the dense/attention path
+
+the serial remainder is the dense/attention path: MoE scales 3.25x, everything else 1.13x
+
+Attributed the 47.8% serial fraction by summing the per-layer MoE timers against the run total, same 8-token prompt,
+one thread then eight (IN2_TIME=1 IN2_THREADS=<n>):
+
+            total     MoE            rest
+   1 thread  4.10 s   2.47 s (60%)   1.63 s
+   8 threads 2.20 s   0.76 s (34%)   1.44 s
+   scaling    1.86x     3.25x          1.13x
+
+The MoE phase is healthy - 3.25x on 8 threads, which is what an `omp parallel for` over 8 selected experts should give
+(the 8th thread matches n_expert_used exactly). Everything that is NOT the MoE scales at 1.13x, i.e. it is effectively
+serial, and it is now 65% of the eight-thread step and 40% of the one-thread step.
+
+That inverts where the work has been going. The MoE has been the optimisation target all session (expert-major
+restructure, dequant fusion, borrow conversions, per-visit KV) because it is the largest single phase by name, and it
+is the one part that was already parallel. The dense/attention path - q/k/v/output projections, the attention itself,
+norms, the router, the embedding row read and the head - has been assumed to be parallel because it calls
+in2_rows_parallel, and it converts 8 threads into 1.13x.
+
+Two candidate causes, and they need distinguishing rather than guessing:
+  * ~100 small matvec calls per token, each opening its own `omp parallel for`: at ~3 us of libgomp barrier per region
+    (measured earlier at ~3.2 us per extra thread, rule 49) that is ~0.3 s per token of pure barrier against regions
+    that may be shorter than the barrier itself;
+  * or the path is genuinely latency-bound per call and threads add contention without adding work in flight.
+The tell is the same one that found the MoE: sweep IN2_THREADS over just that path, or time a single projection in
+isolation at 1 and 8 threads. A region that measures identical at 1 and 8 is a barrier-dominated region, and the fix is
+to persist the thread pool instead of opening a parallel region per tensor.
