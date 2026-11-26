@@ -1549,3 +1549,33 @@ So the concrete next change is, in order:
 Not started: it is a three-file change (header, model.c, gen tool) and the last four multi-site attempts in this session each
 cost a build cycle to discover a mechanical mistake. The measurement above is the piece that was missing, and it now says the
 work is worth a session of its own.
+
+## Exact shape of step 1 (per-position logits), so it is a refactor with anchors, not a search
+
+`in2_forward_at` (model.c:83) tail, from the "logits are only meaningful for the last position" comment at :295 to the
+tanh softcap at :389, does this ONCE for position `n_tok - 1`:
+
+    :296-298   const float *last = h + (n_tok-1)*d;
+               in2_mix(blocks, n_blocks, n_tok*d, (n_tok-1)*d, last, fq, d, eps, fin)   // or memcpy
+    :300-378   the lm_head path: kernel over vocab rows with a fallback, writing `logits`
+    :379-384   fallback: in2_matvec(Wo, fin, d, vocab, logits)
+    :388-389   softcap: for i<vocab: logits[i] = tanhf(logits[i]/30)*30
+    :391+      padded-vocab handling
+
+To produce K logit vectors the mix, head and softcap must run per position, so the clean change is:
+
+1. extract :295-389 into `static int in2_head_at(gguf_ctx*, cfg*, blocks, n_blocks, const float *h, int n_tok, int pos,
+   float *out)` - the body is identical with `(n_tok-1)` replaced by `pos` and `logits` by `out`;
+2. keep `in2_forward_at`'s existing behaviour by calling it with `pos = n_tok - 1` and `out = logits` - the current path then
+   executes exactly the same instructions, which is what makes the oracle a valid gate on the refactor by itself;
+3. add an optional `float *logits_all` parameter; when non-NULL, loop `pos = 0..n_tok-1` calling the extracted helper.
+
+That ordering matters: steps 1 and 2 are a pure refactor that the 12-token oracle must pass unchanged BEFORE any speculative
+code exists. Only step 3 is new behaviour, and it is additive and NULL-gated.
+
+Cost confirmed at measured rates: 13.6 ms per extra position against 172 ms per saved forward - 8 %, so K=4 nets +634 ms per
+block even before counting acceptance.
+
+Not done in this session: the extract touches an 80-line block containing the kernel path, its fallback, the softcap and the
+padded-vocab handling, and the last four multi-site edits cost a build cycle each to discover a mechanical fault. The anchors
+above make it a mechanical job for a session with room to run the oracle after step 2 and again after step 3.
