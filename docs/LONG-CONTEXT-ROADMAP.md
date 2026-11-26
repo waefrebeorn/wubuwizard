@@ -2088,3 +2088,34 @@ threads), and not a single hot kernel (it is 48 small visits). It is the shape o
 
 Which is the same conclusion from a third direction: **the fix for decode MoE is larger M, and larger M comes from acceptance.**
 Everything measured today points at the same lever.
+
+## Acceptance is the only remaining lever, and our weights carry no draft head
+
+Every measurement today converges on M: MoE visits cost 1.4 ms at M = 1 and scale poorly with threads (2.0x, flat past 8), there
+is no hidden residency win, and the fixed 180 ms/forward is 42 % MoE at M = 1. Drafts are the only thing that raises M.
+
+So: does this model ship a multi-token-prediction head we could use as a drafter? Measured, weakly but decisively enough:
+
+    grep over the GGUF's first 40 MB for mtp|nextn|draft|eagle|medusa|lookahead
+    -> Beagle, draft, eagle, jmtp, medusa, mtp, smtp, Smtp, smtplib   (10 hits)
+
+`smtplib` and `Beagle` are tokenizer/vocab strings, not tensor names. **Our GGUF contains no MTP or draft head.** (Caveat: a
+string grep over 40 MB is weak evidence and the real tensor table was not parsed - the kv walk tripped a MemoryError on an array
+field, the same bug as earlier in this project. What it does establish is that nothing is *named* like a drafter in the region
+where all 734 tensor names live.)
+
+Consequence, stated plainly: **prompt-lookup is the only drafter we can have without new weights**, and on non-repetitive text it
+produces what was measured - 0 of 8 drafts accepted. The 1.22x and the 100 % acceptance figures are properties of degenerate
+looping output, not of the engine on real text.
+
+The three routes from here, in order of expected value:
+
+1. **Get the real drafter.** Strata's packs carry a DSpark draft model ("every pack has a DSpark draft model built in",
+   `AR alpha = 2.701` for SQ-10). It is inside a 10.47 GB foreign container whose section layout we have now decoded. Extracting
+   it is the only path that reaches the upstream PR's own acceptance rates.
+2. **Train or distill a small drafter** against this model's greedy outputs - a real project, not a session.
+3. **Ship the engine as-is**: bit-identical, 4.6 tok/s decode / 3.45 tok/s at 60-token context on six CPU cores, with
+   speculation that helps exactly when the text is repetitive.
+
+Option 3 is not a defeat - it is what the hardware can do without a trained drafter - but it should be described that way rather
+than as "faster than upstream", which is currently false.
