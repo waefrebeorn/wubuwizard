@@ -355,3 +355,41 @@ The lesson, recorded because it is the kind that repeats: a result that is simul
 inconsistent is a bug until proven otherwise. The gap-vs-error ratio was computed correctly and is still a legitimate
 diagnostic for predicting quantised-ONLY recall, but it does not predict the two-stage pipeline, and it must not be used
 as a go/no-go gate - the go/no-go is the rerank number, which is what the harness now reports.
+
+## Verification 5: the ball-vs-tangent question, and why scoring must be inner-product
+
+The design argued for scoring in the tangent space at the origin because the Poincare metric diverges at the boundary.
+`tools/tq_ball_vs_tangent.c` measures it. Ground truth is always the exact hyperbolic distance
+`d_H(u,v) = arccosh(1 + 2||u-v||^2/((1-||u||^2)(1-||v||^2)))` on the original f32 ball vectors; two pipelines are
+compared on the same real 3840x32 data, with radii spread over tangent norms 0.4-3.0 (ball radius 0.197-0.905):
+
+    pipeline   bits  recall@10   +rerank@100   bytes/item
+    ball       2     0.275       0.734         8
+    tangent    2     0.392       0.764         8
+    ball       3     0.392       0.740         12
+    tangent    3     0.521       0.744         12
+    ball       4     0.521       0.742         16
+    tangent    4     0.623       0.744         16
+
+Two findings, one expected and one not:
+
+**Tangent-space quantisation beats ball-space quantisation at every bit-width** - 0.392 vs 0.275 at b=2, 0.521 vs
+0.392 at b=3, 0.623 vs 0.521 at b=4. Quantising where the metric is Euclidean is strictly better, which is what the
+design predicted, and it converges as bits rise (0.744 vs 0.742 at the rerank stage) because both approach lossless.
+
+**The unexpected one: hyperbolic-distance scoring caps at ~0.74 rerank recall, against 0.999 for inner-product
+scoring on the same data.** That gap is not quantisation error - the rerank stage here scores the exact `d_H` on the
+original f32 vectors, so a 0.74 means the candidate set itself is wrong 26 % of the time. The reason is structural:
+`d_H` is dominated by the radial term, so two items at different radii are far apart regardless of direction, and a
+small coordinate error near the boundary (radius 0.905 here) moves the distance much more than it moves a dot product.
+Ranking a quantised index by hyperbolic distance throws away the property that makes quantisation survivable.
+
+So the architecture decision is settled by measurement rather than by argument: **encode with Poincare geometry, but
+score with an inner product in the tangent space, and never rank a quantised index by hyperbolic distance.** The Poincare
+ball does its work in the representation - few dimensions, hierarchy - and the inner product does its work in the
+retrieval, where TurboQuant's unbiased estimator and the measured 0.999 rerank recall both live.
+
+Caveat, stated because the radii here were assigned, not measured: the radius spread (0.197-0.905) is synthetic. A real
+WuBu/GAAD encoder's radius distribution is the thing that decides how much of the boundary penalty you actually pay, and
+that is still the outstanding measurement. If real encoders put many items near radius 1, the 0.74 figure gets worse and
+the case for tangent-space scoring gets stronger, not weaker.
