@@ -639,3 +639,32 @@ dead code in the hot path), the build is clean and the oracle is 12/12 with the 
 Next step is therefore a **measurement**, not a kernel: print the real layer count and the real per-token expert counts from
 one fixed place, and re-derive the arithmetic. Two of this document's headline numbers are currently built on a layer
 count that the engine itself contradicts.
+
+## Layer count resolved from the GGUF: 48 blocks, and the histogram's 24 is almost certainly the MoE-layer ordinal
+
+Parsed the metadata directly (ver 3, 734 tensors, 62 kv):
+
+    inkling2.block_count             = 48
+    inkling2.expert_count            = 128
+    inkling2.expert_used_count       = 8
+    inkling2.expert_feed_forward_length = 1152
+    inkling2.expert_weights_scale    = 8.0
+    general.architecture             = inkling2
+
+So 48 layers is correct and the earlier arithmetic that assumed 48 was right. The histogram reporting ids 0..23 contiguously
+is therefore not "the model has 24 layers" - the most likely reading is that `g_moe_hist` is indexed by the **MoE-layer
+ordinal** (24 of the 48 layers carry experts), which means the MoE MAC share in the earlier notes is overstated by 2x:
+
+    MoE, 120-token prefill:  366.9 GMAC over 48 layers  ->  183.5 GMAC over 24 MoE layers
+    projections:              65.4 GMAC (all 48 layers, unchanged)
+    total:                   249 GMAC, not 432
+
+That does not change any conclusion about WHERE the work is, but it changes the size of the prize: at 400 GMAC/s the pair
+becomes 459 ms (MoE) + 164 ms (projections) = 623 ms per 120 tokens = 5.2 ms/token, i.e. **~20x rather than ~12x** on
+prefill. Treat that as an estimate with one unverified step - whether the histogram really is indexed by MoE ordinal.
+
+The one-line test that settles it: print the model layer index alongside the histogram key for a single routing. That is
+cheaper than anything else in this document and it decides whether the headline is 12x or 20x.
+
+Also worth recording: the first GGUF parse attempt died with MemoryError because an array type was mis-sized and it tried
+to allocate the count as bytes. Read the element type before the length, and skip by size rather than allocating.
