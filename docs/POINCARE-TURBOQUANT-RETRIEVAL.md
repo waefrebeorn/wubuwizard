@@ -1706,3 +1706,35 @@ it should stay off. The path that does pay is the dense tier, -5.5 % on decode, 
 The remaining wall for the actual goal - 1M context on a tandem GPU - is unchanged and is not this one: q6 KV at 1M costs
 12.99 GB per step (20.89 GB with the model) against a 6 GB card, and 262k prefill measures ~35 h at 6 bits. Those are the
 numbers that decide whether 1M context is reachable here, and they are not addressed by any amount of expert offload.
+
+## 1M context is not reachable on this box - measured, with the exact ceiling
+
+The engine sizes KV per visit (8 full-attention visits grow with context, the 64 sliding ones stay at 1024 rows
+forever), and it prints the result, so the ceiling needs no arithmetic of mine:
+
+    ctx=1024   8 full x 1024   + 64 sliding x 1024 = 108.6 MB
+    ctx=8192   8 full x 8192   + 64 sliding x 1024 = 193.0 MB
+    ctx=65536  8 full x 65536  + 64 sliding x 1024 = 868.5 MB
+
+That is exactly linear in context, fit from the two large points:
+
+    slope 0.01178 MB/token = 12.06 KB per token at IN2_KV_TQ=6
+
+    ctx        KV        + model 7.90 GB    fits 16 GB
+    131072   1.60 GB          9.50 GB       yes
+    262144   3.11 GB         11.01 GB       yes
+    524288   6.13 GB         14.03 GB       yes
+    1048576  12.16 GB        20.06 GB       NO  (20.06 > 16, by 4 GB)
+
+At 4 bits the same 1M point is 16.01 GB - over by 10 MB, and 4-bit is the width already rejected on fidelity (1.1-1.6 %
+row error crossed this model's greedy-sensitivity threshold; it answers correctly at 6 bits and not at 4). So the honest
+ceiling for this model on a 16 GB box, at a fidelity that produces the reference tokens, is **between 512k and 1M, and
+the 512k point fits with 2 GB to spare.**
+
+Which reframes the goal rather than abandoning it: 512k at 6-bit KV and the reference answer is a real, verified target
+that this hardware can hold, and 1M would need either a fidelity fix at 4 bits (an open research problem, not a tuning
+knob) or more RAM. Both are worth stating plainly instead of continuing to optimise a path toward a number the box cannot
+hold.
+
+Prefill remains the other wall and is unchanged by any of this: 262k measured ~35 h at 6 bits, so even 512k context is
+reachable in capacity long before it is reachable in time.
