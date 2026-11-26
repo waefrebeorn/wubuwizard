@@ -490,7 +490,23 @@ table still reads 16/17/19/22/40/42 and says nothing about it. It also explains 
 records without connecting them: the 4.9 GB resident set on a model whose quantised weights are 12.4 GB but whose
 hot floats are gigabytes, and why the dequant cache had to be sized in the hundreds of MB.
 
-Whether it costs per token or once depends on whether `in2_tensor_to_f32` caches; that is the first thing to measure,
-and it decides whether LP-26 is a per-token win or a memory win. Either way it comes before LP-22: routing q/k/v
-through `in2_matvec_nt` removes the materialisation, and only a quantised q/k/v can be resident on the card.
+**LP-26 correction - the per-token figure above is wrong and the measurement says so.** `in2_tensor_to_f32` does
+cache (`in2_dq_tab`): it dequantises once and hands out either a copy or a borrowed view. The engine already counts
+both, and over a 4-token decode the counters read:
+
+    DQ  f32 produced 557.5 MB, copied 65.6 MB, borrow miss 235 hit 1793, to_f32 calls 2959
+
+That is **~16 MB copied per token, not 1,836 MB**, and 1,793 of 2,028 lookups were borrows (no copy at all). The
+arithmetic agrees: 1,535 MB of quantised traffic plus 1,836 MB of float traffic at the measured ~7 GB/s would be
+~0.48 s per token, against 0.22 s on record. Both cannot be true, and the counter is the one with evidence behind it.
+
+So the 38.2 MB/layer figure is a **residency** fact, not a traffic fact: the q/k/v of the float path occupy about
+557 MB of f32 in the dequant cache and are mostly borrowed rather than copied. It also means the incremental decode
+path does not run float q/k/v per token at all - the type table's silence about type 8 is because those projections
+are quantised on that path, and `in2_layer_full`'s float projections are the prefill/`n_tok>1` path.
+
+What survives of LP-26: **1,836 MB against 488 MB is still the right comparison for the fullseq path**, and it is
+still worth routing q/k/v through `in2_matvec_nt` there, but it is a prefill cost and a residency cost, not a
+decode-per-token cost. What does not survive: quoting it as per-token. Recorded here rather than quietly edited,
+because the wrong version was carried for one commit.
 
