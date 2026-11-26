@@ -1562,3 +1562,23 @@ So the next change is not a knob. It is one batched launch per layer - gather th
 contiguous device span and run a single matvec with 8 x n_out rows. That is a new device entry (the gather is 8 memcpys
 of ~1.4 MB each, already resident at 92 % hit rate) plus one call-site restructure in `in2_moe`, and it is the only path
 left where MoE offload can beat the CPU on this hardware.
+
+## The batched expert launch is 2.39x faster and bit-identical - so the engine should use it
+
+A new device entry, `wubu_cuda_moe_batch`, gathers a layer's active expert slabs into one contiguous span and issues a
+single matvec of `n_exp * n_rows` rows instead of `n_exp` launches. Priced in isolation with real tables, no engine, no
+OpenMP and no cache (`tools/moe_batch_price.c`, 8 experts of 2304x2304 IQ2_XXS, 20 repetitions):
+
+    batch vs per-expert:  max_abs = 0.000e+00                      (bit-identical)
+    8 separate launches   3.26 ms per layer
+    1 batched launch      1.36 ms per layer            2.39x
+    extrapolated          78.1 ms vs 32.6 ms per token (24 layers)
+
+The first run of that harness reported `max|ref| = 0` and I nearly recorded a 2.39x win on an all-zero comparison - the
+kernel was returning zeros because the harness had no iq2xxs grid. With the grid and ksigns dumped from `gguf_reader.c`
+and uploaded, the outputs are non-degenerate and the two paths agree exactly. Worth stating plainly because the speedup
+survived the correction while the correctness claim would not have.
+
+This is the first measurement in this whole GPU thread where a change is both safe and profitable: 2.39x on the exact
+work that made MoE offload a 7 % loss. Wiring `in2_moe` to call it is the remaining step - gather the 8 resident slabs,
+one call, unpack into the per-expert outputs.
