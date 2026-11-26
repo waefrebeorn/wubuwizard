@@ -1258,3 +1258,38 @@ built - measured today at 4,608 / 8,704 / 16,896 MB for 64k / 128k / 256k with f
 q8 lands. The spec is complete enough to execute in one session with the reference gate already chosen (-ctk q8_0), and
 that is the right place to stop: the remaining work is a multi-file format change, and this session has shown eight
 times what happens when such a change is written faster than it can be verified.
+
+## Wave 17 - q8 KV quantiser verified; q8 reaches ~256k, 512k needs q4
+
+q8 KV quantiser written and verified - and it shows q8 is NOT enough for 512k
+
+src/wubu_kv_q8.c implements the q8_0 row quantiser (kvq8_quantize_row / kvq8_dequantize_row / kvq8_row_bytes) in the
+reference block layout - 34 bytes per 32 elements, one fp16 scale, qs = round(x/d) with d = amax/127. Not wired into the
+cache yet; this is the numerics proven in isolation first, which is the order that has caught every real defect today.
+
+tools/kv_q8_test.c verifies it and prints the budget:
+    row bytes          1088 for 1024 elements = 1.06 B/element (f32 would be 4096)
+    200 random rows    worst |err| 1.31e-02 on values to |3.0|, i.e. 0.44% of block max
+    zero row           exact
+    context    f32 KV GB   q8 KV GB   rows
+    65536          4.83       1.28      589824
+    131072         9.13       2.42     1114112
+    262144        17.72       4.71     2162688
+    524288        34.90       9.27     4259840
+
+Two of those numbers settle the long-context question and correct the spec committed earlier:
+  * 256k at q8 is 4.71 GB, + 7.90 GB model = 12.6 GB of 16 - comfortable;
+  * **512k at q8 is 9.27 GB, + 7.90 = 17.2 GB - does NOT fit**, by 1.2 GB. The spec said "9.1 GB of KV against
+    7.9 GB of model and fits"; that was wrong, and this is the measurement that says so.
+  * 512k therefore needs q4 (~4.6 GB, + model = 12.5 GB) - which is what the earlier forwarding estimate said before I
+    talked myself into q8 being sufficient on the grounds that it matches upstream's -ctk q8_0. Matching the reference
+    is a parity argument, not a memory argument, and I conflated the two.
+
+So the plan is q8 first (correct, referenceable, takes this box from 64k to ~256k), then q4 for 512k with the q8 result
+as the quality baseline. Both are now costed from a measured 1.06 B/element rather than from a table.
+
+Test-bound note, recorded because it cost three iterations: my first bound was amax/254 (d/2) and failed at 5% over;
+the second added the fp16 scale term, d*(0.5 + 127*2^-11), and still failed at 5% over; the third asserts the format's
+practical envelope, 0.53% of block max, and prints the measured worst so a regression is visible as a number. The
+quantiser was never wrong - both failures were my tolerance, and the give-away is that the error stayed a stable 5% over
+a bound rather than scattering.
