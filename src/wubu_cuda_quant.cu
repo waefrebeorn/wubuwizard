@@ -37,6 +37,7 @@ __device__ uint32_t c_iq3s_grid[512];
 __device__ uint32_t c_iq3xxs_grid[256];
 __device__ uint8_t  c_ksigns_iq2xs[128];
 __device__ uint64_t c_iq2xxs_grid[256];
+typedef struct { uint16_t d; int8_t qs[32]; } c_q8_0;
 /* IQ4_XS: 16 signed int8 code values. */
 __device__ int8_t   c_iq4nl[16];
 /* IQ2_XS: 512 grid entries of 8 unsigned bytes each. */
@@ -715,6 +716,58 @@ WUBU_EXPORT int wubu_cuda_upload_iq2xxs(const void *grid_256_u64, const void *ks
     return 0;
 }
 
+/* ---------------- Q8_0 (type 8) ----------------
+ *
+ * There was no Q8_0 device kernel: type 8 fell through to wubu_cuda_quant_matvec, which returned success and wrote
+ * nothing (tools/gpu_q8_check.c: 0 of 512 rows non-zero). Q8_0 is k, v, attn_output and attn_rel - four of the five
+ * dense attention tensors - so the resident tier could not hold any of them.
+ *
+ * Block is 34 bytes: fp16 d then 32 int8, and the activation is the same block type. One lane per block, eight
+ * __dp4a per block, then a warp reduction over the blocks a warp covered.
+ */
+__global__ void q8_0_matvec_kernel(const uint8_t * __restrict__ w,
+                                   const c_q8_0 * __restrict__ xq8,
+                                   float * __restrict__ y,
+                                   int64_t row_stride, int nblocks, int n_cols)
+{
+    const int warps_per_block = blockDim.x / 32;
+    const int col = blockIdx.x * warps_per_block + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    if (col >= n_cols) return;
+
+    const uint8_t *wrow = w + (int64_t) col * row_stride;
+    float acc = 0.0f;
+    for (int b = lane; b < nblocks; b += 32) {
+        const uint8_t *blk = wrow + (int64_t) b * 34;
+        const uint16_t wd_bits = (uint16_t)(blk[0] | ((uint16_t) blk[1] << 8));
+        int32_t s = 0;
+        for (int g = 0; g < 8; ++g) {
+            int32_t wv, av;
+            memcpy(&wv, blk + 2 + g * 4, 4);
+            memcpy(&av, xq8[b].qs + g * 4, 4);
+            s = __dp4a(wv, av, s);
+        }
+        /* Q8_0 stores both scales as fp16 BITS, unlike c_q8_k which holds a float. Using the raw uint16 here
+         * multiplied every block by ~7.8e5 and still produced plausible-looking large numbers. */
+        acc += f16_fast(wd_bits) * f16_fast(xq8[b].d) * (float) s;
+    }
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
+    if (lane == 0) y[col] = acc;
+}
+
+WUBU_EXPORT int wubu_cuda_matvec_q8_0(const void *d_w, const void *d_q8, float *d_y,
+                                      int K, int n_cols, int64_t col_stride_bytes)
+{
+    if (!d_w || !d_q8 || !d_y || K <= 0 || n_cols <= 0 || (K % 32) != 0) return -1;
+    const int nblocks = K / 32;
+    const int threads = 256;
+    const int warps = threads / 32;
+    const int blocks = (n_cols + warps - 1) / warps;
+    q8_0_matvec_kernel<<<blocks, threads>>>((const uint8_t *) d_w, (const c_q8_0 *) d_q8, d_y,
+                                            col_stride_bytes, nblocks, n_cols);
+    return cudaDeviceSynchronize() == cudaSuccess ? 0 : -2;
+}
+
 /* ---------------- resident weight tier (LP-22) ----------------
  *
  * Keyed on the HOST pointer of the mapped weights: the GGUF mapping is immutable for the life of the process, so a
@@ -731,6 +784,7 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2xxs(const void *d_w, const void *d_q8, float
 WUBU_EXPORT int wubu_cuda_matvec_iq2xs(const void *, const void *, float *, int, int, int64_t);
 WUBU_EXPORT int wubu_cuda_matvec_iq3xxs(const void *, const void *, float *, int, int, int64_t);
 WUBU_EXPORT int wubu_cuda_matvec_iq4xs(const void *, const void *, float *, int, int, int64_t);
+WUBU_EXPORT int wubu_cuda_matvec_q8_0(const void *, const void *, float *, int, int, int64_t);
 static void   *g_res_d[WUBU_RES_SLOTS];
 static const void *g_res_key[WUBU_RES_SLOTS];
 static size_t  g_res_bytes[WUBU_RES_SLOTS];
@@ -769,7 +823,9 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
     }
     if (cudaMemcpy(g_res_act, h_act, (size_t) act_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return -7;
 
-    const int rc = (type == 16)
+    const int rc = (type == 8)
+        ? wubu_cuda_matvec_q8_0(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
+        : (type == 16)
         ? wubu_cuda_matvec_iq2xxs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes, 1)
         : (type == 17)
         ? wubu_cuda_matvec_iq2xs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
@@ -3248,6 +3304,7 @@ WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type,
      * entry point can gate the type-specific kernels too. */
     int mrc;
     if (type == 16)      mrc = wubu_cuda_matvec_iq2xxs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes, 1);
+    else if (type == 8)  mrc = wubu_cuda_matvec_q8_0(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else if (type == 17) mrc = wubu_cuda_matvec_iq2xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else if (type == 18) mrc = wubu_cuda_matvec_iq3xxs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else if (type == 23) mrc = wubu_cuda_matvec_iq4xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
