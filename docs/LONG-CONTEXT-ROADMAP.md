@@ -1065,3 +1065,39 @@ This is also the first explanation in the whole session that is consistent with 
 
 Next step: count the parallel regions entered per token (a counter beside the fork sites) and confirm it is thousands, then
 hoist. That counter is a five-line change and it converts the last remaining hypothesis into a number.
+
+## CORRECTION: "sliding" is a layer CLASS, not the attention op - and it has no OpenMP at all
+
+Two facts that together invalidate the last two notes' framing:
+
+1. `grep -n "pragma omp" src/wubu_inkling2_fullseq.c` returns **nothing**. The full-sequence path, which is where the
+   `in2_kv_k`/`in2_kv_v` attention loops live (fullseq.c:239, :301, :319), is entirely **serial**.
+2. Yet `PHASE ... sliding=` fell from 11.532 s to 4.296 s with 8 threads - a 2.68x drop in a "serial" path.
+
+Both are true only if `sliding` is not measuring attention. And it is not: the phase timer splits LAYERS by
+`(il % attn_res_block == attn_res_block - 1)` into `full` and `sliding`, i.e. **`sliding` is the class of sliding-attention
+LAYERS, and its timer covers everything those layers do** - projections, MoE, and attention together. The `moe=` line is a
+subset of it, not a sibling.
+
+Corrected arithmetic at 60 tokens (8 threads):
+
+    layers total        5.553 s
+      of which moe        2.305 s   (41.5 % of layers - a subset, printed separately)
+      full-class layers   1.257 s
+      sliding-class       4.296 s   of which moe ~2.3 s and matvecs the rest
+    attention proper    = sliding-class minus moe minus projections ~ 1.5 s, and it is SERIAL
+
+So three claims from the last two notes were wrong and are hereby retracted:
+- **"attention is 78-80 % of layer time"** - false; that number is the share of layers classified as sliding, and most of it
+  is MoE plus projections running inside them;
+- **"3,072 visit-calls per token at 23 us shows call overhead"** - the 23 us figure divided the whole sliding-class time by
+  the visit count, mixing MoE and projections into a per-attention-call number. It measured nothing;
+- **"fork/join per visit-call"** - there is no fork/join in that file at all. The hypothesis is dead on inspection.
+
+What survives, and is now the honest position: MoE is 41.5 % of prefill and per-token flat (healthy); the full/sliding split
+is a layer classification; attention proper is serial and costs roughly 1.5 s of 5.55 s at 60 tokens; and thread scaling of
+about 2.3-2.7x applies to the engine as a whole. The serial, unaccelerated attention loop is a real and bounded target -
+it is the only significant work in the engine that has no parallelism at all - but it is 27 % of prefill, not 80 %.
+
+Lesson, fourth time in this session: I read a label (`sliding`) as if it described the work it contains. A phase named after a
+layer's attention type does not measure that attention - it measures the layer.
