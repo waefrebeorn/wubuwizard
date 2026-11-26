@@ -126,6 +126,31 @@ pattern `[T,T,T,T,T,F]`, confirmed by IN2_KV_TRACE (full attention only at visit
 The 12-slot reading in the briefs assumes the loop passes duplicate attention visits; the trace says they do not, so
 the budget here is the 8-slot one.
 
+### Measured: the kernel is at parity, and prefill is memory-bound because the MoE runs per token
+
+Three measurements settle what "prefill is slow" actually means, and two of them contradict what I first wrote.
+
+1. **The IQ2_XXS kernel is not the problem.** `tools/iq_kernel_wall.c` drives the real kernel over 4096 rows x 2304
+   and gets **19.08 G weights/s single-threaded = 38.2 GFLOPS, 13.41 ns per 256-weight block against upstream's
+   14.94** - i.e. 1.1x the reference. There is no 4-5x kernel headroom; that hypothesis is dead. (Note the bench must
+   be L3-resident to measure this; 2.32 MB of weights fits, and at that size it measures compute, not memory.)
+2. **Prefill re-reads the weights every token.** The engine's per-type timer shows TY16 calls scaling exactly with
+   token count (4348 / 13035 / 43440 for 16 / 48 / 160 tokens) with throughput flat at ~8.7 GOPS. That is the
+   signature of nt=1 per call. The cause is in `in2_moe`: `for (t < n_tok) { #pragma omp parallel for ... }` - a fresh
+   parallel region per token inside the token loop, so the 8 experts' weight slabs are streamed once per token. The
+   attention projections DO batch (`in2_matvec_nt(ctx, &L->wq, xn, n_tok, ...)`), which is why my earlier "batching is
+   already there, it buys 11%" correction was right for the projections and wrong for the MoE - and the MoE is 72% of
+   the FLOPs (63.70 of 87.88 M MAC per layer).
+3. **Prefill is therefore memory-bound, not FLOP-bound.** Thread sweep on a 48-token prompt: 1 thread 29.7 s, 2 ->
+   25.5, 4 -> 16.9, 6 -> 15.2, 8 -> 13.25 s. That is 2.24x over 8 threads with saturation past 4, which is a
+   bandwidth ceiling. `MAYA_IQ2XXS_1T=1` changes nothing (47.547 s vs 47.563 s on a 320-token prompt), so the cheaper
+   IQ2_XXS decode step is not the lever either.
+
+Consequence: batching the MoE across tokens turns prefill from memory-bound into compute-bound and is worth up to ~5x
+(13.25 s -> ~2.6 s on the 48-token probe; ~60 h -> ~12 h for a 1M prompt), which is the real content of LP-17. The
+work is: route all tokens first (that matvec batches), bucket token indices by expert, run one nt-sized matvec per
+expert, scatter back with the routing weights.
+
 - **LP-17 - prefill is at the hardware FLOP ceiling, so this pad is about fewer FLOPs, not faster batching.**
   Measured and corrected from an earlier guess: prefill costs 0.195 s per position, the decode step costs 0.22 s per
   token, and `in2_matvec_nt` already takes `n_tok` - so batching at 320 tokens buys ~11%, not 3x, because weight
