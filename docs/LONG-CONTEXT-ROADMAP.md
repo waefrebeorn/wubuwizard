@@ -874,3 +874,23 @@ hoisting the four buffers out of the expert loop, the buffer by checking whether
 
 Note also that `in2_threads()`'s own comment claims "~3.5x for the same kernels under a persistent pool" - the code was
 written expecting better scaling than the 2.29x measured here, so something has regressed since that measurement.
+
+## Allocation traffic ruled out as the scaling limiter
+
+Replaced the four per-expert `malloc`/`free` pairs inside the parallel MoE loop (~12,000 allocations per 512-token chunk,
+all through one CRT heap lock) with per-thread reusable scratch, grown once and never freed:
+
+    1 thread   14,727 ms   (was 14,700)
+    8 threads   6,411 ms   (was 6,415)   -> scaling 2.30x, was 2.29x
+    oracle     12/12 exact
+
+**No effect whatsoever.** So heap contention is not what holds 8 threads to 2.3 cores. Reverted - a flat change stays out
+of the hot loop.
+
+That leaves memory bandwidth as the leading explanation, and it is testable arithmetically rather than by another build:
+the expert matvecs stream IQ2_4/Q4-class slabs, so at ~27 GMAC/s aggregate the weight traffic is ~8-15 GB/s. On a dual-channel
+DDR5 laptop that is well under the ~80 GB/s ceiling, so *if* the arithmetic is right, bandwidth is NOT it either - which
+would leave the third candidate: that the work per expert bucket is simply too small to schedule (nb ~ 4 rows at 60 tokens,
+so 128 tiny tasks with dynamic scheduling and per-task overhead dominating). That one is testable by the cheapest possible
+experiment: run the same sweep at 480 tokens where nb ~ 30, and see whether scaling improves. If it does, the fix is chunk
+size, not threading and not the GPU.
