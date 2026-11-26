@@ -2007,3 +2007,32 @@ in the earlier measurements: 72 visits of fixed per-layer work that scales far l
 
 Also fixed in this change: `IN2_LOOKUP` was presence-tested, so `IN2_LOOKUP=0` enabled speculation. It now parses the value,
 which is why the baseline above is the first honest one.
+
+## Their shipped VRAM priority does NOT predict our measured hot experts - so we do not adopt it
+
+Their `vram_load_order` is a permutation of all 3,072 expert slots (index = layer*128 + expert). Our engine's routing
+histogram, measured here (`IN2_MOE_HIST=1` - note: a *path* breaks it, the value must be a non-empty string; a path was tried
+first and silently produced zero rows), over a 40-token generation on the 60-token prompt:
+
+    1265 distinct (layer,expert) routings, 14,976 total, all 24 MoE layers represented
+
+Overlap between the top-N by our measured count and the top-N by their priority rank:
+
+    top- 25:  0/25  =  0 %   (random ~2.0 %)
+    top- 50:  1/50  =  2 %   (random ~4.0 %)
+    top-100: 11/100 = 11 %   (random ~7.9 %)
+    top-200: 39/200 = 20 %   (random ~15.8 %)
+
+Their priority ranks for our 50 hottest experts: median **901** of 3072 against a uniform 1536, so there is mild correlation at
+the population level and essentially none at the head - the 25 most-used experts are entirely outside their first 25.
+
+Two honest limits: one prompt (repetitive text, 40 tokens) is a weak sample of "hot", and their order is evidently optimised for
+something other than raw routing frequency - the head of their list is high expert indices (layers 17+), which in this model is
+the tail of the loop core and the post-core layers, not the most-routed experts.
+
+**Conclusion: do not import their ordering.** Our measured histogram is the better local signal, and the engine already uses
+residency accordingly (97.7 % hit rate). The transferable idea remains "decide residency offline", but the table itself is
+pack-specific and would need to be recomputed for our weights and our prompts.
+
+Incidental but useful: the histogram shows routing spread over all 24 MoE layers with 1265 of 3072 slots touched in 40 tokens,
+which is the expected shape for top-8 routing and further confirms the loop accounting (24 MoE layers, 48 visits).
