@@ -645,3 +645,51 @@ than a bug: every one of those six fixes is still correct *for the implementatio
 builder, and the file on disk gives exact shapes. The Strata work is not wasted - stage 1's tap fusion, the block attention
 structure and the GRU recurrence all have direct counterparts - but `ctx_mix` (a learned 4-vector per layer), `ctx_norm`,
 `markov_ctx_mix/norm` and the `w1`/`w2` vocab projections are new and must come from upstream's code rather than from inference.
+
+## The mainline algorithm, read in full from upstream (src/models/dspark.cpp)
+
+`build_dspark_inp_block` (:194-225) and `build_dspark_markov_head` (:232-455) define the whole drafter. Reconstructed:
+
+    # block input, per block of block_drafts positions
+    x0 = tok_norm( token_embd[anchor] )                 # anchors, RMS-normed by token_embd_norm
+    x0 = cat(x0, mask_embd[0 .. block_drafts-2])        # the noise rows
+
+    # 3 dflash blocks over x0 (attn_q/k/v + *_q_norm/_k_norm, attn_k_ctx/attn_v_ctx, ctx_mix, ctx_norm, ffn SwiGLU)
+    ...
+    base = logits(hidden)                                # [n_vocab, B]  (tied token_embd, output_norm)
+
+    prev  = anchor
+    state = 0                                            # [R] = [256]
+    for i in 0 .. B-1:
+        w1_prev = markov_w1[prev]                        # [R] embedding lookup, w1 is [R, n_vocab]
+        markov  = w1_prev
+        if joint_proj:                                   # the "rnn head"
+            joint  = concat(state, w1_prev, hidden_i, f_rnn)      # [3R + n_embd]
+            joint  = joint_proj @ joint + joint_proj_b            # [3R]
+            gate   = sigmoid(joint[0:R])
+            cand   = tanh   (joint[R:2R])
+            state  = cand + gate * (state - cand)        # note: gate*(old-cand), NOT (1-gate)
+            markov = tanh   (joint[2R:3R])
+        bias_i = markov_w2 @ markov + markov_w2_b         # [n_vocab]  <- vocabulary-sized
+        col    = base[:, i] + bias_i                      # (+ softcap if configured)
+        prev   = argmax(col)                              # greedy path
+        out[:, i] = col
+
+**This is not the algorithm I implemented.** Differences that matter:
+
+- The Markov head produces a **vocabulary-space bias** `w2 @ markov` (rank 256 -> 200058 rows) that is added to the block's
+  own logits. There is no 2304-wide `corr`, no `hidden_out`, no dot against a shared unembed, no candidate shortlist, no
+  `cand_base`. My entire stage 3 plus the `IN2_ADD_VEC`/`IN2_BASE_VEC` machinery reproduces a mechanism this drafter does not have.
+- The gate is `cand + gate*(state - cand)`; the Strata code I ported used `cand + g*(state - cand)` too, so that one matches.
+- `f_rnn` is an **extra input row to joint_proj**, not a separate context tensor fused by `softmax(dflare_norm@fuse)`.
+- The anchor embedding is **RMS-normalised by `token_embd_norm`** before entering the block. I fed the raw embedding.
+- `ctx_mix` is a `[4]` per-layer vector (a learned mix over the 4 tap layers), and `ctx_norm` a `[2304]` norm - the per-layer
+  context K/V is built with `attn_k_ctx`/`attn_v_ctx` from that mixed context, which is the closest thing to what I ported.
+
+So the port has to be redone against this, and the good news is that it is *easier*: no candidate machinery, no unembed dot, and
+every weight is in the 503 MB GGUF now on disk. What is needed is a GGUF reader for its two quant types (`Q8_0` for the block
+matrices, `BF16` for w1/w2) and a block forward that follows `build_layers`.
+
+**Immediate next step:** read `dflash.cpp`'s layer builder (~:114-200) for the exact block maths with `ctx_mix`/`ctx_norm`, then
+write a GGUF dequantiser (Q8_0 = 32-weight blocks with an fp16 scale, *not* the Strata Q8_ROW plane layout) and dump the 58
+tensors, so the new implementation runs on real weights instead of the Strata pack's.
