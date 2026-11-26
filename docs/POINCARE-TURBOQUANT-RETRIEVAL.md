@@ -771,3 +771,56 @@ hypothesis has now been measured and closed, and the four retractions in this do
 instead of measuring. The order of operations for the kernel is fixed in advance: extract one real IQ2 tensor and its
 activations, time the current `wubu_iq_rows` against a standalone replacement, and only integrate if the replacement is
 both faster and bit-identical over that tensor.
+
+## The tandem GPU is currently doing zero work on this model
+
+Measured, `IN2_GPU_DENSE=1 IN2_GPU_TRACE=1`, one 49-token step:
+
+    NT-GPU refused ty=14 rc=-99 actb=2628 wb=5806080  (blk.0.attn_q.weight)
+    NT-GPU refused ty=8  rc=-99 actb=2448 wb=2506752  (blk.0.attn_k.weight)
+    NT-GPU refused ty=13 rc=-99 actb=2628 wb=4866048  (blk.3.attn_q.weight)
+    NT-GPU refused ty=12 rc=-99 actb=2628 wb=3981312  (blk.18.attn_q.weight)
+    NT-GPU refused ty=18 rc=-99 actb=2628 wb=2709504  (blk.20.attn_q.weight)
+
+five refusals, **zero accepted calls**, and MoE never attempts the GPU at all. The DLL loads (`wubu_cuda.dll`, repo
+root) and the path engages, but every tensor type this model uses for its dense projections - Q6_K, Q8_0, Q5_K, Q4_K,
+IQ3_XXS - is outside what the kernel accepts. So on Inkling-2-Mini the GPU has been idle for the entire project, while
+the CPU does 100 % of the work at ~2 GMAC/s.
+
+That reframes "tandem GPU acceleration" from an optimisation into a **capability gap**: there is no tandem yet. The
+measured split is:
+
+    phase              share of prefill      where it runs
+    MoE (24 x ~40 ms)      44 %              CPU only, never offered to the GPU
+    dense matvecs          rest              CPU only, every type refused
+    HEAD (0.089 s)         ~2 %              CPU
+
+and the foundation underneath both is the IQ2 dot at ~2.1 GMAC/s.
+
+### A wrong number, discarded
+
+I wrote a GGUF tensor-size audit to quantify the expert weights and it reported **66.56 GB for an 8.49 GB file** -
+misaligned after the KV section, so the tensor table it walked was garbage. Not reported as a finding and not used.
+What the file and the engine do say:
+
+    file                         8,486,236,352 bytes  (8.49 GB)
+    engine working set           4406 MB
+    d=2304  layers=48  core=[6,18)  loops=3  n_expert=128  used=8  d_ff_expert=1152
+
+With 128 experts of 3 x (2304 x 1152) per MoE layer, the experts are by construction the overwhelming majority of the
+model's bytes even at IQ2/IQ1 widths, and the engine's own 4406 MB working set against an 8.49 GB file says most of it
+is not resident. That is consistent with MoE being both the largest thing in the model and the slowest thing per byte,
+but the exact split needs a parser that is checked against the file size before it is trusted.
+
+### What this changes about the plan
+
+The IQ2 dot kernel is still the foundation, but it is not the shortest path to the goal. **Making the GPU accept the
+types this model actually uses** is worth more than a 2x kernel, because it converts an idle 6 GB device into a
+contributor and moves the work that is 100 % serial today onto a device that measured 59 GB/s. Concretely:
+
+1. Enumerate the type ids the CUDA kernel accepts versus the type ids present in the model, per tensor role. Today that
+   intersection is empty for dense projections and MoE is not offered at all.
+2. Add MoE expert matvecs to the GPU path (`wubu_iq_rows` already takes a row range, so an expert is a sub-range - the
+   wiring is smaller than it looks), with the 8 active experts per layer staged per token.
+3. Only then re-measure, because every number in this document above about GPU speed was measured on kernels this model
+   never reaches.
