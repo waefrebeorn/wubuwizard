@@ -377,3 +377,23 @@ Standing measured chain, for the next session to start from rather than re-deriv
     GPU MoE path            30.8 GMAC/s                 upload-bound, not kernel-bound
     card tensor cores       11,800 GMAC/s               384x the IQ2 kernel
     oracle                  12/12 exact in every configuration above
+
+## Part 1 attempted and reverted: the DLL export mechanism is not the obvious one
+
+Wrote `wubu_cuda_resident_matvec_nt` (batched residency: stage n_tok contiguous q8_K rows, run the device matvec with
+M = n_tok so the 8-column tile is selected, copy n_tok rows back; same `g_res_*` tables, same ident key). It compiled with
+zero errors and the DLL grew - and **the symbol did not appear in the export table**:
+
+    objdump -p wubu_cuda.dll | grep resident_matvec
+      [55] wubu_cuda_resident_matvec
+      [56] wubu_cuda_resident_matvec_id          <- the new _nt is absent
+
+`wubu_cuda_iq2x8_check` exported fine from the same append-at-EOF position, so this is not simply "appended code is not
+exported". Something about how `WUBU_EXPORT` resolves for this translation unit differs between those two functions -
+an export list, an `extern "C"` region boundary, or a declaration elsewhere that the linker honours instead. Reverted the
+whole change rather than leave an unexported stub in the tree; source is back at HEAD, DLL rebuilt with `-B`, no `_nt`
+symbol present, oracle 12/12 on CPU and dense.
+
+**The next session should read `WUBU_EXPORT`'s definition and the makefile's export path first** - five minutes of reading
+that would have saved this attempt. The batched entry's body is sound and is described above in enough detail to re-type;
+what is missing is only the linkage detail.
