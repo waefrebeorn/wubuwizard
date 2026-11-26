@@ -24,6 +24,8 @@ void in2_set_logits_all(float *);
 int  in2_state_save(void);
 void in2_state_restore(void);
 void in2_state_rewind(int);
+int  in2_probe_rows(int pos, float *out, int stride, int *out_dim);
+#define IN2_PROBE_MAXV 128
 
 /* SentencePiece marks a leading space with U+2581, byte-level BPE with U+0120; a byte-fallback token is <0xNN>.
  * Same rules as tools/detok.c so the text a run prints is the text detok would print for the same ids. */
@@ -196,6 +198,26 @@ int main(int argc, char **argv)
         fwrite(row1, sizeof(float), cfg.vocab_size, fp);
         fclose(fp);
         fprintf(stderr, "PROBE prefill=%d batched=%d -> %s\n", p0, batched, out);
+        if (getenv("IN2_PROBE_K")) {
+            const int stride = 2048;
+            float *rows = (float *)calloc((size_t)IN2_PROBE_MAXV * (size_t)stride, sizeof(float));
+            FILE *kf = rows ? fopen(getenv("IN2_PROBE_K"), "wb") : NULL;
+            if (kf) {
+                for (int which = 0; which < 2; ++which) {
+                    int dim = 0;
+                    const int nv = in2_probe_rows(p0 + which, rows, stride, &dim);
+                    int hdr[2]; hdr[0] = nv; hdr[1] = dim;
+                    fwrite(hdr, sizeof(int), 2, kf);
+                    if (nv > 0 && dim > 0) {
+                        for (int v = 0; v < nv; ++v)
+                            fwrite(rows + (size_t)v * stride, sizeof(float), (size_t)dim, kf);
+                    }
+                }
+                fclose(kf);
+                fprintf(stderr, "PROBE K rows -> %s%c", getenv("IN2_PROBE_K"), 10);
+            }
+            free(rows);
+        }
         return 0;
     }
 

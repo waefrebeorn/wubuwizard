@@ -237,6 +237,23 @@ void in2_state_rewind(int from_pos)
     if (g_kv)  in2_kv_rewind(g_kv,  from_pos);
     if (g_kv2) in2_kv_rewind(g_kv2, from_pos);
 }
+/* Probe support: copy the stored K row for every visit at one absolute position, so a batched forward and a sequential
+ * one can be compared row by row and the first differing visit identified. Stride is caller-supplied and must be >=
+ * g_kv->dim (1024 here, NOT d_model). */
+int in2_probe_rows(int pos, float *out, int stride, int *out_dim)
+{
+    if (!g_kv || !out) return -1;
+    const int dim = g_kv->dim;
+    if (stride < dim) return -1;
+    if (out_dim) *out_dim = dim;
+    for (int v = 0; v < g_kv->n_visit; ++v) {
+        const float *r = in2_kv_k(g_kv, v, pos);
+        if (r) memcpy(out + (size_t)v * (size_t)stride, r, sizeof(float) * (size_t)dim);
+        else   memset(out + (size_t)v * (size_t)stride, 0, sizeof(float) * (size_t)stride);
+    }
+    return g_kv->n_visit;
+}
+
 int g_kv_window = 0;   /* ring size of the K/V cache, 0 = linear slots */
 
 static void in2_conv_stream(in2_kv_t *kvc, int vvis, int which, const float *x, int n_tok,
@@ -249,9 +266,25 @@ static void in2_conv_stream(in2_kv_t *kvc, int vvis, int which, const float *x, 
         if (which) in2_kv_store_row_v(kvc, vvis, x);
         else       in2_kv_store_row_k(kvc, vvis, x);
     } else {
-        /* a real batch: the batch conv is already correct for it, and the history it must leave behind is its
-         * own last rows, pushed one per position so the record ends up in order */
-        in2_shortconv(x, n_tok, ch, w, k, out);
+        /* A real batch. The batch conv alone is NOT enough: it convolves inside the batch and pads the first taps with
+         * zeros, so at pos0 > 0 the first tokens lose the three history rows that precede them. That made every
+         * multi-token call at a non-zero offset wrong (chunked prefill, speculative verification) while pos0 == 0 -
+         * full prefill - stayed correct, because there is no history there. Seed the conv with the stored history and
+         * keep only the rows belonging to the batch. */
+        const float *hist = which ? in2_kv_hist_v(kvc, vvis, 3) : in2_kv_hist_k(kvc, vvis, 3);
+        const int seeded = 3 + n_tok;
+        float *cat = (float *)malloc(sizeof(float) * (size_t)seeded * (size_t)ch);
+        float *tmp = (float *)malloc(sizeof(float) * (size_t)seeded * (size_t)ch);
+        if (cat && tmp) {
+            if (hist) memcpy(cat, hist, sizeof(float) * 3u * (size_t)ch);
+            else      memset(cat, 0, sizeof(float) * 3u * (size_t)ch);
+            memcpy(cat + 3u * (size_t)ch, x, sizeof(float) * (size_t)n_tok * (size_t)ch);
+            in2_shortconv(cat, seeded, ch, w, k, tmp);
+            memcpy(out, tmp + 3u * (size_t)ch, sizeof(float) * (size_t)n_tok * (size_t)ch);
+        } else {
+            in2_shortconv(x, n_tok, ch, w, k, out);   /* fall back rather than fail */
+        }
+        free(cat); free(tmp);
         const int from = n_tok > 3 ? n_tok - 3 : 0;
         for (int t = from; t < n_tok; ++t) {
             if (which) in2_kv_store_row_v(kvc, vvis, x + (size_t)t * ch);

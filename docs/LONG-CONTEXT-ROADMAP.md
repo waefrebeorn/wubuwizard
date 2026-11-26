@@ -1944,3 +1944,38 @@ K row first differs.
 The honest summary of this thread: three hypotheses died (MoE halving, batching equivalence, ring wrap) and the fourth -
 batching - turned out to be right in the configuration I originally dismissed as unnecessary to test. The rule that keeps
 paying: probe the failing configuration, not a convenient one.
+
+## THE BUG: the batched conv dropped the history - fixed, and batched now equals sequential exactly
+
+`in2_conv_stream` had two branches:
+
+    if (n_tok == 1)  hist = last 3 rows; in2_kv_conv_row(hist, x, ...)      // uses history
+    else             in2_shortconv(x, n_tok, ch, w, k, out);                // history IGNORED
+
+`in2_shortconv` convolves inside the batch and zero-pads the leading taps. At `pos0 == 0` there is no history, so full
+prefill was correct - which is why every gate in this project ever passed, and why a fresh-cache probe at positions 0 and 1
+matched bitwise. At `pos0 > 0` the first tokens of a batch lost the three rows that precede them.
+
+That single oversight made **every multi-token call at a non-zero offset wrong**: chunked prefill (so LP-04's plan to split a
+long prompt into blocks fed at an offset would have produced silently wrong output) and speculative verification (a
+multi-token call at `pos0 = n-1`).
+
+Fix: seed the convolution with the stored history - concatenate the 3 history rows and the batch, run the same conv over
+`3 + n_tok` rows, keep the last `n_tok`. Cost is one temp buffer of `(3+n_tok) x ch` floats per call and the same FLOPs plus
+3 rows.
+
+Measured, after the fix, with a populated 60-token cache (the configuration that failed before):
+
+    pos 60: differing real vocab entries 0/200058, max|diff| = 0.000e+00
+    pos 61: differing real vocab entries 0/200058, max|diff| = 0.000e+00
+
+And with speculation enabled, the 15-token oracle passes at every draft length tried:
+
+    K=0 MATCH   K=1 MATCH   K=2 MATCH   K=4 MATCH   K=8 MATCH
+
+Bisect that found it: dumping the stored K row for all 72 visits at the probe positions showed visit 0 identical and
+**47 of 72 visits different, first at visit 1** - i.e. the corruption enters at the first layer boundary, which is where the
+residual conv runs, not in the projections or the cache.
+
+This is the most consequential finding of the session and it was invisible to every previous test: the engine's own oracle
+only ever exercised `pos0 == 0`.
