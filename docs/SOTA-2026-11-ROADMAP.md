@@ -938,3 +938,31 @@ serialises it. Candidates to check in this order, each by timing the region at 1
   4. in2_tensor_to_f32's copy path - DQ reports 557 MB produced and 103 MB copied per 8-token run, and dequantisation
      is single-threaded per tensor.
 Note what this retires: the MoE is not the target any more. It scales 3.25x and is 34 % of the eight-thread step.
+
+### Attention is not the serial remainder - retraction and the real cost of a small omp region
+
+attention is 2% of the step, not 100%, and parallelising its head loop is a 2x REGRESSION
+
+I predicted attention was the whole 180 ms serial remainder and was wrong twice in one commit-sized step. The numbers:
+
+    original serial build          3.68 - 3.74 tok/s
+    head loop parallel (8 thr)     1.78 tok/s          <- 2x SLOWER
+    same build, attention ablated  3.63 tok/s
+
+So attention costs about 1-2 % of a step (3.68 with it against 3.63 without), not 180 ms. The arithmetic that
+"matched" - 64 sliding visits x 1024 keys x 24 heads x 128 dims x 2 = 403 M MAC, divided by rule 58's 2.24 GMAC/s =
+180 ms - was a coincidence of two unrelated numbers. That 2.24 GMAC/s was measured on a double-precision reduction over
+1M keys; the head dot here is 128 wide, 8-way unrolled float, and runs an order of magnitude faster. Reverted to serial
+and re-measured: 3.74 / 3.71 with tokens unchanged.
+
+The regression is the more useful result. 64 sliding visits per token, each opening an `omp parallel for` over 24 heads
+for ~630 us of work, cost ~4.5 ms of fork/join each - 190x the ~23 us per-region barrier estimate that I used earlier
+today to "rule out" barrier domination. That estimate was taken for a differently-shaped region and does not transfer to
+many small regions. Rule: the per-region omp cost on this runtime is milliseconds at this granularity, so a region must
+hold well over a millisecond of work to pay, and a loop of 24 iterations is never worth parallelising on its own.
+
+Where this leaves the remainder: attention is out. The non-MoE remainder is still ~180 ms/token and is NOT the thing I
+expected, so the next attribution has to be measured per phase rather than inferred from MAC counts - which is exactly
+the trap this entry documents. The dense projections call in2_rows_parallel (270 regions/token) and are the leading
+candidate, and the same fork/join cost measured above says that path may be paying for its parallelism rather than
+benefiting from it.
