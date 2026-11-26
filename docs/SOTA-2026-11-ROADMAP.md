@@ -1168,3 +1168,30 @@ Unverified and next: what the KV dtype actually is today. The header documents p
 and no measurement in this session touched KV bytes directly - every KV figure above is arithmetic from the geometry,
 which is exactly the class of number that has been wrong six times today. The check is one run with a long prompt and
 WorkingSetSize read, not an inference.
+
+### Correction: KV is f32 - the real ceiling is ~64k, and q4 KV is a feature to build
+
+correction: KV is f32, so this box tops out near 64k today, not 512k - the previous commit overclaimed
+
+Last commit said "512k is reachable at q4 KV". That was arithmetic for a dtype the engine does not have. The KV
+accessors are `float *in2_kv_k(...)` / `float *in2_kv_v(...)` - the cache is f32, there is no q8 or q4 KV path at all,
+so the q4 column of that table described a feature that would have to be written.
+
+Measured from the engine's own allocation rather than computed:
+
+    IN2_KV_POS=65536   8 full x 65536  + 64 sliding x 1024 =  4608.0 MB
+    IN2_KV_POS=131072  8 full x 131072 + 64 sliding x 1024 =  8704.0 MB
+    IN2_KV_POS=262144  8 full x 262144 + 64 sliding x 1024 = 16896.0 MB
+
+With the 7.90 GB model beside it: 64k costs 12.5 GB total and fits; 128k costs 16.4 GB and does not; 256k is 16.5 GB of
+KV alone. Scaling the same geometry to the target: 512k = 34.4 GB and 1M = 68.7 GB of f32 KV.
+
+So the honest position on the long-context half of the goal: **today's ceiling on this box is ~64k context**, and 512k
+requires quantised KV that does not exist yet. That is a feature to build, not a setting to flip, and it is exactly the
+lever rule 59 ranks third - precision only divides bytes, so q4 at 512k costs 8.6 GB and still reads 8.6 GB and still
+does every MAC, but it is the difference between "does not fit" and "fits with 4 GB to spare", so it comes before any
+sequence-dimension work on this box.
+
+Two things this entry is careful not to repeat: the previous figure was produced by arithmetic on a table I invented
+rather than by asking the engine, and it survived one commit before being checked. The number that settles this class of
+question is `in2_kv_bytes()` - one line of output - and it should be the first thing consulted, not the last.
