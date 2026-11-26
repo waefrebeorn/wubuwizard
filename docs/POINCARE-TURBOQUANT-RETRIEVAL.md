@@ -1403,3 +1403,39 @@ What is left is one concrete piece of plumbing: export the IQ2_S grid from the h
 `wubu_iq_c11.c`) and call `wubu_cuda_upload_tables` at init the way `upload_iq2xxs` already is. ty=16's 26/136 is the
 same class of problem and needs the same check - its grid *is* uploaded, so its failures point at the slab slice the
 resident path hands it rather than at tables, and that is the next measurement after the upload lands.
+
+## The IQ2_S table upload worked: 56 expert rows went from all-zeros to 1.3e-07
+
+Adding the missing upload at init (`GetProcAddress("wubu_cuda_upload_tables")` fed the host's `iq2s_grid` and
+`iq3s_grid`, which needed two new accessors in `gguf_reader.c` beside `wubu_iq2xxs_grid_bytes`) changed ty=22 from
+silent zeros to correct arithmetic:
+
+    type                  before                          after
+    ty=22 IQ2_S    56 rows, median rel 1.000 (zeros)   37 good, median 1.30e-07
+    ty=23 Q4_K     50 rows, median 1.2e-07             50 good, median 1.26e-07
+    ty=16 IQ2_XXS 136 rows, median rel 1.20           136 rows, median rel 1.28
+
+So a kernel that returns success while writing nothing is, as the notes said, a missing table - and the engine had never
+uploaded the one IQ2_S needs. That is now fixed and verified.
+
+## What is left, and it is one specific oddity
+
+Within every expert tensor - both types, all layers - roughly **28 % of calls are correct and 72 % are wrong**, uniformly:
+
+    ty=16  blk.12.ffn_gate_up_exps   n=24 good=6      ty=22  blk.16.ffn_gate_up_exps  n=24 good=14
+    ty=16  blk.13.ffn_gate_up_exps   n=24 good=3      ty=22  blk.21.ffn_gate_up_exps  n= 8 good=7
+    ty=16  blk.7.ffn_gate_up_exps    n=24 good=6      ty=23  output.weight            n=50 good=50
+
+A uniform fraction that does not depend on the tensor, the layer or the quant type is not a per-tensor defect - it is the
+signature of a **per-call** decision that goes right sometimes. The two candidates are the resident cache (an upload
+landing in the wrong slot, or a hit served for the wrong identity) and the slice address (`src` pointing at the wrong
+expert for the majority of calls, correct when the requested expert happens to be the one at the base of the tensor).
+
+The isolate for that is the self-test export added with this work: `wubu_cuda_selftest_iq2(type, K, n_cols, row_bytes,
+&maxabs)` runs the kernel on a synthetic slab with no cache, no engine and no GGUF in front of it. Its next revision
+must **return `y` rather than a count**, so the same slab can be run through the engine's own `wubu_iq_rows` and the two
+compared directly - that separates "kernel is wrong" from "the slab it was given was wrong" in one run, which is the
+distinction five sessions of engine-level instrumentation failed to make.
+
+Verified unchanged by all of the above: oracle 12/12 exact on CPU and with `IN2_GPU_DENSE=1`; 24-token decode
+5440 -> 5102 ms.

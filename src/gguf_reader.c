@@ -2457,3 +2457,5 @@ int gguf_read_raw_tensor(gguf_ctx *ctx, gguf_tensor_info *tensor, void *output) 
 const void *wubu_iq2xxs_grid_bytes(void)   { return (const void *) iq2xxs_grid; }
 const void *wubu_iq2xxs_ksigns_bytes(void) { return (const void *) ksigns_iq2xs; }
 const void *wubu_iq4nl_bytes(void)         { return (const void *) kvalues_iq4nl; }
+const void *wubu_iq2s_grid_bytes(void)      { return (const void *) iq2s_grid; }
+const void *wubu_iq3s_grid_bytes(void)      { return (const void *) iq3s_grid; }

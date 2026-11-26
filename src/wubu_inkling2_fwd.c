@@ -308,6 +308,8 @@ static int64_t in2_gpu_calls;
 typedef int (*in2_gpu_res_sig)(int, const void *, size_t, const void *, int, float *, int, int, int64_t);
 typedef int (*in2_gpu_up_sig)(const void *, const void *);
 extern const void *wubu_iq2xxs_grid_bytes(void);
+extern const void *wubu_iq2s_grid_bytes(void);
+extern const void *wubu_iq3s_grid_bytes(void);
 extern const void *wubu_iq2xxs_ksigns_bytes(void);
 
 static void in2_gpu_init(void)
@@ -319,6 +321,13 @@ static void in2_gpu_init(void)
     if (!h) return;
     in2_gpu_res_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec");
     in2_gpu_res_id_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec_id");
+    /* IQ2_S needs its 1024-entry grid on the device; without it the kernel writes zeros and returns success - which is
+     * exactly what the expert rows measured (ty=22 rel=1.000 over 56 rows). IQ3_S rides along in the same export. */
+    {
+        typedef int (*up_tables_sig)(const void *, const void *);
+        up_tables_sig ut = (up_tables_sig) (void *) (size_t) GetProcAddress(h, "wubu_cuda_upload_tables");
+        if (ut) ut(wubu_iq2s_grid_bytes(), wubu_iq3s_grid_bytes());
+    }
     if (!in2_gpu_res_fn) return;
     /* The IQ2_XXS kernel reads a grid and a sign table that the library cannot supply itself without linking this
      * translation unit; the engine has both, so it hands them over once. */
