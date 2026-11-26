@@ -611,3 +611,37 @@ Both drafter files exist on the hub at exactly the sizes their layout test docum
 
 The mainline one is downloading to `C:/Users/eman5/models/inkling-2-drafter/`. When it lands, `gguf_names.py --skeleton` on it
 against the Strata pack's 54 names answers the question that matters: same drafter, or a different generation.
+
+## The two drafters are different architectures - the 0/7 is explained, and it was never my arithmetic
+
+Downloaded `dspark-Inkling-2-Mini-Q8_0.gguf` (503,889,952 B, exact size) and parsed its table: **58 tensors, 39 kv pairs,
+25 distinct skeletons.** Against the Strata pack's 54, the differences are structural, not cosmetic:
+
+    mainline (dflash)                        Strata SQ-10 pack
+    blk.N.ctx_mix.weight      [4]     F32    -- absent (fuse is a [4,4] softmax matrix, one per pack not per layer)
+    blk.N.ctx_norm.weight     [2304]  F32    -- absent (dflare_norm plays this role)
+    markov_ctx_mix.weight     [4]     F32    -- absent
+    markov_ctx_norm.weight    [2304]  F32    -- absent
+    markov_w1.weight          [256, 200058] BF16    markov_head.markov_w1 [201024, 256] Q8_ROW  (transposed AND re-scoped)
+    markov_w2.weight          [256, 200058] BF16    -- absent
+    markov_w2.bias            [200058] F32          -- absent
+    joint_proj.weight/bias                          markov_head.rnn_proj (+bias)
+    mask_embd.weight                                mask_embed
+    output_norm.weight                              norm.weight
+
+And the weight layout differs too: mainline `attn_k.weight` is `[2304, 1024]` (in, out) where the pack's `k_proj` is
+`[1024, 2304]` (out, in).
+
+**The important one is `markov_w2 [256, 200058]` with a `[200058]` bias.** In the Strata design the Markov head emits a
+2304-wide correction which is then dotted against a shared unembed matrix. Here there are **two rank-256 projections straight to
+the vocabulary**, so the head produces logits directly at rank 256 - a different mechanism, not a different packing.
+
+**Conclusion.** I ported the Strata drafter faithfully - decoded its formats, read its CUDA and CPU implementations line by line,
+found and fixed six real divergences, and matched it stage by stage - and it was never going to agree with continuations from a
+model whose drafter is this one. The 0/7 was measuring two different architectures against each other. That is a better outcome
+than a bug: every one of those six fixes is still correct *for the implementation they were derived from*.
+
+**Next step:** implement dflash as upstream defines it, from this GGUF. `src/models/` in the upstream checkout holds the graph
+builder, and the file on disk gives exact shapes. The Strata work is not wasted - stage 1's tap fusion, the block attention
+structure and the GRU recurrence all have direct counterparts - but `ctx_mix` (a learned 4-vector per layer), `ctx_norm`,
+`markov_ctx_mix/norm` and the `w1`/`w2` vocab projections are new and must come from upstream's code rather than from inference.
