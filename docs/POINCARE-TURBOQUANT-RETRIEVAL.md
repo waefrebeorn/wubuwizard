@@ -1655,3 +1655,25 @@ is the one condition the engine cannot create cheaply.
 To make batching pay, `moe_batch_res` has to **populate** on a miss instead of falling back: allocate a slot, upload,
 record the ident, and reuse it next token. That is the same fill logic the single-slab path has, and it is the piece that
 has to move into the batch entry before any further measurement is worth taking. No more batching work until that exists.
+
+## Populate-on-miss: the batched path went from 5870 to 5378 ms
+
+`moe_batch_res` now allocates a resident slot, uploads once and records the ident when a slab is missing, instead of
+falling back to a full host gather every call. The gap to dense closes from **+732 ms to +170 ms** over 24 tokens:
+
+    dense   5208 ms
+    batched 5378 ms      (+3.3 %, was +14.2 %)
+    RESSTAT hit=5261 miss=767 evict=0 slots=767 rate=87.3 %
+    oracle  12/12 identical
+
+767 misses over 24 tokens is the irreducible fill cost - 6144 distinct slabs against a 6 GB card, so the first sight of
+each expert is a PCIe upload either way. Everything after it is now device-to-device.
+
+What is left in the gap is measurable and named: only `gate_up` is batched. The `down` projection still runs one call per
+expert through the locked resident entry, so 24 of the 48 launches per layer are still per-expert. Batching it needs the
+entry to take an `act_stride` (each expert's activation is its own post-SiLU vector), which was plan step 3 and is now the
+only remaining item on this thread.
+
+Scorecard for the whole batching exercise, in order of measurement: 2.39x in isolation, 0.87x wired with a host gather,
+0.87x with a D2D entry that never hit, then 0.97x once the entry could fill the cache itself. The four numbers are the
+argument for measuring every stage on the real path instead of extrapolating the first one.

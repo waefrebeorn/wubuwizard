@@ -3830,7 +3830,27 @@ WUBU_EXPORT int wubu_cuda_moe_batch_res(int type, const int64_t *idents, const v
         for (int j = 0; j < g_res_n; ++j)
             if (g_res_d[j] && g_res_ident[j] == idents[i] && g_res_bytes[j] == wbytes_each) { slot = j; break; }
         if (slot < 0) {
-            /* not resident: stage it and remember it, exactly as the single-slab path would */
+            /* POPULATE on a miss. This is the piece whose absence made batching slower than the per-expert path: the
+             * batched branch replaces the calls that used to fill this cache, so without filling here every call misses
+             * and pays the full host gather - measured 5870 vs 5138 ms. Fill once, gather D2D forever after. */
+            const int room = (g_res_n < WUBU_RES_SLOTS) &&
+                             (!g_res_budget || g_res_used + wbytes_each <= g_res_budget);
+            if (room) {
+                slot = g_res_n;
+                if (cudaMalloc(&g_res_d[slot], wbytes_each) == cudaSuccess) {
+                    if (cudaMemcpy(g_res_d[slot], h_w[i], wbytes_each, cudaMemcpyHostToDevice) == cudaSuccess) {
+                        g_res_n++;
+                        g_res_key[slot] = h_w[i];
+                        g_res_bytes[slot] = wbytes_each;
+                        g_res_ident[slot] = idents[i];
+                        g_res_use[slot] = ++g_res_clock;
+                        g_res_used += wbytes_each;
+                        g_res_miss++;
+                    } else { cudaFree(g_res_d[slot]); g_res_d[slot] = NULL; slot = -1; }
+                } else { g_res_d[slot] = NULL; slot = -1; }
+            }
+        }
+        if (slot < 0) {
             if (cudaMemcpy((char *) b_w2 + (size_t) i * wbytes_each, h_w[i], wbytes_each, cudaMemcpyHostToDevice) != cudaSuccess) B2_FAIL(-4);
             continue;
         }
