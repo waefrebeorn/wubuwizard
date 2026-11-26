@@ -532,3 +532,30 @@ across tokens instead of being staged per call.
 
 Budget check before any of it: 432 GMAC at the CPU's effective ~33 GMAC/s (8 threads) is 13.1 s, which is the measured
 prefill almost exactly - so prefill is compute-bound on the CPU and there is no hidden overhead left to find.
+
+## Prefill MoE on the GPU, measured four ways - all of them lose
+
+    120-token prefill:
+      CPU baseline                                  12,773 ms
+      IN2_GPU_MOE=1                                 12,910 ms   (+1.1 %)
+      IN2_GPU_MOE=1 IN2_GPU_DENSE=1                 13,537 ms   (+6.0 %)
+      IN2_GPU_MOE=1 IN2_MOE_BATCH=1 IN2_RES_GB=3     13,074 ms   (+2.4 %)
+
+So the MoE - 85 % of the MACs and the only prize large enough to matter - also does not pay on this card. The explanation
+is the one thing all these configurations share: **they run at M = 1.**
+
+8 experts per token means 8 separate expert matvecs, each a 2304-wide row against a distinct slab. At M = 1 the kernel has
+no reuse to exploit and the per-call round trip (launch, quantise, H2D activation, D2H result, sync) is paid ~1,150 times
+per token per layer. Residency removes the weight upload - 97.7 % hit - but it cannot remove the round trips, and the
+arithmetic per call is too small to hide them.
+
+The one configuration that would work is the one the routing forbids at small batch: **M >= 8 per expert.** With 8 tokens
+and 8 experts each, ~50 distinct experts are touched, so each expert sees ~1.1 tokens - grouped GEMM at M = 1.1 is exactly
+as hopeless as the per-token loop. To reach M >= 8 per expert the prefill must be chunked at **>= 128-512 tokens**, where
+each expert collects 8-32 rows and the measured 373-648 GMAC/s becomes reachable:
+
+    367 GMAC of MoE at ~400 GMAC/s  ->  ~0.9 s   against 12.8 s today
+
+That is the real shape of the remaining work: a grouped-GEMM MoE kernel over the union of routed experts, driven by large
+prefill chunks. It is a bigger job than anything attempted in this session, and it is the first one whose expected payoff
+is measured rather than assumed - 14x on 85 % of the work, versus the 0.8 % the projection wiring was chasing.
