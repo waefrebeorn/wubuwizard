@@ -159,28 +159,35 @@ int main(int argc, char **argv)
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
     if (getenv("IN2_BATCH_PROBE")) {
-        /* Is a batched forward (n_tok>1) bit-identical to sequential single-token stepping at the same positions?
-         * Writes two logit rows: position 0 and position 1, either from one 2-token call or from two 1-token calls.
-         * Run twice (IN2_BATCH_PROBE=0 and =1) and diff the files - speculation is only reachable if they match. */
+        /* Batched (n_tok>1) vs sequential (n x 1-token) forward, in the configuration where speculation actually runs:
+         * AFTER a prefill, with a populated cache, 72 visits and sliding masks. A fresh-cache probe agrees bitwise and
+         * proves nothing about this case. Two tokens (prompt tokens 0 and 1) are pushed at positions n_prompt and
+         * n_prompt+1; row 0 is the logits at n_prompt, row 1 at n_prompt+1. */
         const int batched = atoi(getenv("IN2_BATCH_PROBE")) != 0;
         const char *out = getenv("IN2_PROBE_OUT");
         if (!out) { fprintf(stderr, "IN2_PROBE_OUT not set\n"); return 2; }
         float *row0 = (float *)calloc(cfg.vocab_size, sizeof(float));
         float *row1 = (float *)calloc(cfg.vocab_size, sizeof(float));
+        if (!row0 || !row1) { fprintf(stderr, "probe oom\n"); return 2; }
+        if (n_prompt > 0) {
+            const int rcp = in2_forward_at(ctx, &m, &cfg, toks, n_prompt, 0, h, logits);
+            if (rcp != WUBU_INKLING2_OK) { fprintf(stderr, "probe prefill rc=%d\n", rcp); return rcp; }
+        }
+        const int p0 = n_prompt;
+        int tt[2]; tt[0] = toks[0]; tt[1] = toks[1 % n_prompt];
         if (batched) {
             float *la = (float *)calloc((size_t)2 * cfg.vocab_size, sizeof(float));
-            if (!la || !row0 || !row1) { fprintf(stderr, "probe oom\n"); return 2; }
+            if (!la) { fprintf(stderr, "probe oom\n"); return 2; }
             in2_set_logits_all(la);
-            const int rc = in2_forward_at(ctx, &m, &cfg, toks, 2, 0, h, logits);
+            const int rc = in2_forward_at(ctx, &m, &cfg, tt, 2, p0, h, logits);
             in2_set_logits_all(NULL);
             if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe batched rc=%d\n", rc); return rc; }
             memcpy(row0, la, sizeof(float) * cfg.vocab_size);
             memcpy(row1, la + cfg.vocab_size, sizeof(float) * cfg.vocab_size);
         } else {
-            if (!row0 || !row1) { fprintf(stderr, "probe oom\n"); return 2; }
-            int rc = in2_forward_at(ctx, &m, &cfg, &toks[0], 1, 0, h, row0);
+            int rc = in2_forward_at(ctx, &m, &cfg, &tt[0], 1, p0, h, row0);
             if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe seq0 rc=%d\n", rc); return rc; }
-            rc = in2_forward_at(ctx, &m, &cfg, &toks[1], 1, 1, h, row1);
+            rc = in2_forward_at(ctx, &m, &cfg, &tt[1], 1, p0 + 1, h, row1);
             if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe seq1 rc=%d\n", rc); return rc; }
         }
         FILE *fp = fopen(out, "wb");
@@ -188,7 +195,7 @@ int main(int argc, char **argv)
         fwrite(row0, sizeof(float), cfg.vocab_size, fp);
         fwrite(row1, sizeof(float), cfg.vocab_size, fp);
         fclose(fp);
-        fprintf(stderr, "PROBE wrote 2 x %d floats (batched=%d) to %s\n", cfg.vocab_size, batched, out);
+        fprintf(stderr, "PROBE prefill=%d batched=%d -> %s\n", p0, batched, out);
         return 0;
     }
 

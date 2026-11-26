@@ -1910,3 +1910,37 @@ verification failure - mine, the ring's, the numerics' - is unfounded.
 Recorded because this is the third hypothesis in this thread that measurement destroyed before it reached a conclusion
 (MoE halving, batching non-equivalence, ring wrap). The pattern is consistent: the guess is always about *where* the state
 diverges, and the only thing that settles it is probing the exact configuration the failure occurs in.
+
+## FOUND: at a non-zero position the batched forward is badly wrong - not rounding, a bug
+
+Same probe, run after a 60-token prefill (populated cache, 72 visits, sliding masks) instead of on a fresh cache:
+
+    pos 60 (row0): differing real entries 200058/200058, max|diff| = 3.052e+00, argmax 157021 vs 157021
+    pos 61 (row1): differing real entries 200058/200058, max|diff| = 1.958e+00, argmax 161319 vs 161319
+
+**Every single real vocabulary entry differs, by up to 3.0 logits.** That is not floating-point noise, not an accumulation
+order, and not a tie-break: `in2_forward_at(tokens, 2, pos0=60)` computes a different function from two sequential
+`in2_forward_at(token, 1, pos)` calls at the same positions.
+
+Note the correction this forces: the earlier "batched == sequential, bitwise" result was measured on a **fresh 2-token cache at
+positions 0 and 1**, where `pos0 == 0` takes the prefill branch. It was true there and false everywhere else. The retraction
+in the previous entry was itself wrong, and for the reason that entry had already named: the probe was not run in the
+configuration the failure occurs in.
+
+Why this matters far beyond speculation:
+
+- **`pos0 > 0` with `n_tok > 1` is broken, and it is used by chunked prefill.** Any plan here (and LP-04 in the earlier roadmap)
+  that splits a long prompt into blocks fed at a non-zero offset would have produced wrong output, silently. This is the
+  first evidence that path was never exercised.
+- Speculation failed at token 13 for exactly this reason: the verification forward is a multi-token call at `pos0 = n-1 > 0`,
+  so it perturbs the trajectory immediately. Rollback cannot help - the *accepted* rows are already wrong.
+
+Prime suspects, in order: the two conv streams (`in2_conv_stream`, whose `n_tok > 1` branch shifts history per token and is
+called with a `pos0`-relative history that `in2_kv_begin` only sets up once), and the K/V store cursor (`g_kv_pos` advanced
+per token but the ring/mirror tags written for `pos0 + t`). The measurement to separate them: run the same probe at
+`pos0 = 0` with 2 tokens (known good), then at `pos0 = 1` with 1 token appended to a 1-token prefill, and bisect which visit's
+K row first differs.
+
+The honest summary of this thread: three hypotheses died (MoE halving, batching equivalence, ring wrap) and the fourth -
+batching - turned out to be right in the configuration I originally dismissed as unnecessary to test. The rule that keeps
+paying: probe the failing configuration, not a convenient one.
