@@ -545,3 +545,39 @@ module round-trip at those widths is correct and monotone - so the fault is in t
 now clamped to a verified width (5->6, 8->7) with a one-shot warning on stderr rather than being allowed to emit wrong
 tokens. Refusing outright was tried first and crashed, because the KV init runs once per visit and the failure path
 freed state that later visits still used.
+
+## Verification 9: RETRACTION - there is no memory-safety defect; the tier works, and the bit-width floor is measured
+
+The previous section claimed "an unresolved memory-safety defect" because the set of bit-widths that produced correct
+output differed between builds. **That was wrong.** The working set moved because the codebook changed between those
+builds - I edited `tqv_build_codebook` twice in that window - not because of layout. Attributing my own code changes to
+nondeterminism was the error, and it sent me looking for corruption that was never there.
+
+`IN2_TQ_VERIFY` settles it: every stored row is mirrored in f32 and each read is compared against that shadow. On the
+rows that actually matter (norm ~24.87):
+
+    KV_K visit=0 pos=0 el=0  max read-vs-shadow error 0.30697  (1.23 %)
+    KV_V visit=0 pos=0 el=0  max read-vs-shadow error 0.27535  (1.11 %)
+    KV_K visit=0 pos=1 el=1  max read-vs-shadow error 0.39192  (1.58 %)
+    KV_V visit=0 pos=1 el=1  max read-vs-shadow error 0.32900  (1.32 %)
+
+at b=4 - which is exactly what the standalone module predicts (b=4 on a unit vector: 0.0106-0.0147, times 24.87 =
+0.26-0.37). Reads are correct; the error is plain quantisation error. No slot mismatch, no corruption.
+
+What that also explains is the real constraint: **this model's greedy output changes when a stored row carries ~1.6 %
+error, and does not at ~0.5 %.** Measured end to end, same prompt, same binary:
+
+    IN2_KV_TQ=3,4   clamped to 6   "the Ottoman Empire was Constantinople, which was also kn"   correct
+    IN2_KV_TQ=6     108.6 MB       "the Ottoman Empire was Constantinople, which was also kn"   correct, 10/12 tokens
+    IN2_KV_TQ=7     126.6 MB       "the Ottoman Empire was Constantinople, which was also th"   correct
+    IN2_KV_TQ=8     126.6 MB       "the Ottoman Empire was Constantinople, which was also kn"   correct
+    f32             576.0 MB       "the Ottoman Empire was Constantinople, which was later re"  12/12 tokens
+
+So the tier ships as **6 bits and above**: 108.6 MB against 576.0 MB is **5.3x less KV memory** with the answer correct
+and ten consecutive tokens identical to the f32 oracle. Below 6 bits the row error crosses the model's sensitivity and
+the answer goes wrong, so those widths clamp to 6 with a one-shot warning rather than silently producing a confident
+wrong answer.
+
+The general principle this gives, which is the transferable part: **the bit-width floor is a property of the model's
+sensitivity to row error, not of the quantiser's distortion bound.** The bound says b=4 is near-optimal for its bit
+budget; the model says 1.6 % is too much. Both are true, and only the end-to-end run can tell you where the line is.

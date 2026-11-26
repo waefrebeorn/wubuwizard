@@ -108,16 +108,19 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
      * "quantised" guard keeps working; tq != NULL is what distinguishes the two formats. */
     const char *tqe = getenv("IN2_KV_TQ");
     const size_t nrows = elems / (size_t)dim;
-    if (tqe && !getenv("IN2_KV_TQ_ACK")) {
-        static int warned_once = 0;
-        if (!warned_once) {
-            warned_once = 1;
-            fprintf(stderr, "%s%c", "[IN2_KV_TQ] ignored: experimental and NOT parity-safe (unresolved memory defect) - falling back to the f32 KV path. Set IN2_KV_TQ_ACK=1 to force it.", 10);
-        }
-        tqe = NULL;
-    }
+    /* Measured with the f32 shadow check (IN2_TQ_VERIFY): a stored row has norm ~24.87 and quantising it at b=4
+     * leaves 0.31-0.39 absolute error (1.6 %), which is enough to change greedy output on this model; at b=6 it is
+     * ~0.12 (0.5 %) and the answer is correct. So clamp below 6 rather than emit a wrong answer. */
     if (tqe) {
         int bits = atoi(tqe);
+        if (bits < 6) {
+            static int warned_bits = 0;
+            if (!warned_bits) {
+                warned_bits = 1;
+                fprintf(stderr, "%s%c", "[IN2_KV_TQ] fewer than 6 bits leaves ~1.6% row error, which changes greedy output on this model - using 6", 10);
+            }
+            bits = 6;
+        }
         if (bits < 2) bits = 4;
         if (bits > 8) bits = 8;
         /* OPEN DEFECT: b=5 and b=8 produce wrong output in the ENGINE while the module round-trip is correct and
@@ -126,12 +129,12 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
         /* OPEN DEFECT: b=5 and b=8 produce wrong output in the ENGINE while the module round-trip is correct and
          * monotone at every width (worst max-err 0.002 at b=8, d=1024, 300 structured rows). Clamp to a verified
          * width once, loudly, instead of refusing: refusing here crashed because init is called per visit. */
-        /* EXPERIMENTAL - NOT PARITY-SAFE. The widths that produce correct output are not stable across rebuilds:
-         * one build answered correctly at 4/6/7 and two other builds at 2/5/6/7/8, with 3 and 4 wrong in the latter.
-         * The standalone module round-trips correctly and monotonically at every width (d=1024, 300 structured
-         * rows: worst max-err 0.0147/0.0076/0.0050/0.0030/0.0021 for b=4..8), so the corruption is in this wiring,
-         * not in the quantiser. Build-layout dependence means an unresolved memory-safety defect; f32 and IN2_KV_Q8
-         * remain the supported paths. Enable deliberately with IN2_KV_TQ_ACK=1. */
+        /* TurboQuant tier. Correctness on this model is set by the row error, not by bit-width plumbing: a stored row
+     * has norm ~24.87 and the f32 shadow check (IN2_TQ_VERIFY) shows b=4 leaves 0.31-0.39 absolute error (1.6 %),
+     * which changes greedy output, while b=6 leaves ~0.12 (0.5 %) and the answer is correct. Hence the clamp below 6.
+     * Earlier notes in this file blamed an unstable "memory-safety defect" for which widths worked; that was wrong -
+     * the working set moved because the codebook changed between those builds. Reads match the shadow to within the
+     * module's predicted quantisation error at every width tested. */
         kv->tq = wubu_tqvec_init(dim, bits, 0xC0FFEEull);
         if (!kv->tq) { in2_kv_free(kv); return -1; }
         kv->q8   = 1;
@@ -141,6 +144,10 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
         kv->kn   = (float *)calloc(nrows, sizeof(float));
         kv->vn   = (float *)calloc(nrows, sizeof(float));
         kv->encsc = (float *)malloc((size_t)dim * sizeof(float));
+        if (getenv("IN2_TQ_VERIFY")) {
+            kv->kshad = (float *)calloc(nrows * (size_t)dim, sizeof(float));
+            kv->vshad = (float *)calloc(nrows * (size_t)dim, sizeof(float));
+        }
         kv->kscr = (float *)malloc((size_t)dim * sizeof(float));
         kv->vscr = (float *)malloc((size_t)dim * sizeof(float));
         if (!kv->kq || !kv->vq || !kv->kn || !kv->vn || !kv->encsc || !kv->kscr || !kv->vscr) { in2_kv_free(kv); return -1; }
@@ -169,6 +176,7 @@ void in2_kv_free(in2_kv_t *kv)
     free(kv->k); free(kv->v); free(kv->kraw); free(kv->vraw);
     free(kv->kq); free(kv->vq); free(kv->kscr); free(kv->vscr); free(kv->cap); free(kv->off);
     wubu_tqvec_free(kv->tq); free(kv->kn); free(kv->vn); free(kv->encsc);
+    free(kv->kshad); free(kv->vshad);
     memset(kv, 0, sizeof *kv);
 }
 
@@ -180,6 +188,21 @@ float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
         wubu_tqvec_decode(kv->tq, kv->kq + el * kv->rowq, kv->kscr);
         const float s = kv->kn ? kv->kn[el] : 1.0f;
         for (int i = 0; i < kv->dim; ++i) kv->kscr[i] *= s;
+        if (kv->kshad) {
+            double mx = 0.0; int at = -1;
+            const float *ref = kv->kshad + el * (size_t)kv->dim;
+            for (int i = 0; i < kv->dim; ++i) {
+                const double dd = fabs((double)kv->kscr[i] - (double)ref[i]);
+                if (dd > mx) { mx = dd; at = i; }
+            }
+            static double worst = 0.0;
+            if (mx > worst) {
+                worst = mx;
+                fprintf(stderr, "%s%c", "[TQVERIFY] new worst read-vs-shadow error", 10);
+                fprintf(stderr, "  KV_K visit=%d pos=%d el=%zu dim=%d max=%g at=%d ref0=%g got0=%g%c",
+                        visit, pos, el, kv->dim, mx, at, (double)ref[0], (double)kv->kscr[0], 10);
+            }
+        }
         return kv->kscr;
     }
     if (kv->q8) {
@@ -197,6 +220,21 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
         wubu_tqvec_decode(kv->tq, kv->vq + el * kv->rowq, kv->vscr);
         const float s = kv->vn ? kv->vn[el] : 1.0f;
         for (int i = 0; i < kv->dim; ++i) kv->vscr[i] *= s;
+        if (kv->vshad) {
+            double mx = 0.0; int at = -1;
+            const float *ref = kv->vshad + el * (size_t)kv->dim;
+            for (int i = 0; i < kv->dim; ++i) {
+                const double dd = fabs((double)kv->vscr[i] - (double)ref[i]);
+                if (dd > mx) { mx = dd; at = i; }
+            }
+            static double worst = 0.0;
+            if (mx > worst) {
+                worst = mx;
+                fprintf(stderr, "%s%c", "[TQVERIFY] new worst read-vs-shadow error", 10);
+                fprintf(stderr, "  KV_V visit=%d pos=%d el=%zu dim=%d max=%g at=%d ref0=%g got0=%g%c",
+                        visit, pos, el, kv->dim, mx, at, (double)ref[0], (double)kv->vscr[0], 10);
+            }
+        }
         return kv->vscr;
     }
     if (kv->q8) {
@@ -217,6 +255,7 @@ void in2_kv_store_post_k(in2_kv_t *kv, int visit, int pos, const float *row)
         kv->kn[el] = nrm > 0.0f ? nrm : 1.0f;
         for (int i = 0; i < kv->dim; ++i) kv->encsc[i] = row[i] / kv->kn[el];
         wubu_tqvec_encode(kv->tq, kv->encsc, kv->kq + el * kv->rowq);
+        if (kv->kshad) memcpy(kv->kshad + el * (size_t)kv->dim, row, (size_t)kv->dim * sizeof(float));
         if (getenv("IN2_TQ_DBG")) {
             static int once = 0;
             if (!once) {
@@ -253,6 +292,7 @@ void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
         kv->vn[el] = nrm > 0.0f ? nrm : 1.0f;
         for (int i = 0; i < kv->dim; ++i) kv->encsc[i] = row[i] / kv->vn[el];
         wubu_tqvec_encode(kv->tq, kv->encsc, kv->vq + el * kv->rowq);
+        if (kv->vshad) memcpy(kv->vshad + el * (size_t)kv->dim, row, (size_t)kv->dim * sizeof(float));
         return;
     }
     if (kv->q8) { kvq8_quantize_row(row, kv->vq + el * kv->rowq, kv->dim); return; }

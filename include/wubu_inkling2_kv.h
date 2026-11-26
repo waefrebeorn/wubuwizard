@@ -22,6 +22,9 @@ typedef struct {
     struct wubu_tqvec *tq;  /* when set, rows are TurboQuant codes and q8 is also 1 (4-8 bits/coord) */
     float *kn, *vn;         /* per-row norm: tqvec quantises UNIT vectors, so the row scale is stored separately */
     float *encsc;           /* dim floats, scratch for the normalised row on store */
+    /* IN2_TQ_VERIFY: parallel f32 shadow of every stored row, so a read can be checked against what was written.
+     * Distinguishes a slot mismatch from a decode error from a bug outside the KV path. */
+    float *kshad, *vshad;
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */
