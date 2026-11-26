@@ -1210,3 +1210,36 @@ upper bound that this measurement does not support.
 assessing a llama.cpp PR - because that commit used `git add -A` while the edit was sitting in the tree. The change is real
 and tested, but it is filed under a message that does not describe it. Use explicit paths on `git add` whenever a working
 tree may contain an in-flight edit, rather than `-A`.
+
+## Fine-grained breakdown (IN2_TIMETY, 60 tokens, 8 threads) - and `q` is the surprise
+
+    PHASE layers=5.311 s   full=1.090 s  sliding=4.221 s
+
+    mix        0.042 s    0.8%
+    q          0.861 s   16.2%   <- single projection, second largest component in the engine
+    k+v+conv   0.208 s    3.9%
+    rel+sink   0.084 s    1.6%
+    attn       0.400 s    7.5%   <- attention proper really is small, as the 3.8 % parallelisation result implied
+    gate+wo    0.359 s    6.8%
+    resconv    0.011 s    0.2%
+    moe        2.226 s   41.9%
+
+Ranked: **MoE 41.9 %, q 16.2 %, attention 7.5 %, gate+wo 6.8 %, kv+conv 3.9 %**. Everything else is noise.
+
+Two things follow:
+
+1. **Attention is 7.5 %, not 27 %.** The parallelisation gained 3.8 % because there was only 7.5 % to gain from, and
+   `attn` was never the story. Third correction to that estimate, now with the direct number behind it.
+2. **`q` at 16.2 % is anomalous.** `wq` is one projection per layer per token, similar in shape to `gate`/`wo` which together
+   cost 6.8 %. If they were all batched the same way, `q` should be in that ballpark, not 2.4x larger on its own. The `q`
+   path calls `in2_matvec_nt(..., 1, d, qdim, q)` with nt = 1 - one token at a time - while the MoE and gate paths hand over
+   whole buckets. **A per-token nt=1 projection that cannot amortise its own row-split is exactly the shape that measured
+   2.5-5.3 GMAC/s in the KV analysis.**
+
+So the next concrete step is cheap and specific: batch the `q` projection across tokens the same way the gate/wo path is
+batched, and re-read `q` in this same table. Expected: 0.861 s -> ~0.36 s, i.e. ~9 % off total prefill, with the 12-token
+oracle as the gate. If it does not move, the bottleneck inside `q` is something else and the table will say so on the next run.
+
+For completeness, the honest ranked plan this table implies: MoE (41.9 %, already per-token flat and parallel), then `q`
+(16.2 %, concrete and cheap), then attention (7.5 %, partly parallel now). The GPU line of work addressed none of the top
+three and is closed.
