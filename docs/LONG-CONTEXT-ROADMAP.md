@@ -1809,3 +1809,31 @@ The remaining policy decision, which the loop must implement: after a partial ac
 pre-verification snapshot, rewind the K/V rows to the accepted prefix, then **replay the accepted tokens** in one short
 forward. Replaying is what rebuilds both conv histories at the true prefix; it costs one forward over `acc <= K` tokens and
 happens only on a reject. Full acceptance needs no restore at all.
+
+## Speculation is blocked by numerics, not by rollback - and K=0 is what proved it
+
+The loop is in `tools/inkling_gen.c` behind `IN2_LOOKUP`. Three findings, in the order they were separated:
+
+1. **My first loop was missing the prompt prefill.** The plain loop's step 0 is `in2_forward_at(toks, n_prompt, 0)`, not a
+   single-token prime; my while-loop started with a prime at position `n_prompt`. That alone produced the "correct for five
+   tokens then wrong" signature that I had blamed on the cache - and it reproduced even with **K=0**, where no draft is ever
+   made. K=0 is therefore the control that isolates the loop skeleton from verification, and with the prefill added it now
+   matches the oracle exactly.
+2. **With K>0 the run still diverges, at token 13, with `drafted 8, accepted 0, replays 0`.** Nothing was accepted, so no
+   rollback path executed, and the only difference from the plain path is the verification forward itself:
+   `in2_forward_at(feed, nd+1, n-1)`. That call re-writes the KV row for position `n-1` through the **batched** (n_tok>1)
+   code path, and a batched row is not bit-identical to the sequentially-written row it replaces. Rollback cannot restore it
+   because the rollback point is `n`, which keeps `n-1`.
+3. **Therefore the missing prerequisite is arithmetic, not state**: speculation needs the batched path to produce bit-identical
+   K/V rows and hidden states to single-token stepping. That is a property to be measured per kernel (attention, conv, MoE
+   grouping), not assumed - and it is the same class of claim as "the incremental path is bit-identical to full recompute",
+   which was verified for 1-token stepping and says nothing about n_tok>1.
+
+State of the tree: plain path gates **15/15**; `IN2_LOOKUP=1 IN2_LOOKUP_K=0` matches the oracle exactly (loop skeleton sound);
+`IN2_LOOKUP=1 K>0` prints a warning that parity is not achieved. The rollback infrastructure (row tags, rewind, conv snapshot
+over both caches) is committed and gate-clean regardless - it is correct and it is not what is failing.
+
+Next step, now unambiguous: measure batched-vs-sequential equivalence directly - forward a 2-token block at `pos0` and compare
+each row's logits and stored K/V bytes against two 1-token calls at the same positions. If they differ, quantify by how much
+and locate the kernel (attention vs the two convs vs MoE). That measurement decides whether prompt-lookup speculation is
+reachable at all without changing the batched kernels.

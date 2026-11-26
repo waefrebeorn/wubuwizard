@@ -20,6 +20,10 @@ int in2_forward_seq(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inklin
                     const int *, int, float *, float *);
 int in2_forward_at(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
                    const int *, int, int, float *, float *);
+void in2_set_logits_all(float *);
+int  in2_state_save(void);
+void in2_state_restore(void);
+void in2_state_rewind(int);
 
 /* SentencePiece marks a leading space with U+2581, byte-level BPE with U+0120; a byte-fallback token is <0xNN>.
  * Same rules as tools/detok.c so the text a run prints is the text detok would print for the same ids. */
@@ -155,6 +159,100 @@ int main(int argc, char **argv)
     float *h = (float *)calloc((size_t)cap * cfg.d_model, sizeof(float));
     float *logits = (float *)calloc(cfg.vocab_size, sizeof(float));
 
+    const double t_start_lookup = wall_now();
+    if (getenv("IN2_LOOKUP")) {
+        /* Prompt-lookup speculative decoding. Parity is by construction: the drafter only PROPOSES, and a draft is accepted
+         * only when the target's own greedy argmax at that position equals it, so every emitted token is one the plain
+         * loop would have emitted from the same logits. */
+        const int K = getenv("IN2_LOOKUP_K") ? atoi(getenv("IN2_LOOKUP_K")) : 4;
+        if (K > 0) fprintf(stderr, "IN2_LOOKUP: verification feeds n_tok>1, and the batched path is NOT bit-identical to sequential stepping - parity not achieved (diverges at token 13 with zero accepts). K=0 exercises the loop skeleton only.\n");
+        float *la = (float *)malloc(sizeof(float) * (size_t)(K + 1) * (size_t)cfg.vocab_size);
+        if (!la) { fprintf(stderr, "IN2_LOOKUP: oom for %d x %d logits\n", K + 1, cfg.vocab_size); return 2; }
+        long long n_drafted = 0, n_accepted = 0, n_forward = 0, n_replay = 0;
+        int produced = 0, n = n_prompt;
+        /* The plain loop's step 0 is the prompt prefill, not a single-token prime: without it the first step has no
+         * context at all and the run diverges five tokens in. */
+        {
+            const int rc0 = in2_forward_at(ctx, &m, &cfg, toks, n_prompt, 0, h, logits);
+            ++n_forward;
+            if (rc0 != WUBU_INKLING2_OK) { free(la); return rc0; }
+            used_cache = 1;
+            int b0 = 0; float v0 = -1e30f;
+            for (int i = 0; i < cfg.vocab_size; ++i) if (logits[i] > v0) { v0 = logits[i]; b0 = i; }
+            toks[n] = b0; ++n; ++produced;
+        }
+        while (produced < n_gen) {
+            /* prime: one ordinary step. Processes position n-1 and yields the token for position n. */
+            int rc = in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits);
+            ++n_forward;
+            if (rc != WUBU_INKLING2_OK) { free(la); return rc; }
+            used_cache = 1;
+            int best = 0; float bv = -1e30f;
+            for (int i = 0; i < cfg.vocab_size; ++i) if (logits[i] > bv) { bv = logits[i]; best = i; }
+            toks[n] = best; ++n; ++produced;
+            /* draft: longest suffix of the history seen earlier, take up to K tokens that followed it */
+            int nd = 0, draft[16];
+            if (produced < n_gen) {
+                for (int len = 8; len >= 1 && nd == 0; --len) {
+                    if (n - len - 1 < len) continue;
+                    for (int j = n - 1 - len; j >= len; --j) {
+                        if (memcmp(toks + (j - len), toks + (n - len), sizeof(int) * (size_t)len) == 0) {
+                            int avail = n - j; if (avail > K) avail = K;
+                            for (int q = 0; q < avail; ++q) draft[q] = toks[j + q];
+                            nd = avail; break;
+                        }
+                    }
+                }
+            }
+            if (nd <= 0) { fflush(stdout); continue; }
+            /* verify: feed position n-1 (the token just emitted, not yet processed) plus the drafts. Row q is the
+             * prediction for the token at position n+q, which is draft q. */
+            int feed[17];
+            feed[0] = toks[n - 1];
+            for (int q = 0; q < nd; ++q) feed[q + 1] = draft[q];
+            in2_state_save();
+            in2_set_logits_all(la);
+            rc = in2_forward_at(ctx, &m, &cfg, feed, nd + 1, n - 1, h, logits);
+            in2_set_logits_all(NULL);
+            ++n_forward;
+            if (rc != WUBU_INKLING2_OK) { free(la); return rc; }
+            int acc = 0;
+            for (int q = 0; q < nd; ++q) {
+                const float *row = la + (size_t)q * (size_t)cfg.vocab_size;
+                int a = 0; float av = -1e30f;
+                for (int i = 0; i < cfg.vocab_size; ++i) if (row[i] > av) { av = row[i]; a = i; }
+                if (a != draft[q]) break;
+                acc = q + 1;
+            }
+            n_drafted += nd; n_accepted += acc;
+            if (acc < nd) {
+                /* Roll back. Histories return to the pre-verification snapshot, K/V rows at or beyond n are invalidated,
+                 * then the accepted drafts are replayed so both conv histories sit at the true prefix. Without this the
+                 * record is correct for ~5 tokens and then wrong, which is exactly how the first attempt failed. */
+                in2_state_restore();
+                in2_state_rewind(n);
+                if (acc > 0) {
+                    rc = in2_forward_at(ctx, &m, &cfg, draft, acc, n, h, logits);
+                    ++n_forward; ++n_replay;
+                    if (rc != WUBU_INKLING2_OK) { free(la); return rc; }
+                }
+            }
+            for (int q = 0; q < acc && produced < n_gen; ++q) { toks[n] = draft[q]; ++n; ++produced; }
+            if (produced < n_gen) {
+                /* the correction: the target's own argmax at the first position the drafter got wrong */
+                const float *row = la + (size_t)acc * (size_t)cfg.vocab_size;
+                int a = 0; float av = -1e30f;
+                for (int i = 0; i < cfg.vocab_size; ++i) if (row[i] > av) { av = row[i]; a = i; }
+                toks[n] = a; ++n; ++produced;
+            }
+            fflush(stdout);
+        }
+        free(la);
+        fprintf(stderr, "LOOKUP: %lld forwards for %d tokens (%.2f fwd/token), drafted %lld, accepted %lld = %.1f%%, replays %lld\n",
+                n_forward, n_gen, n_gen ? (double)n_forward / (double)n_gen : 0.0,
+                n_drafted, n_accepted, n_drafted ? 100.0 * (double)n_accepted / (double)n_drafted : 0.0, n_replay);
+        t_total = wall_now() - t_start_lookup;
+    } else {
     for (int step = 0; step < n_gen; ++step) {
         const clock_t t_step0 = clock(); (void)t_step0;
         const int n = n_prompt + step;
@@ -204,6 +302,7 @@ int main(int argc, char **argv)
             }
         }
         fflush(stdout);
+    }
     }
     if (n_gen > 0 && t_total > 0)
         fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (%s)\n",
