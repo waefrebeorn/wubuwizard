@@ -397,3 +397,26 @@ symbol present, oracle 12/12 on CPU and dense.
 **The next session should read `WUBU_EXPORT`'s definition and the makefile's export path first** - five minutes of reading
 that would have saved this attempt. The batched entry's body is sound and is described above in enough detail to re-type;
 what is missing is only the linkage detail.
+
+## Correction: the export was fine, my grep was wrong. `wubu_cuda_resident_matvec_nt` is in the DLL
+
+The previous note said the symbol did not appear in the export table and blamed `WUBU_EXPORT`. That was wrong. `objdump -p`
+truncates long export names, so grepping the full `wubu_cuda_resident_matvec_nt` returned nothing while the symbol was in
+fact exported all along. The correct check is a prefix match:
+
+    objdump -p wubu_cuda.dll | grep -oE "wubu_cuda_resident_matvec[a-z_]*" | sort -u
+      wubu_cuda_resident_matvec
+      wubu_cuda_resident_matvec_id
+      wubu_cuda_resident_matvec_nt      <- present
+
+So the DLL boundary now has the batch dimension the engine was missing: `wubu_cuda_resident_matvec_nt(type, ident, w,
+wbytes, act, act_row_bytes, y, K, n_cols, stride, n_tok)` stages n_tok contiguous q8_K rows into one device buffer, runs the
+device matvec with M = n_tok - which is what selects the 8-column tile - and copies n_tok result rows back, with the same
+resident tables, ident key, fill-on-miss and eviction policy as the single-row entry.
+
+**Part 1 is done and unwired**: nothing dispatches to it, and the oracle is 12/12 exact on CPU and dense with it in the
+DLL. Part 2 is the call sites - the nine `for (int t = 0; t < n_tok; ++t)` projection loops that must hand a token block
+instead of one row - and only after that does the 8-column tile's measured 1.73x become engine throughput.
+
+Lesson recorded for the next attempt at anything similar: **a missing symbol in objdump output is not evidence of a missing
+export** when the name is long. Match on a prefix, or dump the table and read it.

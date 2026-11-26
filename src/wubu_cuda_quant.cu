@@ -4065,3 +4065,70 @@ cleanup:
     free(h_w); free(h_q8); free(h_a); free(h_b);
     return rc;
 }
+
+/* Batched residency entry: n_tok activation rows against ONE resident weight slab.
+ *
+ * The single-row entry has no batch dimension, so every projection the engine issues arrives as M = 1 and no kernel that
+ * needs a real batch (the 8-column tile at 1.73x, or any future mma.sync path) can ever be reached from it. This entry
+ * exists to give the call sites somewhere to hand a token block: it stages n_tok contiguous q8_K rows into one device
+ * buffer, runs the device matvec with M = n_tok - which is what selects the 8-column tile - and copies n_tok result rows
+ * back. Slab residency, identity keying and eviction are unchanged: they are the same g_res_* tables, same ident key.
+ *
+ * Unwired on purpose. Nothing calls this yet, so the oracle cannot move because of it.
+ * Returns -7 if the slab cannot be made resident, so a caller can fall back rather than silently compute garbage. */
+WUBU_EXPORT int wubu_cuda_resident_matvec_nt(int type, int64_t ident, const void *h_w, size_t wbytes,
+                                             const void *h_act, int act_row_bytes, float *h_y,
+                                             int K, int n_cols, int64_t col_stride_bytes, int n_tok)
+{
+    if (!h_w || !h_act || !h_y || K <= 0 || n_cols <= 0 || n_tok <= 0 || wbytes == 0 || act_row_bytes <= 0) return -1;
+    if (type != 16 && type != 22) return -1;                 /* the two types the batched device path covers */
+    if (cudaSetDevice(0) != cudaSuccess) return -2;
+
+    static std::atomic<int> nt_lock{0};
+    int e = 0;
+    while (!nt_lock.compare_exchange_weak(e, 1, std::memory_order_acquire)) e = 0;
+#define NT_FAIL(v) do { nt_lock.store(0); return (v); } while (0)
+
+    /* 1. make the slab resident (fill on miss, exactly like the single-row path) */
+    int slot = -1;
+    for (int j = 0; j < g_res_n; ++j)
+        if (g_res_d[j] && g_res_ident[j] == ident && g_res_bytes[j] == wbytes) { slot = j; break; }
+    if (slot < 0) {
+        const int room = (g_res_n < WUBU_RES_SLOTS) && (!g_res_budget || g_res_used + wbytes <= g_res_budget);
+        if (!room) NT_FAIL(-7);
+        slot = g_res_n;
+        if (cudaMalloc(&g_res_d[slot], wbytes) != cudaSuccess) { g_res_d[slot] = NULL; NT_FAIL(-7); }
+        if (cudaMemcpy(g_res_d[slot], h_w, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(g_res_d[slot]); g_res_d[slot] = NULL; NT_FAIL(-7);
+        }
+        g_res_n++;
+        g_res_key[slot] = h_w;
+        g_res_bytes[slot] = wbytes;
+        g_res_ident[slot] = ident;
+        g_res_used += wbytes;
+        g_res_miss++;
+    }
+    g_res_use[slot] = ++g_res_clock;
+    g_res_hit++;
+
+    /* 2. stage n_tok activation rows and run the device matvec with a real batch */
+    static void *nt_a, *nt_y;
+    static size_t nt_ac, nt_yc;
+    const size_t ab = (size_t) act_row_bytes * (size_t) n_tok;
+    const size_t yb = (size_t) n_cols * sizeof(float) * (size_t) n_tok;
+    if (ab > nt_ac) { if (nt_a) { cudaFree(nt_a); nt_a = NULL; } if (cudaMalloc(&nt_a, ab) != cudaSuccess) NT_FAIL(-3); nt_ac = ab; }
+    if (yb > nt_yc) { if (nt_y) { cudaFree(nt_y); nt_y = NULL; } if (cudaMalloc(&nt_y, yb) != cudaSuccess) NT_FAIL(-3); nt_yc = yb; }
+    if (cudaMemcpy(nt_a, h_act, ab, cudaMemcpyHostToDevice) != cudaSuccess) NT_FAIL(-4);
+
+    int rc;
+    if (type == 16) {
+        rc = wubu_cuda_matvec_iq2xxs(g_res_d[slot], nt_a, (float *) nt_y, K, n_cols, col_stride_bytes, n_tok);
+    } else {
+        rc = wubu_cuda_matvec_iq2s_v2(g_res_d[slot], nt_a, (float *) nt_y, K, n_cols, col_stride_bytes);
+    }
+    if (rc != 0) NT_FAIL(-5);
+    if (cudaMemcpy(h_y, nt_y, yb, cudaMemcpyDeviceToHost) != cudaSuccess) NT_FAIL(-6);
+    nt_lock.store(0);
+#undef NT_FAIL
+    return 0;
+}
