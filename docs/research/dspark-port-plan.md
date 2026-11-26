@@ -67,3 +67,23 @@ its own block state. That is the cross-attention and it is the part with no anal
 
 Step 2 is the real work: roughly the size of the existing full-attention layer plus a small RNN. Everything before it is
 settled.
+
+## Tap capture already exists; step 1 of the staging list is done without new code
+
+`IN2_DUMP_LAYERS=<dir>` already dumps the post-layer hidden state for every layer and every pass
+(`L%02d_p%d.bin`), and `IN2_DUMP_L=<il>` dumps a single layer. Verified against the oracle run:
+
+    IN2_DUMP_LAYERS=$T/taps bash tools/oracle_gate.sh   ->  GATE PASS 15/15, 54 files
+    file sizes: 27,648 B = 6,912 floats = 3 tokens x 2,304   (prefill pass)
+                 9,216 B = 2,304 floats = 1 token  x 2,304   (decode pass)
+
+So `d = 2304` is confirmed from the dumper as well as the manifest, and the four drafter taps can be produced today for the
+visits that map to distinct (layer, pass) pairs.
+
+**One real gap.** The dump keys on physical layer index plus pass counter, so the loop core's repeated visits 6..17 collide
+inside a pass and overwrite each other. `target_layer_ids` wants visits 5, 23, 41 and 48, which in a 0..47 visit space are not
+all distinguishable this way - visit 23 and visit 41 both land on core layers with the same pass counter. Closing it needs a
+visit-indexed dump: a counter incremented by `RUN_LAYER` and a filename that carries it, roughly ten lines, and it does not
+touch the maths at all.
+
+That is now the next concrete step, and it is small. After it, the drafter's inputs are reproducible from a single gate run.
