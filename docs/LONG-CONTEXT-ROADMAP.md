@@ -583,3 +583,33 @@ per-token. The work is therefore, in order:
 
 Step 1 is the one to size first: the histogram as written cannot answer "how many tokens per expert at N = 480", and that
 number decides whether the payoff is 14x or 2x. Instrumenting it properly is cheaper than any kernel and should come first.
+
+## Sizing the grouped-GEMM prize: N = 128 is the threshold, and the payoff is ~12x
+
+Uniform top-8-of-128 routing, expected distinct experts touched by a chunk of N tokens
+(`E(1-(1-k/E)^N)`, E=128, k=8), and the mean rows per expert that a grouped GEMM would receive:
+
+    N=  8   distinct~ 51.6   mean M= 1.24
+    N= 32   distinct~111.8   mean M= 2.29
+    N= 64   distinct~125.9   mean M= 4.07
+    N=128   distinct~128.0   mean M= 8.00    <- the 8-column tile's threshold, hit exactly
+    N=256   distinct~128.0   mean M=16.00
+    N=480   distinct~128.0   mean M=30.00
+
+So a chunk of 128 tokens already gives the kernel the M = 8 it needs, and 256+ gives margin (real routing is skewed, so
+hot experts get more rows than the uniform mean and cold ones fewer - the margin is what absorbs that).
+
+Timing at the measured 400 GMAC/s (conservative, between the 373 GMAC/s mrow figure and 648 GMAC/s for the 8-column tile):
+
+    N=128   MoE 391.4 GMAC -> 978 ms + proj 69.8 GMAC -> 174 ms = 1.15 s   (9.0 ms/token)
+    N=480   MoE 1467.7 GMAC -> 3669 ms + proj 261.6 GMAC -> 654 ms = 4.32 s  (9.0 ms/token)
+    today, CPU path:                                              106.4 ms/token (12,773 ms / 120)
+
+**~11.8x on prefill**, from 106.4 to 9.0 ms/token, and the projection share stays at 15 % - which is why the 0.8 % figure
+from the earlier note was about *total* prefill share at current speeds, not about the projection work being worthless in a
+fast regime. Both numbers are correct; they answer different questions.
+
+Caveat that decides the real number: at 400 GMAC/s the card must sustain that with resident experts AND no per-call round
+trips. Every failed attempt this session failed on the second condition, not the first. So the grouped kernel must consume
+a device-resident index and device-resident gathered activations in one launch per layer - anything that returns to the
+host per expert reintroduces the ~1,150 calls/token/layer that cost four wirings.
