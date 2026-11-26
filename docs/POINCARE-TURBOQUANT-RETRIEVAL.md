@@ -1582,3 +1582,35 @@ survived the correction while the correctness claim would not have.
 This is the first measurement in this whole GPU thread where a change is both safe and profitable: 2.39x on the exact
 work that made MoE offload a 7 % loss. Wiring `in2_moe` to call it is the remaining step - gather the 8 resident slabs,
 one call, unpack into the per-expert outputs.
+
+## Wiring `wubu_cuda_moe_batch` into `in2_moe` - exact plan, nothing left to decide
+
+The batched entry is built and priced (2.39x, bit-identical). What remains is call-site surgery in the one loop that has
+already cost this project several regressions, so the steps are written down to be executed mechanically:
+
+**Anchor A - `src/wubu_inkling2_fwd.c:1952-1958`**, the OpenMP `for (int k = 0; k < got; ++k)` over active experts inside
+`in2_moe`. Per expert it does `in2_matvec_quant(ctx, &L->gate_up, (int64_t)e*2*DFF*d, x + t*d, 2*DFF, d, gk)` then
+`in2_matvec_quant(ctx, &L->down, (int64_t)e*d*DFF, ak, d, DFF, ok)`.
+
+**Step 1.** Above the loop, when `got > 1`, the experts share one tensor type, so fetch each expert's slab once:
+`src_k = in2_tensor_slab(ctx, &L->gate_up, (int64_t)e*2*DFF*d, &wbytes)` - the read/map logic already in
+`in2_matvec_quant` lines 393-440, extracted into a helper that returns the host pointer and byte count without running
+the matvec.
+**Step 2.** If every `src_k` is non-NULL and the type is in `{16, 22}` (the two the batch entry implements), quantise the
+single activation once (q8_K, `n_in = d`, block count `d/256`), call
+`wubu_cuda_moe_batch(ty, srcs, got, wbytes, aq, aq_bytes, gy, d, 2*DFF)`, and distribute `gy` into the per-k `gk`
+slices. Anything else - a NULL slab, type 40/42, no DLL - falls through to the existing per-expert loop untouched.
+**Step 3.** The down projection repeats the same shape (rows `d`, width `DFF`), but its activation differs per expert
+(`ak` is post-SiLU), so it needs either a batch entry that takes an activation *array* or `got` separate calls. Do the
+gate_up half first and measure; if the win is there, extend the entry with an `act_stride` so one activation block can
+carry all experts.
+**Step 4.** `wubu_cuda_moe_batch` currently gathers with `n_exp` H2D memcpys every call. At a 92 % hit rate most of
+those slabs are already in the resident tier; the real version should gather *device-to-device* from the resident slots
+and only fall back to H2D on a miss. That is the difference between 10.4 MB of PCIe per layer and none.
+
+**Parity gate for every step:** the 12-token oracle must stay bit-identical for CPU-only, `IN2_GPU_DENSE=1`, and
+`IN2_GPU_DENSE=1 IN2_GPU_MOE=1 IN2_RES_GB=3.0`, and `IN2_MOE_CHECK` must stay 242/242. Anything that measures flat gets
+reverted, not kept.
+
+Current state is green and committed: oracle 12/12 identical for CPU-only and dense+experts, expert rows 242/242 exact at
+8 threads, batched entry present and priced but not yet called by the engine.
