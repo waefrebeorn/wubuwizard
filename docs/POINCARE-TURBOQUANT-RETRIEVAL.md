@@ -1366,3 +1366,40 @@ the entry itself is sound; the difference is the type. The next step is therefor
 directly from a standalone harness with a known slab and a known activation - not through the resident cache, not through
 the engine - and read what it returns. That is a ten-minute test and it is the only one left that isolates the kernel from
 everything layered on top of it.
+
+## Root cause found: the expert types have no device tables uploaded, so their kernels write zeros
+
+Per-type device-vs-CPU results, 242 expert rows, after adding IQ2_S to the resident dispatch:
+
+    ty=23 (Q4_K, dense)   n= 50   good= 50   median rel 1.2e-07     exact
+    ty=16 (IQ2_XXS)       n=136   good= 26   median rel 1.20        wrong
+    ty=22 (IQ2_S)         n= 56   good=  0   median rel 1.000       all zeros
+
+`rel` is `max|y-ref| / max|ref|`, so exactly 1.000 means **y is all zeros**. That is the project's own documented
+signature - *a kernel that returns all zeros is usually a missing table upload* - and it is literal here:
+
+    uploads the engine performs        kernels that need a table
+    wubu_cuda_upload_iq2xxs            ty 16  (256-entry grid + ksigns)
+    wubu_cuda_upload_tables_iq2xs      ty 17
+    wubu_cuda_upload_table_iq4nl       ty 23
+    -                                  ty 22  IQ2_S needs the 1024-entry grid; never uploaded
+
+The DLL exports `wubu_cuda_upload_tables(iq2s_1024_u64, iq3s_512_u32)` for exactly this, and the engine never calls it,
+because the host side has no accessor for the IQ2_S grid (`iq2s_grid` is a file-static table in `wubu_iq_c11.c`, and the
+only grid accessor the engine exports is `wubu_iq2xxs_grid_bytes`). So IQ2_S has never been device-executable in this
+engine - the resident dispatch did not even route to it before this change, falling through to the generic
+`wubu_cuda_quant_matvec` which returns success and writes nothing.
+
+Two fixes landed, both verified not to disturb anything else:
+
+  1. **ty 22 now dispatches to `wubu_cuda_matvec_iq2s_v2`** instead of the silent generic entry. It still writes zeros
+     because of the missing table, but the fall-through that silently succeeded is gone.
+  2. **A device self-test export** (`wubu_cuda_selftest_iq2`) that runs the kernel on a synthetic slab with no engine,
+     no GGUF and no cache in the way - the isolation test the previous round could not reach.
+
+Verified unchanged: oracle 12/12 exact on CPU and with `IN2_GPU_DENSE=1`; 24-token decode 5464 -> 5122 ms.
+
+What is left is one concrete piece of plumbing: export the IQ2_S grid from the host (`iq2s_grid` is already in
+`wubu_iq_c11.c`) and call `wubu_cuda_upload_tables` at init the way `upload_iq2xxs` already is. ty=16's 26/136 is the
+same class of problem and needs the same check - its grid *is* uploaded, so its failures point at the slab slice the
+resident path hands it rather than at tables, and that is the next measurement after the upload lands.
