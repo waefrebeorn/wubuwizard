@@ -32,7 +32,19 @@ Gate: a written target with the 32K/1M split and the fidelity floor (reference-e
 
 ## Wave 1 — the two in-engine wins that need no new physics
 
-### LP-01 — Wire `quantized_matmul_batched` into the Inkling-2 prefill path
+### LP-01 — Wire `quantized_matmul_batched` into the Inkling-2 prefill path  (MEASURED: 1.56x, not the fix)
+
+**Measured on this host before wiring, with the real quant type and the real slab shape** (`tools/pf_batch_probe.c`,
+2304x2304 IQ2_XXS, batch-identical weight bytes):
+
+    N= 32   128 gemv  1.57x   batched 10.75 GMAC/s   max|diff| = 0   finite reference
+    N=128   128 gemv  1.56x   batched 11.93 GMAC/s   max|diff| = 0
+    N=512   512 gemv  1.21x   batched 11.65 GMAC/s   max|diff| = 0
+
+So batching is worth **~1.5x, flat in batch size, and bit-identical** - the weight slab is 1.31 MB and already
+cache-resident, so the amortisation the doc comment promises is mostly already being collected. And the engine is
+not leaving 100x on the floor here: its 0.11 s/token implies ~13 GMAC/s for the whole model, against this kernel
+family's measured 11.9 GMAC/s ceiling. **The CPU is at its limit; batching is a 1.5x, not a rescue.**
 It exists (`src/quantized_matmul.c:511`), supports IQ2_XXS/IQ3_XXS/IQ4_XS/Q5_K/Q6_K/Q4_K, and every other model in the
 repo uses it; `wubu_inkling2_fwd.c` is the only one issuing per-token gemv at nine sites. The doc comment names the cost
 being paid: *weight data read once, shared across all N tokens*.
@@ -66,13 +78,15 @@ answers reference-exact, 4 bits does not.
 
 ## Wave 3 — the device, and the ceiling
 
-### LP-05 — Tensor-core quantised GEMM + flash-style attention on the 4050
+### LP-05 — Tensor-core quantised GEMM + flash-style attention on the 4050  (promoted: the only order-of-magnitude lever)
 23.7 TFLOP/s GEMM and 15.9 TFLOP/s attention are measured on *this* card at *this* model's shapes. The specific kernels
 that produce it: MMQ-class quantised gemm (**5.7-6.3x over dequant-then-cuBLAS on one card, measured**), flash tiling
 (3.1x at 32k), and the 20-37x silent penalty when a quantised KV fails the CUDA FA gate and falls back to CPU. `wubu_fast_attn.c`
 already exists and is unwired, like the GEMM.
-*[A, E]* · **Size XL** · Unlocks: the 4,800x arithmetic gap; nothing else on this list is within two orders of it. Depends
-on LP-01 (batching) to amortise weight traffic. Gate: prefill tok/s within 2x of the measured llama.cpp baseline for the
+*[A, E]* · **Size XL** · Unlocks: the 4,800x arithmetic gap; nothing else on this list is within two orders of it.
+**Promoted to Wave 1** by LP-01's measurement: if the batched CPU kernel is 1.56x and already at the 11.9 GMAC/s
+ceiling, no amount of CPU scheduling reaches 23.7 TFLOP/s - the card is the only lever with the required magnitude,
+and it is a measured number on this device, not an extrapolation. Gate: prefill tok/s within 2x of the measured llama.cpp baseline for the
 same model and card, with oracle parity stated explicitly (parity and batching fight each other here — pick and write down
 which one wins).
 
