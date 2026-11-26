@@ -127,6 +127,45 @@ int main(void)
         in2_kv_free(&ck2);
     }
 
+    /* ---- per-visit capacity: the layout that makes a long context affordable ----
+     * Visit 0 is a full-attention visit sized to the 16-position context; visit 1 is a sliding visit whose ring is
+     * only 4 rows. This is the shape the engine uses (8 visits at the context, 64 at the window), reduced so it can
+     * be checked by eye: if either the sizing or the ring rule is wrong, one of these fails. */
+    {
+        in2_kv_t pv;
+        int rows[2] = { 16, 4 };
+        CHECK(in2_kv_init_pervisit(&pv, 2, 8, 4, rows) == 0, "init per-visit");
+        CHECK(in2_kv_bytes(&pv) == (size_t)(16 + 4) * 8u * sizeof(float) * 2u,
+              "per-visit reservation should be (16+4) rows, got %zu bytes", in2_kv_bytes(&pv));
+        CHECK(pv.n_pos_max == 16, "position bound is the largest visit, got %d", pv.n_pos_max);
+
+        for (int pos = 0; pos < 16; ++pos) {
+            float *kp = in2_kv_k(&pv, 0, pos);   /* full visit: every position must be accepted and distinct */
+            CHECK(kp != NULL, "full visit rejected pos %d", pos);
+            if (kp) kp[0] = (float) pos * 7.0f;
+            float *ks = in2_kv_k(&pv, 1, pos);   /* sliding visit: accepts the write, wraps inside 4 rows */
+            CHECK(ks != NULL, "sliding visit rejected pos %d", pos);
+            if (ks) ks[0] = -(float) pos;
+        }
+        /* the full visit keeps all 16 positions: no wrap, no aliasing */
+        for (int pos = 0; pos < 16; ++pos) {
+            const float *kp = in2_kv_k(&pv, 0, pos);
+            CHECK(kp && fabsf(kp[0] - (float) pos * 7.0f) < 1e-6f,
+                  "full visit lost pos %d (got %g)", pos, kp ? kp[0] : -999.0f);
+        }
+        /* the sliding visit kept only its last 4 writes: positions 12..15 own slots 0..3, and every older position
+         * that hashed to the same slot now reads back the newest writer of that slot - which is exactly what a ring
+         * cache does, and what a test has to assert rather than "pos 3 still holds 3". */
+        CHECK(fabsf(in2_kv_k(&pv, 1, 15)[0] + 15.0f) < 1e-6f, "sliding pos 15");
+        CHECK(fabsf(in2_kv_k(&pv, 1, 12)[0] + 12.0f) < 1e-6f, "sliding pos 12 = slot 0");
+        CHECK(fabsf(in2_kv_k(&pv, 1, 3)[0] + 15.0f) < 1e-6f,
+              "pos 3 shares slot 3 with pos 15 and must read the newest writer, got %g", in2_kv_k(&pv, 1, 3)[0]);
+        /* and past the position bound the accessor refuses rather than wrapping silently */
+        CHECK(in2_kv_k(&pv, 0, 16) == NULL, "pos 16 is past n_pos_max and must be refused");
+        CHECK(in2_kv_k(&pv, 1, -1) == NULL, "negative pos must be refused");
+        in2_kv_free(&pv);
+    }
+
     in2_kv_free(&kv); in2_kv_free(&fk);
     printf(fails ? "KV SELFTEST: %d FAILED\n" : "KV SELFTEST: all passed\n", fails);
     return fails != 0;

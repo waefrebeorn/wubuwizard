@@ -2,11 +2,14 @@
 #ifndef WUBU_INKLING2_KV_H
 #define WUBU_INKLING2_KV_H
 
+#include <stddef.h>
+
 typedef struct {
     int    n_visit;     /* layer visits per forward = stored layers + extra loop passes */
     int    dim;         /* key/value width */
     int    window;      /* sliding window in positions; 0 = full attention, grows with context */
     int    n_pos_cap;   /* MAX rows allocated to any single visit (kept for the uniform case) */
+    int    n_pos_max;   /* highest legal ABSOLUTE position; independent of the ring size, which is what wraps */
     int    n_stored;    /* positions stored so far */
     int   *cap;         /* rows per visit; NULL means every visit gets n_pos_cap */
     size_t *off;        /* element offset of each visit inside k/v; NULL means uniform stride */

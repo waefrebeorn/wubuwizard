@@ -51,8 +51,11 @@ int in2_kv_init(in2_kv_t *kv, int n_visit, int dim, int window, int n_pos_cap)
     if (!kv || n_visit <= 0 || dim <= 0 || n_pos_cap <= 0) return -1;
     int *rows = (int *)malloc((size_t)n_visit * sizeof(int));
     if (!rows) return -1;
-    for (int v = 0; v < n_visit; ++v) rows[v] = n_pos_cap;
+    /* A window makes the ring the window, not the cap: the cap is only an upper bound on positions. That distinction
+     * is the whole reason kv_selftest can store 10 positions into a 4-row ring. */
+    for (int v = 0; v < n_visit; ++v) rows[v] = (window > 0 && window < n_pos_cap) ? window : n_pos_cap;
     const int rc = in2_kv_init_pervisit(kv, n_visit, dim, window, rows);
+    if (rc == 0) kv->n_pos_max = n_pos_cap;
     free(rows);
     return rc;
 }
@@ -89,6 +92,7 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
         if (kv->cap[v] > maxcap) maxcap = kv->cap[v];
     }
     kv->n_pos_cap = maxcap;
+    kv->n_pos_max = maxcap;
 
     /* The cache is one allocation laid out visit by visit at the offsets just computed. Sizing it from the sum of the
      * per-visit rows is the entire point: a 1M context over 8 full visits plus 64 sliding visits costs
@@ -112,13 +116,13 @@ void in2_kv_free(in2_kv_t *kv)
 
 float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
 {
-    if (!kv || !kv->k || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= in2_kv_cap(kv, visit)) return NULL;
+    if (!kv || !kv->k || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     return kv->k + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
 }
 
 float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 {
-    if (!kv || !kv->v || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= in2_kv_cap(kv, visit)) return NULL;
+    if (!kv || !kv->v || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     return kv->v + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
 }
 
@@ -127,7 +131,9 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 int in2_kv_resident(const in2_kv_t *kv, int pos)
 {
     if (!kv || pos < 0 || pos >= kv->n_stored) return 0;
-    if (kv->window > 0 && pos < kv->n_stored - kv->window) return 0;
+    /* A position is resident if it is still inside the ring of the visits that stored it - the sliding window for a
+     * sliding visit, the whole context for a full one. kv->window is the sliding ring, so this stays conservative. */
+    if (kv->window > 0 && (long) pos < (long) kv->n_stored - (long) kv->window) return 0;
     return 1;
 }
 
