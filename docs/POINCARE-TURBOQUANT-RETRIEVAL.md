@@ -1780,3 +1780,31 @@ The cost is not the codebook search and it is not the Hadamard. It scales with c
 points at the encode running over more rows per visit as the sliding window fills. That is the next thing to instrument,
 with the harness now working: `IN2_TEXT_FILE=<file> ./gen_fast.exe N --text x` (the `--text` is required; without it the
 file is silently ignored and the prompt is argv[3]).
+
+## Why long-context prefill is impossible as designed: KV decodes on every read
+
+`in2_kv_k(visit, pos)` and `in2_kv_v` decode the row **every time it is touched**:
+
+    if (kv->tq) { wubu_tqvec_decode(kv->tq, kv->kq + el * kv->rowq, kv->kscr); ... }
+
+Attention touches every key once per query, so a prefill of N tokens costs `n_visit x N(N+1)/2 x 2` decodes - **O(N^2)**,
+where the f32 path costs zero. At 72 visits and ~80 us per decode that is:
+
+    N=    120    1.05e+06 decodes      ~0.02 h     (measured: TQ 99.2 s vs f32 13.2 s)
+    N=    480    1.66e+07 decodes      ~0.4 h      (measured: TQ exceeded 560 s)
+    N=262144    4.95e+12 decodes      ~1.1e5 h     <-- not 35 h, not 35 days
+
+**The 35-hour figure for 262k prefill was wrong** and it was wrong in the optimistic direction: it was computed from a
+per-token cost measured at 49 tokens, which is nowhere near the asymptotic regime. This projection is from the same
+harness that produced 7.5x at 120 tokens and >9x at 480, and the growth between those two points is what exposed the
+quadratic.
+
+The consequence is architectural, not a tuning problem. Decode-on-read is the right trade for **decode** (one query, N
+keys, O(N) decodes per token - exactly what the memory tier exists to enable) and it is fatal for **prefill**, where it
+turns a linear pass into a quadratic one with a 1024-point Hadamard inside the inner loop.
+
+The fix is standard chunked prefill and it is a 500x-scale reduction, not a micro-optimisation: decode each old row once
+per chunk into an f32 mirror, run every query in the chunk against that mirror, and drop it. Decodes become
+`n_visit x N x (N/chunk)` instead of `n_visit x N^2/2` - at a chunk of 512 that is ~256x fewer, and the f32 mirror is
+512 x 1024 x 4 B x 2 x 72 = 300 MB, which fits. Until that exists, `IN2_KV_TQ` should be understood as a decode-only
+tier, and no long-context prefill number should be quoted from it at all.
