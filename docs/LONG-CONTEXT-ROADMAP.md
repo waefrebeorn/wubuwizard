@@ -1353,3 +1353,26 @@ name is a bookmark, not a definition; read the two marker lines and see what lie
 The next step is one inserted marker between the `xq` preparation and the `wq` projection, then re-read the table. That is a
 single line, it settles whether `q` is the matvec or the preparation, and it is the only way to know which of the two - if
 either - is worth optimising. No further attempt on this component until that line exists.
+
+## The `q` marker insert failed four times on file navigation, not on C
+
+Attempted the single-marker split (time the `q_clip` dequant + calloc separately from the `wq` matvec + clip + tau) three
+ways: one script, an order-safe rework, and a scoped search. All three failed to compile, twice with the same error at line
+76 (`qsplit` undeclared) while the declaration landed at line ~131:
+
+    grep -c "FP2(1);"  -> 1        (only one such marker)
+    grep -c "FP2(2);"  -> see below (more than one)
+
+`wubu_inkling2_fullseq.c` contains **three top-level functions**, and the phase markers are positional within the file rather
+than unique: `FP2(2)` occurs at line 76 in the first function and again later in the one that holds the `q` block. Index-based
+searching (`find the Nth occurrence of this line`) therefore lands in the wrong function and produces a declaration in one
+scope and a use in another - which is exactly the error the compiler reported both times.
+
+Nothing was left behind: every attempt was reverted, `master` rebuilt, oracle 94-char IDS exact, `git status` clean.
+
+The honest lesson - and this is now the fifth time a search-by-pattern has been the thing that failed, after grep on a long
+symbol, a brace scan, a call graph and two labels: **in a file with repeated structures, line numbers from a printed listing
+are the only reliable edit anchor.** Not the Nth match of a pattern, not a brace count, not a name.
+
+The `q` question is still open and still worth one turn, but it needs the file printed with line numbers first, and the edit
+made against a range read off that listing - the same method that finally worked for the attention parallelisation.
