@@ -772,10 +772,10 @@ WUBU_EXPORT int wubu_cuda_matvec_q8_0(const void *d_w, const void *d_q8, float *
  *
  * Keyed on the HOST pointer of the mapped weights: the GGUF mapping is immutable for the life of the process, so a
  * given pointer always names the same bytes and needs no invalidation. Slots are limited and never evicted - the
- * dense tier of this model is 48 layers x 5 tensors plus the head, so 96 is enough and eviction would only add a
+ * dense tier of this model is 48 layers x 5 tensors plus the head = 241 tensors. The first value of 96 here was
  * way to be wrong. Experts are deliberately excluded by the caller: 48x128 slabs is far beyond any slot count.
  */
-#define WUBU_RES_SLOTS 96
+#define WUBU_RES_SLOTS 320
 /* Declared here because this block sits above both definitions; the entry points are defined further down. */
 WUBU_EXPORT int wubu_cuda_quant_matvec(const void *d_w, int type, const void *d_xq8, float *d_y,
                                        int K, int n_cols, int64_t col_stride_bytes);
@@ -789,6 +789,7 @@ static void   *g_res_d[WUBU_RES_SLOTS];
 static const void *g_res_key[WUBU_RES_SLOTS];
 static size_t  g_res_bytes[WUBU_RES_SLOTS];
 static int     g_res_n;
+static int     g_res_full_warned;   /* a full slab is a silent CPU fallback for every later tensor */
 static void   *g_res_act, *g_res_y;
 static void   *g_pin_act, *g_pin_y;      /* page-locked staging: the pageable copies were the per-call cost */
 
@@ -808,7 +809,14 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
     int slot = -1;
     for (int i = 0; i < g_res_n; ++i) if (g_res_key[i] == h_w && g_res_bytes[i] == wbytes) { slot = i; break; }
     if (slot < 0) {
-        if (g_res_n >= WUBU_RES_SLOTS) return -2;
+        if (g_res_n >= WUBU_RES_SLOTS) {
+            if (!g_res_full_warned) {
+                g_res_full_warned = 1;
+                fprintf(stderr, "resident slab FULL at %d slots - later tensors fall back to CPU\n",
+                        WUBU_RES_SLOTS);
+            }
+            return -2;
+        }
         if (cudaMalloc(&g_res_d[g_res_n], wbytes) != cudaSuccess) return -3;
         if (cudaMemcpy(g_res_d[g_res_n], h_w, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
             cudaFree(g_res_d[g_res_n]); g_res_d[g_res_n] = NULL; return -4;
