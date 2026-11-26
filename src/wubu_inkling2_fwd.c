@@ -716,6 +716,25 @@ static int in2_have_avx2(void) { static int c = -1; if (c < 0) c = __builtin_cpu
 
 void in2_matvec(const float *W, const float *x, int n_in, int n_out, float *y)
 {
+    /* Shape trace, because the float path carries no tensor identity and the shapes are unambiguous:
+     * 2304->3072 is attn_q, 2304->1024 is attn_k/attn_v, 3072->2304 is attn_output, 2304->201024 is the head.
+     * If this fires ~144x per token for q/k/v, then the dense projections never enter a typed kernel at all and the
+     * quantised path in every in2_layer_* implementation is dead code for this checkpoint. */
+    if (getenv("IN2_MV_TRACE")) {
+        static unsigned long long calls;
+        static int seen[64];
+        int slot = -1;
+        for (int i = 0; i < 64; ++i) if (!seen[i]) { slot = i; break; }
+        int dup = 0;
+        for (int i = 0; i < 64; ++i) {
+            if (seen[i] == 1000000 + n_in * 100000 + n_out) { dup = 1; break; }
+        }
+        if (!dup && slot >= 0) {
+            seen[slot] = 1000000 + n_in * 100000 + n_out;
+            fprintf(stderr, "MV n_in=%d n_out=%d\n", n_in, n_out);
+        }
+        if ((calls++ % 500) == 0) fprintf(stderr, "MV call %llu\n", calls);
+    }
 #if defined(__x86_64__) || defined(_M_X64)
     if (in2_have_avx2()) { in2_matvec_avx2(W, x, n_in, n_out, y); return; }
 #endif
