@@ -1299,3 +1299,33 @@ What `q` needs is a measurement I still do not have: whether `in2_matvec_quant` 
 or falls to the float path. The `IN2_TRACE_NT` line said `ty=8 ... -> kernel`, but that trace is emitted before the branch,
 not by it. Printing inside the taken branch - once per type - would settle it, and that is the next step rather than another
 speculative pragma.
+
+## `q` takes the KERNEL path - confirmed by the branch, not by a pre-branch trace
+
+Added an `IN2_PATH_TRACE` print INSIDE the fast path of `in2_matvec_nt`, so it fires only when that branch is the one that
+executes (the old `IN2_TRACE_NT` line printed before the branch and therefore never proved anything):
+
+    NT-PATH ty=8  n_in=2304 n_out=3072 nt=60 -> KERNEL path     <- wq, the 16.2 % component
+    NT-PATH ty=14 n_in=2304 n_out=3072 nt=60 -> KERNEL path
+    NT-PATH ty=13/12/18 ...                  -> KERNEL path
+    (and ty=8 n_out=1024 for wk/wv)
+
+So the float-fallback hypothesis is dead: `wq` reaches the quantised kernel. That closes the question the last note posed
+and leaves exactly one:
+
+**The work is 8 groups x 8 rows x (3072x2304) = 10.19 GMAC, it measures 0.857 s = 11.9 GMAC/s = one thread, the outer
+`parallel for` over those 8 groups was ACCEPTED by the compiler (no pragma warning - checked, for the first time in this
+session), and it changed nothing.** Three candidate explanations remain, in order:
+
+1. `omp_get_num_threads()` inside that region is 1 - the region is running inside an already-active outer parallel
+   context (nesting disabled), so my `parallel for` became a serialised inner region despite being a separate pragma;
+2. the inner `in2_matvec_quant` calls use a private persistent pool that serialises when called from multiple threads;
+3. the eight groups are simply not the cost - the 0.857 s is dominated by something in the loop body other than the
+   matvec calls (the per-row activation quantisation over `nab` blocks, or the D2H of `op[]`).
+
+Printing `omp_get_num_threads()` once inside that region discriminates (1) from (2)/(3) in a single run, and it is the only
+remaining step for this component. It is worth one more turn because `q` is 16.2 % of prefill and the recoverable part was
+measured at 480 ms - but nothing further should be tried before that number exists.
+
+Also recorded: this session never checked compiler WARNINGS until now, only `" error"`. That is how a silently-ignored
+pragma could have hidden - it did not, but the check should be part of the build loop from here.

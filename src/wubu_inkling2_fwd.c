@@ -659,6 +659,15 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
             else whole = NULL;
         }
         void *act = malloc(ablk * (size_t)nab * (size_t)nt);
+        if (getenv("IN2_PATH_TRACE")) {
+            static unsigned char seen[256][2];
+            const int big = (n_out == 3072) ? 1 : 0;
+            if (ty >= 0 && ty < 256 && !seen[ty][big]) {
+                seen[ty][big] = 1;
+                fprintf(stderr, "NT-PATH ty=%d n_in=%d n_out=%d nt=%d -> KERNEL path (this is the branch that runs)\n",
+                        ty, n_in, n_out, nt);
+            }
+        }
         const unsigned char *mapped = wubu_inkling2_map_ptr(ctx, t);
         if (act && (mapped || whole)) {
             const int have = mapped ? 1 : (wubu_inkling2_read(ctx, t, whole, rb * n_out) == WUBU_INKLING2_OK);
