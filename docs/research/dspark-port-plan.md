@@ -553,3 +553,41 @@ the same prompt, and compare its drafts against mine. That gives a reference we 
 the same model - which is what every failed hypothesis today was missing.
 
 The 0/7 measurement stands as the honest state of my implementation. What changes is what it is being measured against.
+
+## Upstream runs the drafter as a GGUF graph model - which explains why my port of the Strata code cannot match it
+
+`common/speculative.cpp:1374-1448` settles the architecture question:
+
+    common_speculative_impl_draft_dspark : common_speculative_impl_draft_dflash
+        - loads a SEPARATE model as params.ctx_dft
+        - reads metadata: dflash.sample_from_anchor, dflash.has_markov_context, dflash.has_confidence_head
+        - has_markov_context -> ctx_rows = block_size + 1, state taken from llama_get_embeddings_nextn()
+        - init({ n_draft_max: sample_from_anchor ? block_size : block_size - 1, backend_sampling: true,
+                 dev_features: true, nextn_masked: !has_markov_context })
+
+So upstream does **not** implement the drafter as a hand-written CPU/CUDA loop at all. It loads the drafter GGUF as a second
+llama model and decodes the whole noise block in one `llama_decode` pass, with the Markov context arriving through `h_nextn`
+embeddings. The per-layer BF16 K/V cache, the `dspark_k[il]` / `dspark_frnn` buffers and the explicit 7-step GRU loop I have
+been faithfully porting exist in **Strata's** engine, not in upstream's.
+
+**That is very likely the whole 0/7.** I ported one implementation of DSpark and have been measuring it against continuations
+produced by a model whose drafter upstream would run through a different graph with different metadata keys and possibly a
+newer architecture generation (`ctx_mix`, `ctx_norm`, `markov_w2`). Every stage of my port could be individually correct and
+still disagree with that, and the agreement metric I built cannot distinguish "my maths is wrong" from "these are two
+different drafters".
+
+**Also established: the built reference binary is unusable on this box.** `build-ref/bin/llama-cli.exe` exits 127 with no output;
+it imports `api-ms-win-crt-private-l1-1-0.dll`, a private UCRT shim that is not present on consumer Windows. Not a CodeIntegrity
+block, not a missing CUDA runtime - the import simply cannot resolve. Running upstream as the oracle would need a local rebuild.
+
+### Where the port actually stands
+
+    Strata drafter: fully decoded (54 tensors, both formats), fully read (CUDA + CPU reference),
+                    implemented end to end (stage 1, 2, 3), six divergences found and fixed against the reference,
+                    and measured at 0/7 on real continuations.
+    llama.cpp drafter: a separate GGUF graph model with metadata-driven behaviour; not yet examined at tensor level.
+
+The honest conclusion is that these are two implementations, and the port I built is of the one that is *not* our parity target.
+Before any more hypothesis work, the drafter GGUF that upstream actually reads should be fetched and its tensor table compared
+with the Strata pack. If it carries `ctx_mix` / `ctx_norm` / `markov_w2`, then the pack I decoded is a different generation and
+the 0/7 is explained without my maths being wrong anywhere.
