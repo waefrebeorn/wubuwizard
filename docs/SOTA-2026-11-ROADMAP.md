@@ -604,6 +604,44 @@ lever.
   **14,104 MiB with 2,200 free**, q4_0 KV, and its 1M blocker is the 4,038 MiB compute buffer, not the cache.
 - Our nominal bit figures understate real llama.cpp blocks by +6.2 % (q8_0), +12.5 % (q4_0), +25 % (q4_1).
 
+### LP-25's reopen test, run: rho(9) = 7.83, so the kill is now measured rather than inferred
+
+`IN2_NO_KV=1` recomputes the whole prefix on every step, so step k costs one batched pass over n = 3+k positions.
+That measures rho(n) = T(n positions)/T(1 position) directly. Measured on this box, 8 tokens from a 3-token prompt:
+
+    n=4  1.000 s      n=7  1.703 s
+    n=5  1.313 s      n=8  1.969 s
+    n=6  1.578 s      n=9  2.281 s
+                      n=10 2.438 s
+
+Fitting t(n) = a + b*n over n=4..10 gives **a = 0.041 s, b = 0.240 s per position**, i.e. a 41 ms fixed cost per
+pass and 240 ms of marginal cost for each extra position. Against a standalone single-token step of 0.281 s (3.61 tok/s
+in the same window), that is
+
+    rho(9) = (0.041 + 9*0.240) / 0.281 = 7.83
+
+So our batched path costs **0.87 of a full step per additional position** - it amortises almost nothing. The briefs'
+dense curve (rho(9) = 1.27) does not apply to this engine, and the brief named the reason exactly: "if your verify loop
+calls the single-token GEMV B times, rho(B) = B and everything loses". At rho(9) = 7.83, a 9-position proposal pass
+emitting 1.67 tokens would be ~4.5x slower than plain greedy. **LP-25 stays killed, now on measurement.**
+
+The corollary is the useful part: per-position cost of 0.240 s against 4.22 GMAC is 17.6 GMAC/s = **35 GFLOPS
+aggregate**, essentially one core's kernel rate, which is the same wall the 2.28x thread scaling and the 43 GFLOPS
+prefill figure have been showing from three different directions.
+
+### The prefetch A/B is inconclusive on this box, and saying so is the result
+
+Interleaved, 3 rounds, 6 tokens, pf=0 against pf=8 (`IN2_IQ_PF_ROWS`):
+
+    round 1   pf=0 3.15 tok/s   pf=8 1.16 tok/s
+    round 2   pf=0 1.37         pf=8 1.38
+    round 3   pf=0 1.41         pf=8 1.38
+
+Round-to-round variance is 2.7x, an order of magnitude larger than the effect the brief measured. pf=0 holds the best
+single value, which is the direction the brief predicts (-0.9 % to -12 %), but that is not evidence. **No claim, no
+code change**: removing the prefetch on this basis would be acting on noise. It needs a quiet box and medians of many
+passes, which is the method the brief itself prescribes and this window could not provide.
+
 ### What this changes in the plan
 
 LP-21's device IQ2_XXS kernel is now the highest-value item in the project, because it is 11.5x the CPU's
