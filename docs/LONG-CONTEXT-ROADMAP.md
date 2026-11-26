@@ -183,3 +183,17 @@ What does NOT change: the reference is still the dp4a kernel, int8 dots are stil
 rather than approximate, and the gate is still >300 GMAC/s before wiring. Only the effort estimate moves - this is an XL
 pad, not a substitution, and the honest statement is that it needs a session of its own rather than a patch on the end of
 this one.
+
+## LP-05 baseline upgraded from throughput-only to real evidence
+
+The caveat above ("the price tool's reference magnitude is 4.03e-37, so this is not evidence about accuracy") is now
+resolved rather than carried. The tool was leaving the q8_K block's fp32 scale unset, which drove every product to ~4e-37.
+With the scale set, the same measurement reads:
+
+    batch vs per-expert: ref0 = 2471.25   max_abs = 0.000e+00   max|ref| = 4.681e+03   rel = 0
+    8 separate launches 3.44 ms | 1 batched 1.38 ms | 2.49x per layer
+    GPU batched IQ2_XXS throughput: 30.77 GMAC/s  (bit-identical to the per-expert path on real values)
+
+So the GPU kernel is both **exactly correct** on this shape and **30.77 GMAC/s** - still 384x below the card's 11.82 TMAC/s
+tensor-core GEMM, which remains the whole of LP-05. The difference from before is that the number now has teeth: it is a
+measurement of a correct kernel, not of a degenerate one.

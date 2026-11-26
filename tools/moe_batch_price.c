@@ -65,6 +65,10 @@ int main(int argc, char **argv)
     for (int b = 0; b < K / 256; ++b) {
         unsigned char *blk = aq + (size_t) b * 292;
         ((unsigned short *) blk)[0] = 0x3C00;
+        /* The block scale was being left unset, so every product came out ~4e-37 and the "reference"
+         * magnitude printed as if the two paths agreed on real numbers. Set it so the comparison is
+         * about values as well as timing. */
+        { const float dsc = 0.25f; memcpy(blk, &dsc, 4); }
         memset(blk + 4, 3, 256);
         memset(blk + 4 + 256, 0, 32);
     }
