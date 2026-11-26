@@ -787,6 +787,15 @@ WUBU_EXPORT int wubu_cuda_matvec_iq4xs(const void *, const void *, float *, int,
 WUBU_EXPORT int wubu_cuda_matvec_q8_0(const void *, const void *, float *, int, int, int64_t);
 static void   *g_res_d[WUBU_RES_SLOTS];
 static const void *g_res_key[WUBU_RES_SLOTS];
+/* LRU: the slab used to be permanent, so expert tensors filled VRAM and then every further tensor failed with
+ * -2 (full) or -4 (copy failed under pressure) - measured as refused ty=16 rc=-4 and ty=22 rc=-8 with the expert
+ * gate open. Routing analysis says an LRU of 48 experts/layer hits 85.7 %, so eviction is what makes the
+ * expert types usable at all rather than a tuning knob. */
+static unsigned long long g_res_use[WUBU_RES_SLOTS];
+static unsigned long long g_res_clock = 0;
+static size_t g_res_budget = 0;
+static size_t g_res_used = 0;
+static long g_res_evict = 0, g_res_hit = 0, g_res_miss = 0;
 static size_t  g_res_bytes[WUBU_RES_SLOTS];
 static int     g_res_n;
 static int     g_res_full_warned;   /* a full slab is a silent CPU fallback for every later tensor */
@@ -808,22 +817,49 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
 
     int slot = -1;
     for (int i = 0; i < g_res_n; ++i) if (g_res_key[i] == h_w && g_res_bytes[i] == wbytes) { slot = i; break; }
+    if (slot >= 0) { g_res_use[slot] = ++g_res_clock; g_res_hit++; } else g_res_miss++;
     if (slot < 0) {
-        if (g_res_n >= WUBU_RES_SLOTS) {
-            if (!g_res_full_warned) {
-                g_res_full_warned = 1;
-                fprintf(stderr, "resident slab FULL at %d slots - later tensors fall back to CPU\n",
-                        WUBU_RES_SLOTS);
+        if (!g_res_budget) {
+            const char *bg = getenv("IN2_RES_GB");
+            g_res_budget = bg && bg[0] ? (size_t) (atof(bg) * 1073741824.0) : 0;
+        }
+        /* Evict until there is room, oldest use first. A budget of 0 keeps the old permanent behaviour. */
+        int guard = 0;
+        while (g_res_budget && g_res_used + wbytes > g_res_budget && guard++ < WUBU_RES_SLOTS) {
+            int victim = -1;
+            unsigned long long oldest = ~0ull;
+            for (int i = 0; i < g_res_n; ++i)
+                if (g_res_d[i] && g_res_use[i] < oldest) { oldest = g_res_use[i]; victim = i; }
+            if (victim < 0) break;
+            cudaFree(g_res_d[victim]);
+            g_res_d[victim] = NULL;
+            g_res_used -= g_res_bytes[victim];
+            g_res_bytes[victim] = 0;
+            g_res_key[victim] = NULL;
+            g_res_evict++;
+            /* reuse the freed slot index */
+            slot = victim;
+            break;
+        }
+        if (slot < 0) {
+            if (g_res_n >= WUBU_RES_SLOTS) {
+                if (!g_res_full_warned) {
+                    g_res_full_warned = 1;
+                    fprintf(stderr, "resident slab FULL at %d slots - later tensors fall back to CPU\n",
+                            WUBU_RES_SLOTS);
+                }
+                return -2;
             }
-            return -2;
+            slot = g_res_n++;
         }
-        if (cudaMalloc(&g_res_d[g_res_n], wbytes) != cudaSuccess) return -3;
-        if (cudaMemcpy(g_res_d[g_res_n], h_w, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
-            cudaFree(g_res_d[g_res_n]); g_res_d[g_res_n] = NULL; return -4;
+        if (cudaMalloc(&g_res_d[slot], wbytes) != cudaSuccess) { g_res_d[slot] = NULL; g_res_used += 0; return -3; }
+        if (cudaMemcpy(g_res_d[slot], h_w, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(g_res_d[slot]); g_res_d[slot] = NULL; return -4;
         }
-        g_res_key[g_res_n] = h_w;
-        g_res_bytes[g_res_n] = wbytes;
-        slot = g_res_n++;
+        g_res_key[slot] = h_w;
+        g_res_bytes[slot] = wbytes;
+        g_res_use[slot] = ++g_res_clock;
+        g_res_used += wbytes;
     }
     if ((size_t) act_bytes > g_res_act_cap) {
         if (g_res_act) { cudaFree(g_res_act); g_res_act = NULL; }

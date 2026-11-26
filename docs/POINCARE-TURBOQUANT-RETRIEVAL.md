@@ -1230,3 +1230,35 @@ itself comes after it.
 Both changes were reverted and the engine re-verified: DLL back to 706048 bytes, `gen_fast.exe` rebuilt, oracle 12/12
 exact. Recording the failure is the point - the LRU policy was measured and correct, and it still could not be shipped,
 because the thing underneath it was not safe to recycle.
+
+## RETRACTION: eviction is sound - the parity break was the expert gate, not the cache key
+
+The previous section blamed the resident cache's `(host pointer, byte count)` key for the token divergence and called a
+stable tensor identity the blocker. A bisect disproves that. Same build, eviction active at a 3 GB budget, but with the
+expert gate **closed**:
+
+    eviction ON,  dense only   12/12 oracle tokens exact
+    eviction OFF (default)     12/12 oracle tokens exact
+    24-token decode:  5134 ms / 5.26 tok/s   vs   5114 ms / 5.30 tok/s   ids identical
+
+So the eviction implementation is correct and, when it never has to evict, costs 0.4 % - within noise. The pointer-keyed
+cache survives slot recycling for dense tensors, which is the case it was written for. My diagnosis was wrong.
+
+What the bisect does localise: **the divergence appears only when the expert gate is open**, and the trace cannot show
+why, because it dedupes its per-type messages (`static int w2[256]`, first outcome per type only). If an expert type
+refuses once and succeeds later - or the reverse - only the first line is ever printed, so "refused ty=16 rc=-2" and
+"produced wrong expert output" are indistinguishable in the log.
+
+So the real finding is narrower and more actionable than the last one:
+
+  - eviction is safe and stays; it is a prerequisite for any expert caching, gated behind `IN2_RES_GB` and inert
+    by default (budget 0 = the old permanent behaviour, ids identical, 0.4 % cost);
+  - the expert slice path on the device is **numerically unverified**: opening it changes the greedy sequence at token
+    5, and nothing currently establishes whether the expert kernels are wrong or the slab holds the wrong slice for a
+    given (tensor, element offset) pair;
+  - the per-type trace must report every outcome, not the first, before it can be trusted to say whether an expert
+    matvec ran.
+
+That makes the next step a correctness gate, not a performance one: for one expert slice, compare the device matvec
+against the CPU kernel on the same bytes, with every call reported. Performance work on MoE resumes after that gate
+passes - the LRU sizing and hit rates are already measured and waiting.
