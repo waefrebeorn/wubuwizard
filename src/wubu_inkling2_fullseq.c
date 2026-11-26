@@ -128,6 +128,11 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     }
 
     FP2(1); /* mix+gates */
+    /* IN2_QSPLIT: the q phase is FP2(1)..FP2(2) and covers a q_clip dequant, a calloc AND the wq matvec.
+     * Split it so the 16 % is attributed to what costs it rather than to the label. */
+    static double qs_prep = 0.0, qs_mm = 0.0; static int qs_cnt = 0;
+    const int qsplit = getenv("IN2_QSPLIT") != NULL;
+    const double _qt0 = qsplit ? in2_wall_now() : 0.0;
     /* 2. q with scaled clip and tau (tau is 1.0 at positions below 8192, so it only bites on long context) */
     /* q/k/v are the only projections with no quantised path, so they read a borrowed float view: 38.2 MB per layer
      * per position, 1,836 MB across 48 layers, against 488 MB for the same weights quantised. IN2_FULL_KERNEL routes
@@ -139,6 +144,7 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
     if ((!qkv_kernel && !Wq) || !q) { free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
                      free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
+    const double _qt1 = qsplit ? in2_wall_now() : 0.0;
     for (int t = 0; t < n_tok; ++t) {
         float *qt = q + (size_t)t * qdim;
         if (qkv_kernel) in2_matvec_nt(ctx, &L->wq, xq + (size_t)t * d, 1, d, qdim, qt);
@@ -152,6 +158,14 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
         for (int i = 0; i < qdim; ++i) qt[i] *= tau;
     }
 
+    if (qsplit) {
+        const double _qt2 = in2_wall_now();
+        qs_prep += _qt1 - _qt0;
+        qs_mm   += _qt2 - _qt1;
+        if (++qs_cnt <= 3)
+            fprintf(stderr, "QSPLIT avg/%d: prep=%.2f ms  wq+clip+tau=%.2f ms%c", qs_cnt,
+                    qs_prep / qs_cnt * 1e3, qs_mm / qs_cnt * 1e3, 10);
+    }
     FP2(2); /* q */
     /* 3. k and v with the dynamic short conv */
     /* Borrowed, not copied. in2_tensor_to_f32 returns memory the caller owns, so every one of these paid a full

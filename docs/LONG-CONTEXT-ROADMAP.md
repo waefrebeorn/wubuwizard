@@ -1396,3 +1396,36 @@ the code was fine and the edit machinery was not.
 
 `q` remains unmeasured: 0.862 s over FP2(1)..FP2(2), covering q_clip dequant + calloc + the wq matvec + clip + tau, with
 the split between them still unknown.
+
+## RESOLVED: `q` is not slow - it is the matvec, and the matvec runs at 34 GMAC/s
+
+The split marker finally landed (third attempt, bottom-up insert, re-finding each anchor immediately before use) and the
+answer contradicts everything I had assumed about this component:
+
+    QSPLIT avg/1: prep=0.11 ms   wq+clip+tau=12.05 ms
+    QSPLIT avg/2: prep=0.11 ms   wq+clip+tau=13.30 ms
+    QSPLIT avg/3: prep=0.10 ms   wq+clip+tau=12.59 ms
+
+- the `q_clip` dequant plus calloc is **0.11 ms** - 0.9 % of the interval, irrelevant;
+- the `wq` matvec plus clip plus tau is **~12.6 ms per call**;
+- 60 tokens x 3072 qdim x 2304 d = 424 MMAC per call, so **33.7 GMAC/s** - which is *faster* than the 27 GMAC/s the
+  parallel MoE path achieves, not slower.
+
+And 0.862 s / 12.6 ms = **~68 q-calls per prefill**, so the real q work is ~29 GMAC, not the 10.19 GMAC I computed from
+"24 full layers". My work estimate was wrong by ~3x, which is what made 11.9 GMAC/s look like one thread: I was dividing a
+correct time by an under-counted MAC total.
+
+**Retracted:** "q is single-threaded", "9 % recoverable", and all four attempts that followed from them. `q` is 16.2 % of
+prefill because it is genuinely a large matvec (3072x2304 per token per call, ~68 calls), and it executes at 34 GMAC/s - the
+best rate measured anywhere in this engine on the CPU. There is nothing to win here.
+
+**Kept:** the `IN2_QSPLIT` instrumentation, env-gated and costing nothing, because it is the instrument that finally
+distinguished the matvec from its labelling.
+
+The session's recurring error, named one last time: I trusted an operation count derived from the model's architecture rather
+than measured per call, and then interpreted a correct timing through it. Every one of the four failed `q` attempts was
+downstream of that single arithmetic assumption.
+
+Where this leaves the engine, measured: MoE 41.9 % (parallel, per-token flat), q 16.2 % (efficient, no win), attention 7.5 %,
+gate+wo 6.8 %, everything else noise. The only remaining large target is MoE at 41.9 %, and it is already the healthiest path
+in the engine.
