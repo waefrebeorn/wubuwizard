@@ -724,3 +724,31 @@ correction. So the remaining work is a block forward that follows `dflash.cpp`, 
 **Next step:** write the forward - `x0 = tok_norm(embd[anchor]) ++ mask_embd`, three blocks
 (`attn_q/k/v` with `q_norm`/`k_norm`, ctx K/V from `rms_norm(ctx_mix·taps)·ctx_norm` through `attn_k_ctx`/`attn_v_ctx`, SwiGLU),
 then `output_norm` and the markov chain - and run it against the engine's own continuation.
+
+## The forward is written, and the unembed decode is vectorised and validated
+
+**`tools/dflash_ref.py`** implements the mainline algorithm on the decoded weights: `x0 = [rms(embd[anchor], token_embd_norm);
+mask_embd.T]`, three blocks of GQA attention (24 Q / 8 KV, head 128, q/k-norm per head, NeoX RoPE theta 1e6) with per-layer
+context K/V built as `rms(ctx_mix · taps, ctx_norm)` through `attn_k_ctx`/`attn_v_ctx` (K normalised by `attn_k_ctx_norm` and
+rotated, V neither), SwiGLU 9216, then `rms(·, output_norm)`, `base = h @ unembed^T`, softcap 30, and the Markov chain
+(`joint_proj [5120, 768]` = `state 256 + w1_prev 256 + h_i 2304 + f_rnn 2304`; `state = c + g*(state-c)`; `markov = tanh`;
+`col = base[:,i] + markov_w2 @ markov + w2b`; greedy).
+
+Two structural facts fixed while writing it, both from the drafter's own metadata rather than inference:
+
+    dflash.sample_from_anchor = False       -> slot 0 is a bonus anchor, drafts come from slots 1..7
+    markov_w1/w2 [256, 200058]              -> drafter vocab is 200058, trunk vocab is 201024
+
+The second one is a real open question, not a footnote: the drafter's vocab is 966 smaller than the trunk's and the GGUF carries
+no d2t mapping tensor, so the forward currently assumes the drafter vocab is the first 200058 trunk ids. That assumption is
+testable and must be tested before any acceptance number from this path means anything.
+
+**`tools/dump_unembed_fast.py`** exists because `strata_extract.dequant_sk` is a pure-Python double loop - 256 elements per
+superblock, 1,809,216 superblocks for `model.llm.unembed.weight [201024, 2304]` - which would run for hours. The vectorised
+version decodes 40k superblocks at a time straight into a memmap, and it was validated against the slow one before being trusted:
+
+    200 superblocks / 51,200 weights:  max|fast - slow| = 1.490e-08   rel 4.516e-08   MATCH
+    unembed rms 0.04584
+
+That validation is the whole point: a fast decoder that silently disagrees with the verified one would poison every logit
+downstream, and the failure would look like a modelling error, not a decoding one.
