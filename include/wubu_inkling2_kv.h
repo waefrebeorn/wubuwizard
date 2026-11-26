@@ -34,6 +34,10 @@ int   in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const
 size_t in2_kv_bytes(const in2_kv_t *kv);
 void  in2_kv_free(in2_kv_t *kv);
 float *in2_kv_k(in2_kv_t *kv, int visit, int pos);
+/* Store a post-conv key/value row at an absolute position. This replaces writing through in2_kv_k/v: a quantised cache
+ * cannot hand out a writable scratch, so the store is explicit and owns the format. */
+void  in2_kv_store_post_k(in2_kv_t *kv, int visit, int pos, const float *row);
+void  in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row);
 float *in2_kv_v(in2_kv_t *kv, int visit, int pos);
 int   in2_kv_resident(const in2_kv_t *kv, int pos);
 void  in2_kv_store_raw(in2_kv_t *kv, int visit, const float *krow, const float *vrow);

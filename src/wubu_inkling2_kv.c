@@ -126,6 +126,20 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
     return kv->v + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
 }
 
+void in2_kv_store_post_k(in2_kv_t *kv, int visit, int pos, const float *row)
+{
+    if (!kv || !kv->k || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
+    float *dst = kv->k + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
+    memcpy(dst, row, (size_t)kv->dim * sizeof(float));
+}
+
+void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
+{
+    if (!kv || !kv->v || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
+    float *dst = kv->v + (in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos)) * (size_t)kv->dim;
+    memcpy(dst, row, (size_t)kv->dim * sizeof(float));
+}
+
 /* A sliding ring slot is only valid while it still holds the position asked for; once the window has moved
  * past it the slot belongs to a newer key. Callers use this to fall back instead of attending to stale rows. */
 int in2_kv_resident(const in2_kv_t *kv, int pos)

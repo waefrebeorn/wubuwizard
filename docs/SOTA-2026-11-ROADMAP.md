@@ -1323,3 +1323,30 @@ changes anything, which is the same two-step discipline that worked for the borr
 Cost so far: the quantiser is written and verified (1.06 B/element, worst error 0.44% of block max), the memory budget is
 measured (q8 reaches ~256k, q4 needed for 512k), the dequantise-on-read scratch is proven safe against row aliasing, and
 this entry removes the one assumption that would have made the integration silently wrong.
+
+## Wave 18 - KV store refactor landed bit-identical (q8 prerequisite)
+
+KV store refactor landed bit-identical: the q8 integration's prerequisite is in
+
+in2_kv_k/v were WRITE pointers - the engine memcpy'd post-conv K and V through them at four sites - so a quantised cache
+could not use dequantise-on-read without writing into a scratch and dropping the data. Fixed the shape first, before any
+format change:
+
+  * new in2_kv_store_post_k / in2_kv_store_post_v own the store and the slot arithmetic;
+  * all four write-through sites routed through them (fwd.c:1263-1271, fullseq.c:239-242);
+  * the accessors are now read-shaped, with nothing writing through them.
+
+Verified bit-identical, which is the whole point of doing it separately:
+    6-token   149876 220 36838 182189 149933 220
+    12-token  149876 220 36838 182189 149933 220 50843 11 149984 149933 151534 149919   (full oracle P1)
+    16-token  4.88 / 4.83 tok/s   (unchanged from the pre-refactor 4.83-4.88)
+    KV alloc  IN2_KV_POS=131072 still reports 8704.0 MB
+
+So the storage format can now change without any risk of a silent write-into-scratch defect, and if the q8 path goes
+wrong the blame is unambiguously in the format code rather than in the plumbing. That separation is what the two-step
+discipline buys, and it is the reason the earlier borrow conversions went in without a parity scare.
+
+State of the long-context work: quantiser verified (1.06 B/element, worst error 0.44% of block max), budget measured
+(64k today, ~256k at q8, 512k needs q4), dequantise-on-read proven safe against row aliasing, store path now exists. What
+remains is the storage swap itself plus the -ctk q8_0 parity gate, which is a self-contained next step rather than an
+open-ended one.

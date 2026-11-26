@@ -238,8 +238,8 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
             if (kv) {
                 float *ck = in2_kv_k(kv, vvis, kv_pos0 + t);
                 float *cv = in2_kv_v(kv, vvis, kv_pos0 + t);
-                if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
-                if (cv) memcpy(cv, v + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
+                in2_kv_store_post_k(kv, vvis, kv_pos0 + t, k + (size_t)t * kdim);
+                in2_kv_store_post_v(kv, vvis, kv_pos0 + t, v + (size_t)t * kdim);
                 /* raw rows are pushed by the conv branch above, once each */
             }
         }

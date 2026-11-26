@@ -1260,15 +1260,13 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             in2_l2_clip(k + (size_t)t * kdim, NULL, NKV, HD, 22.6274166f);
             if (g_kv) {
                 const int gp = g_kv_pos + t, vis = vvis;
-                float *ck = in2_kv_k(g_kv, vis, gp);
-                if (ck) memcpy(ck, k + (size_t)t * kdim, sizeof(float) * (size_t)kdim);
+                in2_kv_store_post_k(g_kv, vis, gp, k + (size_t)t * kdim);
             }
             memcpy(v + (size_t)t * kdim, vt + (size_t)t * kdim, sizeof(float) * kdim);
             float *row = v + (size_t)t * kdim;
             for (int hh = 0; hh < NKV; ++hh) in2_rmsnorm_unweighted(row + hh * HD, HD, eps, row + hh * HD);
             if (g_kv) {
-                float *cv = in2_kv_v(g_kv, vvis, g_kv_pos + t);
-                if (cv) memcpy(cv, row, sizeof(float) * (size_t)kdim);
+                in2_kv_store_post_v(g_kv, vvis, g_kv_pos + t, row);
             }
         }
         if (g_kv && getenv("IN2_KV_VERIFY")) {
