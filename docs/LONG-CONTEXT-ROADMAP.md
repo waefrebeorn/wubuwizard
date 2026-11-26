@@ -1520,3 +1520,32 @@ Implementation sketch for whoever picks this up (do NOT begin it without room to
 
 This is the one remaining lever the measurements point to: decode is 172 ms/token and entirely forward-bound, the forward is
 already near this laptop's per-thread rates, so the only way to go faster at identical outputs is to need fewer forwards.
+
+## The verification API does not exist yet - and the economics say build it anyway
+
+`wubu_inkling2_model.c:295` says it plainly: **"logits are only meaningful for the last position."** `in2_forward_at` takes
+n tokens, runs all of them through the layers, and then materialises the head for the last one only. So speculative
+verification of K drafts cannot read K logit vectors today - the sketch in the previous note needs a per-position head.
+
+Priced at measured rates (forward 172 ms/token; head 201,024 x 2,304 = 463 MMAC = 13.6 ms per position at this engine's best
+34 GMAC/s):
+
+    K=3:  save 3 forwards 516 ms   pay 3 extra heads  41 ms   -> net +475 ms
+    K=4:  save 4 forwards 688 ms   pay 4 extra heads  54 ms   -> net +634 ms
+    K=8:  save 8 forwards 1376 ms  pay 8 extra heads 109 ms   -> net +1267 ms
+
+    even at 50 % acceptance (real prose, not the degenerate loop measured earlier), K=4 still nets +290 ms per block
+
+The extra heads are 8 % of what they save, so **the design does not depend on high acceptance to be worth building** - which
+is the opposite of the usual speculative-decoding economics and is a direct consequence of this engine's head being cheap
+relative to a 48-layer forward pass.
+
+So the concrete next change is, in order:
+1. add an optional per-position logits output to `in2_forward_at` (n_tok x vocab floats, 3.2 MB at K=4) - additive, gated,
+   the existing callers pass NULL and are untouched;
+2. the draft/verify loop in `tools/inkling_gen.c` as sketched;
+3. gate on the 12-token oracle being identical, then on tok/s.
+
+Not started: it is a three-file change (header, model.c, gen tool) and the last four multi-site attempts in this session each
+cost a build cycle to discover a mechanical mistake. The measurement above is the piece that was missing, and it now says the
+work is worth a session of its own.
