@@ -49,7 +49,14 @@ def main():
     taps = np.stack([t[:M] for t in taps])
     fuse = s2.load(W, 'dspark.fuse_weight')
     mask = s2.load(W, 'dspark.mask_embed')
-    h = s2.forward(np.repeat(mask[None, :], B, axis=0), taps, fuse, W, np.arange(M, M + B), np.arange(M), B)
+    # Block init exactly as emit_dspark_backbone does it: slot 0 is the anchor token embedded and passed
+    # through token_embd_norm, slots 1..B-1 are mask_embed. The anchor embedding comes from the engine's own
+    # post-embedding dump (IN2_DUMP_EMBD with the anchor as the only input token).
+    anchor_emb = np.fromfile(os.path.join(TMP, 'our_embd.bin'), dtype='<f4')
+    assert anchor_emb.size == H, anchor_emb.size
+    x0 = np.repeat(mask[None, :], B, axis=0)
+    x0[0] = anchor_emb
+    h = s2.forward(x0, taps, fuse, W, np.arange(M, M + B), np.arange(M), B)
     w1 = s2.mat(W, 'dspark.markov_head.markov_w1.weight', 201024, R)
     rp = s2.mat(W, 'dspark.markov_head.rnn_proj.weight', 768, 5120)
     rpb = s2.load(W, 'dspark.markov_head.rnn_proj.bias')

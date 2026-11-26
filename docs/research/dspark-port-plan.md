@@ -406,3 +406,38 @@ produce.
 **Next step is therefore small and specific:** an engine hook to dump `embed_norm(embed[token])` for a given id
 (`IN2_DUMP_EMB=<id>`), then initialise slot 0 with the anchor's real embedding and re-run this loop. Until that is done the
 0/7 is not a verdict on the drafter - it is a verdict on my input, and the two are worth keeping separate.
+
+## Anchor embedding fixed the degeneracy; 0/7 remains, and the next deficiency is context length
+
+The anchor embedding needed no new hook - `IN2_DUMP_EMBD` already dumps the post-embedding stream, so running the anchor
+token alone gives exactly `token_embd_norm(token_embd[149879])`:
+
+    post-embedding stream 1 x 2304, rms 1.1253
+    cosine(anchor_emb, mask_embed) = 0.0361      <- essentially orthogonal
+
+So the init I had been using was not a small approximation, it was a different vector. With slot 0 set correctly:
+
+    step    prev   draft  oracle      score  ok
+       0  149879  166406  149876     54.389   n
+       1  166406   35162     220     57.659   n
+       2   35162  161338   36838     55.908   n
+       3  161338    1929  182189     53.915   n
+       4    1929    1929  149933     52.058   n
+       5    1929   31057     220     54.128   n
+       6   31057  200477   50843     51.358   n
+
+    accepted prefix: 0/7
+
+**What changed is the failure mode, and that is worth recording.** Before, the loop emitted one or two tokens over and over
+(`42623, 42623, 42623, 42623, 113993, 113993, 113993`) - slot-independent and degenerate. Now it emits seven different tokens,
+still wrong. Degeneracy was a symptom of the init; it is gone, so that defect is genuinely fixed even though acceptance did not
+move.
+
+**Next deficiency, identified from our own data: the context cache holds one position.** The taps were dumped during a
+one-token decode pass, so `M = 1` and the cross-attention has a single key/value pair to look at. In the real drafter that
+cache holds `apos` positions - the whole committed sequence, up to the 1025 sliding window. A one-position context makes the
+`*_ctx` projections almost decorative, which is consistent with a block state that now varies but carries no information about
+the prompt.
+
+So the next run must dump taps from a real prefill - at least a few hundred positions - and rebuild the loop from that. The
+mechanism is already there (`IN2_DUMP_VISITS` during a longer `--text` prefill); only the input is wrong, again.
