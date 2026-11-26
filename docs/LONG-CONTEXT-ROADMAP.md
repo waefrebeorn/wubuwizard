@@ -613,3 +613,29 @@ Caveat that decides the real number: at 400 GMAC/s the card must sustain that wi
 trips. Every failed attempt this session failed on the second condition, not the first. So the grouped kernel must consume
 a device-resident index and device-resident gathered activations in one launch per layer - anything that returns to the
 host per expert reintroduces the ~1,150 calls/token/layer that cost four wirings.
+
+## The routing histogram cannot size the chunk, and it contradicts the recorded layer count
+
+Ran a 480-token text prefill with IN2_MOE_HIST=1 and parsed every MOEHIST line:
+
+    284 lines, 24 layers, total routings 383 -> 15 tokens' worth per layer
+    distinct experts per layer: min 7, max 17, mean 11.8
+    counts: mean 1.3, median 1.0, max 3
+
+Two problems, both mine to state plainly:
+
+1. **It does not accumulate across the prefill chunk.** ~16 routings per layer is two tokens x 8 experts, i.e. only the
+   generated positions, not the 480 prefilled ones. So this instrument cannot answer "tokens per expert at N = 480" and
+   the uniform model in the previous note remains the only estimate. It is a plausible model, not a measurement, and must
+   be labelled that way wherever it is used.
+2. **It reports 24 layers, while every note in this file so far records 48.** One of the two is wrong, and it changes
+   every arithmetic result downstream by 2x - including the 11.8x and the "432 GMAC total" from earlier notes. Until
+   `layers` is confirmed from the GGUF metadata directly, treat all prefill arithmetic in this document as carrying a 2x
+   uncertainty on the layer factor.
+
+Nothing was changed to get this: the histogram patch was reverted (it printed nothing at the run sizes tried, so it was
+dead code in the hot path), the build is clean and the oracle is 12/12 with the original instrumentation.
+
+Next step is therefore a **measurement**, not a kernel: print the real layer count and the real per-token expert counts from
+one fixed place, and re-derive the arithmetic. Two of this document's headline numbers are currently built on a layer
+count that the engine itself contradicts.
