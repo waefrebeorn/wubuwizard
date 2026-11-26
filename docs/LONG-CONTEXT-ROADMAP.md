@@ -1006,3 +1006,29 @@ The two results together are the important part:
 So the honest statement of what this change does: it does not speed up the engine as configured today, and it makes the
 memory-efficient configuration viable. The 78-80 % sliding share at f32 remains unexplained and is the next thing to profile,
 with `in2_kv_k` now proven not to be its cause in that path.
+
+## The 78-80 % is call overhead, not arithmetic: 3,072 visit-calls per token, 23 us each
+
+Sliding time per token is constant across context, which rules out fixed-window waste:
+
+    28 tokens  sliding 1.987 s  ->  71.0 ms/token
+    60 tokens  sliding 4.280 s  ->  71.3 ms/token
+
+So the cost is linear in tokens and the window is not being scanned beyond the live positions. The inefficiency is per CALL:
+
+    layers x sliding visits      48 x 64      = 3,072 visit-calls per token
+    71 ms / 3,072                              = 23 us per call
+    MACs per call at pos=28      28x1024x2     = 57 K MAC  -> 2.5 GMAC/s effective
+    MACs per call at pos=60      60x1024x2     = 123 K MAC -> 5.3 GMAC/s effective
+
+2.5-5.3 GMAC/s is what a call-bound loop looks like: each call moves 57-123 K MACs, which is far too little work to amortise
+3,072 of them per token. By comparison the same engine's quantised matvecs run at 12-27 GMAC/s and the GPU kernel at
+373-648 GMAC/s, so the sliding path is 5-10x below the engine's own modest ceiling.
+
+**So the fix is batching, not caching:** one call covering all 64 visits (or all tokens) per layer turns 3,072 calls per token
+into 48, and the per-call cost disappears into a single larger, better-shaped GEMV/GEMM. That is a different change from the
+KV mirror just landed - and unlike the mirror, its benefit applies in the DEFAULT f32 configuration, which is where the
+78-80 % actually lives.
+
+This also retroactively explains the earlier chunked-prefill projection: the O(N^2) decode-on-read analysis was right about
+the TQ path (where the mirror delivered 4.8x) but the dominant cost in the shipped configuration was always the call count.
