@@ -743,3 +743,31 @@ Also still unexplained and worth saying plainly: type 8 (attn_k, attn_v, attn_ou
 refused - nothing is printed for it. So either those calls do not reach this hook at all, or they succeed without the
 one-shot message firing because another hook incremented the counter first. One print of the counter inside the hook
 distinguishes those two, and it is the next edit rather than another guess.
+
+### The resident tier works and is worth nothing yet: per-call sync costs more than the CPU's share
+
+The success trace settles the last question - type 8 IS resident:
+
+    NT-GPU ok ty=8 (blk.0.attn_k.weight)
+    NT-GPU refused ty=14 rc=-1 (blk.0.attn_q.weight)  ... 13, 12, 18 on other layers
+
+So attn_k, attn_v, attn_output and attn_rel - **617 MB of the 1,535 MB step, 40 %** - are being computed on the card,
+along with the head. And the measurement says zero gain (3.71 / 3.41 / 3.51 CPU against 3.71 / 3.53 / 3.53 GPU).
+
+The reason is arithmetic, not mystery. Each resident call is synchronous: memcpy activation in, launch, sync, memcpy
+out, which costs ~35 us before the kernel does anything. Against the CPU's eight threads:
+
+    tensor          MB    GPU us   CPU 8-thread us   winner
+    attn_k        2.39        51               28    CPU
+    attn_v        2.39        51               28    CPU
+    attn_output   7.17        83               84    GPU (by 1 us)
+    attn_rel      0.90        41               10    CPU
+
+192 calls per token at ~35 us is 7 ms of pure round trip, and every tensor under about 4 MB loses to a CPU that is
+already spreading the same work over eight threads. Net effect: nothing, exactly as measured.
+
+Two real fixes, both ordinary engineering rather than insight: **stop synchronising per call** (issue asynchronously and
+sync once per layer or per token, which would make the card win everywhere), or **gate on size** and only offload
+tensors above ~5 MB, which today would mean attn_output alone. Until one of those lands, the honest summary of the
+resident tier is: correct, verified, covering 40 % of the token's bytes, and slower per call than the CPU it is meant
+to relieve.

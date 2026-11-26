@@ -634,6 +634,13 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                                         t->info->name);
                             }
                         }
+                        if (g_rc2 == 0 && getenv("IN2_GPU_TRACE")) {
+                            static int ok2[256];
+                            if (ty >= 0 && ty < 256 && !ok2[ty]) {
+                                ok2[ty] = 1;
+                                fprintf(stderr, "NT-GPU ok ty=%d (%s)\n", ty, t->info->name);
+                            }
+                        }
                         if (g_rc2 == 0) {
                             gpu_took = 1;
                             if (in2_gpu_calls++ == 0)
