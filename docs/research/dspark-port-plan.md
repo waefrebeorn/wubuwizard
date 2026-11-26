@@ -112,3 +112,30 @@ Three consequences, in increasing order of importance:
    argument asserted without a lookup.
 
 Taps are now reproducible exactly, by visit index, from one gate run.
+
+## Stage 1 ported and running on real taps (`tools/dspark_ref.py`)
+
+`k_dspark_mix_taps` (:52-86) is simple and fully specified:
+
+    w = softmax(fuse_w[row][0..3]);  v = sum_j w[j]*tap_j;  out = v * rsqrt(mean(v^2) + eps) * norm_w
+
+Implemented as a numpy reference and run against the four real tap dumps:
+
+    visit 05 <- V005_il05_p0.bin     visit 23 <- V023_il11_p1.bin
+    visit 41 <- V041_il17_p2.bin     visit 47 <- V047_il23_p2.bin
+
+    row  softmax(fuse_w[row])                            rms_pre  rms_post
+      0  [0.093, 0.113, 0.688, 0.106]                     3.0843    2.9928
+      1  [0.330, 0.222, 0.348, 0.100]                     3.3417    3.6074
+      2  [0.180, 0.060, 0.287, 0.473]                     2.5961    3.5469
+      3  [0.202, 0.015, 0.748, 0.035]                     3.4655    3.0477
+
+    rms(norm_w) = 3.0923 - the post-norm scale lands in that neighbourhood as the algebra requires.
+
+Two practical findings: the taps live at **mixed pass suffixes** (`V023` is `p1`, `V041` is `p2`), so any loader must
+match on visit number only, not on `p0`; and each fuse row is a genuinely different mixture (row 3 puts 0.748 on the
+third tap), which is the mechanism the header calls "taps mixed via softmax(fuse_weight[0..3])" - four fused contexts,
+not one.
+
+Stage 1 is done. Stage 2 (3 block-attention layers + context cross-attention) is next, and its kernels
+(`k_dspark_block_attn` :127, `k_dspark_split_qkv` :218, `k_dspark_swiglu` :246) are the ones to read next.
