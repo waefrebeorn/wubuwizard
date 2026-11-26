@@ -163,3 +163,29 @@ clear specification, not a session. It is now the only path to beating upstream'
 `target_layer_ids` ends at **48**, which implies indices 0..48 exist (49 blocks), while our GGUF reports `block_count = 48` and
 the trunk here lists 646 tensors against our 734. Either the target ids are 1-based, or the two distributions differ in layer
 count. Not resolved; it matters because the drafter keys off those exact indices.
+
+## Extraction proven for F32; Q8_ROW is NOT decoded and my first read of it was wrong
+
+**Offsets are relative to section 1's start (4,096).** Proven three ways with tensors whose values can be sanity-checked:
+
+    dspark.layers.0.input_layernorm.weight  off=1,644,895,424  base sec1 -> [1.093, 1.899, -0.542, 0.976, 1.063]  sane
+    dspark.layers.0.self_attn.q_norm.weight off=1,693,870,272  base sec1 -> [0.500, 1.078, 0.614, 0.463, 0.527]  sane
+    dspark.norm.weight                      off=1,871,619,008  base sec1 -> [-2.593, 3.094, 2.751, -3.438, -3.328] sane
+
+The third is decisive positionally: 1,871,619,008 + 4,096 = 1,871,623,104, and section 1 ends at 1,871,632,320 - the drafter sits
+in section 1's **tail**, immediately before the expert bodies. The other bases produce float garbage from the same offsets.
+
+**Q8_ROW: not decoded.** `markov_head.hidden_out.weight` is `[2304, 256]` with 599,040 bytes, and 599,040 = 2304 x 260, so 4 bytes of
+overhead per 256 int8 values is the obvious reading. The first three rows decode cleanly under both "scale first" and "scale last"
+(|w| <= 0.21, stdev ~0.1), which looked like confirmation - and a 200-row check destroyed it:
+
+    rows saturating at |q| = 127: 165/200 under BOTH layouts
+    recovered scale range: -6.9e37 .. 9.1e35   (absurd)
+
+Identical saturation counts under two different offsets, plus absurd recovered scales on most rows, means the rows are **not** a
+fixed 260-byte stride and the overhead is not one fp32 per row. My three-row check was three lucky rows - the same failure this
+project keeps repeating: a plausible sample from a small window treated as proof.
+
+The right next move is to read `engine/include/strata/quant/sk_codecs.hpp` and `engine/src/quant/` for the actual Q8_ROW and S5_K
+decoders rather than reverse-engineering them from bytes. Recorded as unresolved, with the structural fact (599,040 = 2304 x 260)
+that any future attempt should start from.
