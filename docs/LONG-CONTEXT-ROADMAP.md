@@ -1635,3 +1635,51 @@ So the ordered next steps are now:
 
 Finding the cursor semantics was worth more than writing the loop blind: a rewind bug would have produced wrong tokens from
 correct-looking code, which is the single most expensive failure mode this project has.
+
+## Inkling-2-Mini is a LOOPED transformer, and that settles the layer-count question for good
+
+Source: the model's own GGUF metadata, read locally, and the published model card
+(thinkingmachines/Inkling-2-Mini, and the Strata pack page strata-engine/Inkling-2-Mini-Strata).
+
+    inkling2.num_loops       = 3
+    inkling2.loop.core_start = 6
+    inkling2.loop.core_end   = 18
+    inkling2.loop.gate_rank  = 64
+
+**Layers 6..17 (twelve layers) execute three times for every token**, with a rank-64 gate controlling each extra pass. The
+model card states it directly: 26.4B parameters, 3.4B active per token, 5.4B when the repeated passes are counted.
+
+Our engine implements this - `wubu_inkling2_load.c:78` sets `is_loop_layer = (il >= loop_core_start && il < loop_core_end)`,
+and `loop_gate_rank` is threaded through both the per-visit and full-sequence layer bodies.
+
+**And it reconciles a number I had got wrong.** MoE sits on layers 0..23. With the core tripled, the number of MoE
+layer-passes per token is:
+
+    layers 0..5   (6 passes)  +  layers 6..17 x 3 (36 passes)  +  layers 18..23 (6 passes)  =  48
+
+which is EXACTLY the `48 n_tok=120` that `IN2_MOE_NTOK` printed and that I could not explain. The engine was never wrong; my
+model of the engine was.
+
+**Retracted:** the earlier "resolution" that the 284-row histogram's 24 ids meant the MoE MAC share halves to 183.5 GMAC and
+the prefill total is 249 GMAC. That was wrong by precisely the loop factor. The correct figures: 48 MoE layer-passes and
+**72 layer-passes for the full stack** (48 + 12 extra). Every per-token compute estimate in this document that assumed 48
+layer-passes should be multiplied by 1.5.
+
+This also means the engine's arithmetic per token is heavier than my notes implied, which makes the measured 88 ms/token
+prefill and 172 ms/token decode rather better than they looked against the MAC totals I had been dividing by.
+
+## The Strata pack page, and what it says about speed
+
+Same model, independent MIT engine, published numbers: RTX 5070 12 GB with their SQ-10 pack runs 93.9-101.4 tok/s single
+request; a 4 GiB card is enough to start because the non-resident experts stay in system RAM. Their SQ-20 pack is bit-identical
+to the original model (100.00 % same next word, KL 0.00000).
+
+Two things worth taking from it:
+- **Every pack has a DSpark draft model built in, and their headline single-request numbers use it** ("W=4 Beam"), i.e. the
+  fastest published configuration of this exact model is speculative decoding at unchanged-ish output. That is independent
+  confirmation that speculation, not kernel work, is where the remaining decode speed lives.
+- Their spread (SQ-10 92.35 % same-word vs SQ-20 100 %) is a reminder that our oracle discipline is the stricter standard:
+  this engine is gated at bit-identical, which is why it can claim parity while a 10 GB pack at 92 % cannot.
+
+Their .strata format is not GGUF, so nothing is directly loadable here; the value is the architecture fact and the speed
+context, not the files.

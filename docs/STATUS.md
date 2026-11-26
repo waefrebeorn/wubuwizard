@@ -11,6 +11,13 @@ holds the history; this file holds only what is true now.
 Golden line is 3 prompt + 12 generated = **15** tokens (not 12 — the command's `12` is the generate count). The gate refuses
 to pass on an empty or short reference, which is how four false passes were avoided this session.
 
+## Architecture fact that governs all arithmetic
+
+**Looped transformer.** GGUF metadata: `inkling2.num_loops = 3`, `loop.core_start = 6`, `loop.core_end = 18`,
+`loop.gate_rank = 64`. Layers 6..17 run **three times per token** (engine: `load.c:78 is_loop_layer`). So the stack costs
+**72 layer-passes**, and MoE (layers 0..23) costs **48 passes**: 6 + 12x3 + 6 = 48 - exactly the 48 MoE calls `IN2_MOE_NTOK`
+prints. Any estimate assuming 48 layer-passes is 1.5x low.
+
 ## Measured state (60-token prefill, 8 threads, unless noted)
 
     prefill            5.3 s total        88 ms/token
