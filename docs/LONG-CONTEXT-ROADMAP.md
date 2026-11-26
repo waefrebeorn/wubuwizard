@@ -1683,3 +1683,24 @@ Two things worth taking from it:
 
 Their .strata format is not GGUF, so nothing is directly loadable here; the value is the architecture fact and the speed
 context, not the files.
+
+## Last unknown cleared: attention is bounded by the position, not by n_stored
+
+The concern was that a rejected draft would leave `n_stored` inflated and attention would read phantom rows. Both halves are
+now measured in the code:
+
+    fwd.c:1369   if (g_kv->n_stored < g_kv_pos + n_tok) g_kv->n_stored = g_kv_pos + n_tok;   /* monotonic high-water */
+
+- `n_stored` IS a high-water mark and does stay inflated after a rejected draft;
+- but the causal key loop is `for (int j = jstart; j <= gp; ++j)` (fullseq.c:325), bounded by **`gp`, the current token's
+  global position** - never by `n_stored`. Positions beyond `gp` are simply not visited;
+- the key lookup is `in2_kv_k(kv, vvis, j)` with that same global `j`, so a phantom row at `j > gp` cannot enter the softmax;
+- residency (`in2_kv_resident`, kv.c:338) uses `n_stored`, so phantom rows would *pass* that test - which is exactly why this
+  mattered: the guard is the loop bound, not the cache. It is sufficient, and the loop bound holds.
+
+Combined with `in2_kv_begin(pos0)` setting the write cursor, the verdict is: **speculative verification needs no rewind API.**
+Writes past the accepted prefix are never read, and are overwritten when the cursor returns to them.
+
+Design is now fully validated against the code: per-position logits (done, gate-clean), cursor semantics (safe), attention
+bound (safe), and the economics priced at 13.6 ms per extra head against 172 ms per saved forward. The remaining work is the
+loop itself in `tools/inkling_gen.c`, gated at K=1 then K=2 then K=4 against the 15-token oracle.
