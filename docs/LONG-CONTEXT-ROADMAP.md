@@ -445,3 +445,25 @@ That is the whole of part 2. The remaining unknowns are small and local: `boff`/
 neighbouring `in2_matvec_quant`, and the quantise loop is mechanical. It was not attempted here because it still needs a
 build-measure-revert cycle per step and the oracle must be re-gated afterwards - the structure is now known precisely
 enough that the next attempt is a single edit rather than a survey.
+
+## The one detail that stops the in2_matvec_nt wiring: where the weight bytes come from
+
+Attempted the branch described above and aborted it before building. `in2_matvec_nt`'s signature has no `elem_off` and,
+crucially, no weight pointer - it hands tensor METADATA (`t`, `t->info`) to the CPU kernel, which resolves the weights
+itself. The DLL entry `wubu_cuda_resident_matvec_nt` needs the actual **host weight bytes** (`h_w`, `wbytes`) because it
+may have to fill the resident slot, i.e. `cudaMemcpy` from host. Passing `t->info` there would copy metadata into VRAM,
+compute garbage and still return 0, so the fallback would never fire and the oracle would break with no signal.
+
+The correct source is the one `in2_matvec_quant` already uses two functions away:
+
+    const int64_t boff = (elem_off == 0) ? 0 : gguf_raw_size(ty_mv, elem_off);
+    wubu_in2_tensor_t sh = *t;  sh.file_offset = t->file_offset + boff;
+    const unsigned char *src = wubu_inkling2_map_ptr(ctx, &sh);      /* mapped */
+    if (!src) { src = <thread-local buffer>; wubu_inkling2_read(ctx, &sh, buf, rb * n_out); }
+
+With `elem_off == 0` for `in2_matvec_nt` this reduces to: shadow the tensor at `t->file_offset`, `map_ptr` it, and pass
+that pointer as `h_w` with `wbytes = rb * n_out`. If the mapping is unavailable, read into a buffer first, or simply skip
+the GPU branch - the fallback is cheap and correct.
+
+So the wiring is four steps plus this fifth: **the slab pointer must come from `wubu_inkling2_map_ptr`, never from the
+tensor descriptor.** Reverted; tree clean, oracle 12/12 after a full rebuild.
