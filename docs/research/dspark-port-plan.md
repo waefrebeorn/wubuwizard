@@ -254,3 +254,43 @@ adds, the attention output scale, or a missing normalisation of the block state 
 What remains for a ground-truth number is the unembed rows: scoring is `dot(corr, unembed[cand])` and those 201,024 rows live in
 the trunk, not in the DSpark package. The next step is a small engine-side dump of the rows for the 12 known oracle ids, then
 draft-vs-oracle agreement becomes a percentage instead of an opinion.
+
+## Retraction: the stage-2 "growth" was never evidence of a bug, and orientation is uniquely determined
+
+Two eliminations, both of which remove suspects I had been carrying:
+
+**1. Orientation is not a free parameter.** Their call sites pass a transpose flag that is `true` for k/v and `false` for q/o,
+while the manifest lists q_proj as `[3072, 2304]` - two statements that cannot both be taken naively. So I ran all 16
+combinations of (q,k,v,o) orientation. **Fifteen of them fail a dimension check outright**; only `(False,False,False,False)` -
+treating every matrix as `[out, in]` and computing `x @ W.T` - even composes:
+
+    (F,F,F,F)  3.942  7.084  13.438   growth 1.897   STABLE
+    every other combination: shape error, e.g. "size 1024 is different from 2304"
+
+The manifest shapes therefore pin the wiring completely. My implementation was the only one arithmetically possible; there was
+never an orientation bug to find.
+
+**2. A rising RMS inside the stack is erased before it reaches anything.** The final norm is `dspark.norm`, and RMSNorm output
+scale is independent of input scale - measured, not asserted:
+
+    input_rms -> output_rms
+         0.010 ->   3.0666
+         1.000 ->   3.0818
+        13.438 ->   3.0818
+      1000.000 ->   3.0818        reference rms(dspark.norm) = 3.0923
+
+The head sees the normalised state, so the 3.9 -> 7.1 -> 13.4 climb is invisible downstream. It is also not unusual in family:
+the four trunk taps themselves measure rms 7.75, 3.76, 4.12 and 2.89.
+
+**Retracted: "that growth is a red flag, not a result" and the claim that it pointed at a wiring defect.** I treated an
+unexplained number as a symptom without first checking whether the pipeline normalises it away, and it does. The state remains
+*unverified* - there is still no ground truth - but there is no longer any reason to believe the block stack is mis-wired. That
+is a different statement, and the honest one.
+
+**Correction to my own diagnostic, twice in a row:** the line I printed as "after rmsnorm(dspark.norm) = 3.0923" was another
+tautology - it printed `rms(norm_w)` and labelled it the transformed output. The real test is the table above, which varies the
+input scale and shows the output scale hold. Third tautological check this project; the pattern is printing a quantity that is
+fixed by definition and reading it as a measurement.
+
+Where this leaves stage 2: wired the only way the shapes allow, scale behaviour understood, dynamics stable in stage 3. What is
+still missing is not a hypothesis - it is ground truth, which needs the unembed rows for the 12 known oracle ids.
