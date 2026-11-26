@@ -1456,3 +1456,31 @@ the 10 % slice.
 Next step is a timer that brackets ONE whole token - from the token loop's start to the next iteration - and prints its
 breakdown, so the 173 ms can be attributed. Nothing in the FP2 set covers it, so a new bracket is required rather than
 another reading of the existing table.
+
+## CORRECTION: there is no unaccounted 173 ms - decode is 5.8 tok/s and it is ALL forward
+
+The generator has printed the per-step breakdown all along (`gen[i] ... wall (fwd X + Y other)`); I had only ever grepped
+the token IDs:
+
+    gen[1] 0.172s wall (fwd 0.172s + 0.000s other)   5.81 tok/s
+    gen[2] 0.203s wall (fwd 0.203s + 0.000s other)   4.93 tok/s
+    gen[3] 0.172s wall (fwd 0.172s + 0.000s other)   5.81 tok/s
+    gen[5] 0.172s wall (fwd 0.172s + 0.000s other)   5.81 tok/s
+
+"other" is 0.000 s, every step. So the previous note's claim - "nine tenths of decode time is outside the layer phase
+accounting" - is **wrong, retracted.** The whole 172 ms is `in2_forward_at`. What went wrong was the comparison: I divided a
+24-step cumulative wall clock by a PHASE line that is per-step, so the two windows never matched. The arithmetic was fine
+and the comparison was invalid.
+
+The honest decode picture:
+
+    decode            172 ms/token   5.8 tok/s   entirely forward
+    prefill (batched)  88 ms/token   11.4 tok/s  same phases, amortised over 60 tokens
+
+So decode is ~2x the per-token cost of prefill, which is exactly what an unbatchable single-token pass should cost, and it is
+distributed like prefill: MoE ~42 %, q ~16 %, the rest small. There is no hidden block, and no large unexplained term left.
+
+Where the session actually ends, all measured: prefill 5.3 s / 60 tokens with MoE 41.9 % (parallel, healthy), q 16.2 % (at
+34 GMAC/s, efficient), attention 7.5 % (3.8 % won by parallelising it), decode 5.8 tok/s entirely in the forward. The engine
+is not hiding a 10x; it is running its kernels at the rates this 6-core laptop can sustain, and the gaps that remain are
+algorithmic (a drafter - upstream's 1.7-3.1x at unchanged tokens) rather than structural.
