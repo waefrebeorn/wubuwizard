@@ -1514,3 +1514,27 @@ Offloading the experts is currently a **small loss**, because the lock serialise
 uploads a ~1 MB slab over PCIe. Correctness had to come first and does. The payoff now depends on the cache actually
 hitting, which it finally can - the hit/miss counters are trustworthy for the first time, and the hot set is known to be
 concentrated (top-32 experts ~82 % of picks). That is the next measurement, not another diagnosis.
+
+## The cache's real limit was its slot table, not its byte budget - and MoE offload still does not pay
+
+With the race fixed the counters became meaningful, so they were finally read instead of assumed:
+
+    WUBU_RES_SLOTS 320, budget 3 GB    hit=7647 miss=2140 evict=0  slots=320  rate=78.1%
+    WUBU_RES_SLOTS 1536, same budget   hit=9021 miss= 766 evict=0  slots=766  rate=92.2%
+
+`evict=0` in the first line is the tell: the tier had filled its 320-entry pointer table while using ~320 MB of a 3 GB
+budget, and every slab past the 320th unique one was refused to the CPU. The *table* was the binding limit, not memory.
+At 1536 slots the hit rate rises 14 points and nothing is refused.
+
+That did not make offload profitable:
+
+    24-token decode    CPU 5470 ms | GPU dense 5134 ms (-6.1 %) | GPU dense + experts 5495 ms (+7.0 % vs dense)
+
+Correct and still a loss, for a reason the numbers make plain: one token activates 24 layers x 8 experts = 192 expert
+matvecs, each a small (1152 x 2304) launch, and the entry is now serialised by the lock. Launch overhead dominates the
+~2.6 MMAC each one does. **The fix is batching, not caching**: the 8 active experts of a layer have to become one launch.
+Until that exists, MoE offload stays opt-in behind `IN2_GPU_MOE`, which is where it is - correct, verified against the
+oracle, and honestly not worth the PCIe.
+
+Verified in this state: oracle 12/12 identical for CPU only, dense, and dense + experts; expert rows 242/242 exact at
+8 threads.

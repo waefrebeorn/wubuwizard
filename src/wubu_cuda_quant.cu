@@ -775,7 +775,9 @@ WUBU_EXPORT int wubu_cuda_matvec_q8_0(const void *d_w, const void *d_q8, float *
  * dense tier of this model is 48 layers x 5 tensors plus the head = 241 tensors. The first value of 96 here was
  * way to be wrong. Experts are deliberately excluded by the caller: 48x128 slabs is far beyond any slot count.
  */
-#define WUBU_RES_SLOTS 320
+#define WUBU_RES_SLOTS 1536   /* was 320: the table, not the byte budget, was the binding limit - at ~1-2.4 MB per slab
+                                * 320 slots sat at 320 MB while a 3 GB budget went unused, and every expert beyond the first
+                                * 320 unique slabs was refused. 1536 slots lets the LRU actually evict. */
 /* Declared here because this block sits above both definitions; the entry points are defined further down. */
 WUBU_EXPORT int wubu_cuda_quant_matvec(const void *d_w, int type, const void *d_xq8, float *d_y,
                                        int K, int n_cols, int64_t col_stride_bytes);
@@ -796,6 +798,8 @@ static unsigned long long g_res_clock = 0;
 static size_t g_res_budget = 0;
 static size_t g_res_used = 0;
 static long g_res_evict = 0, g_res_hit = 0, g_res_miss = 0;
+
+
 static size_t  g_res_bytes[WUBU_RES_SLOTS];
 /* Stable identity (tensor file offset + element offset) beside the host-pointer key. The pointer key is not an
  * identity for expert slices: the engine stages a miss into a per-call buffer that the allocator hands back at the
@@ -3738,4 +3742,15 @@ WUBU_EXPORT int wubu_cuda_selftest_iq2_run(int type, const void *h_w, size_t wby
     cudaFree(d_w); cudaFree(d_q8); cudaFree(d_y);
     if (sync != cudaSuccess) return -5;
     return rc;
+}
+
+/* Exported so the engine can report what the resident tier actually did, instead of the tier being a black box with a
+ * hit rate nobody measured. Called at exit under IN2_GPU_STATS. */
+WUBU_EXPORT void wubu_cuda_res_stats(long *hit, long *miss, long *evict, long *slots, long *budget_mb)
+{
+    if (hit) *hit = g_res_hit;
+    if (miss) *miss = g_res_miss;
+    if (evict) *evict = g_res_evict;
+    if (slots) *slots = g_res_n;
+    if (budget_mb) *budget_mb = (long) (g_res_budget / (1024 * 1024));
 }

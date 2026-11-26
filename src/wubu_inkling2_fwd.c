@@ -312,6 +312,21 @@ extern const void *wubu_iq2s_grid_bytes(void);
 extern const void *wubu_iq3s_grid_bytes(void);
 extern const void *wubu_iq2xxs_ksigns_bytes(void);
 
+/* The resident tier was a black box with a hit rate nobody had measured; the lock fix makes its counters meaningful,
+ * so report them at exit instead of guessing whether an expert cache can pay. */
+static void in2_gpu_stats_dump(void)
+{
+    typedef void (*st_sig)(long *, long *, long *, long *, long *);
+    void *hh = (void *) (size_t) GetModuleHandleA("wubu_cuda.dll");
+    if (!hh) return;
+    st_sig f = (st_sig) (void *) (size_t) GetProcAddress((void *) hh, "wubu_cuda_res_stats");
+    if (!f) return;
+    long h = 0, m = 0, ev = 0, sl = 0, b = 0;
+    f(&h, &m, &ev, &sl, &b);
+    fprintf(stderr, "RESSTAT hit=%ld miss=%ld evict=%ld slots=%ld budget=%ldMB rate=%.1f%%%c",
+            h, m, ev, sl, b, (h + m) ? 100.0 * (double) h / (double) (h + m) : 0.0, 10);
+}
+
 static void in2_gpu_init(void)
 {
     if (in2_gpu_state) return;
@@ -346,6 +361,7 @@ static void in2_gpu_init(void)
         iq2xs_sig t2 = (iq2xs_sig) (void *) (size_t) GetProcAddress(h, "wubu_cuda_upload_tables_iq2xs");
         (void) t2;
     }
+    if (getenv("IN2_GPU_STATS")) atexit(in2_gpu_stats_dump);
     in2_gpu_state = 1;
 }
 
