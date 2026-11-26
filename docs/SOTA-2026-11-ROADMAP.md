@@ -1234,3 +1234,27 @@ WHAT TO MEASURE FIRST, before any code: `IN2_KV_POS=65536 ./gen_fast.exe 2 ...` 
 WorkingSetSize after a real long-prompt run is the residency check rule 60 demands - a calloc reservation is not
 residency. Those two numbers give the honest starting point; the spec above is written so that the same command reports
 the improvement afterwards.
+
+### Spec de-risked: no caller holds two rows of the same KV array
+
+q8 KV spec de-risked: one dequantise-on-read scratch per ARRAY is sufficient
+
+Step 4 of the spec carried the risk that would kill it - if any caller held a KV row pointer across another read from
+the same array, a single dequantise-on-read scratch would silently corrupt the first row. Checked every call site:
+
+    fullseq.c:239-240   ck = in2_kv_k(...) AND cv = in2_kv_v(...) held together   <- different arrays, safe
+    fullseq.c:301,319   kbp / vbp read and consumed within one iteration
+    fwd.c:1263,1270     ck, cv as above
+    fwd.c:1280,1281     ck, cv as above
+    fwd.c:1338-1339     debug-only (IN2_KROW)
+
+No site holds two rows of the SAME array, so two scratch rows - one for K, one for V - are sufficient, and the
+one-row-per-array dequantise-on-read in the spec stands as written. That was the only structural risk in the change;
+the rest is mechanical (quantiser copy from the reference, row_bytes_q through in2_kv_bytes, keep kraw/vraw f32).
+
+Standing position, unchanged by this: the throughput half of the goal is done and verified (6.2 tok/s, 1.44x upstream,
+12/12 oracle parity, no phase an order of magnitude under its format's rate). The long-context half needs this feature
+built - measured today at 4,608 / 8,704 / 16,896 MB for 64k / 128k / 256k with f32 KV, so the box tops out near 64k until
+q8 lands. The spec is complete enough to execute in one session with the reference gate already chosen (-ctk q8_0), and
+that is the right place to stop: the remaining work is a multi-file format change, and this session has shown eight
+times what happens when such a change is written faster than it can be verified.
