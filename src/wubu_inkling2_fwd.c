@@ -405,8 +405,19 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                                 ? (n_in / 32) * (int) sizeof(in2_q8_0_blk)
                                 : (n_in / 256) * (int) sizeof(in2_q8k_blk);
                             const clock_t _g0 = clock();
-                            if (in2_gpu_resident(ty_mv, src, (size_t) rb * (size_t) n_out, actbuf, act_bytes,
-                                                 y, n_in, n_out, (int64_t) rb) == 0) {
+                            const int g_rc = in2_gpu_resident(ty_mv, src, (size_t) rb * (size_t) n_out, actbuf,
+                                                              act_bytes, y, n_in, n_out, (int64_t) rb);
+                            /* A refusal must never be silent: the first attempt at this path reported success
+                             * while the head returned zeros, and the only visible symptom was id=0 logit=0. */
+                            if (g_rc != 0 && getenv("IN2_GPU_TRACE")) {
+                                static int warned[256];
+                                if (ty_mv >= 0 && ty_mv < 256 && !warned[ty_mv]) {
+                                    warned[ty_mv] = 1;
+                                    fprintf(stderr, "GPU refused ty=%d rc=%d n_in=%d n_out=%d (%s)\n",
+                                            ty_mv, g_rc, n_in, n_out, t->info->name);
+                                }
+                            }
+                            if (g_rc == 0) {
                                 gpu_done = 1;
                                 in2_gpu_sec += (double) (clock() - _g0) / (double) CLOCKS_PER_SEC;
                                 if (in2_gpu_calls == 0)
@@ -1553,7 +1564,27 @@ int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
                             ap[i] = (unsigned char *) act + ablk * (size_t) nab * (size_t) (g + i);
                             op[i] = Y + (size_t) (g + i) * n_out;
                         }
-                        wubu_iq_rows(ty, src, (size_t) rb, n_in, ap, nn, op, 0, n_out);
+                        /* The attention projections arrive here, not through in2_matvec_quant, so the resident
+                         * tier needs its own hook at this call site too. Only nn==1 (a decode step) is taken:
+                         * the resident entry runs the single-token kernel, and a prefill batch would need the
+                         * multi-token one. */
+                        int gpu_took = 0;
+                        if (nn == 1 && getenv("IN2_GPU_DENSE") && t && t->info && t->info->name[0] &&
+                            strstr(t->info->name, "exps") == NULL) {
+                            in2_gpu_init();
+                            if (in2_gpu_state == 1) {
+                                const int ab = (int) (ablk * (size_t) nab);
+                                if (in2_gpu_resident(ty, src, (size_t) rb * (size_t) n_out, ap[0], ab,
+                                                     op[0], n_in, n_out, (int64_t) rb) == 0) {
+                                    gpu_took = 1;
+                                    if (in2_gpu_calls == 0)
+                                        fprintf(stderr, "GPU tier: resident dense matvec engaged (%s)\n",
+                                                t->info->name);
+                                    in2_gpu_calls += 1;
+                                }
+                            }
+                        }
+                        if (!gpu_took) wubu_iq_rows(ty, src, (size_t) rb, n_in, ap, nn, op, 0, n_out);
                     }
                     if (ty >= 0 && ty < 256) {
                         in2_ty_sec[ty] += (double) (clock() - _q0) / (double) CLOCKS_PER_SEC;
