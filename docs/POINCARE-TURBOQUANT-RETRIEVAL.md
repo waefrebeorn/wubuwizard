@@ -870,3 +870,56 @@ So the highest-leverage GPU work is not "port the IQ2 kernel" and not "wire up M
 
 That ordering is driven by measured bytes and measured formats, and it puts the GPU on the 41 % that is cheapest to
 implement before the 45 % that is hardest.
+
+## Measured per-format throughput: the 8x gap is in two formats that are 35 % of the work
+
+`IN2_TIMETY=1` on a 49-token prefill gives per-type cost accounting straight from the matvec paths:
+
+    type                     calls     time    share     rate
+    42  Q2_0                  1618   2.049 s   22.0 %   16.76 GOPS
+    16  IQ2_XXS                779   1.626 s   17.5 %   21.76 GOPS
+    17  IQ2_XS                 712   1.471 s   15.8 %   22.63 GOPS
+    19  IQ1_S                  481   1.342 s   14.4 %   12.40 GOPS
+    40  NVFP4                  677   1.230 s   13.2 %   12.69 GOPS
+    22  IQ2_S                  323   0.853 s    9.2 %   17.08 GOPS
+    8   Q8_0                  2849   0.448 s    4.8 %   94.54 GOPS
+    14  Q6_K                   686   0.116 s    1.2 %  104.77 GOPS
+    13  Q5_K                   252   0.043 s    0.5 %  100.48 GOPS
+    12  Q4_K                   224   0.031 s    0.3 %  104.88 GOPS
+    23  IQ4_XS                  25   0.086 s    0.9 %    5.39 GOPS
+    18  IQ3_XXS                 21   0.009 s    0.1 %  115.61 GOPS
+
+Two facts matter here and they point the same way.
+
+**1. The K-quants run at ~105 GOPS and the low-bit formats run at 12-23 GOPS: an 8x gap.** Q4_K, Q5_K, Q6_K and Q8_0
+are a small fraction of the time precisely because they are fast, not because there is little of them - Q8_0 makes 2849
+calls, more than any other type, and still costs only 4.8 %.
+
+**2. NVFP4 + Q2_0 are 35.2 % of the time at 12.69 and 16.76 GOPS**, and they are plain formats - no grid lookup, no sign
+masks. That is the largest single block of time in the engine and the least defensible one.
+
+### Why they are slow, read off the source
+
+`dot_row_q2_0_avx2` (wubu_dequant_fp4.c:163) walks a 64-element block in **eight separate groups of 8**:
+
+    broadcast one 16-bit word -> _mm256_srlv_epi32 by {0,2,...,14} -> and 3 -> sub 1 -> cvtepi32_ps -> fmadd_ps(x)
+
+that is a variable shift, an add, a sub, an int-to-float convert and an FMA per 8 elements, **plus a horizontal
+reduction per block** (`_mm_add_ps` + two `_mm_hadd_ps` + scalar accumulate, once per 64 elements). Compare the K-quants,
+which use integer `_mm256_maddubs_epi16` / `_mm256_madd_epi16` with int32 accumulation: no per-element float conversion,
+no per-block reduction, 32 elements retired per instruction.
+
+The values themselves are exactly `{-1,0,1,2}`, so the convert-and-subtract is pure overhead - a 4-entry
+`_mm256_permutevar8x32_ps` table gives the same floats bit-exactly, and the reduction can be hoisted out of the block
+loop into one final horizontal sum.
+
+So the concrete next change, in order:
+
+1. Rewrite `dot_row_q2_0_avx2` and the NVFP4 equivalent in the K-quant shape: keep a persistent vector accumulator across
+   the whole row, replace `cvtepi32_ps`+`sub` with the permutation table, and reduce once at the end.
+2. A/B it behind an env switch and gate on both **rate** (`IN2_TIMETY`) and **parity** (the 12-token oracle), because
+   changing accumulation order changes rounding and parity is the invariant.
+3. Only if the integer-maddubs restructure is needed after that, quantise the activations once per matvec as the Q8_0
+   path already does - that is the step that would close a full 6x rather than a fraction of it.
+
+Everything above is measured on this box, in this engine, on the model's real tensor layout.
