@@ -3959,7 +3959,8 @@ __global__ void iq2xxs_matvec_8col_kernel(const uint8_t * __restrict__ w,
  * bytes, bring both results back and report the largest difference. Wired to nothing; this exists so the tile can be
  * proven equivalent (or not) before any dispatch decision is made.
  * Deterministic synthetic data with a finite reference: fp16 scales forced to 1.0h so the comparison is about values. */
-WUBU_EXPORT int wubu_cuda_iq2x8_check(int K, int n_cols, int M, double *out_maxdiff, double *out_maxref)
+WUBU_EXPORT int wubu_cuda_iq2x8_check(int K, int n_cols, int M, double *out_maxdiff, double *out_maxref,
+                                     double *out_ms_mrow, double *out_ms_8col)
 {
     if (K <= 0 || n_cols <= 0 || M <= 0 || (K % QK_K) != 0) return -1;
     const int nblocks = K / QK_K;
@@ -3993,14 +3994,38 @@ WUBU_EXPORT int wubu_cuda_iq2x8_check(int K, int n_cols, int M, double *out_maxd
 
     {
         const int threads = 256, wpb = threads / 32;
-        int blocks = (n_cols + wpb - 1) / wpb;
-        iq2xxs_matvec_mrow_kernel<<<blocks, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_a,
+        const int b_mrow = (n_cols + wpb - 1) / wpb;
+        int b_8c = (n_cols / 8 + wpb - 1) / wpb;
+        if (b_8c < 1) b_8c = 1;
+
+        /* one untimed pass each, so first-touch faults and module load are not charged to either */ 
+        iq2xxs_matvec_mrow_kernel<<<b_mrow, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_a,
                                                       (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
-        blocks = (n_cols / 8 + wpb - 1) / wpb;
-        if (blocks < 1) blocks = 1;
-        iq2xxs_matvec_8col_kernel<<<blocks, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_b,
-                                                       (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
+        iq2xxs_matvec_8col_kernel<<<b_8c, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_b,
+                                                     (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
         if (cudaDeviceSynchronize() != cudaSuccess) { rc = -4; goto cleanup; }
+
+        cudaEvent_t e0, e1;
+        if (cudaEventCreate(&e0) != cudaSuccess || cudaEventCreate(&e1) != cudaSuccess) { rc = -5; goto cleanup; }
+        cudaEventRecord(e0, 0);
+        iq2xxs_matvec_mrow_kernel<<<b_mrow, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_a,
+                                                      (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
+        cudaEventRecord(e1, 0);
+        if (cudaEventSynchronize(e1) != cudaSuccess) { cudaEventDestroy(e0); cudaEventDestroy(e1); rc = -4; goto cleanup; }
+        float ms_m = 0.0f;
+        cudaEventElapsedTime(&ms_m, e0, e1);
+
+        cudaEventRecord(e0, 0);
+        iq2xxs_matvec_8col_kernel<<<b_8c, threads>>>((const uint8_t *) d_w, (const c_q8_k *) d_q8, (float *) d_b,
+                                                    (int64_t) row_bytes, nblocks, n_cols, M, nblocks);
+        cudaEventRecord(e1, 0);
+        if (cudaEventSynchronize(e1) != cudaSuccess) { cudaEventDestroy(e0); cudaEventDestroy(e1); rc = -4; goto cleanup; }
+        float ms_8 = 0.0f;
+        cudaEventElapsedTime(&ms_8, e0, e1);
+        cudaEventDestroy(e0); cudaEventDestroy(e1);
+
+        if (out_ms_mrow) *out_ms_mrow = (double) ms_m;
+        if (out_ms_8col) *out_ms_8col = (double) ms_8;
     }
     if (cudaMemcpy(h_a, d_a, (size_t) M * n_cols * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) goto cleanup;
     if (cudaMemcpy(h_b, d_b, (size_t) M * n_cols * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) goto cleanup;

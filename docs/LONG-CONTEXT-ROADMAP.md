@@ -286,3 +286,27 @@ no barriers, activation loads hoisted into registers and reused across eight col
 is FASTER - parity and speed are separate gates and only the first has been passed. Next: time both kernels at
 2048x2304x8 and require a win before wiring; then swap the inner `__dp4a` pair for `mma.sync.m16n8k32.s8` on this tile,
 where the activation fragment is already resident and the unpack already produces per-column int8.
+
+## Speed gate PASSED, and it exposes that the 30.8 GMAC/s figure was measuring copies, not the kernel
+
+Timed with cudaEvents inside `wubu_cuda_iq2x8_check`, same device bytes, after an untimed warm pass:
+
+    M= 8   mrow  0.11 ms  373.62 GMAC/s    8col  0.07 ms  648.00 GMAC/s   1.73x   BIT-IDENTICAL
+    M=64   mrow  0.83 ms  409.68 GMAC/s    8col  0.47 ms  721.25 GMAC/s   1.76x   BIT-IDENTICAL
+
+Two conclusions, both of which change the plan:
+
+1. **The 8-column tile is faster as well as exact** - 1.73-1.76x over the shipping kernel, flat across M, bit-identical
+   with a finite reference (1.266e+04). So the restructure that failed on traffic grounds succeeds on column blocking:
+   the win was never shared memory (which cost 84 %), it was giving each warp eight columns so the activation load and the
+   loop overhead amortise.
+2. **373-721 GMAC/s is not the 30.8 GMAC/s the MoE path reported, and the difference is not the maths.** Both measure
+   42.5M MACs; this run does it in 0.11 ms, the MoE path in 1.38 ms. The extra 1.27 ms is the eight host-to-device slab
+   copies (10.4 MB over PCIe) that `wubu_cuda_moe_batch` performs inside its timed region. **The MoE GPU path was never
+   kernel-bound - it was upload-bound**, which is the same conclusion the D2D-gather experiment reached from the other
+   direction and which the resident tier exists to fix.
+
+So LP-05 is smaller than advertised: the kernel already exceeds the 300 GMAC/s gate that was set for the IMMA work, and
+the measured bottleneck in the path that uses it is slab upload. Correct order is now: (a) wire the 8-column kernel,
+1.7x for free and exact, (b) keep slabs resident so the copies stop, (c) only then consider `mma.sync` on a kernel that
+may no longer be the binding constraint.
