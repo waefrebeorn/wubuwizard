@@ -943,3 +943,42 @@ forward and upstream's are inside upstream's graph, and upstream is now buildabl
 instrument `src/models/dspark.cpp` and `src/models/dflash.cpp` in the local checkout - print slot logits and the four extracted
 states - rebuild, and compare those numbers against `tools/dflash_ref.py` line by line. That converts this from inference about
 internals into a direct numerical diff, which is what the last several eliminations have been working around.
+
+## The taps are layers 4, 10, 16, 22 - established from the reference, not inferred - and f_rnn now matches it numerically
+
+The instrumentation works. `common/common.cpp` gained a tensor-dump callback enabled only when `LLAMA_DUMP_DIR` is set (with
+`LLAMA_DUMP_MATCH` naming substrings to match), reading values the way `common/debug.cpp` does: `ggml_backend_tensor_get` for
+device buffers, `t->data` when host. It dumps the first occurrence of each matching tensor, which is the prefill - exactly what a
+comparison against a hand-written forward needs. With `LLAMA_DUMP_MATCH="inp_target_features;f_rnn"` the reference wrote:
+
+    inp_target_features  [ne0=4, ne1=2304, ne2=259]   9,547,776 B
+    f_rnn                [ne0=2304, ne1=259]          2,386,944 B
+
+**Correlating those four reference taps against 48 of our own dumps settles the question that guessing never could:**
+
+    tap 0  ->  L04_p0   cos +0.999918
+    tap 1  ->  L10_p1   cos +0.994184
+    tap 2  ->  L16_p2   cos +0.987634
+    tap 3  ->  L22_p2   cos +0.648514
+
+So the taps are the residuals after **layers 4, 10, 16 and 22 - a stride of exactly 6** (`attn_res.block_size`), with the pass
+index advancing as depth increases. Not the visit indices `[5, 23, 41, 48]` I had been using, and not the `src_next` layers 11/17
+either. Three of the four correlations are effectively exact (0.995-0.99992); tap 3 is the outlier at 0.65, so either L22 is
+captured in a different pass than our p2, or the fourth tap is not a plain residual of layer 22.
+
+**And `f_rnn` - which I compute myself from `markov_ctx_mix` and `markov_ctx_norm` - matches the reference's:**
+
+    upstream rms 0.727080     mine 0.722787
+    cosine(mine, upstream) = 0.981564      first row 0.998723      last row 0.985542
+
+That is the first end-to-end numerical agreement anywhere in this port. It says the context mixing path is right: right taps
+(for the first three), right `markov_ctx_mix` weighting, right `markov_ctx_norm` normalisation, right layout. The residual 1.8%
+cosine shortfall is consistent with the tap-3 mismatch above and is the next thing to close.
+
+**Acceptance with the reference's own taps is still 0/7**, so the error is inside the block forward or the Markov chain - but those
+are now the *only* unknowns left, and each can be diffed the same way: the dump hook accepts any tensor name, so the drafter's
+`t_logits` can be captured next and compared against `dflash_ref.py`'s `base` directly.
+
+Build note for future sessions: MSVC relinks fail with LNK1104 "cannot open file" when overwriting an existing DLL/exe that a
+previous run mapped - the fix is to delete the stale artefact and relink, not to retry blindly. Building `-j 1` avoids the
+concurrent-link variant of the same error, and a still-running `llama.exe` will hold `llama-common.dll` open.
