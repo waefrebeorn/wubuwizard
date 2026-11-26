@@ -1766,3 +1766,25 @@ belonging to this repo, whose API differs (`wubu_hive_init` vs `wubu_hive_new`).
 build; the repo's real header is `include/wubu_hive.h`, which was never touched. Lesson: before "vendoring" a file from a
 sibling repo, `git ls-files` the destination - two projects in the same family can both have a `wubu_hive.c` with different
 signed APIs, and the one in the tree is the one that must win.
+
+## Rewindable row tags landed; the conv history is the second half of a rollback
+
+`in2_kv_t` now carries `kpostag`/`vpostag`, one int per row: `pos+1` = the row holds that position, `-1` = deliberately
+invalidated, `0` = never written (behaves exactly as before). The `_post_` stores tag, `in2_kv_k`/`in2_kv_v` refuse a row whose
+tag names a different position, and `in2_kv_rewind(kv, from_pos)` invalidates the range, pulls `n_stored` back to `from_pos`,
+and drops the decoded-mirror visit tags for the same range.
+
+Gated: **15/15 identical**. That is the expected result and it is the useful one - every live row's tag equals the position it
+holds, so the guard never fires on the existing path. The tags are pure added capability, not a behaviour change.
+
+**What a rollback still needs, and why the tags alone are not enough:** the K/V rows are not the only per-position state. The
+4-tap causal conv keeps three rows per visit in `kraw`/`vraw`, advanced by `memmove` inside `in2_kv_store_row_k/v` and
+`in2_kv_store_raw`. A verification pass over K+1 tokens shifts that history K+1 times, and invalidating KV rows does not undo
+it - the next pass would convolve against draft rows. The fix is small and bounded: those buffers are `3 x dim` per visit
+(884 KB at 72 visits x 1024 dim), so a pre-verification snapshot plus a restore on reject is cheap. **Do that before retrying
+the draft loop** - otherwise the same five-tokens-then-wrong signature will reappear and the tags will be wrongly blamed.
+
+Provenance note: the tag scheme is what Strata does with `slot_pos_[pos % kRing] = (epoch << 32) | pos`, but ours is per-row
+rather than per-slot and uses a bounded range clear instead of an epoch bump, so a rejected draft costs O(visits x K) writes
+rather than invalidating the whole cache. For K <= 8 that is ~1.5 K writes per reject, which is nothing next to a 172 ms
+forward.

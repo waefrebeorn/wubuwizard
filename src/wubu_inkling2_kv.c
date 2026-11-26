@@ -108,6 +108,9 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
      * "quantised" guard keeps working; tq != NULL is what distinguishes the two formats. */
     const char *tqe = getenv("IN2_KV_TQ");
     const size_t nrows = elems / (size_t)dim;
+    kv->n_row_total = nrows;
+    kv->kpostag = (int *)calloc(nrows, sizeof(int));
+    kv->vpostag = (int *)calloc(nrows, sizeof(int));
     /* Measured with the f32 shadow check (IN2_TQ_VERIFY): a stored row has norm ~24.87 and quantising it at b=4
      * leaves 0.31-0.39 absolute error (1.6 %), which is enough to change greedy output on this model; at b=6 it is
      * ~0.12 (0.5 %) and the answer is correct. So clamp below 6 rather than emit a wrong answer. */
@@ -196,6 +199,7 @@ void in2_kv_free(in2_kv_t *kv)
     wubu_tqvec_free(kv->tq); free(kv->kn); free(kv->vn); free(kv->encsc);
     free(kv->kshad); free(kv->vshad);
     free(kv->kmir); free(kv->vmir); free(kv->kitag); free(kv->vitag);
+    free(kv->kpostag); free(kv->vpostag);
     memset(kv, 0, sizeof *kv);
 }
 
@@ -203,6 +207,10 @@ float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
 {
     if (!kv || (!kv->k && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->kpostag && el < kv->n_row_total) {
+        const int tg = kv->kpostag[el];
+        if (tg == -1 || (tg != 0 && tg != pos + 1)) return NULL;
+    }
     if (kv->kmir && kv->kitag && pos < kv->n_pos_max && kv->kitag[pos] == visit)
         return kv->kmir + (size_t) pos * (size_t) kv->dim;   /* already decoded for this visit */
     if (kv->tq) {
@@ -241,6 +249,10 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 {
     if (!kv || (!kv->v && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->vpostag && el < kv->n_row_total) {
+        const int tg = kv->vpostag[el];
+        if (tg == -1 || (tg != 0 && tg != pos + 1)) return NULL;
+    }
     if (kv->vmir && kv->vitag && pos < kv->n_pos_max && kv->vitag[pos] == visit)
         return kv->vmir + (size_t) pos * (size_t) kv->dim;   /* already decoded for this visit */
     if (kv->tq) {
@@ -279,6 +291,7 @@ void in2_kv_store_post_k(in2_kv_t *kv, int visit, int pos, const float *row)
 {
     if (!kv || (!kv->k && !kv->q8) || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->kpostag && el < kv->n_row_total) kv->kpostag[el] = pos + 1;
     if (kv->tq) {
         double n2 = 0.0;
         for (int i = 0; i < kv->dim; ++i) n2 += (double)row[i] * (double)row[i];
@@ -316,6 +329,7 @@ void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
 {
     if (!kv || (!kv->v && !kv->q8) || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->vpostag && el < kv->n_row_total) kv->vpostag[el] = pos + 1;
     if (kv->tq) {
         double n2 = 0.0;
         for (int i = 0; i < kv->dim; ++i) n2 += (double)row[i] * (double)row[i];
@@ -333,6 +347,25 @@ void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
 
 /* A sliding ring slot is only valid while it still holds the position asked for; once the window has moved
  * past it the slot belongs to a newer key. Callers use this to fall back instead of attending to stale rows. */
+void in2_kv_rewind(in2_kv_t *kv, int from_pos)
+{
+    if (!kv || from_pos < 0) return;
+    const int hi = kv->n_stored;
+    for (int pos = from_pos; pos < hi; ++pos) {
+        for (int v = 0; v < kv->n_visit; ++v) {
+            const size_t e2 = in2_kv_off(kv, v) + (size_t)in2_kv_row_slot(kv, v, pos);
+            if (e2 >= kv->n_row_total) continue;
+            if (kv->kpostag && kv->kpostag[e2] == pos + 1) kv->kpostag[e2] = -1;
+            if (kv->vpostag && kv->vpostag[e2] == pos + 1) kv->vpostag[e2] = -1;
+        }
+    }
+    if (kv->n_stored > from_pos) kv->n_stored = from_pos;
+    for (int pos = from_pos; pos < hi && pos < kv->n_pos_max; ++pos) {
+        if (kv->kitag) kv->kitag[pos] = -1;
+        if (kv->vitag) kv->vitag[pos] = -1;
+    }
+}
+
 int in2_kv_resident(const in2_kv_t *kv, int pos)
 {
     if (!kv || pos < 0 || pos >= kv->n_stored) return 0;

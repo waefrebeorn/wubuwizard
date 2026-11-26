@@ -32,12 +32,20 @@ typedef struct {
      * id that filled the slot (-1 empty), so a new visit invalidates every slot for free. */
     float *kmir, *vmir;
     int   *kitag, *vitag;
+    /* Rewindable row tags, one per row: pos+1 = this row holds that position, -1 = deliberately invalidated,
+     * 0 = never written (behaves as before). The slot is pos % cap, so without a tag a ring slot silently serves
+     * whatever position last wrapped onto it - which is what broke speculative verification. */
+    int   *kpostag, *vpostag;
+    size_t n_row_total;
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */
 extern int g_kv_window;   /* ring size of the K/V cache, 0 = linear */
 in2_kv_t *in2_kv_current(int *visit, int *pos0);
 void      in2_kv_advance(void);
+/* Invalidate every row at or beyond from_pos and pull n_stored back. O(visits x range); the range is a rejected
+ * draft, so single digits in practice. from_pos == n_stored is a no-op. */
+void      in2_kv_rewind(in2_kv_t *kv, int from_pos);
 void  in2_kv_begin(int pos0);
 void  in2_kv_store_row_k(in2_kv_t *kv, int visit, const float *row);
 void      in2_kv_store_row_v(in2_kv_t *kv, int visit, const float *row);
