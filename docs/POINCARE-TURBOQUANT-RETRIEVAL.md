@@ -1614,3 +1614,25 @@ reverted, not kept.
 
 Current state is green and committed: oracle 12/12 identical for CPU-only and dense+experts, expert rows 242/242 exact at
 8 threads, batched entry present and priced but not yet called by the engine.
+
+## Batched gate_up wired: exact, and slower - because the gather is host-to-device
+
+`IN2_MOE_BATCH=1` now routes a layer's `gate_up` through `wubu_cuda_moe_batch`: gather the active slabs, one matvec,
+distribute into the per-expert slices; `down` stays per expert. Opt-in, default untouched.
+
+    oracle 12/12 identical                             CPU only | IN2_GPU_DENSE=1 | + IN2_MOE_BATCH=1
+    24-token decode   CPU 5452 | dense 5120 | per-expert MoE 5509 | batched MoE 5804 ms
+
+Exact and **slower than everything**. The isolation harness said 2.39x and it still lost, because the harness measured
+a launch-count change with the slabs already in hand, while the engine gathers them over PCIe: 8 slabs x 1.31 MB x 24
+layers = **250 MB per token** of host-to-device traffic at a few GB/s, which is ~50 ms/token - more than the 192 launches
+ever cost. Ten minutes of measurement killed a change that a clean micro-benchmark had blessed, which is the whole reason
+the micro-benchmark was run in isolation first and the wiring done behind a flag.
+
+The fix is the one already written into the plan as step 4 and it is not optional: **gather device-to-device**. At a 92 %
+hit rate the slabs are already in resident slots, so the batch entry should take the idents, look up the device pointers
+it already owns, and either copy D2D (~500 GB/s, ~20 us per layer) or run the per-slab addresses directly without
+gathering at all. Until that exists, `IN2_MOE_BATCH` is a measured dead end and stays off.
+
+State: default and dense paths bit-identical to the oracle; the batched path is exact but slower; 12/12 and 242/242
+hold everywhere they held before.

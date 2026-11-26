@@ -300,6 +300,7 @@ static void *in2_gpu_res_fn;
  * experts collide on the key and the second is served the first one's bytes (measured: 66 of 153 src pointers reused
  * within a single tensor, device rel error 3.7-5.3 on the affected rows). */
 static void *in2_gpu_res_id_fn;
+static void *in2_gpu_batch_fn;   /* batched expert matvec: one launch per layer instead of one per expert */
 static int   in2_gpu_state;      /* 0 = untried, 1 = ready, -1 = not available */
 static double in2_gpu_sec;
 static int64_t in2_gpu_calls;
@@ -336,6 +337,7 @@ static void in2_gpu_init(void)
     if (!h) return;
     in2_gpu_res_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec");
     in2_gpu_res_id_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec_id");
+    in2_gpu_batch_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_moe_batch");
     /* IQ2_S needs its 1024-entry grid on the device; without it the kernel writes zeros and returns success - which is
      * exactly what the expert rows measured (ty=22 rel=1.000 over 56 rows). IQ3_S rides along in the same export. */
     {
@@ -1878,6 +1880,33 @@ static void moe_hist_dump(void)
     }
 }
 
+/* One device launch for a whole layer's active experts. Priced in isolation at 2.39x against per-expert calls and
+ * bit-identical to them (tools/moe_batch_price.c), which matters because the per-expert path is 192 launches per token. */
+static int in2_gpu_moe_batch(int type, const void *const *w, int n_exp, size_t wbytes_each,
+                             const void *act, int act_bytes, float *y, int K, int n_rows)
+{
+    if (!in2_gpu_batch_fn) return -1;
+    typedef int (*sig_t)(int, const void *const *, int, size_t, const void *, int, float *, int, int);
+    return ((sig_t) in2_gpu_batch_fn)(type, w, n_exp, wbytes_each, act, act_bytes, y, K, n_rows);
+}
+
+/* The slab for one expert: mapped when the file is mapped, else read into the caller's scratch. NULL means "let the
+ * caller take the existing per-expert path", never a silent zero. */
+static const unsigned char *in2_expert_slab(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+                                            int ty, int n_in, int n_out, unsigned char *scratch, size_t *wbytes)
+{
+    const int64_t rb = gguf_raw_size(ty, n_in);
+    const int64_t boff = (elem_off == 0) ? 0 : gguf_raw_size(ty, elem_off);
+    if (rb <= 0 || boff < 0) return NULL;
+    wubu_in2_tensor_t sh = *t;
+    sh.file_offset = t->file_offset + boff;
+    const unsigned char *msrc = wubu_inkling2_map_ptr(ctx, &sh);
+    *wbytes = (size_t) rb * (size_t) n_out;
+    if (msrc) return msrc;
+    if (wubu_inkling2_read(ctx, &sh, scratch, (int64_t) *wbytes) != WUBU_INKLING2_OK) return NULL;
+    return scratch;
+}
+
 int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
             int il, const float *x, int n_tok, float *out)
 {
@@ -1939,6 +1968,63 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
          * that gives a thread a whole contiguous expert block to stream, which is what this phase is bound by.
          * Each k writes its own g/act/eo slice, so nothing races, and the weighted sum stays a SERIAL loop in k
          * order - the same expression in the same order as the one-expert-at-a-time version, so the bits match. */
+        /* Batched expert gate_up: gather the layer's active slabs and issue ONE matvec for all of them. Opt-in because
+         * it changes the hottest loop in the model; the per-expert path below stays the default and the fallback. */
+        if (getenv("IN2_MOE_BATCH") && got > 1) {
+            const int ty_b = (L->gate_up.info) ? L->gate_up.info->ggml_type : -1;
+            in2_gpu_init();
+            if ((ty_b == 16 || ty_b == 22) && in2_gpu_state == 1 && in2_gpu_batch_fn) {
+                const size_t rb_b = (size_t) gguf_raw_size(ty_b, d);
+                const size_t wb_b = rb_b * (size_t) (2 * DFF);
+                const void **srcs = (const void **) calloc((size_t) got, sizeof(void *));
+                unsigned char *scr = (unsigned char *) malloc(wb_b * (size_t) got);
+                float *gy = (float *) malloc((size_t) got * (size_t) (2 * DFF) * sizeof(float));
+                int okall = (srcs && scr && gy) ? 1 : 0;
+                for (int k = 0; okall && k < got; ++k) {
+                    size_t wbk = 0;
+                    const unsigned char *sp = in2_expert_slab(ctx, &L->gate_up, (int64_t) idx[k] * 2 * DFF * d,
+                                                              ty_b, d, 2 * DFF, scr + wb_b * (size_t) k, &wbk);
+                    if (!sp || wbk != wb_b) okall = 0; else srcs[k] = sp;
+                }
+                if (okall) {
+                    void *aq = malloc(((size_t) d / 256) * sizeof(in2_q8k_blk));
+                    const int ab = (d / 256) * (int) sizeof(in2_q8k_blk);
+                    if (aq) {
+                        in2_q8k_quantise(x + (size_t) t * d, d / 256, (in2_q8k_blk *) aq);
+                        okall = (in2_gpu_moe_batch(ty_b, srcs, got, wb_b, aq, ab, gy, d, 2 * DFF) == 0);
+                    } else okall = 0;
+                    free(aq);
+                }
+                if (okall) {
+                    int bad = 0;
+#ifdef _OPENMP
+                    #pragma omp parallel for num_threads(in2_threads()) schedule(dynamic) reduction(|:bad)
+#endif
+                    for (int k = 0; k < got; ++k) {
+                        const int e = idx[k];
+                        const float gsc = gs ? gs[e] : 1.0f;
+                        float *gk = g + (size_t) k * 2 * DFF;
+                        float *ak = act + (size_t) k * DFF;
+                        float *ok = eo + (size_t) k * d;
+                        for (int i = 0; i < 2 * DFF; ++i) gk[i] = gy[(size_t) k * 2 * DFF + i] * gsc;
+                        in2_expert_act(gk, gk + DFF, DFF, ak);
+                        /* down still goes per expert: its activation differs per expert, so batching it needs an
+                         * act_stride the entry does not have yet (plan step 3). */
+                        if (in2_matvec_quant(ctx, &L->down, (int64_t) e * d * DFF, ak, d, DFF, ok) != WUBU_INKLING2_OK) bad = 1;
+                    }
+                    free((void *) srcs); free(scr); free(gy);
+                    if (bad) { rc = WUBU_INKLING2_ERR_IO; break; }
+                    for (int k = 0; k < got; ++k) {
+                        const int e = idx[k];
+                        const float dsc = ds ? ds[e] : 1.0f;
+                        const float *ok = eo + (size_t) k * d;
+                        for (int i = 0; i < d; ++i) out[(size_t) t * d + i] += w[k] * ok[i] * dsc;
+                    }
+                    continue;
+                }
+                free((void *) srcs); free(scr); free(gy);
+            }
+        }
         if (!getenv("IN2_STAGE") && got > 1 && in2_threads() > 1) {
             int bad = 0;
 #ifdef _OPENMP
