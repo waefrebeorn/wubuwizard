@@ -366,6 +366,18 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
      * it is keyed off the type. */
     if (getenv("IN2_TRACE_TY") && t && t->info)
         fprintf(stderr, "matvec ty=%d n_in=%d n_out=%d supported=%d\n", ty_mv, n_in, n_out, wubu_iq_supported(ty_mv));
+    /* Does this function even see the dense projections, and does it see them with a name? The resident tier's gate
+     * requires info->name[0] != 0; if the descriptor arrives with an empty name the gate fails silently and the only
+     * visible symptom is that the tensor is never resident. Print the name itself, not a verdict about it. */
+    if (getenv("IN2_Q_TRACE") && ty_mv >= 0 && ty_mv < 256) {
+        static unsigned char seen[256][2];
+        const int has = (t && t->info && t->info->name[0]) ? 1 : 0;
+        if (!seen[ty_mv][has]) {
+            seen[ty_mv][has] = 1;
+            fprintf(stderr, "Q ty=%d n_in=%d n_out=%d name='%s' hasnamed=%d\n", ty_mv, n_in, n_out,
+                    (t && t->info) ? t->info->name : "(no info)", has);
+        }
+    }
     /* Only types whose bit-identical sweep I have personally re-run go through the kernels. wubu_iq_supported()
      * reports what exists in the translation unit, which is not the same thing as what has been proven: a
      * half-finished type returning 1 silently changed the logit from 29.67 to 22.52, and a 7-logit drift with the

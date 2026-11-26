@@ -692,3 +692,29 @@ would still be "produced", and the only sign would be wrong output.
 That makes the ordering clear and non-negotiable: **a device kernel exists for IQ2_XXS and IQ4_XS only.** Q8_0 (k, v,
 attn_output, attn_rel) and Q6_K (q, attn_gate) each need their own kernel and their own reference check before any of
 them is allowed near the resident tier, and the check must assert non-zero and a numeric error, not just a return code.
+
+### The hook was in the wrong function - and q/k/v were never on the float path
+
+`in2_matvec_nt` is defined at **fwd.c:560**. The function I instrumented earlier, the one whose guard I printed and
+whose call site I hooked, is `in2_matvec_quant_mt` at **fwd.c:1526** - the expert path. That single mistake explains
+several rounds of confusion: the "NT" trace showing only expert types, the resident tier never engaging for q/k/v, and
+the conclusion that the dense projections had no typed path.
+
+The real function already carries its own trace (`IN2_TRACE_NT`), which prints `kernel` or `FLOAT-FALLBACK` per type.
+Run on a decode:
+
+    NT ty=14 n_in=2304 n_out=3072 raw=1 supported=1 verified=1 -> kernel      (attn_q, Q6_K)
+    NT ty=8  n_in=2304 n_out=1024 raw=1 supported=1 verified=1 -> kernel      (attn_k, Q8_0)
+    NT ty=8  n_in=2304 n_out=1024 raw=1 supported=1 verified=1 -> kernel      (attn_v, Q8_0)
+    NT ty=8  n_in=2304 n_out=384  raw=1 supported=1 verified=1 -> kernel      (attn_rel, Q8_0)
+    NT ty=30 n_in=2304 n_out=24   raw=1 supported=0 verified=0 -> FLOAT-FALLBACK (sink)
+    NT ty=8  n_in=3072 n_out=2304 raw=1 supported=1 verified=1 -> kernel      (attn_output, Q8_0)
+
+**Every dense attention projection takes the quantised kernel path, with or without `IN2_FULL_KERNEL`.** The earlier
+statement in this register that q/k/v run on float32 and never enter a typed kernel is therefore **wrong**, and so was
+the 1,836 MB-per-token figure derived from it: that was the size of the borrowed float views, not a traffic measure.
+The only float tensor in this block is `sink` (type 30), which is 24 wide and irrelevant.
+
+What follows is simple and was always available: put the resident hook in `in2_matvec_nt` at **fwd.c:560**, next to its
+`wubu_iq_rows` call, instead of in `in2_matvec_quant_mt`. The destination is ready - Q8_0 is verified at 3.8e-06 and
+Q6_K is the only dense type still lacking a device kernel.
