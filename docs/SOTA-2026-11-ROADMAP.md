@@ -1037,3 +1037,26 @@ Consequence, stated in order of confidence:
 If those phases reach even 6 G w/s the token drops by roughly 0.16 s of the 0.178 s decode step's counterpart in
 prefill terms; the honest statement is that this is the largest single measured anomaly in the engine and it is now
 localised to two named phases with a switch already built to test it.
+
+## Wave 13 - IN2_FULL_KERNEL measured: -19% prefill, 0% decode
+
+IN2_FULL_KERNEL is a 19% PREFILL win with identical tokens, and does nothing for decode
+
+Ran the switch the last commit said to run. It is real, and it is narrower than the phase table first suggested.
+
+    IN2_FULL_KERNEL=0   f_q 0.063  f_kv+conv 0.042  f_gate+wo 0.129   full 0.313 s (prefill token)
+    IN2_FULL_KERNEL=1   f_q 0.005  f_kv+conv 0.009  f_gate+wo 0.097   full 0.183 s
+
+f_q 12.6x faster, f_kv+conv 4.7x, f_gate+wo 1.3x, full-layer total 0.313 -> 0.183 = -42% on the PREFILL token, and the
+whole prefill step 0.707 -> 0.570 s = -19%. Tokens identical throughout: 149876 220 36838 182189 149933 220.
+
+But per-token layer time for pure decode tokens is unchanged: 0.162 / 0.163 / 0.161 without the flag against
+0.164 / 0.166 / 0.160 with it. The switch batches the full layer's q through in2_matvec_nt and that only pays when
+there are multiple tokens to batch - at n_tok = 1 it is the same work either way. The 16-token end-to-end runs
+(default 3.47 then 4.23, flagged 4.68 both times) are consistent with a prefill-only win inside run-to-run noise, and
+the 3.47-vs-4.23 spread on identical binaries is contention, not an effect.
+
+So: worth turning on for prompt ingestion, irrelevant to the decode rate, and NOT the fix for the 20x anomaly. f_gate+wo
+survives at 0.097 s = 1.17 G w/s, still ~16x below the 18.3 G w/s kernel, and still 1.02x across thread counts - it is
+the same class of defect the switch just fixed for q, in a phase the switch does not cover. That is the next target and
+it is one phase wide.
