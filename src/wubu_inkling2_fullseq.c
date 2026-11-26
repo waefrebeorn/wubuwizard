@@ -271,56 +271,72 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     if (!(Wrel && rcl && P && Wsk && rs && bias && sink && logit && alpha && attn_out)) rc = WUBU_INKLING2_ERR_IO;
 
     if (rc == WUBU_INKLING2_OK) {
-        for (int t = 0; t < n_tok; ++t) {
-            /* IN2_FULL_KERNEL: the int8 kernel path the sliding layers already use, instead of the fp32 float path.
-             * Behind a flag because it changes top1 (149876 -> 220) when applied: the engine is inconsistent today -
-             * sliding int8, full fp32 - and which contract it keeps is a decision that needs a text-level A/B, not a
-             * one-token comparison. Default keeps the fp32 path so nothing silently changes. */
-            if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wrel, xq + (size_t)t * d, 1, d, NH * DREL, rs);
-            else                        in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs);
-            in2_l2_clip(rs, rcl, NH, DREL, cfg->rel_clip);
-            /* the relative-bias query carries the same log-position tau as q (inkling2.cpp:357-358).
-             * No effect below the 8192 floor, which is why it survived every short-context check. */
-            {
-                const float tau = 1.0f + cfg->log_scale_alpha *
-                    logf(fmaxf(((float)(pos0 + t) + 1.0f) / (float)cfg->log_scale_floor, 1.0f));
-                if (tau != 1.0f) for (int i = 0; i < NH * DREL; ++i) rs[i] *= tau;
-            }
-            in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);
-            if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_nt(ctx, &L->sink, xq + (size_t)t * d, 1, d, NH, sink + (size_t)t * NH);
-            else                          in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
-            for (int hh = 0; hh < NH; ++hh) {
-                const int kvh = hh / (NH / NKV);
-                int n_key = 0;
-                const int gp = kv_pos0 + t;
-                /* the cache is a ring over the window, so keys older than it are no longer resident */
-                const int jstart = (g_kv_window > 0 && gp + 1 > g_kv_window) ? gp + 1 - g_kv_window : 0;
-                for (int j = jstart; j <= gp; ++j) {      /* causal, global positions */
-                    const int dist = gp - j;
-                    const float *kbp;
-                    if (kv) { kbp = in2_kv_k(kv, vvis, j); if (!kbp) continue; kbp += kvh * HD; }
-                    else    { kbp = k + (size_t)(j - kv_pos0) * kdim + kvh * HD; }
-                    double acc = 0.0;
-                    for (int e = 0; e < HD; ++e) acc += (double)q[(size_t)t * qdim + hh * HD + e] * (double)kbp[e];
-                    logit[n_key] = (float)acc * (1.0f / sqrtf((float)HD))
-                                 + (dist < EXT ? bias[hh * EXT + dist] : 0.0f);
-                    ++n_key;
+        /* Tokens are independent: each writes attn_out[t*qdim] and sink[t*NH], both indexed by t. What was NOT
+         * independent were four single-buffer scratches (rs, bias, logit, alpha) shared by every token, which is
+         * why this loop was serial. They are per-thread now, so fork/join happens once per layer instead of once
+         * per token. Arithmetic untouched - a surviving race changes the 12-token oracle IDS line immediately. */
+        #pragma omp parallel
+        {
+            float *rs_t    = (float *) calloc((size_t) NH * DREL, sizeof(float));
+            float *bias_t  = (float *) calloc((size_t) NH * EXT,  sizeof(float));
+            const size_t npos = (size_t) n_tok + (size_t) pos0 + 1u;
+            float *logit_t = (float *) malloc(sizeof(float) * npos);
+            float *alpha_t = (float *) malloc(sizeof(float) * npos);
+            if (rs_t && bias_t && logit_t && alpha_t) {
+            #pragma omp for schedule(dynamic)
+            for (int t = 0; t < n_tok; ++t) {
+                /* IN2_FULL_KERNEL: the int8 kernel path the sliding layers already use, instead of the fp32 float path.
+                 * Behind a flag because it changes top1 (149876 -> 220) when applied: the engine is inconsistent today -
+                 * sliding int8, full fp32 - and which contract it keeps is a decision that needs a text-level A/B, not a
+                 * one-token comparison. Default keeps the fp32 path so nothing silently changes. */
+                if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_nt(ctx, &L->wrel, xq + (size_t)t * d, 1, d, NH * DREL, rs_t);
+                else                        in2_matvec(Wrel, xq + (size_t)t * d, d, NH * DREL, rs_t);
+                in2_l2_clip(rs_t, rcl, NH, DREL, cfg->rel_clip);
+                /* the relative-bias_t query carries the same log-position tau as q (inkling2.cpp:357-358).
+                 * No effect below the 8192 floor, which is why it survived every short-context check. */
+                {
+                    const float tau = 1.0f + cfg->log_scale_alpha *
+                        logf(fmaxf(((float)(pos0 + t) + 1.0f) / (float)cfg->log_scale_floor, 1.0f));
+                    if (tau != 1.0f) for (int i = 0; i < NH * DREL; ++i) rs_t[i] *= tau;
                 }
-                /* sink-aware softmax: the weights sum to less than 1 by the sink's share */
-                float mx = sink[(size_t)t * NH + hh];
-                for (int i = 0; i < n_key; ++i) if (logit[i] > mx) mx = logit[i];
-                double tot = exp((double)(sink[(size_t)t * NH + hh] - mx));
-                for (int i = 0; i < n_key; ++i) { alpha[i] = expf(logit[i] - mx); tot += alpha[i]; }
-                const float inv = (float)(1.0 / tot);
-                for (int i = 0; i < n_key; ++i) alpha[i] *= inv;
-                float *o = attn_out + (size_t)t * qdim + hh * HD;
-                for (int j = 0; j < n_key; ++j) {
-                    const float *vbp;
-                    if (kv) { vbp = in2_kv_v(kv, vvis, j); if (!vbp) continue; vbp += kvh * HD; }
-                    else    { vbp = v + (size_t)(j - kv_pos0) * kdim + kvh * HD; }
-                    for (int e = 0; e < HD; ++e) o[e] += alpha[j] * vbp[e];
+                in2_rel_bias_table(rs_t, P, NH, DREL, EXT, bias_t);
+                if (!getenv("IN2_NO_FULL_KERNEL")) in2_matvec_nt(ctx, &L->sink, xq + (size_t)t * d, 1, d, NH, sink + (size_t)t * NH);
+                else                          in2_matvec(Wsk, xq + (size_t)t * d, d, NH, sink + (size_t)t * NH);
+                for (int hh = 0; hh < NH; ++hh) {
+                    const int kvh = hh / (NH / NKV);
+                    int n_key = 0;
+                    const int gp = kv_pos0 + t;
+                    /* the cache is a ring over the window, so keys older than it are no longer resident */
+                    const int jstart = (g_kv_window > 0 && gp + 1 > g_kv_window) ? gp + 1 - g_kv_window : 0;
+                    for (int j = jstart; j <= gp; ++j) {      /* causal, global positions */
+                        const int dist = gp - j;
+                        const float *kbp;
+                        if (kv) { kbp = in2_kv_k(kv, vvis, j); if (!kbp) continue; kbp += kvh * HD; }
+                        else    { kbp = k + (size_t)(j - kv_pos0) * kdim + kvh * HD; }
+                        double acc = 0.0;
+                        for (int e = 0; e < HD; ++e) acc += (double)q[(size_t)t * qdim + hh * HD + e] * (double)kbp[e];
+                        logit_t[n_key] = (float)acc * (1.0f / sqrtf((float)HD))
+                                     + (dist < EXT ? bias_t[hh * EXT + dist] : 0.0f);
+                        ++n_key;
+                    }
+                    /* sink-aware softmax: the weights sum to less than 1 by the sink's share */
+                    float mx = sink[(size_t)t * NH + hh];
+                    for (int i = 0; i < n_key; ++i) if (logit_t[i] > mx) mx = logit_t[i];
+                    double tot = exp((double)(sink[(size_t)t * NH + hh] - mx));
+                    for (int i = 0; i < n_key; ++i) { alpha_t[i] = expf(logit_t[i] - mx); tot += alpha_t[i]; }
+                    const float inv = (float)(1.0 / tot);
+                    for (int i = 0; i < n_key; ++i) alpha_t[i] *= inv;
+                    float *o = attn_out + (size_t)t * qdim + hh * HD;
+                    for (int j = 0; j < n_key; ++j) {
+                        const float *vbp;
+                        if (kv) { vbp = in2_kv_v(kv, vvis, j); if (!vbp) continue; vbp += kvh * HD; }
+                        else    { vbp = v + (size_t)(j - kv_pos0) * kdim + kvh * HD; }
+                        for (int e = 0; e < HD; ++e) o[e] += alpha_t[j] * vbp[e];
+                    }
                 }
             }
+            }
+            free(rs_t); free(bias_t); free(logit_t); free(alpha_t);
         }
     }
 

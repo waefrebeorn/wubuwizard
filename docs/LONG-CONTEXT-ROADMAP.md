@@ -1155,3 +1155,34 @@ Reverted immediately: full rebuild, oracle 94-char IDS exact, `git status` clean
 One thing worth noting: during the failed build `gen_fast.exe` did not exist and the oracle check returned an EMPTY string.
 Because the check now prints the length, that was visible as `len=0` rather than passing as a match - the fourth time this
 session that requiring a non-empty reference caught what an equality test would have reported as success.
+
+## Upstream PR #33049 (llama.cpp) - what it means for this repo
+
+"spec : fix DFlash2 draft acceptance for Inkling 2 Mini" (n-belokopytov, adapted from renoirvieir4/llama.cpp 0280b55).
+Reported: code 51.0 -> 158.0 tok/s, prose 51.2 -> 85.7 tok/s on the same model this repo targets.
+
+Three claims in it, checked against this engine:
+
+1. **token embedding norm** - "When DFlash2 borrows token embeddings from an Inkling 2 or Inkling 2 Loop target, apply RMS
+   normalization with the target's epsilon and learned tok_norm weight." This repo already does it:
+   `wubu_inkling2_model.c:99` loads `token_embd_norm.weight` and `wubu_inkling2_load.c:65` documents it as "the embedding
+   norm the reference applies before layer 0". **No action needed.**
+2. **visits** - the PR defines a visit index as "a particular execution of a layer, which matters when a model runs the same
+   layer more than once", and Inkling Mini's drafter wants hidden states from visits [5, 23, 41, 48]. This repo already has
+   the same model (`n_visit`, the 72-visit rule in `in2_kv_init_pervisit`). **Consistent, no action needed.**
+3. **selector softcap order** - "Inkling expects softcap(logit + correction). The default order computes
+   softcap(logit) + correction. The function is nonlinear, so the order can change which token the drafter proposes." This
+   repo has no logit softcap and no drafter: `in2_softcap` appears only in the SwiGLU FFN (:983). **Not applicable** - the
+   issue lives in the speculative-decoding path, not in the model forward.
+
+So nothing in the PR contradicts this engine's forward pass, and two of its three details are already implemented here. But
+the PR is strategically important for a different reason:
+
+**The 3x came from draft acceptance, not from a faster kernel.** 51 -> 158 tok/s is an algorithmic win from speculative
+decoding that proposes several tokens and verifies them - and greedy verification preserves token-for-token identity, which
+is exactly this project's parity invariant. Meanwhile this session spent its effort on kernels and threading and produced
+(a) a 1.7x kernel that moved the engine 2 %, and (b) a 4.8x win only in the TQ configuration. A working drafter is a
+1.7-3.1x on decode at unchanged outputs, which is a larger lever than anything measured here.
+
+Recorded as the strategic finding of this session: if the goal is "same tokens, faster", the speculative path is worth more
+than another kernel, and it does not violate the parity invariant.
