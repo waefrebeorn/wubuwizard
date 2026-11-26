@@ -1000,3 +1000,40 @@ this entire session.
 
 Method note: the phase dump prints once per token, so IN2_TIMETY output must be read per token, not summed - the
 first line is the prefill and the rest are decode steps with a different shape entirely.
+
+## Wave 12 - the largest phases run 20x below the kernel rate and ignore threads
+
+found it: the full-attention projections run 20x below the kernel and do not scale
+
+The f_* table (which I had filtered out of every earlier dump) breaks the full-attention layers down, and two of its
+entries explain everything the last three commits failed to attribute:
+
+    f_loads     0.000        f_loads     0.000
+    f_mix+gate  0.014        f_mix+gate  0.015
+    f_q         0.063        f_q         0.063     <- identical
+    f_kv+conv   0.045        f_kv+conv   0.042
+    f_attn      0.021        f_attn      0.011
+    f_gate+wo   0.131        f_gate+wo   0.129     <- identical (44% of full-layer time)
+    f_mlp+moe   0.164        f_mlp+moe   0.047     <- 3.5x, the only part that scales
+          1 thread                 8 threads
+
+Converted to work: f_gate+wo covers 8 full visits x (3072x2304 gate + 2304x3072 wo) = 113.2 M weights per token, and
+it takes 0.129 s. That is 0.88 G weights/s. The IQ kernel measures 18.31 G weights/s single-threaded, so this phase
+runs **21x below the kernel rate**, and 1.02x across thread counts - it neither uses the kernel nor the thread split.
+f_q is the same story: 56.6 M weights in 0.063 s = 0.90 G w/s, 20x below the kernel, also 1.00x across threads.
+
+The projection speed is a float-path signature, not a quant-kernel one. src/wubu_inkling2_fullseq.c has ZERO
+`in2_rows_parallel` calls (the sliding path in wubu_inkling2_fwd.c has 3) and it calls in2_matvec_nt per token with
+n_tok=1, so whatever those two phases actually execute, it is not the parallel row-split over quantised weights that
+the sliding layers use.
+
+Consequence, stated in order of confidence:
+  * certain: 113 M + 57 M weights of the biggest phases run at ~0.9 G w/s, 20x under a measured 18.3 G w/s kernel;
+  * certain: they are invariant to thread count, so no thread tuning can touch them;
+  * still unverified: WHICH slower operation they perform instead. That is one trace away - IN2_TRACE_NT on a full
+    layer will show whether the tensor reaches the quant kernel at all, and IN2_FULL_KERNEL exists precisely to route
+    q through in2_matvec_nt, so running that switch and comparing the phase times is the direct experiment.
+
+If those phases reach even 6 G w/s the token drops by roughly 0.16 s of the 0.178 s decode step's counterpart in
+prefill terms; the honest statement is that this is the largest single measured anomaly in the engine and it is now
+localised to two named phases with a switch already built to test it.
