@@ -225,3 +225,24 @@ IMMA requires, because a warp must own 8 columns to fill `N=8`. So the two steps
 
 Step 1 is a smaller, self-contained change than step 2 and it already buys most of a factor of four. That is where the
 kernel work should start.
+
+## Retraction: the kernel is NOT traffic-bound, and shared-memory staging made it 84% slower
+
+The arithmetic above is correct and the conclusion drawn from it was wrong. Implemented the staging - the q8_K block
+copied once per (m0, block) into shared memory for all warps in the CTA, every per-lane calculation left byte-identical,
+`__syncthreads()` on both sides of the phase - and measured:
+
+    before:  1.38 ms batched, 30.77 GMAC/s
+    after:   2.54 ms batched, +84 % slower
+
+Reverted. What the 7.4 MB figure missed: **the activation bytes are identical for every column, so the repeated reads hit
+L2, not DRAM.** They were never the cost I attributed to them; the cooperative copy plus two barriers per (m0, block) cost
+more than the cached reads it replaced. Same-bytes argument, same order, guaranteed-identical maths - and still slower,
+which is exactly why the measurement has to come before the wiring.
+
+Consequence for the plan: the **8-column restructure is not justified by traffic**. Its value has to come entirely from
+the tensor-core instruction it enables, so it is no longer a cheap step 1 with a 3.6x attached - it is a step whose whole
+justification is the IMMA itself, and it should be built as the MMA change rather than as a separate restructure first.
+The engine-side record stands: CPU at 11.9 GMAC/s ceiling, GPU IQ2 at 30.8 GMAC/s, card at 11.8 TMAC/s, and the gap is
+the instruction. The four prior retractions in this project were about speedups claimed too early; this one is about a
+*bottleneck* diagnosed too confidently from arithmetic alone.
