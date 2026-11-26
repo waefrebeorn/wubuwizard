@@ -108,6 +108,14 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
      * "quantised" guard keeps working; tq != NULL is what distinguishes the two formats. */
     const char *tqe = getenv("IN2_KV_TQ");
     const size_t nrows = elems / (size_t)dim;
+    if (tqe && !getenv("IN2_KV_TQ_ACK")) {
+        static int warned_once = 0;
+        if (!warned_once) {
+            warned_once = 1;
+            fprintf(stderr, "%s%c", "[IN2_KV_TQ] ignored: experimental and NOT parity-safe (unresolved memory defect) - falling back to the f32 KV path. Set IN2_KV_TQ_ACK=1 to force it.", 10);
+        }
+        tqe = NULL;
+    }
     if (tqe) {
         int bits = atoi(tqe);
         if (bits < 2) bits = 4;
@@ -118,15 +126,12 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
         /* OPEN DEFECT: b=5 and b=8 produce wrong output in the ENGINE while the module round-trip is correct and
          * monotone at every width (worst max-err 0.002 at b=8, d=1024, 300 structured rows). Clamp to a verified
          * width once, loudly, instead of refusing: refusing here crashed because init is called per visit. */
-        if (bits == 5 || bits == 8) {
-            static int warned = 0;
-            const int clamped = (bits == 5) ? 6 : 7;
-            if (!warned) {
-                warned = 1;
-                fprintf(stderr, "[IN2_KV_TQ] %d bits is known-broken in-engine (module is fine, wiring is not) - clamping to %d\n", bits, clamped);
-            }
-            bits = clamped;
-        }
+        /* EXPERIMENTAL - NOT PARITY-SAFE. The widths that produce correct output are not stable across rebuilds:
+         * one build answered correctly at 4/6/7 and two other builds at 2/5/6/7/8, with 3 and 4 wrong in the latter.
+         * The standalone module round-trips correctly and monotonically at every width (d=1024, 300 structured
+         * rows: worst max-err 0.0147/0.0076/0.0050/0.0030/0.0021 for b=4..8), so the corruption is in this wiring,
+         * not in the quantiser. Build-layout dependence means an unresolved memory-safety defect; f32 and IN2_KV_Q8
+         * remain the supported paths. Enable deliberately with IN2_KV_TQ_ACK=1. */
         kv->tq = wubu_tqvec_init(dim, bits, 0xC0FFEEull);
         if (!kv->tq) { in2_kv_free(kv); return -1; }
         kv->q8   = 1;

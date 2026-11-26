@@ -28,7 +28,7 @@
 #include "wubu_tqvec.h"
 
 #define TQV_BLOCK 8
-#define TQV_GRID  8192
+#define TQV_GRID  65536
 
 struct wubu_tqvec {
     int      d, bits, ncent, nblk;
@@ -36,6 +36,8 @@ struct wubu_tqvec {
     signed char *sign; /* d random +/-1: the whole transform is a seed plus these signs */
     double  *cent;     /* 2^bits centroids */
     double  *scratch;  /* d doubles for the rotated query */
+    double  *dscr;     /* d doubles for decode: decode ran once per row READ, and a malloc failure there
+                        * returned silently leaving the caller's buffer uninitialised */
 };
 
 static uint64_t tqv_next(uint64_t *s)
@@ -58,7 +60,10 @@ static void tqv_build_codebook(struct wubu_tqvec *c)
     const int n = c->ncent;
     const double sq = sqrt((double) c->d);          /* coordinate scale of a unit vector in R^d is 1/sqrt(d) */
     const double a  = (double) (c->d - 3) / 2.0;
-    const double hi = sq * 1.05;                     /* integrate in u = t*sqrt(d), where the mass actually lives */
+    /* In u = t*sqrt(d) the coordinate has std 1 and its mass sits in |u| < ~4; the support reaches sqrt(d) but
+     * with vanishing density. Spreading the grid to sqrt(d) put ~3 samples per bin at 256 centroids, so empty bins
+     * kept their init positions and became bad codepoints - which is why 8 bits decoded worse than 6. */
+    const double hi = 6.0;
     double *t = malloc(sizeof(double) * TQV_GRID);
     double *w = malloc(sizeof(double) * TQV_GRID);
     if (!t || !w) { free(t); free(w); return; }
@@ -111,7 +116,8 @@ wubu_tqvec *wubu_tqvec_init(int d, int bits, uint64_t seed)
     c->sign = malloc((size_t) c->d);
     c->cent = malloc(sizeof(double) * (size_t) c->ncent);
     c->scratch = calloc((size_t) d, sizeof(double));
-    if (!c->sign || !c->cent || !c->scratch) { wubu_tqvec_free(c); return NULL; }
+    c->dscr = malloc((size_t) d * sizeof(double));
+    if (!c->sign || !c->cent || !c->scratch || !c->dscr) { wubu_tqvec_free(c); return NULL; }
 
     uint64_t s = seed;
     for (int i = 0; i < c->d; ++i) c->sign[i] = (tqv_next(&s) & 1u) ? 1 : -1;
@@ -122,7 +128,7 @@ wubu_tqvec *wubu_tqvec_init(int d, int bits, uint64_t seed)
 void wubu_tqvec_free(wubu_tqvec *c)
 {
     if (!c) return;
-    free(c->sign); free(c->cent); free(c->scratch); free(c);
+    free(c->sign); free(c->cent); free(c->scratch); free(c->dscr); free(c);
 }
 
 int    wubu_tqvec_dim(const wubu_tqvec *c)  { return c ? c->d : 0; }
@@ -160,7 +166,7 @@ static void tqv_rotate(const wubu_tqvec *c, const float *x, double *out)
 static void tqv_unrotate(const wubu_tqvec *c, const double *z, float *out)
 {
     const double sc = 1.0 / sqrt((double) c->d);
-    double *t = c->scratch;
+    double *t = c->scratch;   /* distinct from dscr, which holds z */
     for (int i = 0; i < c->d; ++i) t[i] = z[i];
     tqv_fwht(t, c->d);
     for (int i = 0; i < c->d; ++i) out[i] = (float) (t[i] * (double) c->sign[i] * sc);
@@ -221,10 +227,10 @@ void wubu_tqvec_decode(const wubu_tqvec *c, const void *code, float *out)
 {
     if (!c || !code || !out) return;
     const unsigned char *in = (const unsigned char *) code;
-    double *z = (double *) malloc((size_t) c->d * sizeof(double));
+    double *z = c->dscr;
     if (!z) return;                            /* was a double z[256] with "if (d > 256) return" - which silently
                                                 * left the output untouched for the KV dim (1024) */
     for (int i = 0; i < c->d; ++i) z[i] = c->cent[tqv_get(in, i, c->bits)];
     tqv_unrotate(c, z, out);
-    free(z);
+
 }
