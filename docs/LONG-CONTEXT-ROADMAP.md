@@ -1101,3 +1101,38 @@ it is the only significant work in the engine that has no parallelism at all - b
 
 Lesson, fourth time in this session: I read a label (`sliding`) as if it described the work it contains. A phase named after a
 layer's attention type does not measure that attention - it measures the layer.
+
+## Parallelising the serial attention loop: the dimension is `t`, and four scratches block it
+
+Structure of the full/attention layer (fullseq.c:273-300 and on):
+
+    for (int t = 0; t < n_tok; ++t) {            <- serial outer loop, the natural parallel dimension
+        in2_matvec_nt(&L->wrel, xq + t*d, 1, d, NH*DREL, rs);   <- rs: SHARED scratch row
+        in2_l2_clip(rs, ...); in2_rel_bias_table(rs, P, NH, DREL, EXT, bias);   <- bias: SHARED scratch
+        in2_matvec_nt(&L->sink, xq + t*d, 1, d, NH, sink + t*NH);              <- sink: per-token, safe
+        for (int hh = 0; hh < NH; ++hh) { ... for (int j = jstart; j <= gp; ++j) { ... } }
+    }
+
+`#pragma omp parallel for` on `t` is the right move: every token writes its own slice of `attn_out` (indexed `t*qdim`) and
+its own `sink + t*NH`, so those are race-free by construction. What blocks a one-line parallelisation is the scratch:
+
+- `rs` - ONE row of `NH*DREL` reused for every token, written then immediately consumed. Needs a per-thread copy
+  (`NH*DREL*4` bytes, 24*24*4 = 2.3 KB) or an `rs + t*NH*DREL` layout.
+- `bias` - written by `in2_rel_bias_table(rs, P, NH, DREL, EXT, bias)` per token, same problem, and bigger
+  (NH*EXT entries).
+- `logit`, `alpha`, `attn_out` - `attn_out` is per-token and safe; `logit`/`alpha` must be checked for the same single-buffer
+  pattern before the pragma goes in.
+
+So the change is: give `rs` and `bias` per-token or per-thread storage (a `#pragma omp parallel` outermost with
+`firstprivate` pointers to thread-local scratch, or index them by `t`), then farm `t`. The arithmetic is identical, so the
+12-token oracle is a full check on it - any race shows up as a changed IDS line immediately, which is the cheapest possible
+detector and the reason this is safe to attempt.
+
+Why it is worth doing: this loop is the only significant work in the engine with no parallelism at all, it is ~27 % of
+prefill (1.5 s of 5.55 s at 60 tokens), and on 6 physical cores it should yield 3-5x on that component - the largest
+remaining single win now that MoE is known to be healthy, attention's call structure is not the issue, and the GPU has been
+ruled out four separate ways.
+
+Not attempted here: per-thread `rs`/`bias` plumbing plus verifying no other shared scratch exists is a multi-site change
+inside the hottest, most parity-sensitive loop in the engine, and the last few turns have shown how quickly a label or a
+grep can mislead. It needs a session with room to build, run the oracle, and revert.
