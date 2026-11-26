@@ -263,3 +263,51 @@ no side structure. Query cost is one rotation of the query plus `d` multiply-add
 
 What a caller must not do, because it was measured: use `score` alone as the ranking. `tools/turboquant_recall.c`
 showed 0.23-0.62 recall@10 for that; the top-100 plus an exact re-rank is what reaches 0.94-1.00.
+
+## Verification 4: on real trained vectors the ranking collapses - and the reason is measurable
+
+The synthetic tests used clustered data. The honest next test is real vectors, so 3,840 rows of
+`v.patch_embd.weight` were pulled out of `mmproj-BF16.gguf` (F32, d=6,912), renormalised to the unit sphere, and
+random-projected to d=32 and d=128 - which is the design's own pipeline (project, then quantise).
+
+    file   bits  recall@10   +rerank@100   bytes/item
+    d32    2     0.004       0.028         8
+    d32    3     0.004       0.024         12
+    d32    4     0.004       0.024         16
+    d128   2     0.002       0.030         32
+    d128   3     0.003       0.029         48
+    d128   4     0.003       0.026         64
+
+Rerank recall is 0.024-0.030, and the chance rate for taking 100 candidates out of 3,840 is **100/3840 = 0.026**. The
+candidate set is a random sample of the corpus: the quantised ranking carries no information at all. That is not the
+quantiser being wrong - the bound still holds on the same data - it is the data having no ranking to recover.
+
+The cause, measured directly on the score distribution:
+
+    d=32   gap 10th-11th : median 0.00284   quantisation IP rmse 0.12024   ratio 42x
+           gap 100th-101st: median 0.00056                                  ratio 215x
+    d=128  gap 10th-11th : median 0.00169   quantisation IP rmse 0.06012   ratio 36x
+           gap 100th-101st: median 0.00030                                  ratio 202x
+
+The quantisation error is 40-200x larger than the margin separating the k-th from the (k+1)-th. Under those conditions
+no quantiser of any design recovers the ranking, because the information is not in the scores at this precision. Note
+also why this data is like this: the top-32 principal components of those weight rows hold only **10 %** of the
+variance, so they are close to isotropic - and isotropic vectors in d=32 have inner products that are nearly tied
+everywhere.
+
+So the criterion the earlier synthetic successes were silently satisfying is
+
+    quantised retrieval is viable  <=>  (top-k score gap)  >~  sigma_quant,   sigma_quant ~ sqrt(3*pi^2/(d*4^b))
+
+At d=32, b=3 the quantiser's error is 0.032; the synthetic clustered corpus had gaps far above that and scored
+0.94-1.00, while these weight rows have gaps of 0.003 and score at chance. Same code, same bound, opposite outcome,
+decided entirely by the gap distribution of the corpus.
+
+**This is a go/no-go test that must be run on the real corpus before any index is built**: compute the top-k gap
+distribution and compare it to `sqrt(3*pi^2/(d*4^b))`. If the median gap is an order of magnitude below that number,
+drop to a larger d or a larger b - or conclude, as here, that the ranking was never recoverable and the dimension went
+one step too far. It costs one pass over the corpus and it predicts the result before anything is written.
+
+What remains genuinely unverified: whether a WuBu/GAAD Poincare encoder produces vectors whose gap distribution passes
+that test. Nothing in this document can substitute for the measurement, because the whole point of these last numbers is
+that the outcome is a property of the corpus and not of the quantiser.
