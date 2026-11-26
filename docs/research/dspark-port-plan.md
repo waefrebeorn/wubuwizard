@@ -353,3 +353,25 @@ what a correction head should do.
 **Still not an acceptance rate:** the union set is 12 ids, not 201,024. The combined full-vocab scan is the next step, and it
 needs the base logits inside the engine rather than two runs stitched together - the hook should compute `logits + corr-row`
 per candidate id in one pass.
+
+## Full-vocabulary combined scan: the drafter's top-1 IS the true token
+
+`IN2_ADD_VEC` now computes, inside one process, `base_i + dot(corr, unembed_i)` over all 201,024 rows - the base recomputed from
+`fin` with the same tensor and the same kernel, so no hand-stitching:
+
+    ADD5  149876:51.289814  220:50.006599  149878:39.497284  149928:35.352219  152933:35.013157
+
+**Top-1 is 149876, the true next token**, and it agrees with the value I computed by hand from two separate runs
+(51.289815) to six decimals - an independent path to the same number.
+
+Two things this does and does not establish:
+
+* It does establish that the whole port is coherent at full vocabulary: tap fusion, three block-attention layers, the Markov
+  correction and the unembed dot all contribute, and the correction is doing real work - it moves 220 (base 44.408) to 50.007
+  and keeps the true token ahead by 1.28, where the base alone was a 0.06 near-tie. Without the correction greedy decode of this
+  prompt is a coin flip; with it, the margin is 20x larger.
+* It does **not** establish an acceptance rate. This is one position. The structure that matters is eight drafted positions
+  verified against the target, and the drafter has only been shown to be right where the trunk was already 99.9% sure.
+
+Next: the 7-step drafting loop - feed the drafter its own previous token instead of the anchor, verify each position against the
+engine's argmax, and report accepted-prefix length. That number is the one the port exists to produce.

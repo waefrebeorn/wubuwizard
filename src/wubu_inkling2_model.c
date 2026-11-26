@@ -474,6 +474,47 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     for (int i = 0; i < cfg->vocab_size; ++i) logits_out[i] = tanhf(logits_out[i] / cap) * cap;
     }
 
+    /* Combined score for DSpark verification: final_i = base_i + dot(vec, unembed_i), which is exactly
+     * k_dspark_score_cand_eval dot(corr, unembed_i) + cand_base[i] with cand_base being the head own logits.
+     * Both terms are computed here in one process from the same tensor, so nothing is stitched together by hand.
+     * base is recomputed from fin rather than reusing logits_out, which is scoped to the per-position loop.
+     * IN2_ADD_VEC names a d-float little-endian vector; top-5 by combined score goes to stderr. */
+    if (getenv("IN2_ADD_VEC")) {
+        gguf_tensor_info *_aoi = NULL;
+        wubu_in2_tensor_t _ot;
+        memset(&_ot, 0, sizeof _ot);
+        if (wubu_inkling2_global_tensor(ctx, "output.weight", &_aoi) == 1 && _aoi) {
+            _ot.info = _aoi;
+            _ot.file_offset = (int64_t)ctx->data_blob_offset + (int64_t)_aoi->data_offset;
+            FILE *_af = fopen(getenv("IN2_ADD_VEC"), "rb");
+            float *_av = (float *)malloc(sizeof(float) * (size_t)d);
+            float *_bb = (float *)malloc(sizeof(float) * 8192);
+            float *_cb = (float *)malloc(sizeof(float) * 8192);
+            if (_af && _av && _bb && _cb && fread(_av, sizeof(float), (size_t)d, _af) == (size_t)d) {
+                const int CH = 8192;
+                int _best[5] = { -1, -1, -1, -1, -1 };
+                float _bs[5] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f };
+                for (int _r = 0; _r < cfg->vocab_size; _r += CH) {
+                    const int _n = (_r + CH <= cfg->vocab_size) ? CH : (cfg->vocab_size - _r);
+                    if (in2_matvec_quant(ctx, &_ot, (int64_t)_r * d, fin, _n, d, _bb) != WUBU_INKLING2_OK) break;
+                    if (in2_matvec_quant(ctx, &_ot, (int64_t)_r * d, _av, _n, d, _cb) != WUBU_INKLING2_OK) break;
+                    for (int _i = 0; _i < _n; ++_i) {
+                        const float _s = _bb[_i] + _cb[_i];
+                        if (_s > _bs[4]) {
+                            int _k = 4;
+                            while (_k > 0 && _s > _bs[_k - 1]) { _bs[_k] = _bs[_k - 1]; _best[_k] = _best[_k - 1]; --_k; }
+                            _bs[_k] = _s; _best[_k] = _r + _i;
+                        }
+                    }
+                }
+                fprintf(stderr, "ADD5");
+                for (int _k = 0; _k < 5; ++_k) fprintf(stderr, " %d:%.6f", _best[_k], _bs[_k]);
+                fprintf(stderr, "\n");
+            }
+            free(_av); free(_bb); free(_cb);
+            if (_af) fclose(_af);
+        }
+    }
     /* The output matrix has 201024 rows but only 200058 are real tokens; the rest are padding rows whose
      * embeddings are meaningless. The reference drops the padded vocab before sampling, and without this
      * the first generation run selected id 200567 - an empty padding row - as its second token. */
