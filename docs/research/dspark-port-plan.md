@@ -752,3 +752,37 @@ version decodes 40k superblocks at a time straight into a memmap, and it was val
 
 That validation is the whole point: a fast decoder that silently disagrees with the verified one would poison every logit
 downstream, and the failure would look like a modelling error, not a decoding one.
+
+## First end-to-end run of the mainline forward: it executes, and it is 0/7 with position-insensitive output
+
+The pipeline now runs on real weights end to end. Inputs: the 281-position prompt `pre.txt`, taps
+`L05_p0 / L11_p1 / L17_p2 / L23_p2` (the four visits `[5,23,41,48]` resolved from the engine's own schedule in
+`wubu_inkling2_model.c:227-303` - layers 0-5, then the 6..17 core three times, then 18-23), the anchor embedding for token
+220, and the decoded `unembed`. Oracle is the engine's own greedy continuation after the anchor:
+`1377 68014 371 157021 161319 220 32329`.
+
+    layer rms 1.7454 / 2.6692 / 4.4663        h rms 3.1360   output_norm rms 3.0924
+    base rms 4.3223   f_rnn rms 0.6909
+    drafts  152290, 11, 11, 11, 149881, 196995, 19      MATCH 0/7
+
+**The output is near position-independent**: token `718` tops almost every slot, and even slot 1 - which should predict the
+first drafted token `1377` - returns `718` with a 17.8 peak over a ~16.8 floor. A flat distribution that ignores the slot index
+is the signature of a block whose attention is averaging over the context instead of selecting from it.
+
+**Five hypotheses eliminated by measurement, not by argument:**
+
+    1. position offset      anchor_pos = T vs T-1        drafts unchanged (152290 first either way)
+    2. vocab misalignment   both GGUFs have exactly 200058 tokens, identical at every index
+                            (the trunk's 201024-row matrices are padded with 966 unused rows)
+    3. RoPE convention      NeoX half-split vs GPT-J interleaved   both 0/7, 718 still dominant
+    4. norm parameterisation  all 21 norm tensors centre on ~1 (means 0.56..4.41, rms 0.90..5.29),
+                            so multiplicative RMSNorm is right, not Gemma (1+w)
+    5. numerical blow-up    per-layer trace: x 1.44 -> 4.47, q ~1.5, ctx K 1.37..1.91, ctx V 0.83..4.23,
+                            attention logits +-11..17 - nothing saturates, nothing overflows
+
+The engine's layer-rms growth (1.75 -> 2.67 -> 4.47) also appeared in the Strata port's stage 2 (3.94 -> 7.08 -> 13.44), and
+`ctx_norm` grows with depth (rms 0.96 -> 3.58 -> 5.29), so the growth is a property of the model rather than a bug in either port.
+
+**What is left** is the ctx/tap wiring: which residual point the four taps are taken from, whether the mask rows are ordered
+as assumed, and whether the block queries are meant to see the ctx with the same RoPE base they are given. Those are checkable
+one at a time against the trace above, and none of them is the arithmetic this project spent two days suspecting.

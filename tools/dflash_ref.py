@@ -37,12 +37,18 @@ def rms(x, w=None, eps=EPS):
 
 
 def rope(x, pos, theta=THETA):
-    """x: [T, H, HD], pos: [T] absolute positions. NeoX half-split."""
+    """x: [T, H, HD], pos: [T] absolute positions. DFLASH_ROPE=interleaved switches to GPT-J pairing."""
     T, H, D = x.shape
     half = D // 2
     inv = theta ** (-np.arange(half, dtype=np.float64) * 2.0 / D)
     ang = np.asarray(pos, dtype=np.float64)[:, None] * inv[None, :]     # [T, half]
     cos, sin = np.cos(ang)[:, None, :], np.sin(ang)[:, None, :]
+    if os.environ.get('DFLASH_ROPE') == 'interleaved':
+        x1, x2 = x[..., 0::2], x[..., 1::2]
+        out = np.empty_like(x)
+        out[..., 0::2] = x1 * cos - x2 * sin
+        out[..., 1::2] = x1 * sin + x2 * cos
+        return out
     x1, x2 = x[..., :half], x[..., half:]
     out = np.empty_like(x)
     out[..., :half] = x1 * cos - x2 * sin
@@ -110,6 +116,8 @@ class Drafter:
 
         scale = 1.0 / np.sqrt(HD)
         att = np.einsum('bhd,khd->bhk', q.astype(np.float64), K.astype(np.float64)) * scale
+        if os.environ.get('DFLASH_TRACE'):
+            print(f'   [L{layer}] x rms {np.sqrt((x.astype(np.float64)**2).mean()):.3f} q rms {np.sqrt((q.astype(np.float64)**2).mean()):.3f} kc rms {np.sqrt((kc.astype(np.float64)**2).mean()):.3f} vc rms {np.sqrt((vc.astype(np.float64)**2).mean()):.3f} logit max {att.max():.2f} min {att.min():.2f}')
         # non-causal over ctx+block; block positions see each other unconditionally
         att = att - att.max(axis=-1, keepdims=True)
         p = np.exp(att)
@@ -194,10 +202,15 @@ def main():
     taps = np.stack(taps)                      # [4, T, 2304]
 
     emb = np.fromfile(a.emb, dtype='<f4')[:N_EMBD]
-    anchor_pos = T                            # block slot 0 sits after the context
+    anchor_pos = T - 1                        # slot 0 IS the anchor, at its own position
     ctx_pos = np.arange(T)
     blk_pos = anchor_pos + np.arange(8)
     h, base, f_rnn = forward(dr, emb, taps, ctx_pos, blk_pos)
+    print('[base] per-slot top-5 (before markov):')
+    for i in range(8):
+        t5 = np.argsort(-base[i])[:5]
+        print(f'  slot {i}: ' + '  '.join(f'{int(t)}:{base[i][t]:.2f}' for t in t5))
+    print(f'[base] rms {np.sqrt((base.astype(np.float64)**2).mean()):.4f}  h rms {np.sqrt((h.astype(np.float64)**2).mean()):.4f}  f_rnn rms {np.sqrt((f_rnn.astype(np.float64)**2).mean()):.4f}')
     if a.oracle:
         oracle = [int(x) for x in a.oracle.split(',')]
         res = markov(dr, base, h, f_rnn, a.anchor, min(7, len(oracle)))
