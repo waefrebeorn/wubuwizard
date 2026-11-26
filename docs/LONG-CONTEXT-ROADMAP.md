@@ -310,3 +310,20 @@ So LP-05 is smaller than advertised: the kernel already exceeds the 300 GMAC/s g
 the measured bottleneck in the path that uses it is slab upload. Correct order is now: (a) wire the 8-column kernel,
 1.7x for free and exact, (b) keep slabs resident so the copies stop, (c) only then consider `mma.sync` on a kernel that
 may no longer be the binding constraint.
+
+## Wiring result: the 8-column tile must be gated on a real batch, not switched on globally
+
+Wired it into the resident dispatch unconditionally and measured in the engine:
+
+    dense decode, 24 tokens, 8col everywhere : 7031 ms      <- 37 % SLOWER than baseline
+    dense decode, 24 tokens, mrow (baseline) : 5138-5288 ms
+    parity                                   : exact in both cases (12/12)
+
+The cause is occupancy, not arithmetic: `groups = ceil(n_cols/8)` gives the grid eight times fewer warps for the same
+work, and at `n_tok = 1` each warp has almost nothing to do, so the tile that wins at M=8 (1.73x) loses badly at M=1.
+Smoothly gated now: `n_tok >= 8` takes the 8-column kernel, everything else keeps the one-column kernel. Decode is back
+at baseline and prefill batches get the win where it was actually measured.
+
+That is the third time in this line that a kernel measured faster in isolation failed or inverted end to end, and the
+lesson is the same each time: **the isolated number names the mechanism, never the outcome.** What made this one cheap to
+fix was gating it behind a condition the same commit could flip - no half-wired path, no ambiguity about which code ran.

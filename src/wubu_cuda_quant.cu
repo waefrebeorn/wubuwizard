@@ -1012,6 +1012,9 @@ done:
     return rc;
 }
 
+__global__ void iq2xxs_matvec_8col_kernel(const uint8_t * __restrict__, const c_q8_k * __restrict__,
+                                          float * __restrict__, int64_t, int, int, int, int);
+
 /* Device-resident entry: weights already on the card. n_tok rows of q8_K in, n_tok*n_cols floats out. */
 WUBU_EXPORT int wubu_cuda_matvec_iq2xxs(const void *d_w, const void *d_q8, float *d_y,
                                        int K, int n_cols, int64_t col_stride_bytes, int n_tok)
@@ -1020,6 +1023,16 @@ WUBU_EXPORT int wubu_cuda_matvec_iq2xxs(const void *d_w, const void *d_q8, float
     const int nblocks = K / QK_K;
     const int threads = 256;
     const int warps = threads / 32;
+    /* Eight columns per warp pays only when the batch is real. Measured in the engine at n_tok=1: 7031 ms for 24
+     * tokens against 5138 ms for the one-column kernel, because groups = n_cols/8 gives the CTA 8x fewer warps for the
+     * same work. The tile wins at M>=8 (1.73x, tools/iq2x8_check.c) and loses at M=1, so it is gated on the batch. */
+    if (n_tok >= 8) {
+        const int groups = (n_cols + 7) / 8;
+        const int blocks = (groups + warps - 1) / warps;
+        iq2xxs_matvec_8col_kernel<<<blocks, threads>>>((const uint8_t *)d_w, (const c_q8_k *)d_q8, d_y,
+                                                       col_stride_bytes, nblocks, n_cols, n_tok, nblocks);
+        return cudaDeviceSynchronize() == cudaSuccess ? 0 : -2;
+    }
     const int blocks = (n_cols + warps - 1) / warps;
     iq2xxs_matvec_mrow_kernel<<<blocks, threads>>>((const uint8_t *)d_w, (const c_q8_k *)d_q8, d_y,
                                                   col_stride_bytes, nblocks, n_cols, n_tok, nblocks);
