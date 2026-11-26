@@ -327,3 +327,24 @@ at baseline and prefill batches get the win where it was actually measured.
 That is the third time in this line that a kernel measured faster in isolation failed or inverted end to end, and the
 lesson is the same each time: **the isolated number names the mechanism, never the outcome.** What made this one cheap to
 fix was gating it behind a condition the same commit could flip - no half-wired path, no ambiguity about which code ran.
+
+## The 8-column win does not reach the engine, because prefill barely uses the GPU path
+
+    120-token prefill, CPU           13,841 ms
+    120-token prefill, IN2_GPU_DENSE 13,548 ms      (+2.1 %)
+
+A kernel that is 1.73x faster at the shape it was measured on moves the engine by 2 %. The reason is structural, not a
+bug: prefill issues its projections through `in2_matvec_quant`, which is the CPU path, and the GPU resident tier only
+covers the tensors it holds. So the 8-column tile is wired, exact, and faster - and almost none of the work flows through
+it. Gated correctly (`n_tok >= 8`), so it costs nothing where it does not apply, but it also buys almost nothing today.
+
+**That makes the next step unambiguous and it is not a kernel:** route the prefill projections through the GPU resident
+path at all. Until that wiring exists, every kernel-level improvement - this 1.73x, the 2.49x batching, the 384x IMMA
+headroom - multiplies a fraction of the work that is close to zero. The measured chain is now:
+
+    CPU ceiling            11.9 GMAC/s   (engine already at ~13)
+    GPU kernel            373-721 GMAC/s (measured directly, 8col, M>=8)
+    card tensor cores    11,800 GMAC/s
+    engine prefill uses   the CPU path    <-- the actual bottleneck
+
+Fourth instance of the same pattern in this project: the isolated number names the mechanism, never the outcome.
