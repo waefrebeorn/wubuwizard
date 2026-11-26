@@ -66,11 +66,12 @@ def main():
     assert anchor_emb.size == H, anchor_emb.size
     x0 = np.repeat(mask[None, :], B, axis=0)
     x0[0] = anchor_emb
-    h = s2.forward(x0, taps, fuse, W, np.arange(M, M + B), np.arange(M), B)
+    anchor_pos = M - 1
+    h = s2.forward(x0, taps, fuse, W, np.arange(anchor_pos, anchor_pos + B), np.arange(M), B)
     # Final norm before the head: dspark.norm is unused elsewhere in this pipeline and RMSNorm with its weight
     # (rms 3.09, matching the trunk taps' own 2.9-7.7) is what maps the block stream into the hidden distribution
     # the unembed matrix expects. IN2_DSPARK_POSTNORM=0 disables it for an A/B.
-    if os.environ.get('IN2_DSPARK_POSTNORM', '0') == '1':
+    if os.environ.get('IN2_DSPARK_POSTNORM', '1') != '0':
         h = s2.rmsnorm(h, s2.load(W, 'dspark.norm.weight'))
     w1 = s2.mat(W, 'dspark.markov_head.markov_w1.weight', 201024, R)
     rp = s2.mat(W, 'dspark.markov_head.rnn_proj.weight', 768, 5120)
@@ -87,13 +88,13 @@ def main():
     drafted = []
     print(f"{'step':>4} {'prev':>7} {'draft':>7} {'oracle':>7} {'score':>10}  ok")
     for i in range(STEPS):
-        joint = np.concatenate([state[i], w1[prev], h[i], frnn[-1]], axis=0)[None, :]
+        joint = np.concatenate([state[i], w1[prev], h[i + 1], frnn[-1]], axis=0)[None, :]
         proj = joint @ rp.T + rpb
         g = sig(proj[:, :R]); cand = np.tanh(proj[:, R:2 * R])
         state[i] = cand + g * (state[i] - cand)
         lat = np.tanh(proj[:, 2 * R:3 * R])
         corr = (lat @ ho.T + hob)[0]
-        tok, sc = engine_top1(h[i], corr)
+        tok, sc = engine_top1(h[i + 1], corr)
         drafted.append(tok)
         ok = 'Y' if tok == oracle[i] else 'n'
         print(f"{i:>4} {prev:>7} {tok:>7} {oracle[i]:>7} {sc:10.3f}  {ok}")

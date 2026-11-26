@@ -481,3 +481,37 @@ these formats and runs the same drafter. Building it and dumping the block outpu
 diff intermediates tensor by tensor, which converts this from hypothesis testing into ordinary debugging.
 
 That is the next step, and it is the one that actually ends the guessing.
+
+## Read the actual reference: three real divergences fixed, 0/7 unchanged
+
+`ink_cpu_backend.cpp:1051-1228` contains their CPU `dspark_draft`, the ground truth I had been missing. Comparing it against my
+loop found three genuine wiring errors, not guesses:
+
+1. **Slots are 1-based in the step loop.** Their `for (step = 1; step <= n_draft; ++step)` reads `cur[step * D]`, so the seven
+   drafting steps consume block slots **1..7**, never slot 0 (slot 0 is the anchor). I had been reading slots 0..6.
+2. **RoPE positions are `anchor_pos + i`** (:1099-1100), not `M + i`. With 281 context positions the anchor sits at 280, so my
+   block was rotated one position too far forward - every q and k in the block.
+3. **The final norm is applied** (:1163-1164): `rms_norm(cur, dspark.norm.weight)` on all B slots before the head. I had it off
+   by default; it is now on.
+
+Also confirmed identical to my implementation, which is worth stating because it retires three worries: GQA `n_rep = H/KV`,
+`attn_scale = 1/sqrt(hd)`, non-causal attention over `ctx ++ block`, `state = cand + g*(state - cand)`, `corr = latent·hidden_out
++ bias`, `prev_tok` seeded with the anchor and then the drafted id. And their scorer is `argmax(unembed @ (cur[step] + corr))`,
+which is algebraically the same as my `base + corr·unembed` - they even note the identity in a comment (:1197).
+
+With all three fixed:
+
+    step    prev   draft  oracle      score  ok
+       0     220   43194    1377     11.584   n
+       1   43194  150053   68014     15.964   n
+       ...
+    accepted prefix: 0/7      drafted [43194, 150053, 12, 32135, 150053, 12, 32135]
+
+**Still 0/7.** The three fixes are real - they were divergences from the reference, not opinions - but they do not close the gap,
+so something upstream is still wrong and it is not the block/head arithmetic.
+
+**Next unknown, precisely located:** their context K/V cache is not computed at draft time. It is a *stored per-layer BF16 buffer*
+(`sl.dspark_k[il]`, `sl.dspark_v[il]`) that their prefill fills token by token, and `dspark_draft` only reads it (:1115, :1133).
+So the difference is in **how the cache is built**, and that is the next thing to read - where `dspark_k[il]` is written during
+prefill, and from exactly what tensor. My reconstruction (`k_proj_ctx(fused taps)` RoPE'd at each position) may be subtly wrong
+in input, normalisation, or ordering, and I cannot tell from the output which.
