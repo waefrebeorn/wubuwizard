@@ -953,3 +953,32 @@ access, with 64 sliding visits x 1024 rows per visit-group and 576 MB of KV in t
 rises with context, and the fix (decode each KV row once into an f32 mirror per visit, instead of per access) is already
 described in the chunked-prefill note. That work was projected to take 262k prefill from 57,016 h to ~380 s; this profile
 says it is also the single biggest win available at 480 tokens, where nobody was looking.
+
+## Sliding-attention fix: exact shape, and the 288 MB trap that would sink it
+
+The accessors return ONE dequantised row per array (`kscr`/`vscr`, header comment says so explicitly), so every
+`in2_kv_k(kv, vvis, j)` inside the attention loop re-decodes row j. The query loop then does it again. With 64 sliding
+visits x 1024 window rows x 1024 query rows that is ~7.5e7 decodes of a 1024-point TurboQuant vector plus a 1024-point WHT
+each - which is the 51.1 s of 64.2 s that the phase profile attributes to sliding attention.
+
+The fix is a mirror, but the SIZE decides whether it exists at all:
+
+    mirror over every row:   72 visits x 1024 pos x 1024 dim x 4 B = 288 MB     <- alongside a 7.9 GB model, no
+    mirror for ONE visit:            1024 pos x 1024 dim x 4 B   =   4.0 MB     <- fits trivially
+    stamp array for one visit:                                       4.0 KB
+    decode reduction:                                                1024x
+
+So it must be **window-sized, not row-total-sized**: `float *kmir` of `window_rows * dim` plus `int *kitag` of
+`window_rows`, where `kitag[p]` holds the visit id that populated that slot (-1 = empty). In `in2_kv_k`:
+`if (kitag[pos] == visit) return kmir + pos*dim;` else decode once, copy in, stamp it. Same for v. Because the tag carries
+the visit id, a new visit invalidates every slot for free - no clearing, no per-visit reallocation.
+
+Why this is the right next change and not another experiment:
+- it attacks 78-80 % of prefill time, measured twice, instead of the 22-41 % every GPU attempt targeted;
+- it needs 4 MB and no kernel work, no PCIe, no quantisation change;
+- its effect is directly observable in the existing `PHASE sliding=` line, so the gate is one number before and two after;
+- the trap above is the kind of detail that silently turns a 4 MB change into a 300 MB one, and it is now written down.
+
+Not implemented here: it touches the KV struct in `include/wubu_inkling2_kv.h`, both alloc sites in `in2_kv_init`
+(~:151 and ~:159), `in2_kv_free`, and the two accessors - five edit sites with a build-and-gate cycle, which needs room to
+verify that this session no longer has. The oracle (12 tokens, exact) is the gate to re-establish before and after.
