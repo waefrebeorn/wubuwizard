@@ -66,8 +66,11 @@ def main():
     assert anchor_emb.size == H, anchor_emb.size
     x0 = np.repeat(mask[None, :], B, axis=0)
     x0[0] = anchor_emb
+    # Context is [c0, anchor_pos): the anchor's own position is NOT in the context - it is block slot 0.
+    # ink_cpu_backend.cpp:1103-1105 c_len = anchor_pos - c0, and the block supplies positions anchor_pos+0..B-1.
     anchor_pos = M - 1
-    h = s2.forward(x0, taps, fuse, W, np.arange(anchor_pos, anchor_pos + B), np.arange(M), B)
+    taps_ctx = taps[:, :anchor_pos]                 # positions 0..anchor_pos-1
+    h = s2.forward(x0, taps_ctx, fuse, W, np.arange(anchor_pos, anchor_pos + B), np.arange(anchor_pos), B)
     # Final norm before the head: dspark.norm is unused elsewhere in this pipeline and RMSNorm with its weight
     # (rms 3.09, matching the trunk taps' own 2.9-7.7) is what maps the block stream into the hidden distribution
     # the unembed matrix expects. IN2_DSPARK_POSTNORM=0 disables it for an A/B.
@@ -80,8 +83,8 @@ def main():
     hob = s2.load(W, 'dspark.markov_head.hidden_out.bias')
     fw = fuse[12:16]
     e = np.exp(fw - fw.max())
-    frnn = s2.rmsnorm(np.tensordot((e / e.sum()).astype(np.float32), taps, axes=(0, 0)),
-                      s2.load(W, 'dspark.layers.2.dflare_norm.weight'))
+    frnn = s2.rmsnorm(np.tensordot((e / e.sum()).astype(np.float32), taps_ctx, axes=(0, 0)),
+                      s2.load(W, 'dspark.markov_head.dflare_norm.weight'))
 
     state = np.zeros((B, R), dtype=np.float32)
     prev = anchor

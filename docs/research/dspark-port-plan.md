@@ -515,3 +515,41 @@ so something upstream is still wrong and it is not the block/head arithmetic.
 So the difference is in **how the cache is built**, and that is the next thing to read - where `dspark_k[il]` is written during
 prefill, and from exactly what tensor. My reconstruction (`k_proj_ctx(fused taps)` RoPE'd at each position) may be subtly wrong
 in input, normalisation, or ordering, and I cannot tell from the output which.
+
+## STRATEGIC CORRECTION: the reference is upstream llama.cpp, not the Strata C++ drafter
+
+Two discoveries from the last few reads change what "correct" means for this port.
+
+**1. The drafter ships as its own GGUF, in two incompatible layouts.** `engine/tests/core/ink_dspark_layout_test.cpp`
+documents them with sizes and dates:
+
+    dspark-Inkling-2-Mini-Q8_0_Old.gguf   402,278,560 B   "the layout the engines read"
+    dspark-Inkling-2-Mini-Q8_0.gguf       503,889,952 B   2026-11-23 14:54 UTC, llama.cpp mainline "dflash":
+                                                           ctx_mix / ctx_norm / markov_w2 ...
+
+and the old layout uses different names from the Strata pack I extracted: `dspark_fuse.weight`, `markov_w1.weight`,
+`mask_embd.weight`, `joint_proj.weight/bias`, `output_norm.weight`, `blk.N.attn_k_ctx.weight` - versus the pack's
+`fuse_weight`, `markov_head.markov_w1`, `mask_embed`, `markov_head.rnn_proj`, `norm`, `layers.N.self_attn.k_proj_ctx`. Same
+mathematics, different packaging, and **a second generation that adds `ctx_mix`, `ctx_norm` and `markov_w2`** - i.e. the
+architecture evolved and the pack I have may not match the mainline implementation.
+
+**2. Our own upstream checkout already implements it.** `common/speculative.cpp:1374`:
+
+    struct common_speculative_impl_draft_dspark final : public common_speculative_impl_draft_dflash
+    {..., "draft-dspark", COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK}
+
+with the note at :3201 that "dflash/dspark decode the whole noise block in a single pass and sample every block position on the
+backend". There is also a built `build-ref/bin/llama-cli.exe` sitting in the checkout.
+
+**Why this matters more than any of the six divergences I fixed today:** this engine's contract is token-for-token parity with
+upstream llama.cpp. I have spent the session validating the drafter against the *Strata* implementation - reading its CUDA and
+CPU drafter line by line and matching them - while the thing our engine must agree with is upstream's `draft-dspark`. Those are
+different codebases with possibly different generations of the architecture, and that alone can explain a persistent 0/7 with
+every stage wired plausibly.
+
+**Consequence for the plan.** The next step is not another hypothesis about my taps. It is to establish upstream as the oracle:
+check whether `build-ref/bin/llama-cli.exe` supports `--draft-dspark` (and rebuild if the binary predates the source), run it on
+the same prompt, and compare its drafts against mine. That gives a reference we can actually execute, on the same machine, for
+the same model - which is what every failed hypothesis today was missing.
+
+The 0/7 measurement stands as the honest state of my implementation. What changes is what it is being measured against.
