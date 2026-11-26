@@ -436,3 +436,31 @@ This is the honest state of the last link:
 Training it (`WuBuMath/examples/train_gaad.c` exists) is the prerequisite, and it is a larger job than any single step
 in this document. Until then the retrieval design is complete and verified but has no encoder that produces usable
 geometry - and no amount of quantiser work substitutes for that.
+
+## Verification 6: TurboQuant does NOT beat q8_0 for K-side at equal bits - the previous recommendation was wrong
+
+The previous section proposed putting TurboQuant on the K side because attention scores are inner products and
+TurboQuant's estimator is unbiased while q8_0's row-fitted `amax/127` scale is biased. That argument is plausible and
+measurably wrong. `wubu_tqvec_score` against `kvq8_quantize_row`+`dequantize` on the same 2000 key/query pairs,
+d=128, keys unit-normalised but non-isotropic across dimensions (per-dim scale 0.5-2.0):
+
+    quantiser          bits/elem  IP rmse      IP bias      bytes/row
+    turboquant         8          0.001389     -0.000049    128
+    turboquant         6          0.002933     0.000123     96
+    turboquant         4          0.009111     0.000343     64
+    q8_0 (current KV)  8.5        0.000557     -0.000005    136
+
+**q8_0 is 2.5x more accurate than TurboQuant at 8 bits, for 6 % more space.** And its bias is not merely small but
+smaller than TurboQuant's (-5e-6 against -4.9e-5). The reason is structural: q8_0 fits a per-row scale to the actual
+row amplitude, while TurboQuant's codebook is a function of `(d,b)` only and cannot adapt - data-obliviousness is the
+property that makes it cheap to deploy, and it is also the property that loses here. With 256 levels and a row-fitted
+scale you are already close enough to lossless that adaptivity wins.
+
+What TurboQuant does buy, visible in the same table: **a 4-bit and 6-bit option that does not exist in the tree today**,
+at 64 and 96 bytes per row. Whether 0.0091 IP rmse is tolerable for attention is a separate question and would have to be
+measured through the model's logits, not here - but the honest framing is "a cheap lower-bit option", not "a better
+quantiser than q8_0".
+
+The meta-lesson is the same one this document keeps producing: the theoretical argument (unbiased estimator for an inner
+product) was right about the mechanism and wrong about the conclusion, because it compared bias and ignored that the
+competing estimator's bias is negligible at 8 bits. Both claims were measurable; only one was measured.
