@@ -110,19 +110,38 @@ int main(int argc, char **argv)
     memset(&tok_text, 0, sizeof tok_text);
     if (text_mode) {
         if (!wubu_tokenizer_init_from_gguf(&tok_text, path)) { fprintf(stderr, "tokenizer init failed\n"); return 5; }
-        const int cap0 = 4096;
+        /* IN2_TEXT_FILE reads the prompt from a file, because a long-context prompt cannot fit in argv on Windows.
+         * One token per byte is a safe cap for byte-level BPE over ASCII. */
+        char *fbuf = NULL;
+        int cap0 = 4096;
+        const char *src = argv[3];
+        const char *fpath = getenv("IN2_TEXT_FILE");
+        if (fpath) {
+            FILE *fp = fopen(fpath, "rb");
+            if (!fp) { fprintf(stderr, "cannot open IN2_TEXT_FILE %s\n", fpath); return 8; }
+            fseek(fp, 0, SEEK_END); long sz = ftell(fp); fseek(fp, 0, SEEK_SET);
+            fbuf = (char *)malloc((size_t) sz + 1);
+            if (!fbuf) { fclose(fp); return 9; }
+            if (fread(fbuf, 1, (size_t) sz, fp) != (size_t) sz) { fclose(fp); return 10; }
+            fclose(fp);
+            fbuf[sz] = 0;
+            src = fbuf;
+            cap0 = (int) sz + 8;
+            fprintf(stderr, "TEXT_FILE %ld bytes cap %d\n", sz, cap0);
+        }
         toks = (int *)calloc((size_t)cap0 + (size_t)n_gen, sizeof(int));
         if (!toks) return 6;
-        n_prompt = wubu_tokenizer_encode(&tok_text, argv[3], toks, cap0);
+        n_prompt = wubu_tokenizer_encode(&tok_text, src, toks, cap0);
+        free(fbuf);
         if (n_prompt <= 0) { fprintf(stderr, "prompt encode failed (%d)\n", n_prompt); return 7; }
-        for (int i = 0; i < n_prompt; ++i) printf("tok[%d]=%d\n", i, toks[i]);
+        if (n_prompt <= 64) for (int i = 0; i < n_prompt; ++i) printf("tok[%d]=%d\n", i, toks[i]);
     }
     const int cap = n_prompt + n_gen;
     if (!text_mode) {
         toks = (int *)calloc((size_t)cap, sizeof(int));
         for (int i = 0; i < n_prompt; ++i) toks[i] = atoi(argv[2 + i]);
     }
-    for (int i = 0; i < n_prompt; ++i) printf("prompt[%d]=%d\n", i, toks[i]);
+    if (n_prompt <= 64) for (int i = 0; i < n_prompt; ++i) printf("prompt[%d]=%d\n", i, toks[i]);
 
     double t_step = wall_now(); double t_total = 0.0; int used_cache = 0;
     fprintf(stderr, "LOAD wall: %.2f s (open+probe+load, before first token)\n", t_step - t_proc);

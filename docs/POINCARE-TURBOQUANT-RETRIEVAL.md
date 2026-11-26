@@ -640,3 +640,49 @@ resident.** That is the case for the tiered design: keep the hot window resident
 history, which is exactly the strata/tiering pattern, and it makes the PCIe row the floor rather than the ceiling.
 None of the three rows above has been measured end to end at 1M - they are bandwidth arithmetic on measured throughput,
 which is why the tier work has to come before any claim about 1M speed.
+
+## Verification 10: the wall is prefill throughput, not KV memory - and the 6-bit tier currently costs 4.7x of it
+
+`IN2_TEXT_FILE` now lets the prompt come from a file (argv cannot carry a long-context prompt on Windows), and one
+token per byte caps the encode buffer. That made prefill measurable for the first time, and the numbers reframe the 1M
+question completely.
+
+Same prompt, one token generated, wall clock:
+
+    prompt    f32 KV     6-bit KV   TQ penalty
+    ~11 tok   5.16 s    14.94 s     2.9x
+    ~22 tok   9.88 s    46.88 s     4.7x
+
+Two findings, both unwelcome:
+
+**1. Prefill costs ~0.45 s/token at f32 and ~2.1 s/token at 6 bits, with no batching.** So filling a 262,144-token
+context would take roughly 262144 x 2.1 s = **6.4 days** at 6 bits before the model could answer anything. Filling a 1M
+context is not a slow operation, it is an impossible one. Memory was the problem I expected; throughput is the problem
+that actually blocks the goal, and it blocks 256k just as hard as 1M.
+
+**2. TurboQuant's decode-on-read is the cost.** The 6-bit tier is 2.9x slower at 11 positions and 4.7x slower at 22, so
+the penalty grows with position - exactly what per-row decode costs, since every read runs a Hadamard unrotate and a
+nearest-centroid lookup before the dot product. The memory win of Verification 9 is real; the speed cost is 4.7x and
+rising, which makes the tier a memory-for-speed trade that is only worth paying at contexts where the alternative is not
+fitting at all.
+
+That also invalidates the tandem-GPU arithmetic in the previous section. I priced 1M decode at 12.99 GB/step against
+measured bandwidth and got ~1 s/token. But at 22 positions the engine already spends 2.1 s per token on 6-bit data
+while touching ~1 MB of KV per step - three orders of magnitude under the bandwidth figure. **The engine is not
+bandwidth-bound; it is per-element-bound**, because every KV element is decoded before it is used. Bandwidth arithmetic
+on this engine answers the wrong question.
+
+### Consequently, in priority order
+
+1. **Batched prefill.** The model is currently run one token per forward pass. Chunking the prompt (matmuls over a
+   token block instead of one row) is the only change that makes long context reachable at all; without it, no amount
+   of memory or quantisation matters. This is now the top item and it is worth 100x+ on prefill, not percent.
+2. **Score in the compressed domain.** Feed the query into the rotated basis once per visit and dot it against packed
+   codes using the centroid table - never decode a row to use it. That removes the 4.7x penalty and is what the paper's
+   inner-product variant is for; I implemented only the MSE variant, which forces decode.
+3. Only then re-price 1M, where the remaining question is the fidelity trade (fewer full visits vs pooled history) from
+   the previous section.
+
+Measuring prefill changes the plan. The previous section's conclusion - "1M is short by a factor of two in bits" - is
+still arithmetically true, but it is not the binding constraint; a 1M context that fits in RAM and takes six days to
+fill is not a feature.
