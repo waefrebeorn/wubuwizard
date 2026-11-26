@@ -1420,6 +1420,193 @@ int in2_matvec_quant_mt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
     return bad ? WUBU_INKLING2_ERR_IO : WUBU_INKLING2_OK;
 }
 
+/* Batched quantised matvec with a slice offset: out[t][r] = W[off + r] . a[t].
+ *
+ * in2_matvec_nt does the batching but has no element offset, and in2_matvec_quant has the offset but computes one
+ * position. The MoE needs both: an expert is a slab at e * rows * n_in, applied to a bucket of tokens. The offset is
+ * converted to bytes with gguf_raw_size, the same way in2_matvec_quant does, and the read goes straight from the
+ * mapping when there is one.
+ *
+ * Deliberately NOT internally threaded (no in2_rows_parallel, no omp here): the caller parallelises over experts, and
+ * two nested regions per expert is the one thing we measured to be strictly worse on mingw libgomp.
+ */
+int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+                        const float *X, int nt, int n_out, int n_in, float *Y)
+{
+    if (n_in <= 0 || n_out <= 0 || nt <= 0) return WUBU_INKLING2_ERR_IO;
+    const int ty = (t && t->info) ? t->info->ggml_type : -1;
+    const int q8_0_act = (ty == 8 || ty == 40 || ty == 42);
+    const int be = q8_0_act ? 32 : 256;
+
+    if (getenv("IN2_NOFAST") == NULL && t && t->info && wubu_iq_supported(ty) && in2_ty_verified(ty) &&
+        (n_in % be) == 0) {
+        const int64_t rb = gguf_raw_size(ty, n_in);
+        const int64_t boff = (elem_off == 0) ? 0 : gguf_raw_size(ty, elem_off);
+        if (rb > 0 && boff >= 0) {
+            wubu_in2_tensor_t sh = *t;
+            sh.file_offset = t->file_offset + boff;
+            const unsigned char *msrc = wubu_inkling2_map_ptr(ctx, &sh);
+            unsigned char *whole = msrc ? NULL : (unsigned char *) malloc((size_t) rb * (size_t) n_out);
+            const int have = msrc ? 1 : (whole && wubu_inkling2_read(ctx, &sh, whole, rb * n_out) == WUBU_INKLING2_OK);
+            if (have) {
+                const unsigned char *src = msrc ? msrc : whole;
+                const size_t ablk = q8_0_act ? sizeof(in2_q8_0_blk) : sizeof(in2_q8k_blk);
+                const int nab = n_in / be;
+                void *act = malloc(ablk * (size_t) nab * (size_t) nt);
+                if (act) {
+                    for (int i = 0; i < nt; ++i) {
+                        void *a = (unsigned char *) act + ablk * (size_t) nab * (size_t) i;
+                        if (q8_0_act) in2_q8_0_quantise(X + (size_t) i * n_in, nab, (in2_q8_0_blk *) a);
+                        else          in2_q8k_quantise(X + (size_t) i * n_in, nab, (in2_q8k_blk *) a);
+                    }
+                    const clock_t _q0 = clock();
+                    for (int g = 0; g < nt; g += 8) {
+                        const int nn = (nt - g < 8) ? (nt - g) : 8;
+                        const void *ap[8];
+                        float *op[8];
+                        for (int i = 0; i < nn; ++i) {
+                            ap[i] = (unsigned char *) act + ablk * (size_t) nab * (size_t) (g + i);
+                            op[i] = Y + (size_t) (g + i) * n_out;
+                        }
+                        wubu_iq_rows(ty, src, (size_t) rb, n_in, ap, nn, op, 0, n_out);
+                    }
+                    if (ty >= 0 && ty < 256) {
+                        in2_ty_sec[ty] += (double) (clock() - _q0) / (double) CLOCKS_PER_SEC;
+                        in2_ty_calls[ty] += 1;
+                        in2_ty_macs[ty] += (double) nt * (double) n_out * (double) n_in;
+                    }
+                    free(act);
+                    free(whole);
+                    return WUBU_INKLING2_OK;
+                }
+            }
+            free(whole);
+        }
+    }
+
+    /* Same answer, one position at a time. */
+    for (int i = 0; i < nt; ++i)
+        if (in2_matvec_quant(ctx, t, elem_off, X + (size_t) i * n_in, n_out, n_in, Y + (size_t) i * n_out)
+            != WUBU_INKLING2_OK)
+            return WUBU_INKLING2_ERR_IO;
+    return WUBU_INKLING2_OK;
+}
+
+/* Expert-major MoE for multi-token forwards. See the call site in in2_moe for why this exists. */
+static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
+                         int il, const float *x, int n_tok, float *out,
+                         const float *Wr, const float *cb, const float *gs, const float *ds)
+{
+    const wubu_in2_layer_t *L = &m->layer[il];
+    const int d = cfg->d_model, NE = cfg->n_expert, TOPK = cfg->n_expert_used, DFF = cfg->d_ff_expert;
+    /* Chunk the tokens so the per-(token,slot) expert outputs stay bounded - a 1M prefill cannot allocate
+     * n_tok * TOPK * d at once (74 GB), so chunking is not optional. But the chunk IS the win: with 128 experts and
+     * 8-of-128 routing, a chunk of 32 tokens already selects almost every expert, so the slab is read 128 times per
+     * chunk either way and a small chunk only halves the reads (measured 47.5 -> 38.4 s at 320 tokens, 19%). At
+     * CH = 512 the same 320 tokens fit in one chunk, every slab is read once, and the amortisation is real:
+     * 512 x 8 x 2304 floats = 37.7 MB of per-(token,slot) output, which is a fair trade. */
+    const int CH = n_tok < 512 ? n_tok : 512;
+    int rc = WUBU_INKLING2_OK;
+
+    int *idx = (int *) malloc((size_t) CH * TOPK * sizeof(int));
+    float *wt = (float *) malloc((size_t) CH * TOPK * sizeof(float));
+    float *ok = (float *) malloc((size_t) CH * TOPK * d * sizeof(float));
+    int *cnt = (int *) malloc((size_t) NE * sizeof(int));
+    int *start = (int *) malloc(((size_t) NE + 1) * sizeof(int));
+    int *fill = (int *) malloc((size_t) NE * sizeof(int));
+    int *bt = (int *) malloc((size_t) CH * TOPK * sizeof(int));
+    int *bk = (int *) malloc((size_t) CH * TOPK * sizeof(int));
+    if (!idx || !wt || !ok || !cnt || !start || !fill || !bt || !bk) {
+        rc = WUBU_INKLING2_ERR_IO;
+        goto done;
+    }
+
+    for (int t0 = 0; t0 < n_tok; t0 += CH) {
+        const int nt_ = (n_tok - t0 < CH) ? (n_tok - t0) : CH;
+
+        for (int t = 0; t < nt_; ++t) {
+            int *ip = idx + (size_t) t * TOPK;
+            float *wp = wt + (size_t) t * TOPK;
+            const int got = in2_router(x + (size_t) (t0 + t) * d, Wr, cb, NE, d, TOPK,
+                                       cfg->expert_weights_scale, ip, wp);
+            for (int k = got; k < TOPK; ++k) { ip[k] = -1; wp[k] = 0.0f; }
+            for (int i = 0; i < d; ++i) out[(size_t) (t0 + t) * d + i] = 0.0f;
+        }
+
+        /* counting sort of (token, slot) by expert */
+        for (int e = 0; e < NE; ++e) cnt[e] = 0;
+        for (int t = 0; t < nt_; ++t)
+            for (int k = 0; k < TOPK; ++k)
+                if (idx[(size_t) t * TOPK + k] >= 0) ++cnt[idx[(size_t) t * TOPK + k]];
+        start[0] = 0;
+        for (int e = 0; e < NE; ++e) start[e + 1] = start[e] + cnt[e];
+        memcpy(fill, start, (size_t) NE * sizeof(int));
+        for (int t = 0; t < nt_; ++t)
+            for (int k = 0; k < TOPK; ++k) {
+                const int e = idx[(size_t) t * TOPK + k];
+                if (e < 0) continue;
+                const int at = fill[e]++;
+                bt[at] = t;
+                bk[at] = k;
+            }
+
+        /* Expert-major: one slab read per expert for its whole bucket, instead of once per token. */
+        int bad = 0;
+#ifdef _OPENMP
+        #pragma omp parallel for num_threads(in2_threads()) schedule(dynamic) reduction(|:bad)
+#endif
+        for (int e = 0; e < NE; ++e) {
+            const int nb = cnt[e];
+            if (nb <= 0) continue;
+            float *Xe = (float *) malloc((size_t) nb * d * sizeof(float));
+            float *Ge = (float *) malloc((size_t) nb * 2 * DFF * sizeof(float));
+            float *Ae = (float *) malloc((size_t) nb * DFF * sizeof(float));
+            float *Oe = (float *) malloc((size_t) nb * d * sizeof(float));
+            if (!Xe || !Ge || !Ae || !Oe) { free(Xe); free(Ge); free(Ae); free(Oe); bad = 1; continue; }
+            for (int i = 0; i < nb; ++i)
+                memcpy(Xe + (size_t) i * d, x + (size_t) (t0 + bt[start[e] + i]) * d, sizeof(float) * (size_t) d);
+            if (in2_matvec_quant_nt(ctx, &L->gate_up, (int64_t) e * 2 * DFF * d, Xe, nb, 2 * DFF, d, Ge)
+                != WUBU_INKLING2_OK) {
+                bad = 1;
+            } else {
+                const float gsc = gs ? gs[e] : 1.0f;
+                for (int i = 0; i < nb * 2 * DFF; ++i) Ge[i] *= gsc;
+                for (int i = 0; i < nb; ++i)
+                    in2_expert_act(Ge + (size_t) i * 2 * DFF, Ge + (size_t) i * 2 * DFF + DFF, DFF,
+                                   Ae + (size_t) i * DFF);
+                if (in2_matvec_quant_nt(ctx, &L->down, (int64_t) e * d * DFF, Ae, nb, d, DFF, Oe)
+                    != WUBU_INKLING2_OK) bad = 1;
+            }
+            if (!bad)
+                for (int i = 0; i < nb; ++i) {
+                    const int t = bt[start[e] + i], k = bk[start[e] + i];
+                    memcpy(ok + ((size_t) t * TOPK + (size_t) k) * d, Oe + (size_t) i * d,
+                           sizeof(float) * (size_t) d);
+                }
+            free(Xe); free(Ge); free(Ae); free(Oe);
+        }
+        if (bad) { rc = WUBU_INKLING2_ERR_IO; break; }
+
+        /* Serial k-order accumulation - the same expression in the same order as the per-token path, so the bits
+         * are unchanged. This is the constraint that makes the restructure more than a loop swap. */
+        for (int t = 0; t < nt_; ++t) {
+            float *o = out + (size_t) (t0 + t) * d;
+            for (int k = 0; k < TOPK; ++k) {
+                const int e = idx[(size_t) t * TOPK + k];
+                if (e < 0) continue;
+                const float dsc = ds ? ds[e] : 1.0f;
+                const float *op = ok + ((size_t) t * TOPK + (size_t) k) * d;
+                const float wv = wt[(size_t) t * TOPK + k];
+                for (int i = 0; i < d; ++i) o[i] += wv * op[i] * dsc;
+            }
+        }
+    }
+
+done:
+    free(idx); free(wt); free(ok); free(cnt); free(start); free(fill); free(bt); free(bk);
+    return rc;
+}
+
 /* MoE over n_tok tokens: route, then accumulate the selected experts. */
 int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
             int il, const float *x, int n_tok, float *out)
@@ -1446,6 +1633,18 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
     if (rc != WUBU_INKLING2_OK) { free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo); return rc; }
 
     const clock_t moe_t0 = clock();
+    /* Multi-token forwards go expert-major (IN2_MOE_1T=1 restores the per-token path for A/B). The per-token loop
+     * below streams each selected expert's slab once per token, so prefill re-reads ~1.5 GB of weights for every
+     * position - measured as TY16 calls scaling exactly with token count at a flat 8.7 GOPS, and as prefill gaining
+     * only 2.24x from 1 to 8 threads. Bucketing by expert reads each slab once per bucket instead. */
+    if (n_tok >= 2 && !getenv("IN2_MOE_1T")) {
+        rc = in2_moe_batch(ctx, m, cfg, il, x, n_tok, out, Wr, cb, gs, ds);
+        free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
+        if (getenv("IN2_TIME"))
+            fprintf(stderr, "  moe L%-2d %.3fs [expert-major]\n", il,
+                    (double) (clock() - moe_t0) / (double) CLOCKS_PER_SEC);
+        return rc;
+    }
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
         int idx[256]; float w[256];
         const int got = in2_router(x + (size_t)t * d, Wr, cb, NE, d, TOPK, cfg->expert_weights_scale, idx, w);
