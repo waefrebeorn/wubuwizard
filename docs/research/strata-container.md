@@ -189,3 +189,35 @@ project keeps repeating: a plausible sample from a small window treated as proof
 The right next move is to read `engine/include/strata/quant/sk_codecs.hpp` and `engine/src/quant/` for the actual Q8_ROW and S5_K
 decoders rather than reverse-engineering them from bytes. Recorded as unresolved, with the structural fact (599,040 = 2304 x 260)
 that any future attempt should start from.
+
+## Q8_ROW cracked and verified; S_K is a super-block codec we must port, not guess
+
+The answer is in their code, not in the bytes: `ink_cpu_backend.cpp:50` and `hip_codecs:2836` agree -
+
+    Q8_ROW layout: [rows] float32 scales, followed by [rows, cols] int8_t weights
+
+i.e. **a separate scale plane, not an interleaved per-row header**. For `markov_head.hidden_out` `[2304, 256]`:
+`2304*4 + 2304*256 = 599,040` bytes, an exact match. Decoded and checked:
+
+    scales: min 1.12e-3, max 2.57e-3, median 1.48e-3, all finite and positive
+    per-row stdev across rows 0, 1, 2, 1152, 2303: 0.06254, 0.06259, 0.06238, 0.06261, 0.06261   (uniform, as a real matrix)
+    sampled 34,816 weights: mean|x| 0.0502, stdev 0.0626, max|x| 0.266
+
+So my earlier `599,040 = 2304 x 260` reading was a numerical coincidence: 260 x 2304 and 4 x 2304 + 256 x 2304 are the same
+number for the wrong reason. The lesson repeats - the layout was never in the byte count.
+
+`S5_K` is not decodable by inspection at all: it goes through `dequant_sk_row(src, SkCode, out, n)`, the `strata::quant::sk`
+super-block codec (`sk_codecs.hpp`: `QK_S = 256`, four 64-weight sub-groups). Porting it means porting that codec, not
+reverse-engineering rows.
+
+### And their own source confirms our rollback design
+
+Two comments in `CpuSlot` settle questions we answered by measurement and inference:
+
+    std::vector<SlotShortConvState> sconv_snaps;  // [0..8] exact post-step ShortConv snapshots for DSpark partial-accept rollback!
+    std::vector<std::vector<uint16_t>> dspark_k, dspark_v;   // [3][max_ctx * kv_dim] BF16
+
+They snapshot the **short-conv state per step** for partial-accept rollback - precisely the second half of the rollback problem we
+identified independently today (the 4-tap conv history that invalidating K/V rows does not undo), and they keep snapshots for
+steps 0..8, which matches `block_size = 8`. Our `in2_kv_conv_save/restore` over both caches is the same idea with one snapshot
+instead of a ring of eight.
