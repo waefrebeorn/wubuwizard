@@ -1429,3 +1429,30 @@ downstream of that single arithmetic assumption.
 Where this leaves the engine, measured: MoE 41.9 % (parallel, per-token flat), q 16.2 % (efficient, no win), attention 7.5 %,
 gate+wo 6.8 %, everything else noise. The only remaining large target is MoE at 41.9 %, and it is already the healthiest path
 in the engine.
+
+## Decode is 5.2 tok/s and 90 % of it is outside the profiled layers
+
+Clean linear fit over three run lengths (no O(N^2) behaviour, so "(full recompute)" in the footer is not what it sounds):
+
+    6 tokens   1,815 ms
+    12 tokens  2,908 ms
+    24 tokens  5,273 ms
+    fit: T = 632 ms + 192.8 ms/token   ->   5.2 tok/s
+
+The profiled layer work for the same 24-token run is **466 ms total, 19.4 ms/token**:
+
+    decode                               193 ms/token
+    profiled layers                       19 ms/token    <- 10 %
+    unaccounted                          ~173 ms/token   = 4.2 s of the 5.3 s
+
+So **nine tenths of decode time is not in the layer phase accounting at all.** The candidates, and they are all outside the
+FP2 markers: the LM head over a 201,024-token vocabulary (463 MMAC/token, ~14 ms at this engine's best rate - nowhere near
+173 ms), sampling, the per-step KV bookkeeping, and whatever the "(full recompute)" footer actually refers to.
+
+This is now the single largest unexplained block in the project, and it is in DECODE - the mode a user experiences, and the
+one the upstream PR moved from 51 to 158 tok/s. Every phase optimisation this session (attention, q, MoE) operated inside
+the 10 % slice.
+
+Next step is a timer that brackets ONE whole token - from the token loop's start to the next iteration - and prints its
+breakdown, so the 173 ms can be attributed. Nothing in the FP2 set covers it, so a new bracket is required rather than
+another reading of the existing table.
