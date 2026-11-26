@@ -1376,3 +1376,23 @@ are the only reliable edit anchor.** Not the Nth match of a pattern, not a brace
 
 The `q` question is still open and still worth one turn, but it needs the file printed with line numbers first, and the edit
 made against a range read off that listing - the same method that finally worked for the attention parallelisation.
+
+## Correction to the note immediately above: the markers are NOT duplicated, my script was
+
+The grep I ran after writing that note contradicts it: `FP2(1);` occurs **once** and `FP2(2);` occurs **once**, at line 155,
+both inside `in2_layer_full_seq` (one of three top-level functions in the file). So "positional markers in three functions"
+was wrong. Retracted.
+
+The actual cause was simpler and entirely mine: the insert script computed several indices up front, then inserted at the
+highest one first and the lowest last - but it recomputed `i_fp2` from a stale `i_calloc` offset in the first version, and in
+the third version the declaration insert at `i_fp1` shifted every index above it before `i_fp2`'s block was placed. The
+declaration ended up in one scope and the use in another, which is exactly the `qsplit undeclared` error at a line that did
+not contain either.
+
+So the lesson is not about ambiguous anchors in this file - it is the one already recorded earlier in this document and
+violated again here: **when inserting multiple times into one list, compute NO indices in advance; insert bottom-up and re-find
+each anchor immediately before each insert.** The brace-scan failure and this one are the same class of bug, and both times
+the code was fine and the edit machinery was not.
+
+`q` remains unmeasured: 0.862 s over FP2(1)..FP2(2), covering q_clip dequant + calloc + the wq matvec + clip + tau, with
+the split between them still unknown.
