@@ -352,7 +352,10 @@ the doorbell, and the CPU/GPU split - not more kernels.
   48, alongside `attention.relative_extent 1024`, `attention.relative_length 16`, `attention.qk_clip 22.63`,
   `attention.log_scale_floor 8192` and `expert_weights_scale 8.0`. The 8-full/64-sliding split this project derived by
   tracing is therefore a declared property of the file, and any code that recomputes it from behaviour can read it
-  instead.
+  instead. **Verified, not assumed:** the array decodes to full attention on exactly ,
+  8 full and 40 sliding out of 48 layers, which is precisely what  traced - so the engine and the file
+  agree on the one structural fact the whole KV plan rests on.  with  at
+   likewise produces the 3072-wide  and 1024-wide  tensors actually present.
 - **The dense tier is mostly Q8_0** (`attn_output` and friends are type 8, 1.06 bytes/weight), which is why the
   non-expert tier costs 587 MiB for only 24.18 M MAC/layer. Re-quantising attention to IQ4_XS is a second 8%-class
   arithmetic saving, at a larger quality risk than the head.
