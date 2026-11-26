@@ -920,3 +920,36 @@ against layer time at both context lengths separates attention growth from MoE s
 Three hypotheses eliminated by measurement now - allocation (fixed, flat), granularity (predictions reversed), and with them
 the assumption that the expert loop's parallelism was the problem. The engine's 2.29x is looking less like a bug and more
 like a bandwidth-and-arithmetic-intensity ceiling that this hardware imposes on IQ2 matvecs at batch sizes below 8.
+
+## Phase separation: attention is 78-80 % of layer time, MoE is 29-41 %, and MoE is the part that scales fine
+
+`IN2_TIMETY=1`, same prompt at two lengths, 8 threads:
+
+                        60 tokens        480 tokens     growth
+    layers total         5.713 s         64.204 s       11.2x
+      full (ar-block)    1.264 s (22 %)  13.067 s (20 %)  10.3x
+      sliding            4.449 s (78 %)  51.137 s (80 %)  11.5x
+      f_mlp+moe          0.486 s          3.702 s         7.6x
+      moe                2.325 s (40.7 % of layers)  18.335 s (28.6 %)  7.9x
+
+Normalised per token:
+
+    moe       38.8 ms/token at 60   ->  38.2 ms/token at 480   **flat** - linear in tokens, exactly as it should be
+    sliding   74.2 ms/token at 60   -> 106.5 ms/token at 480   **grows with N**
+
+So, finally, the cost structure of this engine at prefill:
+
+1. **The sliding-window attention path is 78-80 % of all layer time** - 51.1 s of 64.2 s at 480 tokens. Nothing else is close.
+2. **MoE is 28.6-40.7 %** and is per-token flat, so the expert path and its threading are healthy; the 2.29x scaling number
+   was measuring a minority of the work all along.
+3. The dense projections that the whole GPU line of work chased are inside the 22 % `full` term.
+
+MoE also *shrinks* as a share (40.7 % -> 28.6 %) because attention grows faster than it does. Every GPU effort this session -
+the batched resident hook, the MoE batching, the grouped-GEMM sizing - was aimed at between 22 % and 41 % of the time while
+the 80 % was the KV decode-on-read path identified much earlier: `in2_kv_k`/`in2_kv_v` decode each cached row on every
+access, with 64 sliding visits x 1024 rows per visit-group and 576 MB of KV in the 60-token case alone.
+
+**The next step is the sliding attention path, and nothing else.** It is 4 of every 5 seconds of prefill, its per-token cost
+rises with context, and the fix (decode each KV row once into an f32 mirror per visit, instead of per access) is already
+described in the chunked-prefill note. That work was projected to take 262k prefill from 57,016 h to ~380 s; this profile
+says it is also the single biggest win available at 480 tokens, where nobody was looking.
