@@ -2119,3 +2119,32 @@ The three routes from here, in order of expected value:
 
 Option 3 is not a defeat - it is what the hardware can do without a trained drafter - but it should be described that way rather
 than as "faster than upstream", which is currently false.
+
+## DEFINITIVE: 24 physical layers, 48 visits - and my "72 layer-passes" was wrong
+
+Checked the GGUF's own tensor names rather than trusting the `block_count` metadata:
+
+    blk.23.* present, blk.24.* absent, blk.47.* absent
+    distinct blk.N. indices in the tensor table: 24
+
+So this model has **24 physical layers**, and `inkling2.block_count = 48` in the metadata is the **visit** count, not a tensor
+count. That agrees exactly with the Strata pack's `num_physical_layers: 24` and its trunk listing layers 0..23.
+
+The correct accounting therefore is:
+
+    visits = 6 (layers 0..5) + 12 x 3 (loop core 6..17) + 6 (layers 18..23) = 48 visits
+    MoE runs on every visit  ->  48 MoE calls          <- exactly what IN2_MOE_NTOK measured
+    full-stack layer-passes  =  48, NOT 72
+
+**Retracted: "72 layer-passes for the full stack, and every per-token estimate assuming 48 is 1.5x low."** That correction was
+itself wrong: it added the core's extra passes to a 48-*block* stack, but the stack has 24 blocks, so 48 visits is the total and
+the original 48 was right in number for the wrong reason (visits, not physical layers). The MoE call trace agreed with the
+answer both times; I misread which quantity it was counting.
+
+**And it resolves `target_layer_ids [5, 23, 41, 48]`.** Visits run 0..47, so 5, 23 and 41 are intermediate visits and **48 is one
+past the last visit - the final hidden state after the loop**. The drafter therefore taps three intermediate recurrent passes
+plus the final output, which is exactly what "decoding looped transformers" would want: it sees the trajectory, not just the
+endpoint. Not yet confirmed against their code, but it is the only reading consistent with a 0..47 visit space.
+
+Consequence for the DSpark port plan (docs/research/dspark-port-plan.md): tap capture is four buffers from visits 5, 23, 41 and
+the final, inside the existing 48-visit loop - no layer-index ambiguity remains.
