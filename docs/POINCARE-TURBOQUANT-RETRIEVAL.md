@@ -824,3 +824,49 @@ contributor and moves the work that is 100 % serial today onto a device that mea
    wiring is smaller than it looks), with the 8 active experts per layer staged per token.
 3. Only then re-measure, because every number in this document above about GPU speed was measured on kernels this model
    never reaches.
+
+## The type-coverage enumeration: 32 % of the experts are offloadable today, and the biggest share is two simple formats
+
+Tensor sizes derived from the GGUF tensor-table offsets rather than from a block-size table, which is self-validating:
+the sizes sum to **8.474 GB against a data area of 8.474 GB** (file 8.486 GB), and the table end offset lands on
+11978661, the same number the engine prints. The earlier 66.56 GB figure came from my block-size table and was wrong.
+
+    role            tensors      GB      share
+    expert               88    7.251     85.6 %
+    other (dense, embd) 646    1.223     14.4 %
+
+    expert bytes by type                       GB     share of experts   GPU kernel today
+    40  NVFP4                                1.624        22.4 %        no
+    42  Q2_0                                 1.338        18.5 %        no
+    16  IQ2_XXS                               1.226        16.9 %        yes
+    17  IQ2_XS                                1.178        16.2 %        no
+    22  IQ2_S                                 1.088        15.0 %        yes
+    19  IQ1_S                                 0.796        11.0 %        no
+
+The kernel accepts `{8, 16, 22, 23}`, so **31.9 % of expert bytes are of a type it already handles** (IQ2_XXS + IQ2_S)
+and 68.1 % are not. MoE is also never offered to the GPU at all, so today the working share is zero, not 32 %.
+
+Expert layers: 24 (`blk.0..blk.23`), 302.14 MB each, 8 of 128 experts active per token, so
+
+    18.88 MB of expert weights per layer  x  24 layers  =  453 MB touched per token
+
+of which ~185 MB is NVFP4/Q2_0, ~145 MB is IQ2_XXS/IQ2_S, ~124 MB is IQ2_XS/IQ1_S.
+
+### The decision this supports
+
+The two largest expert formats are **NVFP4 and Q2_0 - 40.9 % of all expert bytes - and they are the two easiest formats
+on the list**: NVFP4 is 4-bit values with one scale per 64 elements, Q2_0 is 2-bit values with an fp16 scale per 64
+elements. Neither needs the 256-entry grid lookup and sign-masking that makes IQ2 slow on the CPU, so both vectorise
+cleanly on the GPU. By contrast IQ2_XXS/IQ2_S are already supported and are only 32 % of bytes.
+
+So the highest-leverage GPU work is not "port the IQ2 kernel" and not "wire up MoE for the types it already has". It is:
+
+1. **NVFP4 and Q2_0 matvec kernels on the GPU** - 41 % of expert bytes, trivial unpack, and they are exactly the formats
+   the CPU is worst at (2.1 GMAC/s scalar with per-element dequant).
+2. **Offer MoE expert row ranges to the GPU** - `wubu_iq_rows` already takes `r0/r1`, so an expert is a sub-range; the
+   wiring is a dispatch decision, not a new interface.
+3. Keep the IQ2 path on the CPU initially; it is 45 % of expert bytes but the format that is hardest to vectorise, and
+   the CPU already has a tuned integer path for it.
+
+That ordering is driven by measured bytes and measured formats, and it puts the GPU on the 41 % that is cheapest to
+implement before the 45 % that is hardest.
