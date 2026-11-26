@@ -397,3 +397,36 @@ at all. The ordering changes accordingly: **LP-21 becomes "a bit-exact IQ2_XXS d
   rule using the ~70-85 us copy against ~119 us compute figures above.
 - **LP-24 - the AVX-512 one-token IQ2_XXS row without the codebook** (maya PR #227's trick): the CPU lane is the
   long pole for misses, and this is +6-8% on it in their measurement.
+
+### LP-25 killed by arithmetic before it was written: this engine does not amortise a batch
+
+Draft-free multi-token decode (prompt-lookup, lookahead, Jacobi, Medusa-style) rests on one premise: a pass over K
+candidate positions costs about one position's worth of work, because the weights are read once and positions are
+nearly free. That premise holds for a bandwidth-bound engine. **It does not hold here**, and the numbers to see it were
+already in this register:
+
+    320-token prefill    37.4 s   = 0.117 s per position
+     48-token batch     10.31 s   = 0.215 s per position
+    single-token decode  0.22  s  = 0.220 s per position
+
+Per-position cost barely moves between a 48-wide batch and a single token; only the 320-wide pass is 1.9x cheaper per
+position, and that is the pass where a 7.9 GB fault-in is amortised over 320 positions rather than 48. So this engine
+charges roughly **one position's arithmetic for each position in the batch** - which is what a compute-bound engine
+does, and it is consistent with decode measuring 4.22 GMAC / 0.22 s = 19.2 GMAC/s = 38 GFLOPS aggregate against a
+38 GFLOPS single-thread kernel rate, i.e. the box is delivering one core's kernel throughput for the whole step.
+
+The consequence is a hard kill on speculation at the current per-position cost. A 9-position proposal pass costs
+~9 x 0.18 = 1.6 s. If 40% of proposals match (a generous rate for prose), an average pass emits 1/(1-0.4) = 1.67
+tokens, which sequentially costs 1.67 x 0.22 = 0.37 s. **Speculation would be 4x slower than plain greedy.** For it to
+break even the pass would have to cost under ~0.37 s, i.e. under 0.04 s per position - 5x cheaper than today's
+0.22 s.
+
+So the lever is not "more tokens per pass", it is **one position made cheaper**, and every remaining path runs through
+that: the device IQ2_XXS row kernel (LP-21), the thread-scaling wall, and the 66-byte block access pattern. This is the
+same conclusion `flop_count.py` reached from the other direction when it showed prefill sitting at 43 GFLOPS against a
+~228 GFLOPS ceiling.
+
+Recorded as LP-25 = **do not build**, with the reopen condition stated: if a decode step falls below ~0.05 s
+(bandwidth-bound regime, e.g. once a working device tier carries the dense weights), re-run this arithmetic, because
+the conclusion inverts exactly there.
+
