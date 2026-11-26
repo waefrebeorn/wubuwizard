@@ -1579,3 +1579,28 @@ block even before counting acceptance.
 Not done in this session: the extract touches an 80-line block containing the kernel path, its fallback, the softcap and the
 padded-vocab handling, and the last four multi-site edits cost a build cycle each to discover a mechanical fault. The anchors
 above make it a mechanical job for a session with room to run the oracle after step 2 and again after step 3.
+
+## The oracle gate is now one command - and it immediately caught a naming error in my own notes
+
+`tools/oracle_gate.sh` wraps the parity check every change in this repo depends on:
+
+    bash tools/oracle_gate.sh            # uses the existing binary
+    bash tools/oracle_gate.sh --rebuild  # rebuilds first
+    exit 0 identical / 1 mismatch / 2 harness problem
+
+It refuses to pass when the reference is empty or short - the exact failure that has occurred four times this session, where
+a failed build left the binary missing, both sides returned "", and an equality test reported success. Verified both ways:
+tampering one token of the golden string yields `GATE FAIL(1)` with a want/got diff and exit 1; the untampered run yields
+`GATE PASS` and exit 0.
+
+**And it immediately exposed an error in this document's vocabulary: the "12-token oracle" is FIFTEEN tokens.** The command
+passes `12` as the number of tokens to *generate*, and the IDS line also carries the 3 prompt tokens, so the golden line has
+3 + 12 = 15 ids. Every note in this roadmap that says "12-token oracle, exact" has been quoting a 15-token line. The gate
+initially failed on its own word count because I encoded my wrong belief (13 words) rather than the actual string (16 words).
+
+That is the same class of mistake as `sliding`, `q`, and the layer count - a label I trusted instead of the thing itself. The
+difference is that this time a mechanical check caught it in seconds, which is precisely why the gate is worth more than any
+single optimisation: it converts a recurring human error into a compiler-style failure.
+
+From here the workflow for the per-position-logits refactor (or anything else) is: `bash tools/oracle_gate.sh` before, make
+the change, `bash tools/oracle_gate.sh --rebuild` after. Two commands, no ambiguity about what "still exact" means.
