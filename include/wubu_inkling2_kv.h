@@ -19,6 +19,9 @@ typedef struct {
     float *kscr, *vscr; /* ONE dequantised row per array, returned by the accessors (read-only) */
     size_t rowq;        /* bytes per quantised row */
     int    q8;          /* 1 = keys/values are stored as q8_0 */
+    struct wubu_tqvec *tq;  /* when set, rows are TurboQuant codes and q8 is also 1 (4-8 bits/coord) */
+    float *kn, *vn;         /* per-row norm: tqvec quantises UNIT vectors, so the row scale is stored separately */
+    float *encsc;           /* dim floats, scratch for the normalised row on store */
 } in2_kv_t;
 
 /* shared with the full-attention layer (other translation unit): same cache, same visit numbering */

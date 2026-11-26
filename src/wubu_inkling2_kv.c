@@ -22,6 +22,9 @@
  */
 #include "wubu_inkling2_kv.h"
 #include "wubu_kv_q8.h"
+#include "wubu_tqvec.h"
+#include <stdio.h>
+#include <math.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +69,7 @@ size_t in2_kv_bytes(const in2_kv_t *kv)
     if (!kv || !kv->cap) return 0;
     size_t rows = 0;
     for (int v = 0; v < kv->n_visit; ++v) rows += (size_t)kv->cap[v];
+    if (kv->tq) return rows * kv->rowq * 2u + rows * sizeof(float) * 2u;  /* codes + per-row norms */
     if (kv->q8) return rows * kv->rowq * 2u;
     return rows * (size_t)kv->dim * sizeof(float) * 2u;
 }
@@ -100,8 +104,43 @@ int in2_kv_init_pervisit(in2_kv_t *kv, int n_visit, int dim, int window, const i
      * per-visit rows is the entire point: a 1M context over 8 full visits plus 64 sliding visits costs
      * 8 x 1M x 1024 x 8 B = 68.7 GB in f32, against 603 GB for the uniform layout that in2_kv_init used to build. */
     const size_t elems = total * (size_t)dim;
-    kv->q8   = getenv("IN2_KV_Q8") != NULL;
-    if (kv->q8) {
+    /* TurboQuant tier: 4-8 bits/coord, half the memory of q8_0 at 4 bits. Set q8=1 as well so every existing
+     * "quantised" guard keeps working; tq != NULL is what distinguishes the two formats. */
+    const char *tqe = getenv("IN2_KV_TQ");
+    const size_t nrows = elems / (size_t)dim;
+    if (tqe) {
+        int bits = atoi(tqe);
+        if (bits < 2) bits = 4;
+        if (bits > 8) bits = 8;
+        /* OPEN DEFECT: b=5 and b=8 produce wrong output in the ENGINE while the module round-trip is correct and
+         * monotone at every width (worst max-err 0.002 at b=8, d=1024, 300 structured rows). Refuse rather than
+         * emit wrong tokens; b=4/6/7 are verified to answer correctly. */
+        /* OPEN DEFECT: b=5 and b=8 produce wrong output in the ENGINE while the module round-trip is correct and
+         * monotone at every width (worst max-err 0.002 at b=8, d=1024, 300 structured rows). Clamp to a verified
+         * width once, loudly, instead of refusing: refusing here crashed because init is called per visit. */
+        if (bits == 5 || bits == 8) {
+            static int warned = 0;
+            const int clamped = (bits == 5) ? 6 : 7;
+            if (!warned) {
+                warned = 1;
+                fprintf(stderr, "[IN2_KV_TQ] %d bits is known-broken in-engine (module is fine, wiring is not) - clamping to %d\n", bits, clamped);
+            }
+            bits = clamped;
+        }
+        kv->tq = wubu_tqvec_init(dim, bits, 0xC0FFEEull);
+        if (!kv->tq) { in2_kv_free(kv); return -1; }
+        kv->q8   = 1;
+        kv->rowq = wubu_tqvec_code_bytes(kv->tq);
+        kv->kq   = (unsigned char *)calloc(1, nrows * kv->rowq);
+        kv->vq   = (unsigned char *)calloc(1, nrows * kv->rowq);
+        kv->kn   = (float *)calloc(nrows, sizeof(float));
+        kv->vn   = (float *)calloc(nrows, sizeof(float));
+        kv->encsc = (float *)malloc((size_t)dim * sizeof(float));
+        kv->kscr = (float *)malloc((size_t)dim * sizeof(float));
+        kv->vscr = (float *)malloc((size_t)dim * sizeof(float));
+        if (!kv->kq || !kv->vq || !kv->kn || !kv->vn || !kv->encsc || !kv->kscr || !kv->vscr) { in2_kv_free(kv); return -1; }
+    } else if (getenv("IN2_KV_Q8")) {
+        kv->q8 = 1;
         kv->rowq = kvq8_row_bytes(dim);
         kv->kq   = (unsigned char *)calloc(1, elems / (size_t)dim * kv->rowq);
         kv->vq   = (unsigned char *)calloc(1, elems / (size_t)dim * kv->rowq);
@@ -124,6 +163,7 @@ void in2_kv_free(in2_kv_t *kv)
     if (!kv) return;
     free(kv->k); free(kv->v); free(kv->kraw); free(kv->vraw);
     free(kv->kq); free(kv->vq); free(kv->kscr); free(kv->vscr); free(kv->cap); free(kv->off);
+    wubu_tqvec_free(kv->tq); free(kv->kn); free(kv->vn); free(kv->encsc);
     memset(kv, 0, sizeof *kv);
 }
 
@@ -131,6 +171,12 @@ float *in2_kv_k(in2_kv_t *kv, int visit, int pos)
 {
     if (!kv || (!kv->k && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->tq) {
+        wubu_tqvec_decode(kv->tq, kv->kq + el * kv->rowq, kv->kscr);
+        const float s = kv->kn ? kv->kn[el] : 1.0f;
+        for (int i = 0; i < kv->dim; ++i) kv->kscr[i] *= s;
+        return kv->kscr;
+    }
     if (kv->q8) {
         kvq8_dequantize_row(kv->kq + el * kv->rowq, kv->kscr, kv->dim);
         return kv->kscr;   /* read-only, valid until the next in2_kv_k() call - no caller holds two K rows */
@@ -142,6 +188,12 @@ float *in2_kv_v(in2_kv_t *kv, int visit, int pos)
 {
     if (!kv || (!kv->v && !kv->q8) || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return NULL;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->tq) {
+        wubu_tqvec_decode(kv->tq, kv->vq + el * kv->rowq, kv->vscr);
+        const float s = kv->vn ? kv->vn[el] : 1.0f;
+        for (int i = 0; i < kv->dim; ++i) kv->vscr[i] *= s;
+        return kv->vscr;
+    }
     if (kv->q8) {
         kvq8_dequantize_row(kv->vq + el * kv->rowq, kv->vscr, kv->dim);
         return kv->vscr;
@@ -153,6 +205,33 @@ void in2_kv_store_post_k(in2_kv_t *kv, int visit, int pos, const float *row)
 {
     if (!kv || (!kv->k && !kv->q8) || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->tq) {
+        double n2 = 0.0;
+        for (int i = 0; i < kv->dim; ++i) n2 += (double)row[i] * (double)row[i];
+        const float nrm = (float)sqrt(n2);
+        kv->kn[el] = nrm > 0.0f ? nrm : 1.0f;
+        for (int i = 0; i < kv->dim; ++i) kv->encsc[i] = row[i] / kv->kn[el];
+        wubu_tqvec_encode(kv->tq, kv->encsc, kv->kq + el * kv->rowq);
+        if (getenv("IN2_TQ_DBG")) {
+            static int once = 0;
+            if (!once) {
+                once = 1;
+                float *chk = (float *)malloc((size_t)kv->dim * sizeof(float));
+                wubu_tqvec_decode(kv->tq, kv->kq + el * kv->rowq, chk);
+                double mx = 0.0, nr = 0.0;
+                for (int i = 0; i < kv->dim; ++i) {
+                    const double a = chk[i] * (double)kv->kn[el];
+                    const double dd = fabs(a - (double)row[i]);
+                    if (dd > mx) mx = dd;
+                    nr += (double)row[i] * (double)row[i];
+                }
+                fprintf(stderr, "[TQDBG] dim=%d bits=%d rowq=%zu |row|=%.4f norm_stored=%.4f max_roundtrip_err=%.6f\n",
+                        kv->dim, wubu_tqvec_bits(kv->tq), kv->rowq, sqrt(nr), (double)kv->kn[el], mx);
+                free(chk);
+            }
+        }
+        return;
+    }
     if (kv->q8) { kvq8_quantize_row(row, kv->kq + el * kv->rowq, kv->dim); return; }
     float *dst = kv->k + el * (size_t)kv->dim;
     memcpy(dst, row, (size_t)kv->dim * sizeof(float));
@@ -162,6 +241,15 @@ void in2_kv_store_post_v(in2_kv_t *kv, int visit, int pos, const float *row)
 {
     if (!kv || (!kv->v && !kv->q8) || !row || visit < 0 || visit >= kv->n_visit || pos < 0 || pos >= kv->n_pos_max) return;
     const size_t el = in2_kv_off(kv, visit) + (size_t)in2_kv_row_slot(kv, visit, pos);
+    if (kv->tq) {
+        double n2 = 0.0;
+        for (int i = 0; i < kv->dim; ++i) n2 += (double)row[i] * (double)row[i];
+        const float nrm = (float)sqrt(n2);
+        kv->vn[el] = nrm > 0.0f ? nrm : 1.0f;
+        for (int i = 0; i < kv->dim; ++i) kv->encsc[i] = row[i] / kv->vn[el];
+        wubu_tqvec_encode(kv->tq, kv->encsc, kv->vq + el * kv->rowq);
+        return;
+    }
     if (kv->q8) { kvq8_quantize_row(row, kv->vq + el * kv->rowq, kv->dim); return; }
     float *dst = kv->v + el * (size_t)kv->dim;
     memcpy(dst, row, (size_t)kv->dim * sizeof(float));

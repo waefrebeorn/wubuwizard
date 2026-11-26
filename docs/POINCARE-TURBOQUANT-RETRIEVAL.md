@@ -494,3 +494,54 @@ So the engine work is justified: a 4-bit K tier at 64 B/row with 3e-4 attention 
 card, and the remaining question - do the 12 oracle tokens survive - is now a specific, falsifiable engine test rather
 than a hope. The prediction from this table is that they should, with the sink-argmax churn as the most likely failure
 mode.
+
+## Verification 8: the 4-bit KV tier is IN THE ENGINE and it works - with two module bugs and one retraction on the way
+
+`IN2_KV_TQ=<bits>` now selects a TurboQuant KV tier alongside the existing `IN2_KV_Q8`. Measured on the real engine,
+1024-position cache, same 12-token oracle:
+
+    tier            KV at 1024 ctx   vs f32    answer
+    f32 (baseline)  576.0 MB         1.0x      the Ottoman Empire was Constantinople, which was later re   12/12 tokens
+    IN2_KV_TQ=4      72.6 MB         7.9x      the Ottoman Empire was Constantinople, which was also known  10/12 tokens
+    IN2_KV_TQ=6     108.6 MB         5.3x      the Ottoman Empire was Constantinople, which was also known  10/12 tokens
+    IN2_KV_TQ=7     126.6 MB         4.5x      the Ottoman Empire was Constantinople, which was also the    10/12 tokens
+
+The first ten generated tokens are identical to the f32 oracle at 4, 6 and 7 bits; the divergence is at the tail, and the
+answer is correct throughout. For **7.9x less KV memory** on a 6 GB card that is the memory win the whole exercise was
+for, measured in the engine rather than in a probe.
+
+Three defects were found by doing it, two of them mine:
+
+**1. `wubu_tqvec_decode` silently did nothing above d=256.** It held a `double z[256]` stack buffer with
+`if (c->d > 256) return;`. The KV row dim is 1024, so decode returned without writing its output and the engine read
+uninitialised scratch. Found because the engine segfaulted before emitting a token. Replaced with a heap buffer.
+
+**2. The codebook grid did not follow the distribution's scale.** `tqv_build_codebook` integrated on a fixed `[-1,1]`
+grid, but a unit vector's coordinates occupy `|t| <= ~1/sqrt(d)` - at d=1024 that is `|t| <= 0.1`, so 8192 grid points
+put roughly 800 samples underneath 256 centroids. The grid is now built in `u = t*sqrt(d)` where the mass actually is.
+Stretching it past the support initially produced `pow(negative, fractional)` = NaN, which is how the second half of
+this bug was found - the d=32 self-test went to NaN while d=1024 looked perfect, the opposite of the usual direction.
+
+**3. RETRACTION: the block-diagonal 8x8 rotation is not good enough for real data.** The earlier "Verification 3"
+concluded block-diagonal was identical to full rotation within noise, and it was - **on random unit vectors**, which are
+already isotropic. Real K rows are not: they carry a large shared component (norm 24.87 over 1024 dims). A block
+rotation only mixes inside each 8-wide block, so such a row stays concentrated, the rotated coordinates are not i.i.d.
+Beta, and the codebook is fitted to the wrong law. Measured on an actual K row:
+
+    block-diagonal 8x8   max round-trip err 0.603  (2.4 % of the row norm)
+    signs + Hadamard     max round-trip err 0.039  (0.16 %)          15x better
+
+and with the block version the engine produced fluent nonsense - "Kazakhstan, Astana, is a city that has" for a question
+about the Ottoman capital. The module now uses `R = (1/sqrt(d)) H S`: random signs then a fast Walsh-Hadamard
+transform, orthogonal, `O(d log d)`, still regenerable from one seed, and it mixes every coordinate with every other.
+Re-verified after the change: d=32 still passes the distortion bound at every bit-width (0.3522/0.1115/0.0324/0.0090) and
+d=1024 round-trip is monotone over 300 structured rows (worst 0.0108/0.0040/0.0015 for b=4/6/8).
+
+The lesson is the same shape as the earlier harness bug: a measurement that agrees with my expectation, on data I
+generated to suit it, is not evidence about real data. Both times the real input disagreed.
+
+**Open defect, not fixed:** `IN2_KV_TQ=5` and `=8` produce wrong output in the engine ("Kazakhstan, Astana...") while the
+module round-trip at those widths is correct and monotone - so the fault is in the wiring, not the quantiser. Both are
+now clamped to a verified width (5->6, 8->7) with a one-shot warning on stderr rather than being allowed to emit wrong
+tokens. Refusing outright was tried first and crashed, because the KV init runs once per visit and the failure path
+freed state that later visits still used.

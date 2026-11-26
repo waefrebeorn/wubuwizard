@@ -33,7 +33,7 @@
 struct wubu_tqvec {
     int      d, bits, ncent, nblk;
     uint64_t seed;
-    double  *rot;      /* nblk * 64: 8x8 orthogonal blocks */
+    signed char *sign; /* d random +/-1: the whole transform is a seed plus these signs */
     double  *cent;     /* 2^bits centroids */
     double  *scratch;  /* d doubles for the rotated query */
 };
@@ -56,14 +56,17 @@ static double tqv_nrand(uint64_t *s)
 static void tqv_build_codebook(struct wubu_tqvec *c)
 {
     const int n = c->ncent;
-    const double a = (double) (c->d - 3) / 2.0;
+    const double sq = sqrt((double) c->d);          /* coordinate scale of a unit vector in R^d is 1/sqrt(d) */
+    const double a  = (double) (c->d - 3) / 2.0;
+    const double hi = sq * 1.05;                     /* integrate in u = t*sqrt(d), where the mass actually lives */
     double *t = malloc(sizeof(double) * TQV_GRID);
     double *w = malloc(sizeof(double) * TQV_GRID);
     if (!t || !w) { free(t); free(w); return; }
     double tot = 0.0;
     for (int i = 0; i < TQV_GRID; ++i) {
-        t[i] = -1.0 + 2.0 * (i + 0.5) / TQV_GRID;
-        w[i] = pow(1.0 - t[i] * t[i], a);
+        t[i] = -hi + 2.0 * hi * (i + 0.5) / TQV_GRID;
+        const double r = t[i] / sq;
+        w[i] = (r * r < 1.0) ? pow(1.0 - r * r, a) : 0.0;   /* outside the support pow() returns NaN */
         tot += w[i];
     }
     for (int i = 0; i < TQV_GRID; ++i) w[i] /= tot;
@@ -71,14 +74,14 @@ static void tqv_build_codebook(struct wubu_tqvec *c)
     double acc = 0.0; int j = 0;
     for (int i = 0; i < TQV_GRID && j < n; ++i) {
         acc += w[i];
-        if (acc >= (double) (j + 1) / (double) n - 1e-15) c->cent[j++] = t[i];
+        if (acc >= (double) (j + 1) / (double) n - 1e-15) c->cent[j++] = t[i] / sq;
     }
-    for (; j < n; ++j) c->cent[j] = t[TQV_GRID - 1];
+    for (; j < n; ++j) c->cent[j] = t[TQV_GRID - 1] / sq;
 
     for (int it = 0; it < 120; ++it) {
         double bnd[260], sum[260], ws[260];
-        for (int k = 1; k < n; ++k) bnd[k] = 0.5 * (c->cent[k - 1] + c->cent[k]);
-        bnd[0] = -2.0; bnd[n] = 2.0;
+        for (int k = 1; k < n; ++k) bnd[k] = 0.5 * (c->cent[k - 1] + c->cent[k]) * sq;
+        bnd[0] = -2.0 * sq; bnd[n] = 2.0 * sq;
         memset(sum, 0, sizeof sum); memset(ws, 0, sizeof ws);
         int seg = 0;
         for (int i = 0; i < TQV_GRID; ++i) {
@@ -89,43 +92,29 @@ static void tqv_build_codebook(struct wubu_tqvec *c)
         double dl = 0.0;
         for (int k = 0; k < n; ++k) {
             if (ws[k] <= 1e-18) continue;
-            const double v = sum[k] / ws[k];
+            const double v = sum[k] / ws[k] / sq;
             dl += fabs(v - c->cent[k]);
             c->cent[k] = v;
         }
-        if (dl < 1e-12) break;
+        if (dl < 1e-14) break;
     }
     free(t); free(w);
 }
 
 wubu_tqvec *wubu_tqvec_init(int d, int bits, uint64_t seed)
 {
-    if (d <= 0 || d % TQV_BLOCK != 0 || bits < 1 || bits > 8) return NULL;
+    if (d <= 0 || bits < 1 || bits > 8) return NULL;
+    if ((d & (d - 1)) != 0) return NULL;   /* Hadamard needs a power of two (32, 128, 1024 are) */
     struct wubu_tqvec *c = calloc(1, sizeof *c);
     if (!c) return NULL;
     c->d = d; c->bits = bits; c->ncent = 1 << bits; c->nblk = d / TQV_BLOCK; c->seed = seed;
-    c->rot = malloc(sizeof(double) * (size_t) c->nblk * TQV_BLOCK * TQV_BLOCK);
+    c->sign = malloc((size_t) c->d);
     c->cent = malloc(sizeof(double) * (size_t) c->ncent);
     c->scratch = calloc((size_t) d, sizeof(double));
-    if (!c->rot || !c->cent || !c->scratch) { wubu_tqvec_free(c); return NULL; }
+    if (!c->sign || !c->cent || !c->scratch) { wubu_tqvec_free(c); return NULL; }
 
     uint64_t s = seed;
-    for (int b = 0; b < c->nblk; ++b) {
-        double *B = c->rot + (size_t) b * TQV_BLOCK * TQV_BLOCK;
-        for (int i = 0; i < TQV_BLOCK; ++i)
-            for (int j = 0; j < TQV_BLOCK; ++j) B[i * TQV_BLOCK + j] = tqv_nrand(&s);
-        for (int i = 0; i < TQV_BLOCK; ++i) {            /* orthonormalise each 8x8 block */
-            for (int k = 0; k < i; ++k) {
-                double dot = 0.0;
-                for (int j = 0; j < TQV_BLOCK; ++j) dot += B[i * TQV_BLOCK + j] * B[k * TQV_BLOCK + j];
-                for (int j = 0; j < TQV_BLOCK; ++j) B[i * TQV_BLOCK + j] -= dot * B[k * TQV_BLOCK + j];
-            }
-            double nr = 0.0;
-            for (int j = 0; j < TQV_BLOCK; ++j) nr += B[i * TQV_BLOCK + j] * B[i * TQV_BLOCK + j];
-            nr = sqrt(nr);
-            for (int j = 0; j < TQV_BLOCK; ++j) B[i * TQV_BLOCK + j] /= nr;
-        }
-    }
+    for (int i = 0; i < c->d; ++i) c->sign[i] = (tqv_next(&s) & 1u) ? 1 : -1;
     tqv_build_codebook(c);
     return c;
 }
@@ -133,7 +122,7 @@ wubu_tqvec *wubu_tqvec_init(int d, int bits, uint64_t seed)
 void wubu_tqvec_free(wubu_tqvec *c)
 {
     if (!c) return;
-    free(c->rot); free(c->cent); free(c->scratch); free(c);
+    free(c->sign); free(c->cent); free(c->scratch); free(c);
 }
 
 int    wubu_tqvec_dim(const wubu_tqvec *c)  { return c ? c->d : 0; }
@@ -143,17 +132,38 @@ size_t wubu_tqvec_code_bytes(const wubu_tqvec *c)
     return c ? ((size_t) c->d * (size_t) c->bits + 7u) / 8u : 0;
 }
 
+static void tqv_fwht(double *a, int n)
+{
+    for (int h = 1; h < n; h <<= 1)
+        for (int i = 0; i < n; i += h << 1)
+            for (int j = i; j < i + h; ++j) {
+                const double x = a[j], y = a[j + h];
+                a[j] = x + y;
+                a[j + h] = x - y;
+            }
+}
+
+/* R = (1/sqrt(d)) H S : random signs then Hadamard. Orthogonal (R^T R = I) and it mixes EVERY coordinate with every
+ * other in O(d log d), which the earlier 8x8 block-diagonal version did not: block rotation left structured rows
+ * concentrated inside a few blocks, so the rotated coordinates were not i.i.d. Beta and real KV rows decoded with
+ * 0.603 error on a norm-24.87 row against 4e-3 on a random unit vector. Random unit vectors are already spread, which
+ * is why the block version measured identical in the synthetic probe and then failed on real data. */
 static void tqv_rotate(const wubu_tqvec *c, const float *x, double *out)
 {
-    for (int b = 0; b < c->nblk; ++b) {
-        const double *B = c->rot + (size_t) b * TQV_BLOCK * TQV_BLOCK;
-        const int o = b * TQV_BLOCK;
-        for (int i = 0; i < TQV_BLOCK; ++i) {
-            double s = 0.0;
-            for (int j = 0; j < TQV_BLOCK; ++j) s += B[i * TQV_BLOCK + j] * (double) x[o + j];
-            out[o + i] = s;
-        }
-    }
+    const double sc = 1.0 / sqrt((double) c->d);
+    for (int i = 0; i < c->d; ++i) out[i] = (double) x[i] * (double) c->sign[i];
+    tqv_fwht(out, c->d);
+    for (int i = 0; i < c->d; ++i) out[i] *= sc;
+}
+
+/* inverse: R^T z = (1/sqrt(d)) S H z, H symmetric */
+static void tqv_unrotate(const wubu_tqvec *c, const double *z, float *out)
+{
+    const double sc = 1.0 / sqrt((double) c->d);
+    double *t = c->scratch;
+    for (int i = 0; i < c->d; ++i) t[i] = z[i];
+    tqv_fwht(t, c->d);
+    for (int i = 0; i < c->d; ++i) out[i] = (float) (t[i] * (double) c->sign[i] * sc);
 }
 
 static int tqv_nearest(const wubu_tqvec *c, double v)
@@ -211,16 +221,10 @@ void wubu_tqvec_decode(const wubu_tqvec *c, const void *code, float *out)
 {
     if (!c || !code || !out) return;
     const unsigned char *in = (const unsigned char *) code;
-    double z[256];
-    if (c->d > 256) return;                    /* keep it stack-only; d is 16-128 in this design */
+    double *z = (double *) malloc((size_t) c->d * sizeof(double));
+    if (!z) return;                            /* was a double z[256] with "if (d > 256) return" - which silently
+                                                * left the output untouched for the KV dim (1024) */
     for (int i = 0; i < c->d; ++i) z[i] = c->cent[tqv_get(in, i, c->bits)];
-    for (int b = 0; b < c->nblk; ++b) {        /* inverse of an orthogonal block is its transpose */
-        const double *B = c->rot + (size_t) b * TQV_BLOCK * TQV_BLOCK;
-        const int o = b * TQV_BLOCK;
-        for (int j = 0; j < TQV_BLOCK; ++j) {
-            double s = 0.0;
-            for (int i = 0; i < TQV_BLOCK; ++i) s += B[i * TQV_BLOCK + j] * z[o + i];
-            out[o + j] = (float) s;
-        }
-    }
+    tqv_unrotate(c, z, out);
+    free(z);
 }
