@@ -790,6 +790,8 @@ static const void *g_res_key[WUBU_RES_SLOTS];
 static size_t  g_res_bytes[WUBU_RES_SLOTS];
 static int     g_res_n;
 static void   *g_res_act, *g_res_y;
+static void   *g_pin_act, *g_pin_y;      /* page-locked staging: the pageable copies were the per-call cost */
+
 static size_t  g_res_act_cap, g_res_y_cap;
 
 WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbytes,
@@ -818,15 +820,25 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
     if ((size_t) act_bytes > g_res_act_cap) {
         if (g_res_act) { cudaFree(g_res_act); g_res_act = NULL; }
         if (cudaMalloc(&g_res_act, (size_t) act_bytes) != cudaSuccess) { g_res_act_cap = 0; return -5; }
+        if (g_pin_act) { cudaFreeHost(g_pin_act); g_pin_act = NULL; }
+        if (cudaHostAlloc(&g_pin_act, (size_t) act_bytes, cudaHostAllocDefault) != cudaSuccess) {
+            g_pin_act = NULL; g_res_act_cap = 0; return -5;
+        }
         g_res_act_cap = (size_t) act_bytes;
     }
     const size_t ybytes = (size_t) n_cols * sizeof(float);
     if (ybytes > g_res_y_cap) {
         if (g_res_y) { cudaFree(g_res_y); g_res_y = NULL; }
         if (cudaMalloc(&g_res_y, ybytes) != cudaSuccess) { g_res_y_cap = 0; return -6; }
+        if (g_pin_y) { cudaFreeHost(g_pin_y); g_pin_y = NULL; }
+        if (cudaHostAlloc(&g_pin_y, ybytes, cudaHostAllocDefault) != cudaSuccess) { g_pin_y = NULL; g_res_y_cap = 0; return -6; }
         g_res_y_cap = ybytes;
     }
-    if (cudaMemcpy(g_res_act, h_act, (size_t) act_bytes, cudaMemcpyHostToDevice) != cudaSuccess) return -7;
+    
+    /* host -> pinned -> device: the middle hop is a plain memcpy of a few KB, the DMA is the fast pinned one */
+    memcpy(g_pin_act, h_act, (size_t) act_bytes);
+    if (cudaMemcpyAsync(g_res_act, g_pin_act, (size_t) act_bytes, cudaMemcpyHostToDevice, 0)
+            != cudaSuccess) return -7;
 
     const int rc = (type == 8)
         ? wubu_cuda_matvec_q8_0(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
@@ -840,7 +852,9 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
         ? wubu_cuda_matvec_iq4xs(g_res_d[slot], g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes)
         : wubu_cuda_quant_matvec(g_res_d[slot], type, g_res_act, (float *) g_res_y, K, n_cols, col_stride_bytes);
     if (rc != 0) return -8;
-    if (cudaMemcpy(h_y, g_res_y, ybytes, cudaMemcpyDeviceToHost) != cudaSuccess) return -9;
+    if (cudaMemcpyAsync(g_pin_y, g_res_y, ybytes, cudaMemcpyDeviceToHost, 0) != cudaSuccess) return -9;
+    if (cudaDeviceSynchronize() != cudaSuccess) return -9;
+    memcpy(h_y, g_pin_y, ybytes);
     return 0;
 }
 
