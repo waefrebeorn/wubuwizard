@@ -1801,6 +1801,20 @@ done:
 }
 
 /* MoE over n_tok tokens: route, then accumulate the selected experts. */
+static long *g_moe_hist = NULL;
+static void moe_hist_set(long *h) { g_moe_hist = h; }
+static void moe_hist_dump(void)
+{
+    if (!g_moe_hist) return;
+    for (int L = 0; L < 64; ++L) {
+        long tot = 0;
+        for (int e = 0; e < 512; ++e) tot += g_moe_hist[(size_t)L * 512 + e];
+        if (!tot) continue;
+        for (int e = 0; e < 512; ++e) if (g_moe_hist[(size_t)L * 512 + e])
+            fprintf(stderr, "MOEHIST %d %d %ld%c", L, e, g_moe_hist[(size_t)L * 512 + e], 10);
+    }
+}
+
 int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
             int il, const float *x, int n_tok, float *out)
 {
@@ -1841,6 +1855,15 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
         int idx[256]; float w[256];
         const int got = in2_router(x + (size_t)t * d, Wr, cb, NE, d, TOPK, cfg->expert_weights_scale, idx, w);
+        /* IN2_MOE_HIST: routing histogram keyed by (layer, expert). Answers the only question that decides whether a
+         * hot-expert cache is worth building - how concentrated the router actually is - before any cache exists. */
+        if (getenv("IN2_MOE_HIST")) {
+            static long *mh = NULL; static int mh_n = 0;
+            if (!mh) { mh = (long *)calloc((size_t)64 * 512, sizeof(long)); mh_n = 1;
+                       atexit(moe_hist_dump); moe_hist_set(mh); }
+            for (int k = 0; k < got && k < TOPK; ++k)
+                if (il >= 0 && il < 64 && idx[k] >= 0 && idx[k] < 512) mh[(size_t)il * 512 + idx[k]]++;
+        }
         for (int i = 0; i < d; ++i) out[(size_t)t * d + i] = 0.0f;
         /* Experts are independent, so the k loop is the natural parallel axis: with n_tok == 1 it is the only one
          * that gives a thread a whole contiguous expert block to stream, which is what this phase is bound by.

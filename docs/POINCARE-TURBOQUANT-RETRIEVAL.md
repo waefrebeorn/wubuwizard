@@ -1119,3 +1119,36 @@ The device path is bounded by residency, not by arithmetic. A hot-expert cache -
 actually selects most often resident and streaming only misses - is the only way to move the 75 % and it is a real
 feature, not a flag. Until then the honest summary is: **the GPU contributes ~5 % of the work and buys 7-21 % of decode
 speed; prefill (the phase that decides whether long context is usable at all) is CPU-only by construction.**
+
+## The router is concentrated enough for a hot-expert cache - measured before building one
+
+`IN2_MOE_HIST=1` (new, `wubu_inkling2_fwd.c`) accumulates a routing histogram keyed by (layer, expert) and dumps it at
+exit. 16 decode tokens, 24 layers, 8 experts per token, 5760 picks total:
+
+    layer    picks   distinct of 128   top-8    top-16   top-32
+    L0        120         54           39.2 %   60.0 %   81.7 %
+    L1        120         50           45.0 %   65.8 %   85.0 %
+    L2        120         56           39.2 %   58.3 %   80.0 %
+
+Aggregating across layers is meaningless (each layer has its own 128 experts, so the union is all 128 at top-8 = 14.8 %);
+per layer the distribution is strongly skewed: **half the experts are never selected in 120 picks, and the top 32 cover
+about 82 %.**
+
+That is the precondition a hot-expert cache needs, and it prices the design exactly:
+
+    expert size            302.14 MB / 128 per layer = 2.36 MB each
+    cache of 32/layer      75.5 MB per layer  x 24 layers = 1.81 GB      ~82 % of picks
+    cache of 16/layer      37.8 MB per layer  x 24 layers = 0.91 GB      ~62 % of picks
+
+Against a 6 GB card carrying a 1.22 GB dense set, the 32-expert cache is affordable, and it would put roughly four
+fifths of the 75 % of decode time that is MoE within reach of the device - the opposite of the earlier experiment where
+every expert streamed and the result was 14 % slower.
+
+Two things this does not yet say: the histogram is over 16 tokens of one prompt, so the *stability* of the hot set over
+a longer run is unmeasured (a cache that hits 82 % in the first 16 tokens and then thrashes on a topic change is worth
+less than its hit rate suggests), and the miss path still pays a PCIe transfer that the 14 % loss measured above shows is
+not free. The next step is therefore a cache with an explicit miss cost, measured on a longer run, not a straight
+port of the routing table.
+
+Recording the instrument itself: it is env-gated, writes only when `IN2_MOE_HIST=1`, and answered in one 16-token run a
+question that would otherwise have been answered by building the cache and hoping.
