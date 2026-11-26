@@ -80,6 +80,11 @@ static void in2_mix(const float *blocks, int n_blocks, int block_stride, int pos
 
 /* pos0 = index of the first token in `tokens`. With a cache attached the layers only compute those positions and
  * read everything earlier from the cache; with pos0 = 0 and no cache this is the original full recompute. */
+/* Non-NULL => in2_forward_at also writes logits for EVERY position, [n_tok][vocab]. Used by speculative
+ * verification, which needs argmax at each drafted position. NULL (the default) preserves prior behaviour. */
+static float *g_logits_all = NULL;
+void in2_set_logits_all(float *p) { g_logits_all = p; }
+
 int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                    const int *tokens, int n_tok, int pos0, float *h, float *logits)
 {
@@ -292,10 +297,17 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *fin = (float *)malloc(sizeof(float) * d);
     float *fq = global_f32(ctx, "output_res_query.weight");
     if (!fin) { free(blocks); free(fq); return WUBU_INKLING2_ERR_IO; }
+    /* Per-position logits for speculative verification. g_logits_all is NULL for every existing caller, so this
+     * loop runs exactly once with pos = n_tok-1 and logits_out = logits - the same instructions as before.
+     * Set it with in2_set_logits_all(buf) where buf is n_tok * vocab_size floats. */
+    const int _n_hp = g_logits_all ? n_tok : 1;
+    for (int _hp = 0; _hp < _n_hp; ++_hp) {
+    const int pos = g_logits_all ? _hp : (n_tok - 1);
+    float *logits_out = g_logits_all ? g_logits_all + (size_t)pos * (size_t)cfg->vocab_size : logits;
     /* logits are only meaningful for the last position */
     const double _fw1 = in2_wall_now();
-    const float *last = h + (size_t)(n_tok - 1) * d;
-    if (fq) in2_mix(blocks, n_blocks, n_tok * d, (n_tok - 1) * d, last, fq, d, eps, fin);
+    const float *last = h + (size_t)pos * d;
+    if (fq) in2_mix(blocks, n_blocks, n_tok * d, pos * d, last, fq, d, eps, fin);
     else    memcpy(fin, last, sizeof(float) * d);
 
     float *on = global_f32(ctx, "output_norm.weight");
@@ -329,12 +341,12 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             const clock_t _h0 = clock();
             for (int r = 0; r < cfg->vocab_size; r += CHUNK) {
                 const int n = (r + CHUNK <= cfg->vocab_size) ? CHUNK : (cfg->vocab_size - r);
-                if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits + r) != WUBU_INKLING2_OK) {
+                if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits_out + r) != WUBU_INKLING2_OK) {
                     head_done = 0;
                     break;
                 }
             }
-            if (getenv("IN2_TIMETY")) {
+            if (!_hp && getenv("IN2_TIMETY")) {
                 extern double in2_ty_sec[256]; extern long in2_ty_calls[256]; extern double in2_ty_macs[256];
                 double tot = 0.0;
                 for (int _t = 0; _t < 256; ++_t) tot += in2_ty_sec[_t];
@@ -379,14 +391,15 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     if (!head_done) {
         float *Wo = global_f32(ctx, "output.weight");
         if (!Wo) { free(blocks); free(fin); free(fq); return WUBU_INKLING2_ERR_IO; }
-        in2_matvec(Wo, fin, d, cfg->vocab_size, logits);
+        in2_matvec(Wo, fin, d, cfg->vocab_size, logits_out);
         free(Wo);
     }
     const double _fw2 = in2_wall_now();
-    if (getenv("IN2_TIMETY"))
+    if (!_hp && getenv("IN2_TIMETY"))
         fprintf(stderr, "FWD wall: embed+layers=%.3f s  head=%.3f s  (ntok=%d)\n", _fw1 - _fw0, _fw2 - _fw1, n_tok);
     const float cap = 30.0f;
-    for (int i = 0; i < cfg->vocab_size; ++i) logits[i] = tanhf(logits[i] / cap) * cap;
+    for (int i = 0; i < cfg->vocab_size; ++i) logits_out[i] = tanhf(logits_out[i] / cap) * cap;
+    }
 
     /* The output matrix has 201024 rows but only 200058 are real tokens; the rest are padding rows whose
      * embeddings are meaningless. The reference drops the padded vocab before sampling, and without this
