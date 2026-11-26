@@ -1186,3 +1186,27 @@ is exactly this project's parity invariant. Meanwhile this session spent its eff
 
 Recorded as the strategic finding of this session: if the goal is "same tokens, faster", the speculative path is worth more
 than another kernel, and it does not violate the parity invariant.
+
+## The attention parallelisation landed and measures a real (small) win - and it was mis-bundled
+
+The hand-scoped edit (lines 274-324, per-thread rs/bias/logit/alpha, `omp parallel` + `omp for` over tokens) built clean and
+kept the oracle exact (94-char IDS). Measured against the pre-change sweep:
+
+    1 thread   layers 13.946 -> 13.835 s    full 2.414 -> 2.278 s    sliding 11.532 -> 11.557 s
+    8 threads  layers  5.553 ->  5.382 s    full 1.257 -> 1.100 s    sliding  4.296 ->  4.282 s
+    60-token wall clock            6,415 -> 6,174 ms               (-3.8 %)
+
+So: **full-class layers improved 12.5 %, sliding-class were unchanged, wall clock 3.8 % faster**, oracle exact. The reason
+sliding did not move is that this loop is the `full` branch - the parallelisation was applied where the code was, which is
+the full-attention/ar-block layer, not the sliding layers. That is consistent with the earlier correction that `sliding` is a
+layer class and its cost is mostly MoE, which is already parallel via a different path.
+
+Kept, because it is a measured improvement with an unchanged oracle. But the honest size of it is 3.8 %, not the 3-5x that
+would have followed had attention really been 27 % of prefill and fully serial - which means **attention proper is a much
+smaller share than the phase arithmetic suggested**, and the earlier "27 % serial attention" estimate should be treated as an
+upper bound that this measurement does not support.
+
+**Process error, recorded so it does not repeat:** this code change was committed inside `80e1b16`, whose message is about
+assessing a llama.cpp PR - because that commit used `git add -A` while the edit was sitting in the tree. The change is real
+and tested, but it is filed under a message that does not describe it. Use explicit paths on `git add` whenever a working
+tree may contain an in-flight edit, rather than `-A`.
