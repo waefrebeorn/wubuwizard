@@ -1534,6 +1534,17 @@ int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
     const int q8_0_act = (ty == 8 || ty == 40 || ty == 42);
     const int be = q8_0_act ? 32 : 256;
 
+    /* One line per distinct type, so a tensor that silently takes the float path can be told apart from one whose
+     * kernels simply are not verified: both look identical from the outside (same tokens, same silence). */
+    if (getenv("IN2_NT_TRACE") && ty >= 0 && ty < 256) {
+        static int seen[256];
+        if (!seen[ty]) {
+            seen[ty] = 1;
+            fprintf(stderr, "NT ty=%d sup=%d ver=%d align=%d n_in=%d n_out=%d nt=%d (%s)\n",
+                    ty, wubu_iq_supported(ty), in2_ty_verified(ty), (n_in % be) == 0, n_in, n_out, nt,
+                    (t && t->info && t->info->name[0]) ? t->info->name : "?");
+        }
+    }
     if (getenv("IN2_NOFAST") == NULL && t && t->info && wubu_iq_supported(ty) && in2_ty_verified(ty) &&
         (n_in % be) == 0) {
         const int64_t rb = gguf_raw_size(ty, n_in);
@@ -2077,7 +2088,8 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)qdim, sizeof(float));
     if (Wq && q) {
-        in2_matvec(Wq, xq, d, qdim, q);
+        if (getenv("IN2_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wq, 0, xq, qdim, d, q);
+        else                          in2_matvec(Wq, xq, d, qdim, q);
         in2_l2_clip(q, qcl, NH, HD, 22.6274166f);
         const float tau = 1.0f + 0.1f * logf(fmaxf(((float)pos0 + 1.0f) / 8192.0f, 1.0f));
         for (int i = 0; i < qdim; ++i) q[i] *= tau;
@@ -2100,8 +2112,10 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     int rc = WUBU_INKLING2_OK;
     if (!Wk || !Wv || !kc || !vc || !kp || !vp || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
     if (rc == WUBU_INKLING2_OK) {
-        in2_matvec(Wk, xk, d, kdim, kraw);
-        in2_matvec(Wv, xv, d, kdim, vraw);
+        if (getenv("IN2_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wk, 0, xk, kdim, d, kraw);
+        else                          in2_matvec(Wk, xk, d, kdim, kraw);
+        if (getenv("IN2_FULL_KERNEL")) in2_matvec_quant(ctx, &L->wv, 0, xv, kdim, d, vraw);
+        else                          in2_matvec(Wv, xv, d, kdim, vraw);
         in2_shortconv_dynamic(kraw, 1, kdim, kc, kp, xk, d, NKV, 4, kt);
         in2_shortconv_dynamic(vraw, 1, kdim, vc, vp, xv, d, NKV, 4, vt);
         memcpy(k, kt, sizeof(float) * kdim);
