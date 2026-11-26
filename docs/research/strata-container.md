@@ -221,3 +221,31 @@ They snapshot the **short-conv state per step** for partial-accept rollback - pr
 identified independently today (the 4-tap conv history that invalidating K/V rows does not undo), and they keep snapshots for
 steps 0..8, which matches `block_size = 8`. Our `in2_kv_conv_save/restore` over both caches is the same idea with one snapshot
 instead of a ring of eight.
+
+## Both tensor formats now decode, and there is a tool for it
+
+`tools/strata_extract.py` reads any tensor out of a `.strata` pack to raw f32. Verified end to end on real data:
+
+    q_proj.weight   S5_K    [3072, 2304]   7,077,888 floats -> 28,311,552 B file   (exact)
+    hidden_out.w    Q8_ROW   [2304, 256]     589,824 floats ->  2,359,296 B file   (exact)
+
+**S_K superblock** (from `quant/sk_codecs.cpp:520-570`):
+
+    2 B  fp16 D                     superblock scale
+    4 B  u[0..3]                    per-subgroup multipliers, used as u/255
+    160 B packed q                  for S5_K: 256 values x 5 bits = 1280 bits exactly
+    value = (q - half) * D * (u[g] / 255),  half = (2^bits - 1)/2  ->  15.5 for S5_K
+    sizes: S2 70, S3 102, S4 134, S5 166, S6 198, S8 262 bytes per 256 weights
+
+Decoded S5_K q_proj: 102,400 sampled weights, mean|x| 0.0381, stdev 0.0485, range +-0.2227 - symmetric and consistent with a
+projection matrix, and byte counts match exactly (`27,648 superblocks x 166 = 4,589,568`), which is the check that failed every
+guess at Q8_ROW and holds here.
+
+**Q8_ROW** is a separate f32 scale plane followed by the int8 plane - see the section above.
+
+So the entire DSpark drafter (54 tensors, 216 MB) is now readable. `--dump-dspark DIR` writes all of it as f32 (~866 MB).
+
+What remains is not decoding but *reimplementation*: 3 layers of cross-attention against target hidden states from layers
+5/23/41/48, a rank-256 Markov head over a 201,024-token vocabulary, `block_size = 8`, and a per-step short-conv snapshot ring
+for partial-accept rollback (which their `CpuSlot` does and which our `in2_kv_conv_save/restore` mirrors with a single snapshot).
+The format is no longer an obstacle; the work is now ordinary engine work.
