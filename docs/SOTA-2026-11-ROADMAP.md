@@ -919,3 +919,22 @@ Two candidate causes, and they need distinguishing rather than guessing:
 The tell is the same one that found the MoE: sweep IN2_THREADS over just that path, or time a single projection in
 isolation at 1 and 8 threads. A region that measures identical at 1 and 8 is a barrier-dominated region, and the fix is
 to persist the thread pool instead of opening a parallel region per tensor.
+
+### Correction to the candidate list above
+
+rule out the barrier theory by arithmetic: 6.2 ms of a 180 ms serial remainder
+
+Before anyone spends a session persisting the thread pool, the numbers say not to. 270 matvec calls per decode step
+(rule 29's count) times ~23 us of libgomp barrier at 6 threads is 6.2 ms per token, against a dense/attention remainder
+of 180 ms per token at 8 threads - 3.5 %. Opening a parallel team per tensor is wasteful and is NOT why that path
+converts 8 threads into 1.13x.
+
+So the serial work is INSIDE the dense path, in code that either carries no omp pragma or has a dependency that
+serialises it. Candidates to check in this order, each by timing the region at 1 and 8 threads rather than reading it:
+  1. the attention score/softmax/PV loops - if they carry no pragma they are one thread over 64 sliding visits x 8 kv
+     heads x 1024 keys, and rule 58 measured that loop at 57 ns/key;
+  2. the embedding row read and the head, both of which are per-token and were once 0.28 s and 0.015 s respectively;
+  3. the router and the per-token gate arithmetic, which is small in bytes and may never have been parallelised;
+  4. in2_tensor_to_f32's copy path - DQ reports 557 MB produced and 103 MB copied per 8-token run, and dequantisation
+     is single-threaded per tensor.
+Note what this retires: the MoE is not the target any more. It scales 3.25x and is 34 % of the eight-thread step.
