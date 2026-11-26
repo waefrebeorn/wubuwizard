@@ -771,3 +771,37 @@ sync once per layer or per token, which would make the card win everywhere), or 
 tensors above ~5 MB, which today would mean attn_output alone. Until one of those lands, the honest summary of the
 resident tier is: correct, verified, covering 40 % of the token's bytes, and slower per call than the CPU it is meant
 to relieve.
+
+### The next change, quantified: 124 ms of the step is not bytes at all
+
+Every group of this token's traffic, costed at the two measured rates (11.2 GB/s CPU aggregate, 56 GB/s resident on
+the card):
+
+    group                                              MB   CPU ms   GPU ms
+    q  (Q6_K/Q5_K/Q4_K/IQ3_XXS - 4 kernels needed)    580     51.8     10.4
+    k/v/attn_output/rel  (Q8_0 - resident)            617     55.1     11.0
+    head  (IQ4_XS - resident)                         235     21.0      4.2
+    experts  (IQ2/IQ1/Q2_0)                           369     32.9      6.6
+
+All of it on the CPU in series is **160.8 ms**, against a **measured 285 ms step**. So **124 ms - 43 % of every
+token - is not traffic at all**: it is dequantisation and serialisation, the exact thing the card does 11.5x better
+because its dequant is a different instruction mix, not a different bandwidth.
+
+That reframes the remaining work. The plan is not "move more bytes to the card" - the bytes are only 57 % of the
+step. It is: dense tier on the GPU (all of q, k, v, output, rel, head = 1,432 MB), experts on the CPU (369 MB), and
+the two running concurrently.
+
+    dense on GPU, experts on CPU, serial:      25.6 + 32.9 = 58.5 ms
+    the same, overlapped:                      max(25.6, 32.9) = 32.9 ms
+    if the 124 ms of dequant moves with it:    ~33 ms = 8.7x the present step
+
+The 8.7x is a ceiling and is stated as one. What makes it credible rather than arithmetic theatre is that the GPU
+path is already at 11.5x on the dequant-heavy part of exactly this format, and the sync economics are the only thing
+standing between the two halves - measured directly as ~35 us per call against 28 us of 8-thread CPU work on the same
+tensor.
+
+Order of work, each gated on tokens before any timing:
+1. batch the resident submission (one sync per layer, not per tensor) - no new kernel needed;
+2. Q4_K, Q5_K, Q6_K, IQ3_XXS device kernels, each verified against an exact reference, which completes `attn_q`;
+3. run the dense tier on one stream and the expert path on the CPU concurrently, which is Strata's doorbell;
+4. only then the expert cache (Aged-LFU, global pool, router-ahead prefetch), gated on dirty-layer fraction.
