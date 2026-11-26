@@ -130,3 +130,33 @@ construction that reaches the measured 23.7 TFLOP/s, and it is an XL pad that cl
 Its gate, in order: (1) bit-identical or oracle-identical output against `wubu_cuda_selftest_iq2_run` on the same bytes,
 (2) measured GMAC/s above 300 (10x the current kernel) before any engine wiring, (3) 12/12 oracle after wiring, with the
 accumulation-order parity question answered explicitly rather than assumed.
+
+## What the IQ2 kernel actually does, and the shortest path from 30.8 to hardware rate
+
+`src/wubu_cuda_quant.cu:650` `iq2xxs_matvec_mrow_kernel` is better than the label "naive matvec" implies:
+
+- one warp per output column, `group = lane>>2` (0..7) and `entry = lane&3` split each 66-byte IQ2_XXS block's four
+  grid entries across lanes, so the 2-bit codes are unpacked cooperatively;
+- the unpacked weights `g0,g1` are loaded ONCE per block and reused across `IQ2X_MT` activation rows in registers -
+  the weight-read amortisation is already there (this is why batching gains little at kernel level);
+- the dot product is `__dp4a` (int8 dot-accumulate) against q8_K activations, then one `acc[t] += wd * q8b->d * sumi`
+  fp32 FMA per 8-value group.
+
+So the kernel is not wasting weight traffic. **It is limited by using INT8 dp4a instead of INT8 tensor cores.** The
+measured 30.8 GMAC/s is ~62 GFLOP/s of dp4a; this card's tensor-core GEMM is 23,650 GFLOP/s. The gap is the instruction,
+not the algorithm.
+
+**LP-05's concrete upgrade, therefore, is narrow and well-defined:** replace the per-lane `__dp4a` inner loop with
+`mma.sync.aligned.m16n8k32.s8.s8.s32` (INT8 tensor cores, available on sm_89), keeping everything above it - the warp
+mapping, the cooperative 2-bit unpack, the once-per-block weight load, the fp32 scale application. The operand layout
+already matches: IMMA consumes int8 tiles of 16x8x32, and the kernel already has 8-lane groups producing exactly 32 int8
+values per block per row. Expected effect: the dp4a path issues one MAC per lane per instruction; a m16n8k32 IMMA issues
+4096 MACs per warp per instruction, so 1-2 orders of magnitude is available in principle, with the block unpack and the
+scale FMA becoming the new bound (~8 fp32 FMA per 256 values per row).
+
+Order of work, unchanged from the gate: (1) keep the dp4a kernel as the reference, (2) add the IMMA kernel beside it and
+assert bit-identical against `wubu_cuda_selftest_iq2_run` on identical bytes - int8 dot products are exact, so parity
+here is achievable, not approximate, (3) require >300 GMAC/s before wiring, (4) then 12/12 oracle with the accumulation
+order question answered.
+
+That is a self-contained kernel task with an exact reference already in the tree, and it is the last order of magnitude.
