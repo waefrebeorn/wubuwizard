@@ -695,3 +695,29 @@ So the only error was mine in assuming MoE ran on all 48 layers, which inflated 
 Every "contradiction" in the last three notes dissolved into a single arithmetic slip on the layer factor. The engine was
 correct throughout, and the histogram instrumentation - which I twice suspected of being broken - was reporting the truth
 both times. Worth remembering next time a measurement disagrees with a note: check the note against the file first.
+
+## Prefill does reach in2_moe with n_tok - so the histogram's silence about prefill is unexplained, and that matters
+
+The call graph, read rather than assumed:
+
+    wubu_inkling2_fullseq.c:395   rc = in2_moe(ctx, m, cfg, il, moein, n_tok, moeout);   <- prefill, whole token block
+    wubu_inkling2_fwd.c:1575      rc = in2_moe(ctx, m, cfg, il, moein, n_tok, moeout);   <- decode
+    wubu_inkling2_fwd.c:1951      rc = in2_moe_batch(...)                                <- inside in2_moe
+    wubu_inkling2_fwd.c:1960      router + MOE_HIST increment, loop over t < n_tok
+
+So prefill passes the entire chunk to `in2_moe` and `in2_moe` does see `n_tok`. Yet the measurement says otherwise:
+
+    480-token prompt, 2 tokens generated -> 383 routings total = 2 tokens' worth (16 per layer)
+    60 / 120 / 480-token prompts, 1 token generated -> MOEHIST prints NOTHING at all
+
+Both results say the same thing: the histogram only ever sees the generated positions. That is now inconsistent with the
+call graph, and the inconsistency is not cosmetic - it decides whether prefill's MoE runs as one 480-token block (in which
+case a grouped GEMM has a natural home already) or as 480 separate single-token calls (in which case the block does not
+exist yet and step 1 of the plan is real work).
+
+The next step is a **three-line trace, not more reading**: print `(il, n_tok)` once at the top of `in2_moe` under an env
+flag and run one 120-token prompt. That single line answers the question that determines the entire remaining plan, and it
+is the cheapest thing in this document.
+
+Method note, because this is the third time: I have twice now "proved" something by reading call sites and been contradicted
+by the measurement. Reading tells you what CAN happen; only the trace tells you what DID.
