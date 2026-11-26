@@ -894,3 +894,29 @@ would leave the third candidate: that the work per expert bucket is simply too s
 so 128 tiny tasks with dynamic scheduling and per-task overhead dominating). That one is testable by the cheapest possible
 experiment: run the same sweep at 480 tokens where nb ~ 30, and see whether scaling improves. If it does, the fix is chunk
 size, not threading and not the GPU.
+
+## Granularity prediction refuted: scaling gets WORSE with bigger expert buckets
+
+The test said: if 128 tiny dynamic-scheduled tasks were the problem, 480 tokens (nb ~ 30 rows per expert instead of ~4)
+should scale better than 60 tokens. Measured:
+
+    60 tokens   1 thread 14,700 ms   8 threads  6,415 ms   -> 2.29x   107 ms/token
+    480 tokens  1 thread 124,397 ms  8 threads  66,517 ms  -> 1.87x   138 ms/token
+
+Scaling **falls** from 2.29x to 1.87x as the buckets get larger, and per-token cost rises from 107 to 138 ms. That is the
+opposite of the prediction, so per-task scheduling overhead is not the limiter either - it is ruled out the same way
+allocation was.
+
+Both observations point at a **shared resource that gets worse with more work in flight**, not at granularity:
+- more work per bucket -> worse scaling is the classic signature of a saturating shared resource (memory channel or cache),
+  not of scheduling;
+- per-token cost rising 107 -> 138 ms at 4x the context is consistent with attention's O(N) KV traffic per token being a
+  growing share, so two different effects are mixed inside these two numbers.
+
+Which means this sweep cannot separate them, and nothing further should be concluded from it. The phase counters already
+exist for exactly this (`in2_moe_sec`, `in2_lay_sec`, `in2_full_sec`, `in2_slide_sec` under IN2_TIMETY): reporting MoE time
+against layer time at both context lengths separates attention growth from MoE scaling in one run, with no new code.
+
+Three hypotheses eliminated by measurement now - allocation (fixed, flat), granularity (predictions reversed), and with them
+the assumption that the expert loop's parallelism was the problem. The engine's 2.29x is looking less like a bug and more
+like a bandwidth-and-arithmetic-intensity ceiling that this hardware imposes on IQ2 matvecs at batch sizes below 8.
