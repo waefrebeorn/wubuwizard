@@ -808,3 +808,35 @@ What this changes: every MAC-share argument earlier in this document (the 0.8 %,
 and TY 16/17 first; they are 55 % between them.** The identity of each type in terms of which tensors it serves (dense
 attention projections vs expert gate_up/down) is the one mapping still to confirm, and it is a one-line print away - after
 which the decision of what to move to the GPU, if anything, is made on measured time rather than assumed proportions.
+
+## Type mapping, part one: the dominant cost is the expert matvecs, and they are running at single-thread rates
+
+`IN2_TRACE_NT=1` (which prints name-free but shape+type for every `in2_matvec_nt` call) on a 60-token prompt:
+
+    ty= 8   n_in=2304  n_out=1024 / 3072 / 384     kernel
+    ty=12   n_in=2304  n_out=1024 / 3072 / 384     kernel
+    ty=13   n_in=2304  n_out=1024 / 3072 / 384     kernel
+    ty=13   n_in=3072  n_out=2304                  kernel
+    ty=14   same shapes                            kernel
+    ty=18   n_in=2304  n_out=3072                  kernel
+    ty=30   n_in=2304  n_out=24                    FLOAT-FALLBACK  (the 24-wide router-ish tensor)
+
+So the **attention projections are ty 8 / 12 / 13 / 14 / 18** (Q8_0 and the K-quants). None of those are the five expensive
+types from the profile. The expensive ones - TY 42 (22.4 %), TY 16 (16.9), TY 17 (16.1), TY 19 (14.7), TY 40 (13.0) - do not
+appear in this trace at all, which means they belong to the tensors that go through the **expert path**
+(`in2_matvec_quant_nt`), i.e. `gate_up` and `down`.
+
+That is consistent with the profile in one important way and contradicts it in another:
+
+- consistent: the expert matrices are the bulk of prefill time (55 % across TY 16/17/19/40/42);
+- contradicts the plan's premise: those calls realise **12.5-23.1 GOPS = 6.3-11.6 GMAC/s**, which is *single-thread* rate, not
+  the ~8x that an `omp parallel for` over 128 experts should give. `in2_moe_batch` is written expert-major and parallel, yet
+  the measured aggregate throughput says the parallelism is not being realised.
+
+So the next question is not about the GPU at all: **why does the expert-major loop over 128 experts deliver single-thread
+throughput?** Candidates, each cheap to test: `in2_threads()` returning 1 in this build; the dynamic schedule starving threads
+because per-expert buckets are small at 60 tokens; or a shared lock/buffer inside the fallback quantiser serialising them
+(the thread-local comment at that buffer suggests this has bitten before).
+
+That question is worth more than the entire GPU line of work: 55 % of prefill, currently running at roughly one core's worth
+of throughput.
