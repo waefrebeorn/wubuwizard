@@ -1,0 +1,160 @@
+{
+ "report_path": "C:/Users/eman5/WuBu/repos/wubuwizard/docs/research/E-baselines.md",
+ "measured_prefill": [
+  {
+   "engine": "llama.cpp CUDA (custom build, fusions)",
+   "hardware": "RTX 4060 Laptop 8GB, 12.8GB Q3_K-expert requant, blk 6-15 experts on GPU, -ngl 99 -fa 1 -ub 512 -b 2048, 7.3GB peak",
+   "context": "4k prompt / 8k ctx: 545 t/s (308 t/s same model stock)",
+   "tok_per_s": "545 (stock 308)",
+   "url": "https://llamaperf.com/report/5bf6d33d-95cb-4d70-9716-1610b0deb416"
+  },
+  {
+   "engine": "llama.cpp",
+   "hardware": "RTX 4060 8GB + 16GB DDR4",
+   "context": "exact target model Inkling-2-Mini at 10,000 tokens of context: 101 t/s prefill, 17.11 t/s decode",
+   "tok_per_s": "101",
+   "url": "https://x.com/analogalok/status/2124135141555720653"
+  },
+  {
+   "engine": "llama.cpp (draft-mtp build, per-tensor 6.18GB quant)",
+   "hardware": "RTX 5060 Laptop 8GB, Gemma 4 12B dense, 48 layers, -c 4096 -fa on",
+   "context": "4k prompt, mean of 3 runs",
+   "tok_per_s": "700-900",
+   "url": "https://github.com/ggml-org/llama.cpp/discussions/25357"
+  },
+  {
+   "engine": "llama.cpp CUDA (llama-bench)",
+   "hardware": "RTX 4060 Laptop 8GB, Qwen3.5 9B Q4_K_M, -ngl 99",
+   "context": "pp512 (model fully resident)",
+   "tok_per_s": "1828.8",
+   "url": "https://llamaperf.com/gpu/rtx-4060-laptop-8gb"
+  },
+  {
+   "engine": "LM Studio (llama.cpp)",
+   "hardware": "RTX 4050 Laptop 6GB, i5-13420H, 64GB DDR5, Qwen3.6-35B-A3B Q5_K_M with RAM offload",
+   "context": "34-36k context windows; ~292 t/s derived from the reported 2-minute TTFT",
+   "tok_per_s": "~292",
+   "url": "https://llamaperf.com/gpu/rtx-4050-6gb"
+  },
+  {
+   "engine": "LM Studio",
+   "hardware": "RTX 4050 Laptop 6GB, LFM2.5 1.2B (fully resident)",
+   "context": "short prompt, 256k ctx configured",
+   "tok_per_s": "8500",
+   "url": "https://llamaperf.com/gpu/rtx-4050-6gb"
+  },
+  {
+   "engine": "llama.cpp (pecera-engine build)",
+   "hardware": "RTX 4070 Ti 12GB, Inkling-2-Mini IQ3_XXS 10.81GB, blk 20-23 experts on CPU, 64k ctx",
+   "context": "short prompt",
+   "tok_per_s": "1239-1399",
+   "url": "https://llamaperf.com/report/f2a9b4ca-9670-4b73-8780-935e09a7de85"
+  },
+  {
+   "engine": "llama.cpp",
+   "hardware": "RTX 3090 24GB, Inkling-2-Mini UD-Q4_K_XL 17GB",
+   "context": "short prompt -> 32,768 tokens of context (-59%)",
+   "tok_per_s": "965 -> 400",
+   "url": "https://llamaperf.com/report/c78bd998-45a8-4f2e-bed4-1b1772058d6a"
+  },
+  {
+   "engine": "LexiEngine (NVFP4 experts, 4-bit KV)",
+   "hardware": "RX 7900 XTX 24GB, Inkling-2-Mini 18.3GB",
+   "context": "4k / 16k / 262k / 524k prompts",
+   "tok_per_s": "2430 / 2332 / 1193 / 764",
+   "url": "https://llamaperf.com/report/9849c2ad-44ef-4ba2-869a-0ff9b2d6053e"
+  },
+  {
+   "engine": "llama.cpp (same card comparison)",
+   "hardware": "RX 7900 XTX 24GB, Inkling-2-Mini",
+   "context": "4k prompt",
+   "tok_per_s": "1233",
+   "url": "https://llamaperf.com/report/9849c2ad-44ef-4ba2-869a-0ff9b2d6053e"
+  },
+  {
+   "engine": "custom CUDA stack (MXFP8 dense weights)",
+   "hardware": "A100-40GB, Inkling-2-Mini",
+   "context": "8k / 131k / 250k / 980k (980k = 67 min)",
+   "tok_per_s": "1900 / 1030 / 715 / 245",
+   "url": "https://llamaperf.com/report/81901eb9-d3e4-450c-9269-5938707e659c"
+  },
+  {
+   "engine": "llama.cpp (ROCm 7.2.4)",
+   "hardware": "Ryzen AI Max+ 395 gfx1151, 96GB LPDDR5X, Qwen3.8-27B UD-Q4_K_XL",
+   "context": "6k -> 35k prompts; author's rule: prefill halves per position-doubling, full 262k is hours-scale",
+   "tok_per_s": "317 -> 168",
+   "url": "https://github.com/ggml-org/llama.cpp/discussions/27154"
+  },
+  {
+   "engine": "llama.cpp b11574 Vulkan (5-run mean)",
+   "hardware": "Intel Arc Pro B65, Qwen3.8-27B / Gemma 4 31B / Muse 28B",
+   "context": "pp512 / pp4096 / pp16384, -fa 0 (fa=1 collapses on this driver, Gemma 294/111/38)",
+   "tok_per_s": "446 / 432 / 388 (Qwen); 413 / 379 / 335 (Gemma)",
+   "url": "https://github.com/snowopsdev/b65-benchmarks/blob/main/findings/phase05.md"
+  },
+  {
+   "engine": "llama.cpp CUDA, 41-config sweep",
+   "hardware": "RTX 5080 16GB, Gemma 4 12B Q4_K_M",
+   "context": "pp512 GPU vs CPU; bs=4096; FA on",
+   "tok_per_s": "4983 GPU / 589 CPU; 5120+ at bs4096; 4618 FA",
+   "url": "https://github.com/Fyrthuz/llama.cpp-benchmark"
+  },
+  {
+   "engine": "llama.cpp (12B QAT Q4_0, 8k prompts)",
+   "hardware": "RTX 5080 16GB desktop",
+   "context": "8k-token prompts (same card as the 4983 pp512 run: -38%, not a clean A/B)",
+   "tok_per_s": "3100",
+   "url": "https://llamaperf.com/model/inkling-2"
+  },
+  {
+   "engine": "llama.cpp (fork + vanilla A/B)",
+   "hardware": "Tesla V100 32GB, Qwen3.8-27B Q5_K_XL, q8_0 KV, 100k restored tokens",
+   "context": "append 128 / 256 / 1000 tokens to a 100k KV: 155.6 / 211.1 / 300.9 t/s vanilla",
+   "tok_per_s": "300.94 at +1k (433.19 fork)",
+   "url": "https://github.com/jackjusko/jusko-llama-volta-qwen3flash"
+  },
+  {
+   "engine": "llama.cpp (4-GPU)",
+   "hardware": "4x V100-32GB, 262,144 ctx, 12.9GB/GPU",
+   "context": "209,715-token prompt (~2 min)",
+   "tok_per_s": "1772",
+   "url": "https://github.com/1115714829/llama.cpp-v100/blob/v100-2.0.1.1/docs/v100/benchmarks.en.md"
+  },
+  {
+   "engine": "ExLlamaV3 (EXL3 4.05bpw)",
+   "hardware": "RTX 4090 24GB, Qwen3.8-125B (6B active), part in RAM, 32k ctx",
+   "context": "32,768 ctx",
+   "tok_per_s": "1944",
+   "url": "https://llamaperf.com/report/3aaf9d57-7e6f-4585-b2c5-6f3e3209ccbd"
+  },
+  {
+   "engine": "KTransformers v0.3 (AMX CPU experts + GPU attention)",
+   "hardware": "2x Xeon 6454S, 4090 24GB, 382GB-1TB DRAM, DeepSeek-V3/R1 671B Q4_K_M",
+   "context": "short prompts; 1k/2k/4k/8k = 111/112.5/102/101 t/s on V0.2.1; llama.cpp same box 10.31 t/s",
+   "tok_per_s": "286.55 (27.8x llama.cpp)",
+   "url": "https://github.com/kvcache-ai/ktransformers/blob/main/doc/en/DeepseekR1_V3_tutorial.md"
+  },
+  {
+   "engine": "ik_llama.cpp vs llama.cpp (same CPU, pp512)",
+   "hardware": "Ryzen 7950X, LLaMA-3.1-8B",
+   "context": "pp512, no FA: IQ2_XXS 43.54 -> 154.17; Q4_K_S 102.85 -> 258.78; geomean 2.88x",
+   "tok_per_s": "154.17 vs 43.54 (IQ2_XXS)",
+   "url": "https://github.com/ikawrakow/ik_llama.cpp/wiki/Jan-2025:-prompt-processing-performance-comparison"
+  },
+  {
+   "engine": "llama.cpp CUDA (MMQ vs cuBLAS on one card)",
+   "hardware": "RTX 5090 32GB, Qwen3.5-35B-A3B Q4_K_M / MXFP4",
+   "context": "pp512, nothing else changed",
+   "tok_per_s": "5611 (MMQ) vs 989 (cuBLAS); 6566 vs 1050 MXFP4",
+   "url": "https://zenn.dev/toki_mwc/articles/rtx5090-blackwell-cuda-toolkit-trap-llama-cpp"
+  },
+  {
+   "engine": "llama.cpp CUDA, K=q4_1 fail case",
+   "hardware": "RTX 3090, Qwen3.8-27B IQ4_NL, 4-10k prompts",
+   "context": "K=q4_1/V=q8_0 -> FA op silently falls back to CPU: 1,276 -> 34 t/s; q8_0/q8_0 baseline 1,174-1,276",
+   "tok_per_s": "34 (from 1276)",
+   "url": "https://github.com/ggml-org/llama.cpp/issues/27109"
+  }
+ ],
+ "implied_262k_prefill": "Measured anchors, then arithmetic to 262,144 tokens. (a) 8 GB laptop, Inkling-2-Mini stock: 101 t/s at 10k = 43 min if flat, ~1.4 h with a 2x-per-doubling penalty past 32k (llamaperf/X, https://x.com/analogalok/status/2124135141555720653). (b) Tuned same card: 545 t/s at 4k = 8 min, but unattainable at 262k because 3.1 GB of KV cannot co-reside with 12.8 GB of weights in 8 GB (https://llamaperf.com/report/5bf6d33d-95cb-4d70-9716-1610b0deb416). (c) 6 GB RTX 4050, 35B-A3B with RAM offload: ~292 t/s implied by a reported 2-min TTFT at 34-36k -> 15 min flat, ~2 h with fall-off (https://llamaperf.com/gpu/rtx-4050-6gb). (d) Worst laptop-class measured curve, 96 GB unified iGPU 27B Q4: 168 t/s at 35k and 'halves per position-doubling' -> ~21 t/s at 262k = ~3.5 h, which the author independently calls 'hours-scale' (https://github.com/ggml-org/llama.cpp/discussions/27154). (e) 24 GB RTX 3090, Inkling Q4: 400 t/s at 32k -> 45-90 min (https://llamaperf.com/report/c78bd998-45a8-4f2e-bed4-1b1772058d6a). (f) Measured directly at length: 715 t/s at 250k on A100-40GB = 6.1 min (https://llamaperf.com/report/81901eb9-d3e4-450c-9269-5938707e659c) and 1,193 t/s at 262k on RX 7900 XTX = 3.7 min (https://llamaperf.com/report/9849c2ad-44ef-4ba2-869a-0ff9b2d6053e); 209,715 tokens at 1,772 t/s on 4x V100 = 2 min (https://github.com/1115714829/llama.cpp-v100/blob/v100-2.0.1.1/docs/v100/benchmarks.en.md); 512,444 tokens after a 90.8-min cold prefill on an M2 Max (https://llamaperf.com/report/e2fa78b2-e87f-43ab-8da7-81b17e3a4b01). CONCLUSION: a 6 GB laptop GPU lands between 15 min and ~2 h for 262k, with ~45 min the most defensible single figure for a 12B-class model that mostly lives in host RAM. No baseline implies days. This engine's measured 0.11 s/token = 9.09 t/s = 8.0 h is therefore 4-30x off the real baselines, not 200x; the 200x figure is the pp512 gap where the model fits and the comparison is pure arithmetic throughput (1,828.8 t/s vs 9.09 t/s). Most of the recoverable factor is two kernels plus residency: MMQ-class quantised tensor-core GEMM is worth 5.7-6.3x over dequant-then-cuBLAS on the same card (https://zenn.dev/toki_mwc/articles/rtx5090-blackwell-cuda-toolkit-trap-llama-cpp), tensor cores themselves 5x versus a coreless GPU (https://www.pugetsystems.com/labs/articles/llm-inference-consumer-gpu-performance/), and fused flash attention 3.1x at 32k, with a 20-37x SILENT penalty if a quantised KV type fails the CUDA FA kernel gate and the op falls back to CPU (https://github.com/ggml-org/llama.cpp/issues/27109)."
+}
