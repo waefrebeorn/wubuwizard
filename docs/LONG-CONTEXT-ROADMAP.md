@@ -197,3 +197,31 @@ With the scale set, the same measurement reads:
 So the GPU kernel is both **exactly correct** on this shape and **30.77 GMAC/s** - still 384x below the card's 11.82 TMAC/s
 tensor-core GEMM, which remains the whole of LP-05. The difference from before is that the number now has teeth: it is a
 measurement of a correct kernel, not of a degenerate one.
+
+## Why the 8-column restructure helps even before tensor cores: the kernel is traffic-bound
+
+Per output column of a 2304-wide matrix, the bytes actually touched are:
+
+    weights      : 9 blocks x 66 B            =   594 B
+    activations  : 9 blocks x 292 B (q8_K)    = 2,628 B     <-- 4.4x the weight bytes
+
+The activation row is the SAME for every column, but the current mapping (one warp per output column) gives each warp its
+own copy of the read, so a 2304x2304 matrix costs:
+
+    one warp per column (current)   activations re-read 2304x = 6.1 MB  + weights 1.4 MB = 7.4 MB
+    eight columns per warp          activations read     288x = 0.8 MB  + weights 1.4 MB = 2.1 MB
+
+    5.3M MACs / 7.4 MB = 0.7 MAC per byte      <- arithmetic intensity far too low to be compute-bound
+
+That is the real reason the kernel sits at 30.8 GMAC/s: it is moving 7.4 MB to do 5.3M MACs. **The 8-column restructure is
+worth up to 3.6x on traffic alone**, before any tensor-core instruction is introduced - and it is the same structural change
+IMMA requires, because a warp must own 8 columns to fill `N=8`. So the two steps are one step, and the ordering is:
+
+1. rebuild the lane mapping so a warp owns 8 columns and holds the activation block in registers once (expect toward
+   ~110 GMAC/s from traffic alone; still dp4a, still bit-identical, still testable against the existing kernel),
+2. then swap the inner dot for `mma.sync.m16n8k32.s8` on the same tile, where the activation fragment is already resident
+   and the 2-bit unpack is already producing per-column int8 tiles,
+3. gate on >300 GMAC/s, then 12/12.
+
+Step 1 is a smaller, self-contained change than step 2 and it already buys most of a factor of four. That is where the
+kernel work should start.
