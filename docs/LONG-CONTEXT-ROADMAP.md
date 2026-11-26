@@ -1704,3 +1704,32 @@ Writes past the accepted prefix are never read, and are overwritten when the cur
 Design is now fully validated against the code: per-position logits (done, gate-clean), cursor semantics (safe), attention
 bound (safe), and the economics priced at 13.6 ms per extra head against 172 ms per saved forward. The remaining work is the
 loop itself in `tools/inkling_gen.c`, gated at K=1 then K=2 then K=4 against the 15-token oracle.
+
+## NEGATIVE RESULT: the speculative loop produces WRONG tokens - verification advances cache eviction
+
+The draft/verify loop was written (suffix-match drafter, one `in2_forward_at` over `feed[0..K]` with per-position logits,
+accept while the target's argmax agrees) and gated at K=1, the near-degenerate case:
+
+    golden : 371 151451 149879 149876 220 36838 182189 149933 220 50843 ...
+    K=1    : 371 151451 149879 149876 220    17    13    20   12  1258 ...
+
+Identical for the first five tokens, then wrong from token six. Reverted; the plain path gates 15/15 again.
+
+**Why, and why my earlier "no rewind needed" verdict was wrong.** I checked that attention's key loop is bounded by the current
+position (`j <= gp`) and concluded phantom rows are never read. That part was right. What I did not check is the OTHER use of
+`n_stored`:
+
+    kv.c:341   if (kv->window > 0 && (long)pos < (long)kv->n_stored - (long)kv->window) return 0;
+
+`n_stored` is not only a readability bound - it is the **eviction** bound for sliding-window visits. The verification pass
+writes rows at positions beyond the accepted prefix and `n_stored` is monotonic (fwd.c:1369 raises it, nothing lowers it), so
+those phantom writes **permanently advance eviction** and drop real positions out of the window. The model then attends to a
+truncated window: exactly the symptom, correct for five tokens and then wrong once the window state matters.
+
+So speculative verification DOES need a rollback, and specifically it needs `n_stored` rewound (plus the ring slot state that
+`window` implies) - a cache API that does not exist. The lesson is narrower than "check the cache": **`n_stored` is read in two
+different roles, as a length and as an eviction frontier, and a rewind has to restore both.** Checking one and concluding the
+other was safe is the same error shape as reading one phase label and concluding what the other 80 % was doing.
+
+The per-position logits support (`in2_set_logits_all`) stays: it is gate-clean, additive, and needed by any future attempt at
+either speculation or a rewind API.
