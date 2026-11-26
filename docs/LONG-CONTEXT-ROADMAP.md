@@ -508,3 +508,27 @@ What is left is the shape of the call, not the data:
 So the next lever is not bandwidth and not the kernel: it is **one synchronisation per layer instead of one per projection**
 (launch async, sync where the result is first read), which is cheap to try and directly measurable against the 12,913 ms
 CPU baseline. Measure that before any further kernel work.
+
+## Where prefill time actually is, in MACs (this retires the projection work as a target)
+
+Per token per layer, from the model's own dims (d=2304, d_ff=1152, 8 of 128 experts):
+
+    attention projections (wq, wk, wv, wrel)   11.4 MMAC
+    MoE experts (8 x gate_up + down)           63.7 MMAC     -> MoE is 5.6x the projections
+
+    120-token prefill x 48 layers:  projections 65.40 GMAC,  MoE 366.92 GMAC  (total 432 GMAC)
+    at the measured 8-column kernel speed (648 GMAC/s):  projections 101 ms, MoE 566 ms
+    measured prefill total:                                       13,250 ms
+
+So **even with the GPU running every attention projection perfectly, the most it can remove from prefill is 0.8 %.** The
+whole line of work that ends in the batched resident hook was chasing 0.8 %. That, not any kernel defect and not any
+synchronisation pattern, is why GPU prefill never beat CPU: the work it was given was too small to matter.
+
+Conversely the MoE experts are 85 % of the MACs and the same kernel could run them in 566 ms instead of contributing to a
+13 s prefill - a ~20x prize - except that the existing GPU MoE path measures 30.8 GMAC/s, i.e. no better than the CPU,
+because it spends its time on slab uploads rather than arithmetic. **That is the only target in this engine big enough to
+change prefill**, and it is a data-placement problem, not a kernel problem: the experts must be resident and stay resident
+across tokens instead of being staged per call.
+
+Budget check before any of it: 432 GMAC at the CPU's effective ~33 GMAC/s (8 threads) is 13.1 s, which is the measured
+prefill almost exactly - so prefill is compute-bound on the CPU and there is no hidden overhead left to find.
