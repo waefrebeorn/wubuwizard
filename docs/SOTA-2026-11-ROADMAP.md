@@ -1388,3 +1388,37 @@ Two things worth keeping from this one: the struct comment was wrong and cost a 
 comment stating a UNIT is a claim to verify against the arithmetic that consumes it, not documentation; and the
 two-step discipline (quantiser standalone, then store refactor bit-identical, then the format swap) meant that when the
 swap failed, exactly one line was suspect and it was found on the first hypothesis that the arithmetic could explain.
+
+## Wave 21 - q8 KV is a memory win, not yet a speed win: 1.93x slower at 1098 positions
+
+q8 KV at long context: 1.93x SLOWER, and the memo that cannot work
+
+Shipped q8 KV is correct and 3.76x smaller with identical tokens, but it is not yet usable for long context. Measured
+at 1098 positions (a 366x repeated 3-token prompt, one generated token, 8 threads):
+
+    f32 KV   167.8 s
+    q8 KV    323.7 s    = 1.93x slower
+
+Diagnosis: the attention loop is `for (hh in heads) { for (j in keys) { kb = in2_kv_k(...) ... } }` - head OUTER, key
+INNER - so consecutive accessor calls are different keys and the same row is re-dequantised once per head, 24 times per
+visit. 64 sliding visits x 1024 keys x 24 heads = 1.6 M dequantise calls per token where 65 k would do.
+
+I wrote a one-entry memo keyed on (visit,pos) to fix that, measured it, and it gave nothing: 327.8 s against 323.7 s.
+The reason is the loop order - a 1-entry memo only helps when the SAME row is requested consecutively, and in this loop
+it never is. Reverted rather than shipping four struct fields plus an invalidation path that provably does nothing, which
+is rule 41's corollary applied to my own change.
+
+The fix that would actually work, in order of preference:
+ 1. dequantise the VISIBLE WINDOW once per visit into a scratch of n_key x dim floats (1024 x 1024 x 4 B = 4 MB per
+    visit), then run the head loop over the dequantised copy - one pass over the keys instead of 24, at the cost of a
+    4 MB buffer and one extra read;
+ 2. or transpose the loops to key-outer/head-inner so each dequantised row is used by all 24 heads before the next row
+    is touched, which needs no scratch but changes the accumulation order per head - verify parity against the f32 path
+    before believing it.
+Option 1 is the one to take: it keeps the accumulation order exactly as it is.
+
+Standing position, unchanged and now fully measured:
+  * q8 KV: correct, 3.76x smaller, identical tokens on P1 (12) and P2 (10), costs 2.5% decode at short context;
+  * 256k fits on this box at q8 (12.61 GB with the model), up from a 64k ceiling;
+  * long-context THROUGHPUT with q8 is 1.93x worse until the window is dequantised once per visit - the feature is a
+    memory win today, not a speed one, and saying otherwise would be the eighth wrong mechanism of the session.
