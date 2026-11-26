@@ -366,7 +366,13 @@ the doorbell, and the CPU/GPU split - not more kernels.
 `tools/gpu_iq_wall.c` drives the host-callable entry `wubu_cuda_quant_matvec_host` to find out what it can do. Three
 results, the first of which matters most:
 
-- **IQ2_XXS (type 16) returns zeros while reporting success.** `rc=0`, `y[0]=0`, `y[n-1]=0`. That is the exact silent
+- **FIXED: IQ2_XXS (type 16) now computes on the card.** `iq2xxs_matvec_mrow_kernel` + `wubu_cuda_upload_iq2xxs` +
+  type-16 dispatch, verified against the exact dequantised reference in `tools/gpu_vs_cpu_iq.c`: max |ref-gpu| =
+  **2.86e-06** on a reference magnitude of 35.9, max relative 1.07e-3 with 1 of 2304 rows marginally over (float
+  reduction order - the warp sums 32 lanes, the reference sums sequentially in double). The tables had to be uploaded
+  for this: `c_ksigns_iq2xs` was declared on the device and **never populated**, which nothing noticed because the
+  IQ2_S kernel reads its signs out of `qs[32+...]` instead of the table.
+- **Was:** IQ2_XXS (type 16) returns zeros while reporting success. `rc=0`, `y[0]=0`, `y[n-1]=0`. That is the exact silent
   no-op class this engine's own comments warn about ("a half-finished type returning 1 silently changed the logit from
   29.67 to 22.52"). 25.5% of this model's weight bytes are IQ2_XXS, so the dominant format for the VRAM tier has **no
   working device path yet** - only IQ2_S, Q2_0 and Q8_0 do.
@@ -384,6 +390,39 @@ So LP-21's first task is not the doorbell but a device-resident IQ2_XXS dot that
 without it 45% of the per-token bytes (dense attention projections are partly IQ2_XXS/IQ2_XS) cannot live on the card
 at all. The ordering changes accordingly: **LP-21 becomes "a bit-exact IQ2_XXS device row kernel, verified against
 `tools/iq_kernel_wall.c`'s CPU reference"**, and the doorbell moves to LP-22.
+
+### RESIDENT IQ2_XXS on this card: 219 G weights/s, 11.5x the CPU kernel
+
+`tools/gpu_resident_bench.c` uploads a slab once and times only kernel launches (`wubu_cuda_iq2xxs_bench_host`), which
+is the regime a tandem engine keeps the dense tier in:
+
+    slab MB      rows     kernel us    G weights/s    GB/s read
+        1.3      2294          33.8         156.41        40.32
+       16.0     28244         303.1         214.69        55.35
+       64.0    112977        1206.3         215.79        55.63
+      256.0    451911        4762.6         218.62        56.36
+     1024.0   1807646       19046.4         218.67        56.38
+     4096.0   7230584       64193.5         259.52        66.91
+
+So a resident IQ2_XXS slab streams at **~219 G weights/s / 56 GB/s**, against **19.08 G weights/s for one CPU
+thread** and an aggregate CPU rate of ~43 G weights/s. That is **11.5x**, and it is the first measurement in this
+project that makes the tandem split an arithmetic conclusion rather than an analogy with Strata.
+
+It also prices the two regimes exactly. The per-call host path (`wubu_cuda_quant_matvec_host`, which copies first)
+measured **8.93 G weights/s** on the same 1.31 MB slab - **25x slower than resident** - because a 1.31 MB copy at
+2.4 GB/s is 550 us of PCIe against a 34 us kernel. That is why the dense tier has to be *resident* rather than
+streamed per call, and why Strata's doorbell and copy-engine split exists at all.
+
+### What that is worth per token, on measured numbers
+
+    resident non-expert tier        1,084 MiB (attention 696 MB read per token + head 235 MB)
+      at 56.4 GB/s                  ~16.5 ms
+    experts, all from CPU            369 MB at the engine's measured ~7 GB/s  = ~53 ms   -> 18 tok/s
+    experts with a 43% VRAM cache    ~210 MB miss at ~7 GB/s                 = ~30 ms   -> 31 tok/s
+
+Both against **4.5 tok/s today**, because the CPU alone re-reads all 1,535 MB. The tandem split is therefore worth
+**4x at zero cache hit rate and ~7x if the 4.8 GB expert cache behaves**, before any kernel work on the CPU lane.
+The binding constraint is now the CPU lane's 7 GB/s, which is the number LP-24 and the thread-scaling front attack.
 
 ### Pads
 

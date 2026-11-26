@@ -221,3 +221,11 @@ float iq2_xxs_dot_row(const uint8_t *qdata, int n_elems, const float *x) {
     }
     return total;
 }
+
+/* ---------------------------------------------------------------------------
+ * Accessors for the CUDA upload path. The tables are static in this file and the
+ * device kernel needs exactly these bytes; returning them keeps the DLL free of a
+ * link dependency on this translation unit (the caller uploads them).
+ * ------------------------------------------------------------------------- */
+const void *wubu_iq2xxs_grid_bytes(void)   { return (const void *) iq2xxs_grid; }
+const void *wubu_iq2xxs_ksigns_bytes(void) { return (const void *) ksigns_iq2xs; }

@@ -36,6 +36,7 @@ __device__ uint32_t c_iq3s_grid[512];
 /* IQ3_XXS: 256 grid entries of 4 magnitudes each, and the 7-bit sign masks. */
 __device__ uint32_t c_iq3xxs_grid[256];
 __device__ uint8_t  c_ksigns_iq2xs[128];
+__device__ uint64_t c_iq2xxs_grid[256];
 /* IQ4_XS: 16 signed int8 code values. */
 __device__ int8_t   c_iq4nl[16];
 /* IQ2_XS: 512 grid entries of 8 unsigned bytes each. */
@@ -632,6 +633,154 @@ __global__ void iq2s_matvec_mrow_kernel(const uint8_t * __restrict__ w,
             if (lane == 0) y[(int64_t)(m0 + t) * n_cols + col] = s;
         }
     }
+}
+
+/* ---------------- IQ2_XXS (type 16) ----------------
+ *
+ * This format had no device path at all: wubu_cuda_quant_matvec_host fell through to the generic
+ * dispatcher for type 16, which returns success while writing nothing, so a caller saw rc=0 and a buffer of
+ * zeros (tools/gpu_iq_wall.c caught it). 25.5% of this model's weight bytes are IQ2_XXS, so the VRAM tier
+ * cannot hold the dense weights without it.
+ *
+ * Decode, straight from src/dequant_iq2_xxs.c: one fp16 scale per block, a 4-bit subgroup scale in the top
+ * nibble of aux32[1], a 7-bit sign index in the bits below it, and a 256-entry grid of 8 int8 values.
+ */
+#define IQ2X_MT 16
+__global__ void iq2xxs_matvec_mrow_kernel(const uint8_t * __restrict__ w,
+                                          const c_q8_k * __restrict__ xq8m,
+                                          float * __restrict__ y,
+                                          int64_t col_stride_bytes, int nblocks,
+                                          int n_cols, int M, int q8_row_blocks)
+{
+    const int warps_per_block = blockDim.x / 32;
+    const int col = blockIdx.x * warps_per_block + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    if (col >= n_cols) return;
+
+    const int group = lane >> 2;      /* ib32, 0..7 */
+    const int entry = lane & 3;       /* l, 0..3 */
+    const uint8_t *wcol = w + (int64_t)col * col_stride_bytes;
+
+    for (int m0 = 0; m0 < M; m0 += IQ2X_MT) {
+        const int mt = (M - m0) < IQ2X_MT ? (M - m0) : IQ2X_MT;
+        float acc[IQ2X_MT];
+        for (int t = 0; t < IQ2X_MT; ++t) acc[t] = 0.0f;
+
+        for (int b = 0; b < nblocks; ++b) {
+            const uint8_t *blk = wcol + (int64_t)b * 66;
+            const uint16_t d_bits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+            const uint8_t *aux = blk + 2 + 8 * group;
+            uint32_t a0, a1;
+            memcpy(&a0, aux, 4);
+            memcpy(&a1, aux + 4, 4);
+            const uint8_t gidx = ((const uint8_t *)&a0)[entry];
+            const uint8_t signs = c_ksigns_iq2xs[(a1 >> (7 * entry)) & 127];
+            const uint8_t *grid = (const uint8_t *)(c_iq2xxs_grid + gidx);
+            int32_t g0, g1;
+            memcpy(&g0, grid, 4);
+            memcpy(&g1, grid + 4, 4);
+            /* same predicated-negation trick as the IQ2_S kernel above */
+            const uint32_t m_lo = (((uint32_t)(signs & 0x0F) * 0x00204081u) & 0x01010101u) * 0xFFu;
+            const uint32_t m_hi = (((uint32_t)(signs >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu;
+            g0 = (int32_t)__vsub4((uint32_t)g0 ^ m_lo, m_lo);
+            g1 = (int32_t)__vsub4((uint32_t)g1 ^ m_hi, m_hi);
+            const float wd = f16_fast(d_bits) * (0.5f + (float)(a1 >> 28)) * 0.25f;
+
+            const c_q8_k *rowbase = xq8m + (int64_t)m0 * q8_row_blocks;
+            for (int t = 0; t < mt; ++t) {
+                const c_q8_k *q8b = rowbase + (int64_t)t * q8_row_blocks + b;
+                const int8_t *q8 = q8b->qs + group * 32 + entry * 8;
+                int32_t b0, b1;
+                memcpy(&b0, q8 + 0, 4);
+                memcpy(&b1, q8 + 4, 4);
+                const int sumi = __dp4a(g0, b0, 0) + __dp4a(g1, b1, 0);
+                acc[t] += wd * q8b->d * (float)sumi;
+            }
+        }
+
+        for (int t = 0; t < mt; ++t) {
+            float s = acc[t];
+            for (int off = 16; off > 0; off >>= 1)
+                s += __shfl_down_sync(0xffffffffu, s, off);
+            if (lane == 0) y[(int64_t)(m0 + t) * n_cols + col] = s;
+        }
+    }
+}
+
+WUBU_EXPORT int wubu_cuda_upload_iq2xxs(const void *grid_256_u64, const void *ksigns_128_u8)
+{
+    if (!grid_256_u64 || !ksigns_128_u8) return -1;
+    if (cudaMemcpyToSymbol(c_iq2xxs_grid, grid_256_u64, 256 * sizeof(uint64_t)) != cudaSuccess) return -2;
+    if (cudaMemcpyToSymbol(c_ksigns_iq2xs, ksigns_128_u8, 128) != cudaSuccess) return -3;
+    return 0;
+}
+
+/* Resident-slab benchmark: upload the weights ONCE, then time only the kernel.
+ *
+ * Every other entry in this file pays a host->device copy per call, which at a 1.3 MB slab is the whole measurement.
+ * This one answers the question the tandem design actually depends on: how fast does a slab that is already in VRAM
+ * stream, which is the regime the dense tier lives in once it is resident. Returns the best of `reps` launches in
+ * microseconds through *out_us, and 0 on success.
+ */
+WUBU_EXPORT int wubu_cuda_iq2xxs_bench_host(const void *h_w, const void *h_q8, float *h_y,
+                                           int K, int n_cols, int64_t col_stride_bytes,
+                                           int reps, double *out_us)
+{
+    if (!h_w || !h_q8 || !h_y || !out_us || K <= 0 || n_cols <= 0 || reps <= 0 || (K % QK_K) != 0) return -1;
+    const size_t wb = (size_t)n_cols * (size_t)col_stride_bytes;
+    const size_t xb = (size_t)(K / QK_K) * sizeof(c_q8_k);
+    void *d_w = NULL, *d_xq8 = NULL;
+    float *d_y = NULL;
+    int rc = -1;
+    if (cudaMalloc(&d_w, wb) != cudaSuccess) goto done;
+    if (cudaMalloc(&d_xq8, xb) != cudaSuccess) goto done;
+    if (cudaMalloc(&d_y, (size_t)n_cols * sizeof(float)) != cudaSuccess) goto done;
+    if (cudaMemcpy(d_w, h_w, wb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    if (cudaMemcpy(d_xq8, h_q8, xb, cudaMemcpyHostToDevice) != cudaSuccess) goto done;
+    {
+        const int nblocks = K / QK_K;
+        const int threads = 256;
+        const int warps = threads / 32;
+        const int blocks = (n_cols + warps - 1) / warps;
+        cudaEvent_t e0, e1;
+        if (cudaEventCreate(&e0) != cudaSuccess) goto done;
+        if (cudaEventCreate(&e1) != cudaSuccess) { cudaEventDestroy(e0); goto done; }
+        double best = 1e18;
+        for (int r = 0; r < reps; ++r) {
+            cudaEventRecord(e0, 0);
+            iq2xxs_matvec_mrow_kernel<<<blocks, threads>>>((const uint8_t *)d_w, (const c_q8_k *)d_xq8, d_y,
+                                                          col_stride_bytes, nblocks, n_cols, 1, nblocks);
+            cudaEventRecord(e1, 0);
+            if (cudaEventSynchronize(e1) != cudaSuccess) { cudaEventDestroy(e0); cudaEventDestroy(e1); goto done; }
+            float ms = 0.0f;
+            cudaEventElapsedTime(&ms, e0, e1);
+            if ((double) ms * 1000.0 < best) best = (double) ms * 1000.0;
+        }
+        cudaEventDestroy(e0);
+        cudaEventDestroy(e1);
+        if (cudaMemcpy(h_y, d_y, (size_t)n_cols * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) goto done;
+        *out_us = best;
+        rc = 0;
+    }
+done:
+    if (d_w) cudaFree(d_w);
+    if (d_xq8) cudaFree(d_xq8);
+    if (d_y) cudaFree(d_y);
+    return rc;
+}
+
+/* Device-resident entry: weights already on the card. n_tok rows of q8_K in, n_tok*n_cols floats out. */
+WUBU_EXPORT int wubu_cuda_matvec_iq2xxs(const void *d_w, const void *d_q8, float *d_y,
+                                       int K, int n_cols, int64_t col_stride_bytes, int n_tok)
+{
+    if (!d_w || !d_q8 || !d_y || K <= 0 || n_cols <= 0 || n_tok <= 0 || (K % QK_K) != 0) return -1;
+    const int nblocks = K / QK_K;
+    const int threads = 256;
+    const int warps = threads / 32;
+    const int blocks = (n_cols + warps - 1) / warps;
+    iq2xxs_matvec_mrow_kernel<<<blocks, threads>>>((const uint8_t *)d_w, (const c_q8_k *)d_q8, d_y,
+                                                  col_stride_bytes, nblocks, n_cols, n_tok, nblocks);
+    return cudaDeviceSynchronize() == cudaSuccess ? 0 : -2;
 }
 
 /* Scratch for M quantised rows, and the host entry that drives the kernel above. */
@@ -3021,7 +3170,8 @@ WUBU_EXPORT int wubu_cuda_quant_matvec_host(const void *h_w, int type,
     /* Dispatch the same way the engine's wubu_gpu_matvec() does, so this host
      * entry point can gate the type-specific kernels too. */
     int mrc;
-    if (type == 17)      mrc = wubu_cuda_matvec_iq2xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
+    if (type == 16)      mrc = wubu_cuda_matvec_iq2xxs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes, 1);
+    else if (type == 17) mrc = wubu_cuda_matvec_iq2xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else if (type == 18) mrc = wubu_cuda_matvec_iq3xxs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else if (type == 23) mrc = wubu_cuda_matvec_iq4xs(d_w, d_xq8, d_y, K, n_cols, col_stride_bytes);
     else                 mrc = wubu_cuda_quant_matvec(d_w, type, d_xq8, d_y, K, n_cols, col_stride_bytes);
