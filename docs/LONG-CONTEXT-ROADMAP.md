@@ -744,3 +744,34 @@ sizing says a 128-token chunk already yields mean M = 8 per expert, which is exa
 
 Also: this closes the loop on three consecutive notes. The layer count, the export table, and this all resolved the same way
 - a thirty-second trace or file query beat three rounds of reasoning about the code. The trace should have been step one.
+
+## The grouped-GEMM structure already exists - and it is the thing that measured -6 %
+
+`in2_moe_batch` (fwd.c:1757) is, already, exactly what the plan said needed building:
+
+    CH = min(n_tok, 512)                                        chunk the block
+    counting sort of (token,slot) by expert  (cnt/start/fill/bt/bk)   <- the inverted index
+    #pragma omp parallel for over experts, schedule(dynamic)
+      gather the expert's whole bucket into Xe (nb rows, contiguous)
+      in2_matvec_quant_nt(ctx, &L->gate_up, e*2*DFF*d, Xe, nb, 2*DFF, d, Ge)      <- M = nb
+      ... activation, then the same for L->down
+
+So: inverted index by expert, expert-major dispatch, one slab read per expert per chunk, M = nb rows per expert, and the
+chunking comment records a measured 19 % gain from moving 320 tokens into a single 512-chunk. With CH=512 and 512 tokens,
+nb is ~32 per expert - well past the 8 the tile needs.
+
+**Which means the -6 % measurement from three notes ago was taken at exactly this shape.** The hook I added sat in the
+group-of-8 loop of `in2_matvec_quant_nt`, which is the MoE expert path, with nb rows per expert and the 8-column tile
+selected - and it lost to the CPU. That result now has to be read as: *at M = 8-32 per expert, with 8 OpenMP threads each
+already running an expert-major bucket, the RTX 4050 loses to the CPU.* The 20x projection assumed a naive per-token CPU;
+the CPU here is not naive, and that is the whole discrepancy.
+
+Revised position, replacing the earlier plan:
+- the token-blocked MoE stage: **done** (it was never missing);
+- the grouped GEMM over an inverted index: **done**, on the CPU, in parallel;
+- what is missing is GPU economics at nb = 8-32: per-call H2D of the activation block and D2H of results across
+  ~6,000 calls per 512-token chunk (24 layers x 128 experts x 2 matrices) eats the kernel's advantage.
+
+So the next question is not "build the gather" but "**is there a shape where the GPU's 400-700 GMAC/s survives the round
+trips**", e.g. keeping gathered activations resident across all 24 layers and issuing one launch per layer instead of one
+per expert. Anything that still returns to the host per expert cannot win, and that is now measured rather than predicted.
