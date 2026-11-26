@@ -490,13 +490,24 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             float *_av = (float *)malloc(sizeof(float) * (size_t)d);
             float *_bb = (float *)malloc(sizeof(float) * 8192);
             float *_cb = (float *)malloc(sizeof(float) * 8192);
+            /* Base vector: default is this forward pass final hidden, but the DSpark drafting loop needs the
+             * base logits of a *drafted slot*, so IN2_BASE_VEC overrides it with a file. */
+            const char *_bp = getenv("IN2_BASE_VEC");
+            float *_bv = NULL;
+            if (_bp) {
+                _bv = (float *)malloc(sizeof(float) * (size_t)d);
+                FILE *_bf = _bv ? fopen(_bp, "rb") : NULL;
+                if (_bf) { if (fread(_bv, sizeof(float), (size_t)d, _bf) != (size_t)d) { free(_bv); _bv = NULL; } fclose(_bf); }
+                else { free(_bv); _bv = NULL; }
+            }
+            const float *_base = _bv ? _bv : fin;
             if (_af && _av && _bb && _cb && fread(_av, sizeof(float), (size_t)d, _af) == (size_t)d) {
                 const int CH = 8192;
                 int _best[5] = { -1, -1, -1, -1, -1 };
                 float _bs[5] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f };
                 for (int _r = 0; _r < cfg->vocab_size; _r += CH) {
                     const int _n = (_r + CH <= cfg->vocab_size) ? CH : (cfg->vocab_size - _r);
-                    if (in2_matvec_quant(ctx, &_ot, (int64_t)_r * d, fin, _n, d, _bb) != WUBU_INKLING2_OK) break;
+                    if (in2_matvec_quant(ctx, &_ot, (int64_t)_r * d, _base, _n, d, _bb) != WUBU_INKLING2_OK) break;
                     if (in2_matvec_quant(ctx, &_ot, (int64_t)_r * d, _av, _n, d, _cb) != WUBU_INKLING2_OK) break;
                     for (int _i = 0; _i < _n; ++_i) {
                         const float _s = _bb[_i] + _cb[_i];
@@ -511,7 +522,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                 for (int _k = 0; _k < 5; ++_k) fprintf(stderr, " %d:%.6f", _best[_k], _bs[_k]);
                 fprintf(stderr, "\n");
             }
-            free(_av); free(_bb); free(_cb);
+            free(_av); free(_bb); free(_cb); free(_bv);
             if (_af) fclose(_af);
         }
     }

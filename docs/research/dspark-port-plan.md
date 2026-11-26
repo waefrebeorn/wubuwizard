@@ -375,3 +375,34 @@ Two things this does and does not establish:
 
 Next: the 7-step drafting loop - feed the drafter its own previous token instead of the anchor, verify each position against the
 engine's argmax, and report accepted-prefix length. That number is the one the port exists to produce.
+
+## The 7-step drafting loop measures 0/7 - and the reason is a specific missing input, not a mystery
+
+`tools/dspark_loop.py` runs the real loop: the drafter consumes its own draft as the next `prev_tok`, and each position is
+scored as `base(block_out[i]) + corr_i` by the engine's own kernel via `IN2_BASE_VEC`. Result:
+
+    step    prev   draft  oracle      score  ok
+       0  149879   42623  149876     52.461   n
+       1   42623   42623     220     53.931   n
+       2   42623   42623   36838     53.785   n
+       3   42623   42623  182189     53.787   n
+       4   42623  113993  149933     54.698   n
+       5  113993  113993     220     55.827   n
+       6  113993  113993   50843     56.051   n
+
+    accepted prefix: 0/7
+
+**This is the number the earlier single-position result hid.** Scoring the trunk's own logits plus a correction gave 1/1,
+because the base was the trunk's - the drafter was only ever asked to break a near-tie it was handed. Asked to produce the base
+logits itself, it is wrong at every position.
+
+**Cause, and it is concrete: the block state was initialised with `mask_embed` in all eight slots.** Their `emit_dspark_backbone`
+puts the **embedded, embed_norm-normalised anchor token in slot 0** and `mask_embed` only in slots 1..7. I substituted
+`mask_embed` everywhere because the anchor embedding was not available in Python - so all eight slots start from the identical
+vector and differ only by RoPE position, and the loop degenerates to repeating one or two tokens (42623, 42623, 42623, 42623,
+113993, 113993, 113993). That degeneracy is the signature of a slot-independent block state, exactly what a constant init would
+produce.
+
+**Next step is therefore small and specific:** an engine hook to dump `embed_norm(embed[token])` for a given id
+(`IN2_DUMP_EMB=<id>`), then initialise slot 0 with the anchor's real embedding and re-run this loop. Until that is done the
+0/7 is not a verdict on the drafter - it is a verdict on my input, and the two are worth keeping separate.
