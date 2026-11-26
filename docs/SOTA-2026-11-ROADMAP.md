@@ -1080,3 +1080,28 @@ visits per token, for data the kernel path discards. The 558 MB / 564-entry cach
 512-entry cap noted in rule 50, so a touch that reorders it could matter beyond its own cost. That is a hypothesis with
 a test - time in2_tensor_borrow alone on a cached tensor - and until that runs, the register should say the fix is
 verified and its mechanism is not.
+
+### Near miss: the sliding q "anomaly" was a 3x units error, not a defect
+
+near miss: the sliding q phase is NOT an anomaly - I divided a 3-position figure by 1 position of work
+
+Almost filed "sliding q runs at 3.77 G w/s, 21% of the kernel" as the next defect. It is wrong, and the error is the
+same shape as the attention mistake earlier: the phase table IN2_TIMETY prints is the FIRST token's, which is the
+3-position prefill, while the work figure I divided by it (64 sliding visits x 7.08 M weights) is one position's.
+Corrected:
+
+    q phase, prefill token (3 positions)     0.092 s
+    per decode position                      ~0.031 s
+    453 M weights / 0.031 s                  = 14.6 G w/s = 80% of the 18.31 G kernel
+
+So the sliding q projection is essentially at the kernel's rate and needs no work. The 1.30x thread scaling on it is
+then the honest residual: at 80% of a single-thread kernel rate it has little headroom left for threads to find.
+
+The rule this adds: the IN2_TIMETY phase table is PER TOKEN AND THE FIRST TOKEN IS THE PREFILL. Any W/S rate derived
+from it must use that token's own position count, or it will be wrong by the prefill width - 3x here. That is the
+second time today a units mismatch between a per-token timer and a per-position work count has produced a fake
+anomaly, so it belongs next to rule 75 rather than in the narrative.
+
+State after this: full layers 0.097 s and at the kernel's rate; sliding 0.390 s of which MoE is 0.205 s (scaling 3.4x,
+healthy) and the rest is small. Steady-state decode 0.164 s/token. There is no remaining phase that is an order of
+magnitude below its format's rate - the 20x anomaly is closed, and what is left is the MoE's own volume.
