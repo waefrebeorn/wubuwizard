@@ -89,19 +89,25 @@ num_sections u16 at 14, table at 0x10, engram hash at 0x190). Six entries, each 
 
 **All five non-empty sections hash to their recorded SHA-256.** The pack is intact; the download is not merely the right size.
 
-Section 3 decodes to **3,072 entries at stride 34**, i.e. **24 MoE layers x 128 experts** - exactly the topology our own GGUF
-reports (48 blocks, experts on layers 0-23, 128 experts, 8 used). Independent confirmation from a second engine's file format.
+Section 3 decodes to **3,072 entries, and the layout is NOT interleaved**: `reader.cpp:123-131` copies all
+`n * 32 = 98,304` bytes of `StrataExpertEntry` first, then `n * 2 = 6,144` bytes of `uint16_t vram_load_order` - 104,448
+total, which matches the section length exactly. Parsing it as 34-byte interleaved records (my first attempt) produces
+plausible-looking but wrong statistics, and those numbers were committed before this was checked.
 
-Per-expert quantisation is real and not uniform:
+Correct directory contents:
 
-    distinct gu_code_id  = 220      (top: id 0 used by 1,901 experts, then 32:149, 3:145, 43:114, 1:90)
-    distinct dn_code_id  = 150      (top: id 0 used by 2,015 experts, then 2:151, 79:146, 112:119)
-    distinct cluster_id  = 472      (top: 0 for 1,372, 32:148, 20224:146, 28672:121)
+    entries          3,072 = 24 MoE layers x 128 experts, expert_id 0..127 repeated per layer, flags all 0
+    distinct gu_code_id  =   3      (id 3: 2,472 experts, id 2: 585, id 15: 15)
+    distinct dn_code_id  =   3      (id 2: 2,399, id 3: 658, id 15: 15)
+    cluster_id           =   0      for every entry - clustering is not used in this pack
+    vram_load_order      =   a true permutation of 0..3071 (first 12: 2176, 2049, 1920, 2177, 2048, 2181, 2178,
+                             1921, 2179, 1408, 1024, 1152)
 
-So most experts share a default codebook, but ~1,100 gate/up and ~1,050 down codebooks are specialised per expert or cluster.
-That is the mechanism behind 3.17 bits/parameter reaching 92 % same-next-token, and it is the concrete thing to copy: our engine
-gives all 128 experts one IQ2_XXS grid.
+So per-expert codebooks are NOT the mechanism here: three gate/up and three down codebooks cover all 3,072 experts, which
+means the specialisation is per *tensor group*, not per expert. **Retracted: "220 distinct gu codebooks, ~1,100 specialised"**
+- that came from the misaligned read and is wrong.
 
-The trailing 2-byte `vram_load_order` field parses to values like `[18, 771, 0, 0, 32768, 291, 0, 0, 32768, 48]` - alternating
-zeros and 0x8000 suggest a bit-packed priority rather than a plain index, and it is **not** yet decoded. Recorded as unverified
+What IS real and valuable: `vram_load_order` is a complete priority permutation over all 3,072 expert bodies, shipped in the
+pack. Residency is decided offline, once, and the engine just walks the list - whereas our engine decides at runtime with
+`IN2_RES_GB`. The first entries cluster in high expert indices (2176+, i.e. layers 17+), consistent with ordering by use.
 rather than guessed.
