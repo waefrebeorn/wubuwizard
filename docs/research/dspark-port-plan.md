@@ -982,3 +982,40 @@ are now the *only* unknowns left, and each can be diffed the same way: the dump 
 Build note for future sessions: MSVC relinks fail with LNK1104 "cannot open file" when overwriting an existing DLL/exe that a
 previous run mapped - the fix is to delete the stale artefact and relink, not to retry blindly. Building `-j 1` avoids the
 concurrent-link variant of the same error, and a still-running `llama.exe` will hold `llama-common.dll` open.
+
+## Named-tensor dumps now work; the block forward is where we diverge, and the diff harness exists to prove it
+
+Two `ggml_set_name` calls in `src/models/dspark.cpp` (`dspark_base` on the pre-Markov logits at :248, `dspark_logits` on the final
+output at :453) make exactly the tensors we need visible to the dump hook. That required one rebuild, and the rebuild required
+deleting `bin/llama.exe` first - overwriting a stale artefact gives LNK1104 regardless of retries.
+
+Captured with `LLAMA_DUMP_MATCH="dspark_base;dspark_logits"`:
+
+    dspark_base    [200058, 2]   1,600,464 B
+    dspark_logits  [200058, 2]   1,600,464 B
+
+**The comparison against our forward, position-matched:**
+
+    ref  col0  rms 3.866  top5 150525:11.13 151320:9.67 199254:8.96 198437:8.72 151405:8.46
+    ref  col1  rms 7.346  top5 151457:7.28 13:7.17 151090:7.08 151337:6.93 149876:6.85
+    ours slot0 rms 4.394  top5 150743:19.76 123268:18.05 155795:17.73 185634:17.62 69717:17.49
+    ours slot1 rms 4.364  top5 158951:18.38 129992:18.37 153817:18.04 123268:17.74 150743:17.68
+
+    cos(ref col0, ours slot0) = -0.081      cos(ref col0, ours slot1) = -0.005
+    cos(ref col1, ours slot1) = +0.001
+
+Two things stand out. The reference's logits are **much flatter** - max 11.13 where ours reach 19.76 - and the vectors are
+essentially uncorrelated. Our magnitudes are the right order (rms 4.4 vs 3.9/7.3), so this is not a scaling bug: the content is
+different.
+
+**Important caveat, stated so it is not over-read:** the reference graph runs with `n_tok = 2`, not our 8 slots, in every request
+tried (n_predict 2, 4, 8 all produce a 2-column dump). So the column-to-slot correspondence is not established, and one negative
+cosine set is not proof the block is wrong - only that no slot matches column 0 or 1. What it does establish is that `base` and
+`logits` are now capturable and comparable, which is the machinery the remaining work needs.
+
+**Acceptance varies by request**: 7/47 (0.149), 4/40 (0.100), 1/21 (0.048). It is not a fixed number and any parity claim must
+compare over the same prompt and the same n_predict.
+
+**Next step:** name the block input (`cur` after `build_dspark_inp_block`) and each of the three block outputs, dump them, and
+compare stage by stage against `dflash_ref.py` - the same technique that pinned `f_rnn` to cosine 0.982 and identified the taps as
+layers 4/10/16/22. That localises the divergence to a stage instead of leaving it in "the block" as a whole.
