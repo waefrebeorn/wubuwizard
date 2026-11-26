@@ -966,3 +966,37 @@ expected, so the next attribution has to be measured per phase rather than infer
 the trap this entry documents. The dense projections call in2_rows_parallel (270 regions/token) and are the leading
 candidate, and the same fork/join cost measured above says that path may be paying for its parallelism rather than
 benefiting from it.
+
+## Wave 11 - the phase table: decode is 5.63 tok/s and 43% of layer time is unmeasured
+
+steady-state decode is 5.63 tok/s, not 3.7 - every number this session was prefill-weighted
+
+The engine has had a full 8-phase layer breakdown behind IN2_TIMETY all along. Reading it corrects the framing of
+this entire session.
+
+1. THE REPORTED TOK/S WERE AVERAGES OVER A PREFILL. A 6-token run is one 3-token prefill plus five decode tokens, and
+   at 1 thread that prefill alone costs 1.444 s of a 3.3 s run - 47 %. Per-token layer time, tokens 2-6 only:
+
+       1 thread   mean 0.327 s -> 3.06 tok/s
+       8 threads  mean 0.178 s -> 5.63 tok/s      (scaling 1.84x, unchanged)
+
+   So steady-state decode is 5.63 tok/s at 8 threads against upstream's 4.31 on the same file, i.e. 1.31x, and the
+   "3.7 tok/s" quoted all session was a prefill-weighted artefact of measuring with 6-8 token runs. Long runs were
+   always going to show this; short runs hid it. Any decode claim from now on must be per-token from token 2 onward.
+
+2. ATTENTION IS 2 %, CONFIRMING THE RETRACTION. The engine's own timer puts attn at 0.014 s of 0.707 s. My 180 ms
+   estimate was wrong by two orders of magnitude and the ablation had already said so; the phase table is the
+   independent confirmation.
+
+3. THE REAL REMAINDER IS UNINSTRUMENTED CODE, NOT A NAMED PHASE. At 8 threads the eight phases sum to 0.402 s against
+   layers = 0.707 s, so 43 % of layer time sits between the markers. Largest named phase is moe at 29 %; q is 13 %,
+   gate+wo 6 %. Unknown-but-inside-the-layer is by far the biggest single cost in the engine.
+
+   That 43 % is where the next work goes, and it is not a guess about which phase - it is code the markers do not
+   cover. Candidates in the layer function outside the TKPH spans: the relative-bias table build, the tensor
+   borrow/dequant setup at layer entry, the alloc/free of attn_out and the scratch, and the residual/loop-message
+   arithmetic around the two mixes. Instrumenting those four is a strictly cheaper next step than optimising anything,
+   and unlike every MAC-count argument today it cannot be wrong about what it is measuring.
+
+Method note: the phase dump prints once per token, so IN2_TIMETY output must be read per token, not summed - the
+first line is the prefill and the rest are decode steps with a different shape entirely.
