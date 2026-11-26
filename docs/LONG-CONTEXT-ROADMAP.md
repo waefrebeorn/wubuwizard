@@ -467,3 +467,26 @@ the GPU branch - the fallback is cheap and correct.
 
 So the wiring is four steps plus this fifth: **the slab pointer must come from `wubu_inkling2_map_ptr`, never from the
 tensor descriptor.** Reverted; tree clean, oracle 12/12 after a full rebuild.
+
+## The batched hook at the attention projection site: implemented, measured, reverted
+
+Wired `wubu_cuda_resident_matvec_nt` exactly as specified - inside the existing `for (int g = 0; g < nt; g += 8)` group loop
+in the batched projection path, where the group's activation rows are already contiguous in `act` and `src` is the mapped
+weight slab, so one call covers eight tokens at M = 8 and the 8-column tile is finally reachable from the engine.
+
+    oracle, 12 tokens, CPU vs IN2_GPU_DENSE : exact (94-byte IDS line, non-empty on both sides)
+    120-token prefill, CPU                   : 12,913 ms
+    120-token prefill, IN2_GPU_DENSE=1       : 13,721 ms    (-6 %, GPU slower)
+
+So the tile is reachable now and still does not pay. Combined with the earlier +2.1 % this rules out the explanation that
+held for the last two notes: it is not "the kernel never sees a batch". The batch is real, the tile is selected, and the
+prefill is still not faster than the CPU - which points at everything AROUND the matvec rather than the matvec itself:
+the 1.5 MB-per-call weight residency, the per-call quantisation of the token block, and the H2D/D2H of activations and
+results. Those are now the suspects, and each is measurable on its own before another line of wiring is written.
+
+Reverted; full rebuild, oracle exact.
+
+Note on method: the first run of this build failed to compile, so `gen_fast.exe` did not exist and both the CPU and GPU
+runs returned EMPTY IDS lines. The equality check `[ "$A" = "$B" ]` compared "" to "" and reported "oracle exact". That
+is the fourth degenerate comparison this session and the fix is the same one every time: **require the reference to be
+non-empty before believing an equality**, never just check that two sides agree.
