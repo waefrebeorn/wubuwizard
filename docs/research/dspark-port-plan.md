@@ -139,3 +139,19 @@ not one.
 
 Stage 1 is done. Stage 2 (3 block-attention layers + context cross-attention) is next, and its kernels
 (`k_dspark_block_attn` :127, `k_dspark_split_qkv` :218, `k_dspark_swiglu` :246) are the ones to read next.
+
+### Correction: the `rms_pre` column in the first commit was a tautology
+
+The first version printed `pre` as the RMS of `outs[r] / norm`, and since `outs = v/rms(v)*norm`, that quantity is
+`v/rms(v)`, whose RMS is **exactly 1.0000 by construction for every row** - which is precisely what it printed. It looked
+like a passing check and confirmed nothing. Fixed: `fuse_taps` now returns the true pre-normalisation RMS of the fused
+vector, and the corrected numbers are
+
+    row  rms_pre  rms_post
+      0   3.0843    2.9928
+      1   3.3417    3.6074
+      2   2.5961    3.5469
+      3   3.4655    3.0477
+
+Same failure pattern as the degenerate `oracle exact len=0` comparisons earlier in this project: a number that cannot fail,
+reported as if it had been checked.

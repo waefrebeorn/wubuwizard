@@ -50,6 +50,7 @@ def fuse_taps(taps, fuse, norm, eps=1e-6):
     taps = np.stack([t[:M] for t in taps])            # [4, M, H]
     outs = np.empty((4, M, H), dtype=np.float32)
     weights = []
+    pre_rms = []
     for r in range(4):
         fw = fuse[r * 4:(r + 1) * 4]
         e = np.exp(fw - fw.max())
@@ -57,8 +58,9 @@ def fuse_taps(taps, fuse, norm, eps=1e-6):
         weights.append(w)
         v = np.tensordot(w.astype(np.float32), taps, axes=(0, 0))     # [M, H]
         ms = (v * v).mean(-1, keepdims=True)
+        pre_rms.append(float(np.sqrt(ms.mean())))                     # true RMS before normalising
         outs[r] = v / np.sqrt(ms + eps) * norm
-    return outs, weights
+    return outs, weights, pre_rms
 
 
 def main():
@@ -76,18 +78,15 @@ def main():
 
     for v, t in zip(visits, taps):
         print(f"visit {v:02d}: {t.shape[0]} pos x {t.shape[1]}")
-    outs, weights = fuse_taps(taps, fuse, norm)
+    outs, weights, pre_rms = fuse_taps(taps, fuse, norm)
 
     rms_norm = float(np.sqrt((norm ** 2).mean()))
     print(f"\nrms(norm_w) = {rms_norm:.4f}   <- rms_post should land near this")
     print(f"{'row':>3}  {'softmax(fuse_w[row])':<42} {'rms_pre':>8} {'rms_post':>9}")
     for r in range(4):
-        pre = float(np.sqrt((outs[r] ** 2).mean()))
-        v = outs[r] / norm
-        pre = float(np.sqrt((v ** 2).mean()))
         post = float(np.sqrt((outs[r] ** 2).mean()))
         ws = '[' + ', '.join(f'{x:.3f}' for x in weights[r]) + ']'
-        print(f"{r:>3}  {ws:<42} {pre:8.4f} {post:9.4f}")
+        print(f"{r:>3}  {ws:<42} {pre_rms[r]:8.4f} {post:9.4f}")
 
     if a.dump:
         np.save(a.dump, outs)
