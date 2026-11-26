@@ -1886,3 +1886,27 @@ the default and never part of a parity claim. Any future run that enables it mus
 Also from the same release, directly relevant to a 6 GB card: oMLX now keeps **Inkling 2 experts on SSD**, taking a 24 GB Mac
 from 17.0 GB to 10.2 GB and letting a 14.8K prompt run that previously exhausted memory. Our engine already streams experts
 from SSD (`IN2_RES_GB`); their result is evidence the approach scales to a prompt length we currently cannot fit.
+
+## Correction: the ring does NOT wrap at token 13, so that is not the explanation either
+
+The runtime line kills the hypothesis I had just written down:
+
+    KV    ctx=1024 rows/visit: 8 full x 1024 + 64 sliding x 1024 = 576.0 MB
+
+Every visit is sized `ctx = 1024` rows, so `pos % cap == pos` for any position below 1024, and the sequence that diverges is 13
+tokens long. **No wrap occurs. Retracted: "verification's writes wrap and overwrite live rows, which is why token 13 fails."**
+
+What survives the measurements so far:
+- the loop skeleton is right (K=0 matches the oracle exactly);
+- batched == sequential at positions 0 and 1, bitwise, with a *fresh* cache;
+- the failure needs K>0, happens with zero accepted drafts, and lands at token 13.
+
+The gap in that evidence is now the obvious one: **the probe tested a fresh 2-token cache, while real verification runs with a
+populated cache, 72 visits and sliding masks.** A batched attention/conv call over an existing prefix can take a different
+kernel branch than the one-token path even when the fresh case agrees exactly. So the next measurement must be the same probe
+*after a prefill*, at positions inside a populated cache - not a fresh one. Until that is run, every hypothesis about the
+verification failure - mine, the ring's, the numerics' - is unfounded.
+
+Recorded because this is the third hypothesis in this thread that measurement destroyed before it reached a conclusion
+(MoE halving, batching non-equivalence, ring wrap). The pattern is consistent: the guess is always about *where* the state
+diverges, and the only thing that settles it is probing the exact configuration the failure occurs in.
