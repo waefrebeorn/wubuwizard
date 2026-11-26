@@ -149,6 +149,40 @@ the budget here is the 8-slot one.
   = 1.7 s with GDS (4.74 GB/s) to 5.0 s with O_DIRECT (1.97 GB/s). Use NO_BUFFERING so KV streaming cannot evict the
   5.2 GB model, and preallocate the file (append-extend measured 537 MB/s against 1206 MB/s preallocated).
 
+### Reading: DeepSeek-V4.1-Flash (arXiv 2609.19969), and what does not retrofit
+
+Anchor: 890 B/token of global KV at 1M for a 552B MoE in 40 layers, ~1/4 of DeepSeek-V4-Flash, plus SWA Bounded
+Replay taking the *persistent* cache to ~1/8. Ours is 65,536 B/token (8 full visits x 1024 dims x 2 x 4 B) = 68.7 GB
+at 1M. The gap is not one trick; it is three dimensions multiplied.
+
+- **Sequence-dimension compression is the lever we are missing.** CSA2 folds every m tokens into one KV entry
+  (ratio 1 = no compression). We have none: every full-visit KV row is one token. This is the only dimension that
+  reduces the per-token READ as well as the footprint, and therefore the only one that moves the ~4.3 tok/s ceiling
+  that all-resident f32/q4 KV is stuck at. At m=8 the 1M budget is 8.6 GB with no precision loss at all; m=4 plus q4
+  is 4.3 GB; m=8 plus q4/fp4 is 2.1 GB, which reads in 47 ms and puts the ceiling near 21 tok/s instead of 4.3.
+  DeepSeek learned the compressor; a mean/max-pooled retrofit is an approximation and has to be measured before it
+  is believed (needle retrieval at 128k is the gate, and it cannot be measured until LP-17 lands).
+- **`SWA Bounded Replay` transfers directly and is free.** Their finding: exact reconstruction of the decoder's SWA
+  state needs L x n_win replayed tokens, but replaying only n_win is negligibly worse, so SWA KV is never persisted.
+  For us the 64 sliding visits are 0.5 GB and never grow, so this changes nothing in RAM - but it is exactly what
+  LP-20 needs: persist only the 8 full visits and replay the last 1024 tokens on resume, instead of checkpointing
+  0.5 GB of sliding state on every save.
+- **FP4 global KV is trained, not post-hoc.** They quantise during training and call the degradation marginal. Our
+  LP-18 must therefore measure post-hoc q8/q4/FP4 against the f32 cache rather than cite their result.
+- **CED (decoder global KV projected from H_{L/2}) halves prefill but cannot be retrofitted** - it needs a trained
+  per-layer W^KV_l. Ours must come from LP-17 batching, not from architecture.
+- **CSA2's Full/Reindex/Reuse modes cannot be retrofitted either**: which layers share KV and indices is a static
+  trained assignment. The transferable half is Reuse of *Top-K indices* across neighbouring layers, which is a
+  runtime approximation (cheaper indexing, identical outputs only if the reused index set happens to match) and
+  belongs to LP-19 as an optimisation, gated on retrieval quality.
+- **Their decode-FLOPs curve confirms LP-19's ordering**: 4K -> 1M grows single-token decode FLOPs by only 1/4
+  because the indexer plus Top-K bounds the work. That is the same conclusion the Windows measurements reached from
+  the other direction - selectivity, not residency, is what makes long context usable.
+
+Sharpened LP-18: compress along the sequence dimension FIRST (m = 2/4/8, pooled, measured), then precision (q8 ->
+q4/fp4), then consider index reuse. Footprint and read bandwidth both scale with m, and m is the difference between
+a 4.3 tok/s ceiling and a usable one.
+
 Evidence base, all local, each with its own verified citation ledger:
 `C:/Users/eman5/kv-1m-brief.md` (KV representation), `C:/Users/eman5/longcontext-kv-offload-brief.md` (engines),
 `C:/Users/eman5/kvbrief/KV-MEMORY-BRIEF.md` (Windows memory, measured on this box, with kvbench.c),
