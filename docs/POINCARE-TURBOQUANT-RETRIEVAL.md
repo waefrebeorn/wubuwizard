@@ -1027,3 +1027,41 @@ The general lesson, which has now cost me five corrections in this document: **a
 speedup opportunity until you measure what the slow one is actually spending its time on.** Q4_K is 6x faster than
 Q2_0 not because its arithmetic is better but because its *format* stores values one per nibble instead of four per
 byte. Chasing the arithmetic was chasing the wrong half of the gap.
+
+## RETRACTION: the GPU was not idle - I was benchmarking a stale DLL
+
+The previous section reported the GPU doing **zero work** (5 refusals, 0 accepted calls) and concluded that "there is no
+tandem yet". That measurement was invalid. `wubu_cuda.dll` on disk was dated Nov 24 20:04 while
+`src/wubu_cuda_quant.cu` was dated Nov 25 23:31: **the DLL was 27 hours older than its own source**, so every type
+added to the quantiser in that window was absent from the library the engine loaded. The refusals I read as "the kernel
+does not accept these types" were "this DLL has never heard of these types".
+
+Rebuilding it (`mingw32-make -f Makefile.win wubu_cuda.dll`, nvcc 13.5, sm_89) produces **706,048 bytes against the
+stale 657,408** - 48 KB of kernels that had never been executed. With the fresh DLL:
+
+    NT-GPU ok ty=8 (blk.0.attn_k.weight)
+    GPU tier: engaged (blk.0.attn_k.weight)
+
+So the GPU does engage, and the parity claim survives it: 12/12 oracle tokens identical with `IN2_GPU_DENSE=1`.
+
+### But engaging is not helping
+
+Same prompt, 97-token prefill, wall clock:
+
+    GPU off   9895 ms
+    GPU on   10515 ms      -6.2 %
+
+One matvec type (8, Q8_0) is accepted, on one tensor; everything else is still refused (types 12, 13, 14, 18), and the
+engagement overhead costs more than the work it takes over. So the conclusion that the GPU is not contributing stands -
+but the reason is coverage and overhead, not a library that refuses everything, and the specific claim "zero accepted
+calls" was wrong.
+
+### The recurring trap
+
+This is the **second time** in this project that a stale `wubu_cuda.dll` produced a wrong conclusion about the GPU. The
+DLL is not rebuilt by `tools/build_gen_fast.sh` (which builds only the C11 engine), so any engine-only rebuild leaves
+the DLL behind, and the engine fails *quietly* - it does not report "DLL older than source", it reports per-type
+refusals that read exactly like missing kernel support.
+
+Rule from here on: **before any statement about GPU behaviour, compare the DLL's mtime against `src/wubu_cuda_*.cu`,
+and rebuild if it is older.** The check is one `ls`, and skipping it has now cost two wrong findings.
