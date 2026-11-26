@@ -136,7 +136,12 @@ def main():
 
     ctx_pos = np.arange(M)
     applied_pos = np.arange(M, M + a.block)
-    x = taps[3][:1].repeat(a.block, axis=0)          # placeholder block state from the final tap
+    # Real block init, from emit_dspark_backbone (:1484-1489): slot 0 is the anchor token's embedding passed
+    # through model.llm.embed_norm, slots 1..B-1 are dspark.mask_embed. We do not have the anchor embedding
+    # here, so use mask_embed for all slots - still the real vector, unlike the old taps[3] placeholder.
+    mask = load(a.weights, 'dspark.mask_embed')
+    print(f"mask_embed rms={np.sqrt((mask**2).mean()):.4f}")
+    x = np.repeat(mask[None, :], a.block, axis=0)
     y = forward(x, taps, fuse, a.weights, applied_pos, ctx_pos, a.block)
     print(f"\nout {y.shape}  rms={np.sqrt((y**2).mean()):.4f}  finite={np.isfinite(y).all()}  "
           f"min={y.min():.3f} max={y.max():.3f}")

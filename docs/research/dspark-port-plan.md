@@ -186,3 +186,41 @@ feed a real block state - embed 8 token ids - instead of the placeholder and see
 
 Also corrected: `dspark.norm.weight` is **not** the norm used in tap mixing (stage 1 used it, wrongly); the mixing norm is the
 per-layer `dflare_norm`. `dspark.norm.weight` is used elsewhere - final output, still to be located.
+
+## Diagnostic round: real init did not fix the growth, and S5_K dequant is NOT a constant-factor error
+
+**1. The real block init is known and is now used.** `emit_dspark_backbone` (:1484-1489):
+
+    k_ink_embed_norm(embed.weight, embed_norm.weight, anchor_id, d_cur, 1, H)   // slot 0 = anchor token
+    k_dspark_fill_mask(mask_embed, d_cur, B)                                    // slots 1..7 = mask_embed
+
+Replacing my `taps[3]` placeholder with the real `mask_embed` (rms 0.5956) did **not** fix the growth:
+
+    layer 0 out_rms 3.9421   layer 1 7.0837   layer 2 13.4376     (was 5.56 / 7.86 / 13.90)
+
+So the placeholder was not the cause. Candidate 1 eliminated.
+
+**2. S5_K dequant tested against a fan-in invariant, with Q8_ROW as the control.** For a matrix `[out, in]` the weight stdev
+should sit near `1/sqrt(in)` if the checkpoint respects init scale - and two Q8_ROW tensors, whose decode is independently
+verified, land on it to within 0.2%:
+
+    tensor                                   fmt      stdev   1/sqrt(in)  ratio
+    q_proj    [3072, 2304]                   S5_K    0.0409     0.0208     1.965
+    o_proj    [2304, 3072]                   S5_K    0.0274     0.0180     1.517
+    down_proj [2304, 9216]                   S5_K    0.0178     0.0104     1.707
+    gate_proj [9216, 2304]                   S5_K    0.0328     0.0208     1.575
+    hidden_out[2304,  256]                   Q8_ROW  0.0626     0.0625     1.002
+    rnn_proj  [ 768, 5120]                   Q8_ROW  0.0140     0.0140     1.001
+
+**A constant multiplicative error in my S5_K decode would show as a constant ratio. It does not** - the ratios scatter
+1.52..1.97. So either the dequant is right and these tensors genuinely sit above init scale, or the error varies per superblock
+in a way that produces scatter. Either way, "S5_K is off by a constant factor" is refuted, and tuning a constant would be
+fitting noise.
+
+The Q8_ROW ratios of 1.002 and 1.001 are the strongest confirmation yet that the extractor is faithful: two independent
+tensors, different shapes and fan-ins, landing on the same invariant.
+
+**Where that leaves the growth:** unexplained, and the remaining suspect is my wiring rather than the weights. The next test
+should not be more introspection - it should be ground truth. We already have 12 oracle continuation ids; a correct stage 3
+would draft tokens that agree with them at a high rate. Implementing the Markov head and measuring draft-vs-oracle agreement
+turns this from "is my activation scale plausible" into a pass/fail number.
