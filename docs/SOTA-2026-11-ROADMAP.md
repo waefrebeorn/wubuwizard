@@ -166,7 +166,7 @@ at 1M. The gap is not one trick; it is three dimensions multiplied.
   that all-resident f32/q4 KV is stuck at. At m=8 the 1M budget is 8.6 GB with no precision loss at all; m=4 plus q4
   is 4.3 GB; m=8 plus q4/fp4 is 2.1 GB, which reads in 47 ms and puts the ceiling near 21 tok/s instead of 4.3.
   DeepSeek learned the compressor; a mean/max-pooled retrofit is an approximation and has to be measured before it
-  is believed (needle retrieval at 128k is the gate, and it cannot be measured until LP-17 lands).
+  is believed (needle retrieval at 128k is the gate, and it cannot be measured until prefill is affordable at all).
 - **`SWA Bounded Replay` transfers directly and is free.** Their finding: exact reconstruction of the decoder's SWA
   state needs L x n_win replayed tokens, but replaying only n_win is negligibly worse, so SWA KV is never persisted.
   For us the 64 sliding visits are 0.5 GB and never grow, so this changes nothing in RAM - but it is exactly what
@@ -175,7 +175,7 @@ at 1M. The gap is not one trick; it is three dimensions multiplied.
 - **FP4 global KV is trained, not post-hoc.** They quantise during training and call the degradation marginal. Our
   LP-18 must therefore measure post-hoc q8/q4/FP4 against the f32 cache rather than cite their result.
 - **CED (decoder global KV projected from H_{L/2}) halves prefill but cannot be retrofitted** - it needs a trained
-  per-layer W^KV_l. Ours must come from LP-17 batching, not from architecture.
+  per-layer W^KV_l, and ours cannot be retrofitted from it either.
 - **CSA2's Full/Reindex/Reuse modes cannot be retrofitted either**: which layers share KV and indices is a static
   trained assignment. The transferable half is Reuse of *Top-K indices* across neighbouring layers, which is a
   runtime approximation (cheaper indexing, identical outputs only if the reused index set happens to match) and
