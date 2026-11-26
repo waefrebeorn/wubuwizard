@@ -923,3 +923,35 @@ So the concrete next change, in order:
    path already does - that is the step that would close a full 6x rather than a fraction of it.
 
 Everything above is measured on this box, in this engine, on the model's real tensor layout.
+
+## Null result: the Q2_0 micro-optimisations buy 0.2 %, so the cost is elements-per-instruction
+
+Two changes were implemented and A/B'd against the reference kernel behind `IN2_Q20_V2`:
+
+  - the `cvtepi32_ps` + `sub 1` pair replaced by a 4-entry `_mm256_permutevar8x32_ps` table (bit-identical, since
+    {-1,0,1,2} are all exactly representable), and
+  - the per-block horizontal reduction removed, each block's sum folded into a persistent accumulator with one FMA and
+    reduced once at the end of the row instead of twice per 64 elements.
+
+Measured, `IN2_TIMETY=1`, same 49-token prefill:
+
+    variant              Q2_0 time     Q2_0 rate      total
+    reference            2.055 s       16.71 GOPS     4.5 s
+    v2                   2.051 s       16.74 GOPS     4.5 s
+
+**0.2 %, which is noise.** Parity was preserved exactly (12/12 oracle tokens), so the change was correct - it was simply
+aimed at the wrong instruction. Reverted rather than left in the tree behind a flag, because dead complexity that
+measures flat is worse than no change at all.
+
+What this rules out: the per-block reduction and the int-to-float conversion are not the cost. Both are now known to be
+free, which leaves the expansion itself - `srlv` producing **8 elements per five-uop sequence**, against the K-quants'
+`maddubs`/`madd` retiring **32 elements per instruction**. That 4x difference in elements-per-instruction matches the
+measured 6x rate gap (16.7 vs ~105 GOPS) better than anything else examined.
+
+So the only change with a plausible 4-6x on Q2_0 and NVFP4 is structural: quantise the activations to int8 once per
+matvec, exactly as the Q8_0 path already does, and run the 2-bit/4-bit fields through `_mm256_maddubs_epi16` with int32
+accumulation. That is a rewrite of the dot, not a tuning of it, and it is the next piece of work - with the measured
+target being Q2_0 from 16.7 to somewhere near 90 GOPS, which would remove roughly a third of prefill time.
+
+Recording the null result matters as much as the positive ones: it is the fourth cheap hypothesis this document has
+tested and closed, and each one cost minutes where the alternative was hours of a refactor built on a guess.
