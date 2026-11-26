@@ -375,6 +375,35 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                               }
                           }
                       }
+                      /* Full-vocabulary argmax for the same vector: chunked like the head so the kernel path
+                       * sees legal blocks, keeping a running top-5. This is what turns a 12-candidate sanity
+                       * check into a real acceptance measurement for the DSpark drafter. */
+                      if (getenv("IN2_SCORE_ALL")) {
+                          const int CH = 8192;
+                          float *_buf = (float *)malloc(sizeof(float) * CH);
+                          if (_buf) {
+                              int _best[5] = { -1, -1, -1, -1, -1 };
+                              float _bs[5] = { -1e30f, -1e30f, -1e30f, -1e30f, -1e30f };
+                              for (int _r = 0; _r < cfg->vocab_size; _r += CH) {
+                                  const int _n = (_r + CH <= cfg->vocab_size) ? CH : (cfg->vocab_size - _r);
+                                  if (in2_matvec_quant(ctx, &ot, (int64_t)_r * d, _vec, _n, d, _buf) != WUBU_INKLING2_OK) break;
+                                  for (int _i = 0; _i < _n; ++_i) {
+                                      const float _s = _buf[_i];
+                                      if (_s > _bs[4]) {
+                                          int _k = 4;
+                                          while (_k > 0 && _s > _bs[_k - 1]) {
+                                              _bs[_k] = _bs[_k - 1]; _best[_k] = _best[_k - 1]; --_k;
+                                          }
+                                          _bs[_k] = _s; _best[_k] = _r + _i;
+                                      }
+                                  }
+                              }
+                              fprintf(stderr, "TOP5");
+                              for (int _k = 0; _k < 5; ++_k) fprintf(stderr, " %d:%.6f", _best[_k], _bs[_k]);
+                              fprintf(stderr, "\n");
+                              free(_buf);
+                          }
+                      }
                       free(_vec); fclose(_sf);
                   }
                   _scored = 1;

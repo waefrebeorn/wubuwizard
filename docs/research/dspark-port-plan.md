@@ -324,3 +324,32 @@ twelve plausible tokens could look right and still be wrong at full vocab.
 Next step is therefore the honest version of this test: score all 201,024 rows for `corr` (chunked, reusing the same hook) and
 take the true argmax, then repeat over the 7 drafting steps. That gives top-1 agreement, and agreement over steps gives the
 acceptance rate the whole port exists to produce.
+
+## Full-vocab test refuted the 12-candidate result, and the documented fix restored it
+
+Scoring `corr` over all 201,024 rows instead of 12 changed the answer - which is why the caveat mattered:
+
+    control (engine fin)  TOP5  149876:44.468  220:44.408  149878:35.706  152933:33.836  150455:33.611
+    drafter corr          TOP5  196997:12.830   62:11.816   63:9.684   149876:6.822   12:6.237
+
+**The true token ranks 4th at full vocabulary.** The 12-candidate test was not evidence of a working drafter; it was a
+candidate set I had biased toward the answer.
+
+The cause is documented in their own scorer: `k_dspark_score_cand_eval(..., const float* cand_base, // [K_cand] (nullable ->
+0.0f))` computes `dot(corr, unembed_i) + cand_base[i]` - the Markov head produces a **correction**, and it is added to the
+base logits from the trunk's own head. I had scored the correction alone. With base added on the union of both top-5s:
+
+       id      base    markov       sum
+    149876    44.468     6.822    51.290   <- truth
+       220    44.408     5.598    50.007
+    149878    35.706     3.791    39.497
+    152933    33.836     1.177    35.013
+    196997    19.217    12.830    32.047
+
+Top-1 combined is the true token, margin 1.283. Note what the correction is doing: it lifts 196997 from 19.2 to 32.0 (+12.8) and
+149933 down by 2.2, i.e. it reorders candidates inside the trunk's own shortlist rather than proposing from nowhere - exactly
+what a correction head should do.
+
+**Still not an acceptance rate:** the union set is 12 ids, not 201,024. The combined full-vocab scan is the next step, and it
+needs the base logits inside the engine rather than two runs stitched together - the hook should compute `logits + corr-row`
+per candidate id in one pass.
