@@ -1880,6 +1880,9 @@ static in2_dq_ent in2_dq_tab[2048];
 #define IN2_DQ_MAX 2048
 int in2_dq_n;
 size_t in2_dq_bytes;   /* bytes currently held by the dequant cache */
+/* One budget for the whole cache, shared by the insert path and the borrow/evict path. It was a function-local static
+ * inside the insert path, which meant the eviction code could not see it. */
+static size_t dq_budget = 0;
 long in2_dq_miss;      /* dequantisations that could not be cached (table full or over budget) */
 
 float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_out)
@@ -1912,7 +1915,6 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
     /* Byte budget, not just an entry count: 512 entries of "whatever was touched" is unbounded in practice, and the
      * model is 8.5 GB on a 16 GB box. Measured peak working set of a 24-token run was 10.1 GB; the cache is a pure
      * speed cache, so capping it changes no arithmetic. IN2_DQ_MB overrides. */
-    static size_t dq_budget = 0;
     if (dq_budget == 0) {
         const char *_dqmb = getenv("IN2_DQ_MB");
         dq_budget = (size_t)(_dqmb ? atoi(_dqmb) : 512) * 1024u * 1024u;
@@ -1958,13 +1960,33 @@ const float *in2_tensor_borrow(gguf_ctx *ctx, const wubu_in2_tensor_t *t)
         if (in2_dq_tab[i].key == t->info) return in2_dq_tab[i].buf;
 
     const int saved = in2_dq_force_begin();
-    float *v = in2_tensor_to_f32(ctx, t, NULL);
+    int64_t ne = 0;
+    float *v = in2_tensor_to_f32(ctx, t, &ne);
     in2_dq_force_end(saved);
     if (!v) return NULL;
     /* first touch: the cache now owns a copy of its own, so drop ours and hand back the table's pointer */
     for (int i = 0; i < in2_dq_n; ++i)
         if (in2_dq_tab[i].key == t->info) { free(v); return in2_dq_tab[i].buf; }
-    return v;   /* table full: caller owns it after all, and that is a leak risk we accept only in that case */
+
+    /* The table refused it (entry cap or byte budget). Handing `v` back here would be a LEAK, not a fallback: every
+     * caller holds the returned pointer as table-owned and never frees it - that is the contract of borrow. It used to
+     * do exactly that, and the cost was measured at 200-390 MB of new pages per decode token (WorkingSetSize climbing
+     * 3090 -> 3726 MB over four steps, 95k page faults per step with zero disk reads, and peak RSS 7.0 GB at 12 tokens
+     * vs 10.3 GB at 24). Bounded memory is worth an occasional re-dequantise; an unbounded leak is not.
+     * Slot 0 is the oldest entry because nothing here ever removes or reorders, so index order is insertion order. */
+    const size_t want = (size_t) ne * sizeof(float);
+    while (in2_dq_n > 0 && (in2_dq_n >= IN2_DQ_MAX || in2_dq_bytes + want > dq_budget)) {
+        in2_dq_bytes -= (size_t) in2_dq_tab[0].n * sizeof(float);
+        free(in2_dq_tab[0].buf);
+        memmove(&in2_dq_tab[0], &in2_dq_tab[1], sizeof in2_dq_tab[0] * (size_t) (in2_dq_n - 1));
+        --in2_dq_n;
+    }
+    in2_dq_tab[in2_dq_n].key = t->info;
+    in2_dq_tab[in2_dq_n].buf = v;
+    in2_dq_tab[in2_dq_n].n   = ne;
+    in2_dq_bytes += want;
+    ++in2_dq_n;
+    return v;   /* now owned by the table, so a later eviction frees it */
 }
 
 /* Token embedding lookup: token_embd is (n_embd, n_vocab) so token t occupies columns t.
