@@ -3868,3 +3868,89 @@ WUBU_EXPORT int wubu_cuda_moe_batch_res(int type, const int64_t *idents, const v
 #undef B2_FAIL
     return rc;
 }
+
+/* ---------------- IQ2_XXS, eight columns per warp ----------------
+ *
+ * The shipping kernel gives ONE output column to each warp, which is the structural reason it cannot use tensor cores:
+ * mma.sync.m16n8k32 wants a warp to own 8 columns to fill N=8. This kernel is the tile that instruction needs, built
+ * first in plain dp4a so the lane mapping and the parity can be settled independently of the instruction swap.
+ *
+ * Lane mapping: lane -> (group = lane>>2, entry = lane&3) still selects which 8 of a 256-value block this lane owns, but
+ * the warp now holds EIGHT columns, so the same activation bytes are loaded once and reused eight times instead of being
+ * re-read per column. Accumulators are acc[col][t]; the reduction stays a 32-lane butterfly per (col, t).
+ *
+ * UNWIRED ON PURPOSE: nothing calls this yet, and the default dispatch is untouched, so building it cannot change any
+ * engine output. Parity must be established against iq2xxs_matvec_mrow_kernel on identical bytes before wiring.
+ */
+#define IQ2X8_MT 4          /* token rows per pass: acc is IQ2X8_MT * 8 floats, kept small to stay in registers */
+
+__global__ void iq2xxs_matvec_8col_kernel(const uint8_t * __restrict__ w,
+                                          const c_q8_k * __restrict__ xq8m,
+                                          float * __restrict__ y,
+                                          int64_t col_stride_bytes, int nblocks,
+                                          int n_cols, int M, int q8_row_blocks)
+{
+    const int warps_per_block = blockDim.x / 32;
+    const int warp = blockIdx.x * warps_per_block + (threadIdx.x / 32);
+    const int lane = threadIdx.x & 31;
+    const int col0 = warp * 8;
+    if (col0 >= n_cols) return;
+
+    const int group = lane >> 2;      /* 0..7  */
+    const int entry = lane & 3;       /* 0..3  */
+    const int ncol_here = (n_cols - col0) < 8 ? (n_cols - col0) : 8;
+
+    for (int m0 = 0; m0 < M; m0 += IQ2X8_MT) {
+        const int mt = (M - m0) < IQ2X8_MT ? (M - m0) : IQ2X8_MT;
+        float acc[8][IQ2X8_MT];
+        for (int c = 0; c < 8; ++c)
+            for (int t = 0; t < IQ2X8_MT; ++t) acc[c][t] = 0.0f;
+
+        for (int b = 0; b < nblocks; ++b) {
+            /* activation for this block, once for all eight columns */
+            int32_t a0[IQ2X8_MT], a1[IQ2X8_MT];
+            float   ad[IQ2X8_MT];
+            const c_q8_k *rowbase = xq8m + (int64_t) m0 * q8_row_blocks;
+            for (int t = 0; t < mt; ++t) {
+                const c_q8_k *q8b = rowbase + (int64_t) t * q8_row_blocks + b;
+                const int8_t *q8 = q8b->qs + group * 32 + entry * 8;
+                memcpy(&a0[t], q8 + 0, 4);
+                memcpy(&a1[t], q8 + 4, 4);
+                ad[t] = q8b->d;
+            }
+
+            for (int c = 0; c < ncol_here; ++c) {
+                const uint8_t *blk = w + (int64_t)(col0 + c) * col_stride_bytes + (int64_t) b * 66;
+                const uint16_t d_bits = (uint16_t)(blk[0] | ((uint16_t)blk[1] << 8));
+                const uint8_t *aux = blk + 2 + 8 * group;
+                uint32_t w0, w1;
+                memcpy(&w0, aux, 4);
+                memcpy(&w1, aux + 4, 4);
+                const uint8_t gidx = ((const uint8_t *) &w0)[entry];
+                const uint8_t signs = c_ksigns_iq2xs[(w1 >> (7 * entry)) & 127];
+                const uint8_t *grid = (const uint8_t *)(c_iq2xxs_grid + gidx);
+                int32_t g0, g1;
+                memcpy(&g0, grid, 4);
+                memcpy(&g1, grid + 4, 4);
+                const uint32_t m_lo = (((uint32_t)(signs & 0x0F) * 0x00204081u) & 0x01010101u) * 0xFFu;
+                const uint32_t m_hi = (((uint32_t)(signs >> 4) * 0x00204081u) & 0x01010101u) * 0xFFu;
+                g0 = (int32_t)__vsub4((uint32_t)g0 ^ m_lo, m_lo);
+                g1 = (int32_t)__vsub4((uint32_t)g1 ^ m_hi, m_hi);
+                const float wd = f16_fast(d_bits) * (0.5f + (float)(w1 >> 28)) * 0.25f;
+                for (int t = 0; t < mt; ++t) {
+                    const int sumi = __dp4a(g0, a0[t], 0) + __dp4a(g1, a1[t], 0);
+                    acc[c][t] += wd * ad[t] * (float) sumi;
+                }
+            }
+        }
+
+        for (int c = 0; c < ncol_here; ++c) {
+            for (int t = 0; t < mt; ++t) {
+                float v = acc[c][t];
+                for (int off = 16; off > 0; off >>= 1)
+                    v += __shfl_down_sync(0xffffffffu, v, off);
+                if (lane == 0) y[(int64_t)(m0 + t) * n_cols + col0 + c] = v;
+            }
+        }
+    }
+}
