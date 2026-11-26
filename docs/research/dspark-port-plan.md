@@ -909,3 +909,37 @@ real gap rather than the ceiling - upstream gets seven accepted tokens where min
 
 A live reference implementation, on this machine, for this model, with a measured acceptance figure to match, is exactly what every
 failed hypothesis this session was missing. The next step is to run the same prompt through both and compare intermediates.
+
+## The oracle is verified against the reference, and three more hypotheses are dead
+
+**The foundation holds.** Running the same 263-token prompt through the upstream server and through our engine gives the same 12
+greedy tokens:
+
+    server : 34541 150463 195644 149880 150422 149878 177853 1164 149879 179357 152024 13
+    ours   : 34541 150463 195644 149880 150422 149878 177853
+    agree on first 7: True
+
+So the trunk behaves identically, the oracle is exactly the reference's continuation, and the 0/7 is entirely a drafter gap - not a
+prompt, tokenizer, or sampling difference. The server's own top-1 for step 1 is `34541` ("woke") at logprob -2.0875.
+
+**Three more hypotheses eliminated, each by measurement:**
+
+    1. ctx injection        with ctx K/V zeroed (block-only attention): slot 1 top = 68073, still 0/7
+                            with ctx injection:                        slot 1 top = 149965, still 0/7
+       => the block is wrong either way; it is not the ctx wiring alone.
+    2. anchor input         slot 0 fed the token embedding (as I had it):        slot 1 top 149965
+                            slot 0 fed the trunk's FINAL hidden at that position: slot 1 top 12
+       => `has_markov_context=true` does not simply mean "use the final hidden as slot 0" either.
+    3. unembed source       not testable this way: the mainline trunk carries output.weight as IQ4_XS (no decoder written),
+                            and the Strata S6_K copy is the one in use.
+
+**One new lead, from the mainline trunk's tensor list:** it contains `loop_kv_res_query.weight [2304, 24]` - a per-layer (24-column)
+query over the residual stream. That is a mechanism our engine does not implement, and it is a plausible definition of *which* states
+become the four taps (`n_extract=4`): not four hardcoded visit dumps, but whatever this learned query selects. Our engine collects
+`src_next` at `blk_len` intervals for its loop-core messaging, which need not be the same thing at all.
+
+**Where this stops being guesswork.** Every input-side variable I can vary has been varied. The remaining differences between my
+forward and upstream's are inside upstream's graph, and upstream is now buildable in ~5 minutes incrementally. The next step is to
+instrument `src/models/dspark.cpp` and `src/models/dflash.cpp` in the local checkout - print slot logits and the four extracted
+states - rebuild, and compare those numbers against `tools/dflash_ref.py` line by line. That converts this from inference about
+internals into a direct numerical diff, which is what the last several eliminations have been working around.

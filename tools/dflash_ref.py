@@ -106,7 +106,11 @@ class Drafter:
         q = rope(q, blk_pos)
         k = rope(k, blk_pos)
 
-        kc, vc = self.ctx_kv(taps, layer, ctx_pos)
+        if os.environ.get('DFLASH_NO_CTX'):
+            kc = np.zeros((0, N_KV, HD), np.float32)
+            vc = np.zeros((0, N_KV, HD), np.float32)
+        else:
+            kc, vc = self.ctx_kv(taps, layer, ctx_pos)
         K = np.concatenate([kc, k], axis=0)      # [T+B, KV, HD]
         V = np.concatenate([vc, v], axis=0)
         T = kc.shape[0]
