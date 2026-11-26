@@ -1733,3 +1733,36 @@ other was safe is the same error shape as reading one phase label and concluding
 
 The per-position logits support (`in2_set_logits_all`) stays: it is gate-clean, additive, and needed by any future attempt at
 either speculation or a rewind API.
+
+## The ring is FIFO, and HIVE is already in this repo - the fix is tags, not an import
+
+Directive: replace the FIFO ring with HIVE. Checked before importing anything:
+
+- **WuBuHIVE is already vendored here.** `include/wubu_hive.h` + `src/wubu_hive.c` implement linked fixed blocks +
+  bit skipfield + per-block freelist, exactly as WuBuOS's `src/kernel/wubu_hive.*` do, with an embedded-struct API
+  (`wubu_hive_init/insert/erase/foreach/live`) already used by `wubu_agi.c`, `wubu_ctxvm.c`, `wubu_ecosystem.c`.
+  Nothing needs copying in; the two implementations are the same design.
+- **What is FIFO is the KV slot mapping**: `in2_kv_slot(pos) = pos % cap` (`wubu_inkling2_kv.c:50`). A modulo ring cannot
+  express "this row is invalid" - the only way to make room is to overwrite the row at `pos % window`, which is exactly the
+  row still live for the previous pass. That is why the K=1 speculative run corrupted after five tokens: verification writes
+  advanced `n_stored`, eviction (kv.c:341) followed it, and real rows fell out of the window.
+
+**The fix is an epoch-stamped tag per slot, not a new container.** Each slot carries `(epoch, pos)`; an accessor returns a
+row only when both match the request. Consequences:
+
+- rewind = `++epoch`, O(1), no per-row work - a rejected draft's rows become unreachable instantly;
+- eviction becomes exact: a slot is valid only for the position it was tagged with, so nothing can be read stale;
+- no memset, no clearing, no ring aliasing: today a sliding visit overwrites `pos % window` regardless of whether that row
+  is still needed.
+
+This is precisely the scheme Strata uses (`slot_pos_[p % kRing] = ((int64_t)epoch_ << 32) | p`, `++epoch_` on rewind,
+`dflash2.cpp:875/854/973`), arrived at independently from our own failure. The HIVE is the right container for the *rows*
+when capacities are per-visit and dynamic (its O(1) erase/freelist reuse beats two flat slabs), but it is not what makes
+rewind possible - the tag is. Order of work: tags first (small, gateable, unblocks speculation), HIVE-backed row storage
+second (memory shape, not correctness).
+
+**And a near-miss worth recording:** copying WuBuOS's `wubu_hive.{h,c}` into `src/` overwrote a TRACKED `src/wubu_hive.c`
+belonging to this repo, whose API differs (`wubu_hive_init` vs `wubu_hive_new`). Restored with `git checkout` before any
+build; the repo's real header is `include/wubu_hive.h`, which was never touched. Lesson: before "vendoring" a file from a
+sibling repo, `git ls-files` the destination - two projects in the same family can both have a `wubu_hive.c` with different
+signed APIs, and the one in the tree is the one that must win.
