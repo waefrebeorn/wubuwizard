@@ -348,6 +348,38 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             memset(&ot, 0, sizeof ot);
             ot.info = oinfo;
             ot.file_offset = (int64_t)ctx->data_blob_offset + (int64_t)oinfo->data_offset;
+            /* Score an external vector against named unembed rows. This is the ground-truth hook for the DSpark
+             * drafter: in2_matvec_quant takes an element offset, so a single row costs one row-length matvec
+             * instead of the 201024-row head. Reads d floats little-endian from IN2_SCORE_VEC and prints
+             * "SCORE <id> <dot>" per id in the comma-separated IN2_SCORE_IDS. Runs once per process. */
+            { const char *_sv = getenv("IN2_SCORE_VEC");
+              static int _scored = 0;
+              if (_sv && !_scored) {
+                  FILE *_sf = fopen(_sv, "rb");
+                  if (_sf) {
+                      float *_vec = (float *)malloc(sizeof(float) * (size_t)d);
+                      if (_vec && fread(_vec, sizeof(float), (size_t)d, _sf) == (size_t)d) {
+                          const char *_si = getenv("IN2_SCORE_IDS");
+                          if (_si) {
+                              const char *_p2 = _si;
+                              while (*_p2) {
+                                  char *_end = NULL;
+                                  const long _id = strtol(_p2, &_end, 10);
+                                  if (_end == _p2) break;
+                                  _p2 = _end;
+                                  while (*_p2 == ',' || *_p2 == ' ') ++_p2;
+                                  if (_id <= 0 || _id >= cfg->vocab_size) continue;
+                                  float _s = 0.0f;
+                                  if (in2_matvec_quant(ctx, &ot, (int64_t)_id * d, _vec, 1, d, &_s) == WUBU_INKLING2_OK)
+                                      fprintf(stderr, "SCORE %ld %.6f\n", _id, _s);
+                              }
+                          }
+                      }
+                      free(_vec); fclose(_sf);
+                  }
+                  _scored = 1;
+              } }
+
             const int CHUNK = 8192;
             head_done = 1;
             const clock_t _h0 = clock();

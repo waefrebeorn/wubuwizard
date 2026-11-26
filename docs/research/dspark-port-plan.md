@@ -294,3 +294,33 @@ fixed by definition and reading it as a measurement.
 
 Where this leaves stage 2: wired the only way the shapes allow, scale behaviour understood, dynamics stable in stage 3. What is
 still missing is not a hypothesis - it is ground truth, which needs the unembed rows for the 12 known oracle ids.
+
+## FIRST GROUND-TRUTH POSITIVE: the full drafter ranks the true next token first
+
+The pipeline now runs end to end on real weights - stage 1 (tap fusion) -> stage 2 (3 block-attention layers) -> stage 3
+(Markov GRU) -> unembed scoring - and the token it should predict is the one it puts first.
+
+Scoring hook added to the engine (`IN2_SCORE_VEC` / `IN2_SCORE_IDS`): `in2_matvec_quant` takes an element offset, so one
+unembed row costs one row-length matvec instead of the 201024-row head. **The hook was validated before being believed** -
+fed the engine's own final hidden, it ranks the true next token first, so it reproduces the real logits:
+
+    engine fin  -> SCORE 149876 44.467781   (true next token)
+                   SCORE 220    44.408203   (near-tie, as greedy decode of this prompt actually is)
+
+Then the drafter's `corr` vector, same 12 candidate ids:
+
+    drafter corr -> SCORE 149876 6.822034   <- correct, and with a clearer margin
+                    SCORE 220    5.598398
+                    SCORE 11     3.052794
+                    SCORE 149919 1.846477
+                    SCORE 149984 0.491476
+                    SCORE 371    0.071222
+
+**Caveat, stated plainly:** the candidate set is the 12 oracle continuation ids, not the full 201,024-row vocabulary. Ranking
+the right token first among twelve is real evidence that the stages are wired coherently - it is the first end-to-end signal
+in this thread that is not introspection - but it is not an acceptance rate. A drafter that only ever had to choose among
+twelve plausible tokens could look right and still be wrong at full vocab.
+
+Next step is therefore the honest version of this test: score all 201,024 rows for `corr` (chunked, reusing the same hook) and
+take the true argmax, then repeat over the 7 drafting steps. That gives top-1 agreement, and agreement over steps gives the
+acceptance rate the whole port exists to produce.
