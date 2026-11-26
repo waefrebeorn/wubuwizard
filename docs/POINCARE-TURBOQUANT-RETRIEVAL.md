@@ -1194,3 +1194,39 @@ Not decided: a 14 % miss path still pays PCIe, so the net is only positive if a 
 route it replaces - that is an end-to-end measurement, not an extrapolation from hit rate. And every number here comes
 from one prompt and one 64-token run; a second prompt with different subject matter could move the curve, so the cache
 needs a hit-rate counter that reports live rather than trusting this table.
+
+## The LRU cache was implemented and reverted: the resident tier's cache key cannot survive eviction
+
+The routing analysis priced an LRU at 48 experts/layer, ~2.7 GB, 85.7 % hit. Implementing it against the resident slab
+turned up two things, both of which stop the work rather than slow it.
+
+**1. Experts still never reach the device, even with room and eviction.** Opening the expert gate and giving the slab a
+3 GB budget (`IN2_RES_GB=3.0`), the trace still refuses both expert types that the type gate allows:
+
+    ok      ty=8
+    refused ty=16 rc=-2   (slab FULL)
+    refused ty=22 rc=-2
+    refused ty=12/13/14/17/18/19/40 rc=-1   (outside the type gate)
+
+`-2` is "no free slot", and it fired even with eviction wired in, so the eviction path as written did not free a slot on
+that miss - the slab had already reached `WUBU_RES_SLOTS`, which returns before allocating.
+
+**2. Eviction broke parity, and that is the real blocker.** With eviction active the greedy ids changed at token 5:
+
+    oracle      149876 220 36838 182189 149933 220 50843 11
+    with LRU    149876 220 34361 149933 145038 30
+
+The refused expert types never executed, so the corruption is in the **dense** path: evicting a slab and reallocating its
+slot changes which bytes a cached entry refers to. The resident tier keys its cache on `(host pointer, byte count)`, and
+that key is only sound while entries are permanent. As soon as a slot is recycled, a pointer that the engine re-uses for
+a different tensor resolves to a slab holding the previous tensor's bytes - and the matvec returns a plausible, wrong
+answer with no error at all.
+
+So the design conclusion is not "the cache needs tuning", it is: **before any eviction can ship, a resident entry needs a
+stable tensor identity** - an id or a file offset carried from the loader - instead of a host address. That is a small
+change to the bridge's signature and a large one to trust in the cache; it is the first thing to do, and the LRU policy
+itself comes after it.
+
+Both changes were reverted and the engine re-verified: DLL back to 706048 bytes, `gen_fast.exe` rebuilt, oracle 12/12
+exact. Recording the failure is the point - the LRU policy was measured and correct, and it still could not be shipped,
+because the thing underneath it was not safe to recycle.
