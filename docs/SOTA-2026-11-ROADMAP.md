@@ -1350,3 +1350,6 @@ State of the long-context work: quantiser verified (1.06 B/element, worst error 
 (64k today, ~256k at q8, 512k needs q4), dequantise-on-read proven safe against row aliasing, store path now exists. What
 remains is the storage swap itself plus the -ctk q8_0 parity gate, which is a self-contained next step rather than an
 open-ended one.
+
+## Wave 19 - q8 KV: 3.76x smaller and wrong - reverted, with three candidate causes
+
