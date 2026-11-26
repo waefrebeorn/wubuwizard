@@ -11,7 +11,7 @@ int main(int argc,char**argv){
   fclose(f);
   const int NQ=200,KK=10,RR=100;
   printf("%-6s %-4s %-11s %-13s %-11s\n","file","bits","recall@10","+rerank@100","bytes/item");
-  for(int b=2;b<=4;++b){
+  for(int b=2;b<=8;++b){
     wubu_tqvec*c=wubu_tqvec_init((int)d,b,0xC0FFEEull);
     if(!c){printf("init fail d=%u\n",d);return 1;}
     size_t nb=wubu_tqvec_code_bytes(c);
@@ -27,7 +27,7 @@ int main(int argc,char**argv){
       for(int a=0;a<KK;++a){int bb=a;for(uint32_t t=a+1;t<N;++t)if(sc[t]>sc[bb])bb=(int)t;
         double ts=sc[a];sc[a]=sc[bb];sc[bb]=ts;int ti=idx[a];idx[a]=idx[bb];idx[bb]=ti;}
       int truth[16]; for(int a=0;a<KK;++a) truth[a]=idx[a];
-      for(uint32_t i=0;i<N;++i) sc[i]=wubu_tqvec_score(c,qv,codes+nb*i);
+      for(uint32_t i=0;i<N;++i){ sc[i]=wubu_tqvec_score(c,qv,codes+nb*i); idx[i]=(int)i; }
       sc[qi]=-1e30;
       for(int a=0;a<RR;++a){int bb=a;for(uint32_t t=a+1;t<N;++t)if(sc[t]>sc[bb])bb=(int)t;
         double ts=sc[a];sc[a]=sc[bb];sc[bb]=ts;int ti=idx[a];idx[a]=idx[bb];idx[bb]=ti;}

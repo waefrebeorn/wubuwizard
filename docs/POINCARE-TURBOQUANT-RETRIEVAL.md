@@ -311,3 +311,47 @@ one step too far. It costs one pass over the corpus and it predicts the result b
 What remains genuinely unverified: whether a WuBu/GAAD Poincare encoder produces vectors whose gap distribution passes
 that test. Nothing in this document can substitute for the measurement, because the whole point of these last numbers is
 that the outcome is a property of the corpus and not of the quantiser.
+
+## RETRACTION and corrected result: real vectors PASS; the previous section's conclusion was my bug
+
+The section above concluded that real trained vectors collapse to chance (0.024-0.030 rerank recall) and built a
+"gap < quantisation error" criterion on that. **That conclusion is withdrawn. It was a defect in the harness, not a
+property of the data.**
+
+The tell was internal inconsistency: `tools/turboquant_realvec.c` measured correlation between exact and quantised
+scores of **0.99994 at b=8** while simultaneously reporting 0.004 recall@10. A 0.99994-correlated scoring function
+cannot miss the top-10; the two numbers cannot both be real. The bug: after computing the ground-truth top-k the code
+overwrote the score array with quantised scores but never reset the index permutation, so the second selection sort
+permuted an already-permuted index array. Recall was comparing the truth against a scrambled ordering.
+
+With `idx[i] = i` restored in the quantised loop, the same data, same code, same seed:
+
+    real trained vectors, 3840 rows of v.patch_embd.weight, projected
+    d=32                                      d=128
+    bits  recall@10  +rerank  bytes/item      bits  recall@10  +rerank  bytes/item
+    2     0.506      0.981    8               2     0.572      0.994    32
+    3     0.705      0.999    12              3     0.744      1.000    48
+    4     0.839      1.000    16              4     0.861      1.000    64
+    5     0.903      1.000    20              5     0.923      1.000    80
+    6     0.938      1.000    24              6     0.951      1.000    96
+    7     0.957      1.000    28              7     0.962      1.000    112
+    8     0.973      1.000    32              8     0.978      1.000    128
+
+So the design **passes on real trained vectors**: at d=32, b=3 the scan is 12 bytes per item, quantised-only recall@10
+is 0.705, and top-100 plus an exact re-rank is **0.999**. At b=4 it is 1.000 for 16 bytes.
+
+And the earlier structure finding survives, now with the right explanation: those vectors are near-isotropic with
+top-32 energy of 10 %, their k-th gaps really are small (median 0.003 at d=32), and that is exactly why quantised-only
+recall is 0.5-0.97 rather than ~1.0 - the near-ties are real. What was wrong was the inference that the candidate SET
+is also lost. It is not: the re-rank reaches 0.999, which is only possible if the top-100 contains the true neighbours.
+This is the same division of labour measured on synthetic data - **bit-width buys the candidate set, the re-rank
+converts it into recall** - now confirmed on real weights.
+
+Monotonicity is also restored: recall@10 rises 0.506 -> 0.973 with each bit on d=32, which is the `4^-b` error law
+asserting itself. The flat-at-chance table above showed no such trend, which in hindsight was the second tell that the
+measurement was broken: a quantiser whose error falls 16x cannot produce a recall curve that does not move.
+
+The lesson, recorded because it is the kind that repeats: a result that is simultaneously surprising and internally
+inconsistent is a bug until proven otherwise. The gap-vs-error ratio was computed correctly and is still a legitimate
+diagnostic for predicting quantised-ONLY recall, but it does not predict the two-stage pipeline, and it must not be used
+as a go/no-go gate - the go/no-go is the rerank number, which is what the harness now reports.
