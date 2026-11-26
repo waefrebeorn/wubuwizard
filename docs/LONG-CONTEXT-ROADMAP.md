@@ -1243,3 +1243,32 @@ oracle as the gate. If it does not move, the bottleneck inside `q` is something 
 For completeness, the honest ranked plan this table implies: MoE (41.9 %, already per-token flat and parallel), then `q`
 (16.2 %, concrete and cheap), then attention (7.5 %, partly parallel now). The GPU line of work addressed none of the top
 three and is closed.
+
+## `q` is single-threaded, to the decimal - and that is 9 % of prefill for free
+
+Batching the `q` projection (hoisting it out of the per-token loop into one `in2_matvec_nt(ctx, &L->wq, xq, n_tok, d, qdim, q)`
+call) built clean and kept the oracle exact, then measured **no change at all**: 0.857 s against 0.861 s. Reverted - a flat
+change does not stay.
+
+But the arithmetic identifies the real fault precisely:
+
+    q work = 60 tokens x 24 full layers x 3072 qdim x 2304 d = 10.19 GMAC
+    measured 0.857 s                                        = 11.9 GMAC/s
+    single-thread ceiling (measured separately)              = 11.9 GMAC/s
+
+**Exactly one thread's throughput.** The engine's parallel paths reach ~27 GMAC/s, so `q` is running serial while everything
+around it is not. At 27 GMAC/s the same work is 377 ms - **a 480 ms saving, 9 % of total layer time**, from removing a
+serial section rather than from any new algorithm.
+
+Why batching did not fix it is the open question, and it is now sharply posed: the row-split helper has an early-out
+`if (nt <= 1 || n_out < 2 * nt) return in2_matvec_quant(...)` which a per-token call always takes - so before this change `q`
+could never parallelise - yet passing nt = 60 did not engage it either. So either the split is not reached for this tensor's
+path (type/`in2_ty_verified` sending it to a float fallback), or the split itself is serial for this shape. Both are one
+instrumented print apart, and `q` is the second-largest component in the engine after MoE.
+
+Ranked, measured, and unchanged by anything in the GPU line of work:
+
+    moe  41.9 %   per-token flat, parallel       - healthy
+    q    16.2 %   SINGLE-THREADED, 9 % recoverable
+    attn  7.5 %   partly parallelised this session (3.8 % overall gain)
+    gate+wo 6.8 %
