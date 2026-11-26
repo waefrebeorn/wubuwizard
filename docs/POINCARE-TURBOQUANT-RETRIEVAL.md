@@ -1298,3 +1298,38 @@ measured 14 % slower, eviction added, correctness check added) all ended in eith
 thing that moved forward was the routing analysis that says a cache would be worth 86 %. The cache is not the blocker.
 The blockers, in order, are: expert slices crash on the device; the per-type trace hides outcomes after the first; and
 only then is any hit-rate question worth asking.
+
+## Cleanup: the expert escape hatch is gone, and the bounds guard did not find the fault
+
+Three attempts to reach the expert path by patching the dense matvec entry (open the expert name filter, add eviction,
+add a device-vs-CPU check) each ended in a crash or a wrong token, so all of it was removed rather than left behind a
+flag. What that work established, in order:
+
+  - **the slice bounds are correct.** A guard computing `boff + rb*n_out` against `gguf_raw_size(ty, prod(dims))` never
+    fired: the device is handed a byte range that does lie inside the tensor. So the fault is not the offset arithmetic,
+    which was my leading hypothesis;
+  - **the fault is inside the device call for expert types anyway**, and it moves with optimisation level (`-O3` faults,
+    `-O1` returns the same wrong token), so it is a memory error rather than numerics;
+  - **the per-type trace is not trustworthy for this path** - it prints the first outcome per type only, so "refused" and
+    "ran" are indistinguishable in the log, which is why three separate runs appeared to show experts never executing.
+
+Two of my patches also landed on the wrong call site (the batched path has a second resident call using `base`/`ty`
+instead of `src`/`ty_mv`), which is what produced two of the three segfaults. A hot path with two near-identical call
+sites is the wrong place for scripted edits; the next change there goes in as a new function, not a patched condition.
+
+### Verified state after the cleanup
+
+    gen_fast.exe, CPU only                 12/12 oracle, exact
+    IN2_GPU_DENSE=1                        12/12 oracle, exact
+    24-token decode   off 5425 ms   on 5113 ms   ids identical      (-5.8 %)
+    trace             NT-GPU ok ty=8 (blk.5.attn_k.weight), GPU tier: engaged
+
+So the device keeps the decode win it had (this run 5.8 %, earlier runs 7-21 % depending on length), with no escape hatch
+that can crash, and the tree carries no dead instrumentation.
+
+### What replaces it
+
+The expert path is a **MUL_MAT_ID-shaped gather**, and the reason three patches failed is that this engine has no such
+entry point - only a contiguous-slab dense matvec. The next change is therefore a new function with its own signature
+(`ids`, `n_ids`, slot map, guard row), written once and gated on its own device gate, rather than another condition
+inside the dense path. That is the first item in `docs/MOE-OFFLOAD-PRIOR-ART.md` and it has not changed.
