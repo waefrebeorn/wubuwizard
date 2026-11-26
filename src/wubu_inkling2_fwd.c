@@ -300,7 +300,9 @@ static void *in2_gpu_res_fn;
  * experts collide on the key and the second is served the first one's bytes (measured: 66 of 153 src pointers reused
  * within a single tensor, device rel error 3.7-5.3 on the affected rows). */
 static void *in2_gpu_res_id_fn;
-static void *in2_gpu_batch_fn;   /* batched expert matvec: one launch per layer instead of one per expert */
+static void *in2_gpu_batch_fn;
+static void *in2_gpu_batch_res_fn;  /* same, but gathers device-to-device from resident slots - the H2D gather cost
+                                     * 250 MB/token and measured SLOWER than per-expert calls (5804 vs 5120 ms) */   /* batched expert matvec: one launch per layer instead of one per expert */
 static int   in2_gpu_state;      /* 0 = untried, 1 = ready, -1 = not available */
 static double in2_gpu_sec;
 static int64_t in2_gpu_calls;
@@ -338,6 +340,7 @@ static void in2_gpu_init(void)
     in2_gpu_res_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec");
     in2_gpu_res_id_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_matvec_id");
     in2_gpu_batch_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_moe_batch");
+    in2_gpu_batch_res_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_moe_batch_res");
     /* IQ2_S needs its 1024-entry grid on the device; without it the kernel writes zeros and returns success - which is
      * exactly what the expert rows measured (ty=22 rel=1.000 over 56 rows). IQ3_S rides along in the same export. */
     {
@@ -1882,6 +1885,14 @@ static void moe_hist_dump(void)
 
 /* One device launch for a whole layer's active experts. Priced in isolation at 2.39x against per-expert calls and
  * bit-identical to them (tools/moe_batch_price.c), which matters because the per-expert path is 192 launches per token. */
+static int in2_gpu_moe_batch_res(int type, const int64_t *ids, const void *const *w, int n_exp, size_t wbytes_each,
+                                 const void *act, int act_bytes, float *y, int K, int n_rows)
+{
+    if (!in2_gpu_batch_res_fn) return -1;
+    typedef int (*sig_t)(int, const int64_t *, const void *const *, int, size_t, const void *, int, float *, int, int);
+    return ((sig_t) in2_gpu_batch_res_fn)(type, ids, w, n_exp, wbytes_each, act, act_bytes, y, K, n_rows);
+}
+
 static int in2_gpu_moe_batch(int type, const void *const *w, int n_exp, size_t wbytes_each,
                              const void *act, int act_bytes, float *y, int K, int n_rows)
 {
@@ -1991,7 +2002,16 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                     const int ab = (d / 256) * (int) sizeof(in2_q8k_blk);
                     if (aq) {
                         in2_q8k_quantise(x + (size_t) t * d, d / 256, (in2_q8k_blk *) aq);
-                        okall = (in2_gpu_moe_batch(ty_b, srcs, got, wb_b, aq, ab, gy, d, 2 * DFF) == 0);
+                        int64_t ids[64];
+                        if (got > 64) okall = 0;
+                        for (int k = 0; okall && k < got; ++k) {
+                            const int64_t eo = (int64_t) idx[k] * 2 * DFF * d;
+                            ids[k] = L->gate_up.file_offset + ((eo == 0) ? 0 : gguf_raw_size(ty_b, eo));
+                        }
+                        if (okall) {
+                            const int r1 = in2_gpu_moe_batch_res(ty_b, ids, srcs, got, wb_b, aq, ab, gy, d, 2 * DFF);
+                            if (r1 != 0) okall = (in2_gpu_moe_batch(ty_b, srcs, got, wb_b, aq, ab, gy, d, 2 * DFF) == 0);
+                        }
                     } else okall = 0;
                     free(aq);
                 }

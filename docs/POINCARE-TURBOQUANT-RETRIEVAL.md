@@ -1636,3 +1636,22 @@ gathering at all. Until that exists, `IN2_MOE_BATCH` is a measured dead end and 
 
 State: default and dense paths bit-identical to the oracle; the batched path is exact but slower; 12/12 and 242/242
 hold everywhere they held before.
+
+## The D2D gather cannot warm itself, and that is why batching is still slower
+
+Added `wubu_cuda_moe_batch_res`, which gathers device-to-device from resident slots by ident. Wired the engine to prefer
+it and fall back to the host-gather entry. Exact (oracle 12/12 identical) and **still slower: 5870 vs 5138 ms**.
+
+The reason is structural, and worth writing down because it invalidates the planned step 4 as stated: the batched branch
+**replaces** the per-expert `in2_matvec_quant` calls, and those calls are what populated the resident tier in the first
+place. So on every batch call the slabs are not resident, `moe_batch_res` finds no slot, and falls back to the same
+host-to-device gather that made it slow. The cache cannot fill itself, because the code that used to fill it is the code
+being bypassed.
+
+Stated plainly: 2.39x in isolation, 0.87x in the engine, now 0.87x again with a D2D entry that never gets a hit. The
+micro-benchmark was not wrong about launch count; it was measuring a system where the slabs were already in hand, which
+is the one condition the engine cannot create cheaply.
+
+To make batching pay, `moe_batch_res` has to **populate** on a miss instead of falling back: allocate a slot, upload,
+record the ident, and reuse it next token. That is the same fill logic the single-slab path has, and it is the piece that
+has to move into the batch entry before any further measurement is worth taking. No more batching work until that exists.

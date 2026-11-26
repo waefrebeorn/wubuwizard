@@ -3796,3 +3796,55 @@ WUBU_EXPORT int wubu_cuda_moe_batch(int type, const void *const *h_w, int n_exp,
     b_lock.store(0);
     return rc;
 }
+
+/* Batched expert matvec with a DEVICE-to-DEVICE gather from the resident tier.
+ * The host-pointer version of this entry was measured SLOWER than per-expert calls (5804 vs 5120 ms on a 24-token
+ * decode) because it gathered 8 x 1.31 MB x 24 layers = 250 MB/token over PCIe - more than the 192 launches cost. At a
+ * 92 % hit rate the slabs are already resident, so gather D2D (~500 GB/s) and touch the bus not at all.
+ * Returns -7 if any ident is not resident: the caller must fall back rather than guess. */
+WUBU_EXPORT int wubu_cuda_moe_batch_res(int type, const int64_t *idents, const void *const *h_w, int n_exp,
+                                       size_t wbytes_each, const void *h_act, int act_bytes, float *h_y,
+                                       int K, int n_rows_each)
+{
+    if (type != 16 && type != 22) return -1;
+    if (!idents || !h_w || n_exp <= 0 || wbytes_each == 0 || !h_act || !h_y || K <= 0 || n_rows_each <= 0) return -1;
+    const int64_t row_bytes = (int64_t) (wbytes_each / (size_t) n_rows_each);
+    if (row_bytes <= 0 || (size_t) row_bytes * (size_t) n_rows_each != wbytes_each) return -1;
+    const int n_cols = n_exp * n_rows_each;
+    const size_t wb = wbytes_each * (size_t) n_exp;
+
+    static void *b_w2, *b_act2, *b_y2;
+    static size_t b_w2c, b_act2c, b_y2c;
+    static std::atomic<int> b2_lock{0};
+    int e = 0;
+    while (!b2_lock.compare_exchange_weak(e, 1, std::memory_order_acquire)) e = 0;
+#define B2_FAIL(v) do { b2_lock.store(0); return (v); } while (0)
+
+    if (wb > b_w2c) { if (b_w2) { cudaFree(b_w2); b_w2 = NULL; } if (cudaMalloc(&b_w2, wb) != cudaSuccess) B2_FAIL(-3); b_w2c = wb; }
+    if ((size_t) act_bytes > b_act2c) { if (b_act2) { cudaFree(b_act2); b_act2 = NULL; } if (cudaMalloc(&b_act2, (size_t) act_bytes) != cudaSuccess) B2_FAIL(-3); b_act2c = (size_t) act_bytes; }
+    const size_t yb = (size_t) n_cols * sizeof(float);
+    if (yb > b_y2c) { if (b_y2) { cudaFree(b_y2); b_y2 = NULL; } if (cudaMalloc(&b_y2, yb) != cudaSuccess) B2_FAIL(-3); b_y2c = yb; }
+
+    for (int i = 0; i < n_exp; ++i) {
+        int slot = -1;
+        for (int j = 0; j < g_res_n; ++j)
+            if (g_res_d[j] && g_res_ident[j] == idents[i] && g_res_bytes[j] == wbytes_each) { slot = j; break; }
+        if (slot < 0) {
+            /* not resident: stage it and remember it, exactly as the single-slab path would */
+            if (cudaMemcpy((char *) b_w2 + (size_t) i * wbytes_each, h_w[i], wbytes_each, cudaMemcpyHostToDevice) != cudaSuccess) B2_FAIL(-4);
+            continue;
+        }
+        if (cudaMemcpyAsync((char *) b_w2 + (size_t) i * wbytes_each, g_res_d[slot], wbytes_each,
+                            cudaMemcpyDeviceToDevice, 0) != cudaSuccess) B2_FAIL(-4);
+        g_res_use[slot] = ++g_res_clock;
+    }
+    if (cudaMemcpy(b_act2, h_act, (size_t) act_bytes, cudaMemcpyHostToDevice) != cudaSuccess) B2_FAIL(-4);
+    const int rc = (type == 16)
+        ? wubu_cuda_matvec_iq2xxs(b_w2, b_act2, (float *) b_y2, K, n_cols, row_bytes, 1)
+        : wubu_cuda_matvec_iq2s_v2(b_w2, b_act2, (float *) b_y2, K, n_cols, row_bytes);
+    if (cudaDeviceSynchronize() != cudaSuccess) B2_FAIL(-5);
+    if (cudaMemcpy(h_y, b_y2, yb, cudaMemcpyDeviceToHost) != cudaSuccess) B2_FAIL(-6);
+    b2_lock.store(0);
+#undef B2_FAIL
+    return rc;
+}
