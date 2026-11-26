@@ -314,8 +314,13 @@ block on the codebook: 32 scalar grid loads and 32 sign-table loads per 256 valu
 
 So the split is not a compromise, it is arithmetic that happens to be favourable: **every non-expert tensor is 1,084
 MiB and can live in VRAM permanently**, and 43% of the expert population fits on top of it. Per token the engine reads
-dense 696 MB, experts 369 MB, head 469 MB; moving dense and head to VRAM puts 1.17 GB of the 1.53 GB token on a
-192 GB/s link and leaves the CPU only the expert misses.
+dense 696 MB and experts 369 MB; moving the non-expert tier to VRAM puts ~930 MB of the 1,535 MB step on a 192 GB/s
+link and leaves the CPU only the expert misses.
+
+**Correction, because this figure was wrong in two earlier drafts of this note:** the output head is **234.7 MiB**, not
+469. `output.weight` is `[2304, 201024]` in IQ4_XS, which is 463.2 M weights at 136 bytes per 256 = 234.7 MiB; 469 MiB
+is head **plus** `token_embd.weight`, which is a separate tensor of the same shape (the head is not tied). So the head is
+~15% of a decode step, not 31%.
 
 One measurement decides the fetch/compute ratio, and it comes out in favour of fetching: PCIe 4.0 **x8** on this
 laptop is ~10-13 GB/s real (nvidia-smi reports link width 8), so an 0.83 MB expert slab costs ~70-85 us to copy,
@@ -332,6 +337,25 @@ generation counter), `src/wubu_model_gpu.cu` (1,559 lines), `src/flash_attn_*.cu
 builds; the card is compute capability 8.9 (Ada). So the device side is further along than the CPU side was, and what
 is missing is exactly the part the three engines above are built around: a **tandem scheduler** - a placement plan,
 the doorbell, and the CPU/GPU split - not more kernels.
+
+### What the checkpoint gives for free, read out of the GGUF
+
+- **No MTP, no draft head.** 734 tensors, none matching `nextn`/`draft`/`mtp`/`eh_proj`/`enorm`/`hnorm`, and nothing
+  outside `blk.*` except `loop_kv_res_query`, `loop_res_query`, `output`, `output_norm`, `output_res_query`,
+  `token_embd`, `token_embd_norm`. So every multi-token-per-pass scheme has to be **draft-free** (prompt lookup,
+  lookahead/Jacobi, self-speculative layer skip) - there is nothing to hang a Medusa/EAGLE head on.
+- **The head is untied and re-quantisable.** `output.weight` is IQ4_XS at 234.7 MiB per token. At IQ2_XXS it would be
+  113.9 MiB, saving **120.8 MiB = 8.2%** of the measured 1,535.5 MB step - the largest single arithmetic saving
+  identified so far that needs no new kernel, only a re-quantised tensor. It is not free: greedy output moves unless
+  the top logit survives 2 bits, which is a measurable question and not an assumption.
+- **The sparse pattern is in the metadata, not inferred.** `attention.sliding_window_pattern` is an explicit array of
+  48, alongside `attention.relative_extent 1024`, `attention.relative_length 16`, `attention.qk_clip 22.63`,
+  `attention.log_scale_floor 8192` and `expert_weights_scale 8.0`. The 8-full/64-sliding split this project derived by
+  tracing is therefore a declared property of the file, and any code that recomputes it from behaviour can read it
+  instead.
+- **The dense tier is mostly Q8_0** (`attn_output` and friends are type 8, 1.06 bytes/weight), which is why the
+  non-expert tier costs 587 MiB for only 24.18 M MAC/layer. Re-quantising attention to IQ4_XS is a second 8%-class
+  arithmetic saving, at a larger quality risk than the head.
 
 ### Measured: the GPU library builds here, but the tier is not ready
 
