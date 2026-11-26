@@ -840,3 +840,37 @@ because per-expert buckets are small at 60 tokens; or a shared lock/buffer insid
 
 That question is worth more than the entire GPU line of work: 55 % of prefill, currently running at roughly one core's worth
 of throughput.
+
+## The engine's real limiter: thread scaling is 2.29x, not 8x
+
+60-token prefill, `IN2_THREADS` swept:
+
+    1 thread   14,700 ms
+    2 threads  11,486 ms   1.28x
+    4 threads   7,661 ms   1.92x
+    8 threads   6,415 ms   2.29x
+
+So the expert-major MoE loop and everything else do parallelise - OpenMP is linked (19 `gomp_parallel`, 110 GOMP symbols)
+and the pragmas execute - but 8 threads buy **2.29x, not 8x**. That single number explains every throughput observation in
+this document:
+
+    per-thread ceiling      ~11.9 GMAC/s  (measured, batched CPU probe)
+    ideal 8 threads          ~95 GMAC/s
+    observed (2.29x)         ~27 GMAC/s    <- matches the 12.5-23.1 GOPS per-type profile exactly
+    GPU IQ2 kernel           373-648 GMAC/s
+
+The engine is not 4-30x off the GPU because of the kernel; it is 2.3x below its own core count, and then the GPU is another
+order of magnitude beyond that. **The first prize is thread scaling, not the GPU: 2.29x -> 6x would take prefill from 6.4 s
+to ~2.4 s at 60 tokens, roughly halving it, with no new kernel and no data movement.**
+
+Why scaling is this poor is now the single question worth answering. Candidates in order of likelihood:
+- memory bandwidth: every expert matvec streams its slab from RAM, and 8 threads all streaming IQ2 slabs can saturate the
+  channel long before the cores are busy - a bandwidth ceiling would look exactly like this;
+- four `malloc`/`free` pairs per expert inside the parallel region (128 experts x 24 layers per chunk = ~12,000 allocations);
+- the shared fallback quantiser buffer, whose thread-local comment records this exact class of bug before.
+
+Each is testable without changing the maths: bandwidth by comparing aggregate GOPS against measured DRAM rate, malloc by
+hoisting the four buffers out of the expert loop, the buffer by checking whether the thread-local guard is still conditional.
+
+Note also that `in2_threads()`'s own comment claims "~3.5x for the same kernels under a persistent pool" - the code was
+written expecting better scaling than the 2.29x measured here, so something has regressed since that measurement.
