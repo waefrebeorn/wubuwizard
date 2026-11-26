@@ -987,3 +987,43 @@ That is a well-scoped change with a reference implementation sitting next to it 
 piece of work. The probe also stands as a warning about the measurement itself: had I only measured the int8 variant
 against nothing, I would have concluded that int8 activations were slower than floats, which is the opposite of what the
 Q8_0 number in the same engine shows.
+
+## RETRACTION: the Q2_0 rewrite ceiling is 1.79x, not 4-6x - the unpack is over half the cost
+
+The previous section promised a maddubs rewrite worth "4-6x" on Q2_0 and NVFP4 and "roughly a third of prefill time".
+That was inferred from the rate gap alone (16.7 vs ~105 GOPS) and is wrong. `tools/q2_unpack_lab.c` measures the
+floor directly: the same row loop with the multiply and FMA removed, keeping only the 2-bit expansion:
+
+    full Q2_0 dot    12.75 GMAC/s
+    unpack only     56 % of that time
+    => best case if the multiply and FMA were completely free: 1.79x
+
+The K-quants hit 105 GOPS because their weights are already bytes - Q4_K is 4-bit and unpacks with one shift and mask
+per 32 values, Q8_0 needs no unpack at all. Q2_0 is 2-bit, so producing one lane per element costs a variable shift,
+an and, a subtract and a pack before any arithmetic can happen, and that unpack is 56 % of the dot. **A perfect
+multiply cannot beat 1.79x**, whatever instruction it uses.
+
+So the realistic prize on Q2_0 is ~1.8x on 22 % of prefill - about 10 % overall, and less than that in wall time once
+threading contention is included. NVFP4 (13.2 %, 12.69 GOPS) would need a separate float-LUT path for a similar
+fraction. Both are multi-hour SIMD rewrites that change accumulation order, so each needs a parity gate, and together
+they are worth roughly 15-20 % - not a third.
+
+### Revised priority
+
+Given that, the ordering from the type-coverage section stands but its justification changes: moving NVFP4 and Q2_0 to
+the GPU is worth more than rewriting them on the CPU, because on the GPU the unpack problem disappears entirely (a
+4-bit or 2-bit value is one index into a constant table held in shared memory, and the matrix-vector multiply can be
+done at one thread per output row with no per-element expansion at all). On the CPU the unpack is an irreducible 56 %
+of the work; on the GPU it is a table lookup.
+
+So:
+
+1. **GPU kernels for NVFP4 (22.4 % of expert bytes) and Q2_0 (18.5 %)** - the two largest formats, the two simplest,
+   and the two where the CPU's structural disadvantage vanishes.
+2. Route MoE expert row ranges to them (`wubu_iq_rows` already takes r0/r1).
+3. Leave the CPU Q2_0 kernel alone unless a 1.8x on 22 % is the only thing left to do.
+
+The general lesson, which has now cost me five corrections in this document: **a rate gap between two formats is not a
+speedup opportunity until you measure what the slow one is actually spending its time on.** Q4_K is 6x faster than
+Q2_0 not because its arithmetic is better but because its *format* stores values one per nibble instead of four per
+byte. Chasing the arithmetic was chasing the wrong half of the gap.
