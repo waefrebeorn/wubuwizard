@@ -805,3 +805,86 @@ Order of work, each gated on tokens before any timing:
 2. Q4_K, Q5_K, Q6_K, IQ3_XXS device kernels, each verified against an exact reference, which completes `attn_q`;
 3. run the dense tier on one stream and the expert path on the CPU concurrently, which is Strata's doorbell;
 4. only then the expert cache (Aged-LFU, global pool, router-ahead prefetch), gated on dirty-layer fraction.
+
+## Wave 10 - the five research fronts, synthesised (and one of them changes the CPU model)
+
+### Decode is concurrency-bound, not bandwidth-bound: ~8 of 24 miss slots in flight
+
+The most useful result in the batch, and it inverts the roofline I had been quoting. 43 GFLOPS at the IQ kernels'
+3.88 FLOP/B is **11.1 GB/s = 15 %** of what this part can stream, so bandwidth was never the wall. Per-thread
+memory-level parallelism is the wall: at 1 thread we have ~8 lines in flight at ~100 ns and at 8 threads still ~8 lines
+each but at ~400 ns of inflated latency, and
+`8 threads x 8 lines x 64 B / 400 ns = 10.2 GB/s` predicts the 11.1 measured. Zen 4 documents **24 outstanding misses
+per core** in the Miss Address Buffer (AMD Zen 4 SOG), corroborated by Chips and Cheese (DDR5-5600: 82 ns idle ->
+>400 ns with five bandwidth threads). We are using a third of the hardware's concurrency.
+
+Correction to the same brief, filed rather than edited away: its "4.5 tok/s x 7.9 GB = 35.6 GB/s, 67 % of the ceiling"
+multiplies the whole FILE by the token rate. Per-token traffic is 1,535 MB, so the engine streams ~7 GB/s, not 35, and
+it sits at 15 % of the roof - which is what the MLP argument says independently.
+
+The lever, in payoff order, with the source's own measurements:
+1. **Row tiling R=4** (R=8 when the activation fits), 6-deep unroll: four independent row streams in flight per thread
+   turns 8 outstanding misses into ~24. ik_llama's 4-row-interleaved formats measured **248.3 vs 188.7 t/s PP-512 on
+   Zen 4 (1.32x)** and 2.5-3.4x over mainline on Q4_K/Q5_K. This is the single biggest CPU-side change available and
+   it applies to single-token decode, not just prefill.
+2. **SoA scales with 64 B-aligned payloads.** A scale sharing a line with nothing, in a different line from its quants,
+   adds a SECOND dependent miss per block and halves MLP; ~half of 32 B loads also straddle a line on Zen 4. The
+   "66-byte blocks defeat the prefetcher" folklore is wrong - a dense 66-byte run is still a sequential stream.
+3. **Prefetch distance computed, not guessed:** D ~ latency x per-thread BW (16 lines at 10 GB/s/100 ns, 31 at
+   20 GB/s/200 ns), targeting the next row block 1.5-2 KB ahead, PREFETCHNTA for streaming weights.
+4. Contiguous row ranges per thread, one thread per physical core, 2 MB pages.
+5. Batch tokens T=4-8 so the matvec becomes a GEMM (AI 3.9 -> 15-31 FLOP/B) and leaves the latency regime entirely -
+   but rule 64 says a 9-position pass does not pay here, so this is prefill-only.
+
+### Affinity: +61 % in the brief, exactly zero on this engine (measured, not argued)
+
+The brief measured 6 threads pinned one-per-core at **263 vs 162 GFLOPS** (+61 %) on this same laptop, with both SMT
+siblings of core 0 at 95 % while the rest idled - i.e. Windows packing a partially-occupied team. Tested here directly
+on the engine, 8 tokens, `IN2_THREADS` x `OMP_PROC_BIND`:
+
+    6 threads: none 3.63 | close 3.63 | spread 3.61
+    8 threads: none 3.74 | close 3.71 | spread 3.66
+   12 threads: none 3.68 | close 3.71 | spread 3.68
+
+Nothing beats 8 threads unbound, and binding is flat or worse. The +61 % is real for a dense SGEMM whose team leaves
+six cores idle for Windows to mis-pack; an engine already at 8 threads on 6 cores has no such packing to fix. Keep the
+finding, do not port the fix.
+
+### Sustained-load ceiling is the 45 W STAPM limit, not the OS
+
+30 minutes of continuous 12-thread matmul on this box: 270.0 GFLOPS (5-15 min) -> 240.5 (15-30) -> **229.8 (25-30),
+-15 %**, peak window 280.4 vs worst 211.9 (-24 %), 97-100 C throughout, 4.12 GHz average. Every OS knob measured flat
+for all-core work (PERFBOOSTMODE -3 %, PROCTHROTTLEMAX 99 -0 %, CPMINCORES 100 + DISTRIBUTEUTIL 0 +0.5 %,
+PROCTHROTTLEMIN noise); the ceiling lives in the SMU. Single-thread cap is 4.30 GHz mean / 4.44 max, identical hot and
+idle, so "up to 5 GHz" is unreachable on this platform. No undervolting: AMD lists Curve Optimizer as **No** for this
+part.
+
+### Long context: the exact, not merely accurate, stack
+
+For the 512k-1M goal the batch surfaced three methods that preserve bits or bound the error rather than approximating
+it, which is what this engine's parity contract needs:
+- **AnchorKV** - reconstructs KV **bit-exactly** from layer-sparse residual-stream anchors, O(L) cascade replay (16.3x
+  faster than naive at 4K), exact DP anchor placement for interleaved sliding-window models, break-even spacing
+  computable from the config alone, verified on CPU. This composes directly with our 8-full-of-48 split.
+- **GAAC** - lossless exponent codec, 1.405-1.407x on BF16, ~26 % resident-KV cut, 1.19-1.27x decode attention at 64K,
+  explicitly aimed at personal devices.
+- **LoomKV** - bit-exact tiering, BF16 at 0.71x raw, 2.7-3.6x goodput at the LRU cliff.
+- Cheapest quality-preserving win without any of the above: **HeadWiseKV** - per-KV-head static windowing on the global
+  layers only, training-free, 68.95 % KV retention costs RULER 0.35 points and extends context 114K->161K.
+- Design warning for us: **NLL-guided layer selection** says 1/4 full-attention layers match the 1/2-periodic baseline
+  with ~15 min of calibration, i.e. our 8-of-48 is likely over-provisioned on attention and under-provisioned nowhere.
+
+### Lineage, and the one negative result that saves a month
+
+Vec-LUT (MobiSys 2026) unified LUT across parallel tokens (1->N lookup per index) reports **4.2x over SOTA on 5 edge
+devices**; T-MAC does 20 tok/s on one core for a 3B BitNet (4-5x llama.cpp); midge uses the OS page cache AS the expert
+cache via MADV_RANDOM (3.98 vs 0.48 GB/s/core). Strata's published 6-thread desktop-Zen table says it is at **100 % of
+RAM bandwidth at one token per expert** - i.e. no kernel headroom in decode for it, only weight reuse across 3-4 tokens
+(KQ256, bit-exact, 11-20 %). That contradicts our measured 15 %-of-roof, and the contradiction is unresolved: different
+format, different thread count, possibly different accounting. **Do not resolve it by assumption** - if Strata is right
+for its setup, R=4 tiling buys nothing and the win is elsewhere; rule 75 says recompute before committing, so the R=4
+implementation should land with a bytes/s-vs-threads curve at 512 KB / 8 MB / 2 GB that shows where the wall actually is.
+
+Negative result worth acting on immediately: with 7.9 GB in 16 GB, the expert-streaming tier is pure pessimisation -
+skip it. Two-level NUMA barriers are NUMA-only. llama.cpp's weight-replication PR is 22-59 % slower than its own
+`--numa distribute`.
