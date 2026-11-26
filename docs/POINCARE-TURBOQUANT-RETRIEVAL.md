@@ -686,3 +686,49 @@ on this engine answers the wrong question.
 Measuring prefill changes the plan. The previous section's conclusion - "1M is short by a factor of two in bits" - is
 still arithmetically true, but it is not the binding constraint; a 1M context that fits in RAM and takes six days to
 fill is not a feature.
+
+## Verification 11: three retractions - my prefill figures were inflated 4.8x, batching buys nothing, and AVX2 buys nothing
+
+The previous section reported prefill at "0.45 s/token at f32 and 2.1 s/token at 6 bits" and concluded that a 262k
+context would take 6.4 days to fill. **All three numbers were wrong**, for one reason: I derived tokens-per-prompt from
+a character count instead of reading the value the engine prints. It prints `prefix N` in every step line, and the
+prompts were 49 and 97 tokens, not the ~11 and ~22 I divided by.
+
+The engine's own figures:
+
+    prompt        prefix   wall      s/token   vs decode (0.17)
+    s4  f32         49      4.484 s   0.0915    1.9x faster
+    s4  6-bit       49     14.234 s   0.290     1.7x slower
+    s8  f32         97      9.093 s   0.0937    1.8x faster
+    s8  6-bit       97     46.141 s   0.4757    2.8x slower
+
+So prefill is **0.093 s/token (10.7 tok/s) at f32**, not 0.45 - a 4.8x overstatement. And 262,144 tokens at the 6-bit
+rate is **~35 hours**, not 6.4 days. The conclusion that throughput rather than memory blocks long context survives,
+since 35 hours is still not a feature, but the magnitude was wrong by nearly 5x and the corrected figure is what any
+planning should use.
+
+**Retraction 2: batched prefill buys nothing on this machine.** I claimed chunking the prompt into token blocks was worth
+"100x+". A probe with identical weights and identical total MACs, two loop orders, 64 tokens through 4096x4096 f32:
+
+    (a) token-outer (what the engine does)   0.65 s   1.66 GMAC/s
+    (b) row-outer   (each weight read once)  0.64 s   1.67 GMAC/s
+    speedup 1.01x
+
+Row-outer moves 64 MB of weights against token-outer's 4.3 GB and takes the same time, which proves the kernel is
+**ALU-bound, not weight-bound**. Amortising weight reads cannot help when the arithmetic is the limit. Planning a
+refactor on the assumption that it would was a mistake, and the probe cost two minutes against the refactor's hours.
+
+**Retraction 3: AVX2 does not help the engine either.** The same probe with `-mavx2 -mfma -ffast-math` goes 1.66 ->
+10.81 GMAC/s, a 6.5x gain, so the capability is there. But the engine built with `-mavx2 -mfma` produces **bit-identical
+oracle tokens and identical prefill wall time** (10064 ms vs 9875 ms, inside noise). The engine's cost is therefore not
+in vectorisable f32 arithmetic at all - it is in the IQ2 dequantisation and the expert gather, which the flag does not
+touch. Adding the flag is safe (parity held) but worthless on its own; keep it for the kernels that do guard on
+`__AVX2__`, and do not expect it to move the number.
+
+What the phase dump does say, at 97 tokens in 9.09 s: MoE layers run ~0.075-0.089 s each with `[expert-major]`, and the
+HEAD is 0.089 s for 201024 x 2304. Twenty-four MoE layers at ~0.08 s is ~1.9 s of the 9.09 s, so MoE is a fifth of
+prefill and the dense matvecs are the rest - both dominated by dequantising IQ2 weights element by element.
+
+The next optimisation target is therefore **dequantisation throughput**, not loop order, not SIMD flags, and not
+batching: the engine converts a 7.90 GB IQ2_XXS weight set to f32 to use it, at 1.17 G w/s. Every one of the three
+things I proposed last message attacks the wrong layer of the problem.
