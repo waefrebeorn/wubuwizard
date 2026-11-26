@@ -87,3 +87,28 @@ visit-indexed dump: a counter incremented by `RUN_LAYER` and a filename that car
 touch the maths at all.
 
 That is now the next concrete step, and it is small. After it, the drafter's inputs are reproducible from a single gate run.
+
+## Visit-indexed dump added, and it corrects my own account of why it was needed
+
+`IN2_DUMP_VISITS=<dir>` writes `V%03d_il%02d_p%d.bin` for every visit. One insertion in `RUN_LAYER` (a counter and a
+conditional write), no maths touched, oracle unmoved: **GATE PASS 15/15**.
+
+What it proves, from the runtime rather than from tensor names:
+
+    visit range observed: 000 .. 047        -> exactly 48 visits, 0..47
+    V005 -> il05 p0      V023 -> il11 p1      V041 -> il17 p2
+    no visit 048 exists
+
+Three consequences, in increasing order of importance:
+
+1. The 24-physical-layer / 48-visit accounting is now confirmed **behaviourally**, not inferred from `blk.N` names.
+2. `target_layer_ids [5, 23, 41, 48]` - since 47 is the last visit and nothing beyond it runs, **48 must denote the final hidden
+   state after the loop**. The earlier inference now has runtime support.
+3. **Retraction: my stated reason for needing this dumper was wrong.** I wrote that visits 23 and 41 "both land on core layers
+   with equal pass counters" and would collide. They do not - V023 is `il11 p1` and V041 is `il17 p2`, distinct keys, so
+   `IN2_DUMP_LAYERS` could already have produced all four taps. The visit dumper is still worth having (it makes visit identity
+   explicit and it is what proved 0..47), but the collision argument I gave for it was false, and I should have checked the
+   actual mapping before asserting a gap. This is the same error pattern as the Q8_ROW 260-byte stride: a plausible structural
+   argument asserted without a lookup.
+
+Taps are now reproducible exactly, by visit index, from one gate run.

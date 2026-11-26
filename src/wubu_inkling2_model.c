@@ -158,6 +158,10 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
     int n_src_cur = 0, n_src_next = 0;
     if (!src_cur || !src_next) rc = WUBU_INKLING2_ERR_IO;
     static int in2_dump_pass = 0;   /* 0 = pre/post layers and the first loop pass; N = loop pass N */
+    /* Visit index: counts every RUN_LAYER invocation across the whole 48-visit schedule. Physical layer + pass
+     * counter cannot distinguish the loop core's repeated visits (visits 23 and 41 both land on core layers with
+     * equal pass counters), and the DSpark drafter taps visits 5, 23, 41 and the final state. */
+    int in2_visit_no = 0;
     #define RUN_LAYER(IL, MSG) do {                                                    \
         float *_br = (float *)malloc(sizeof(float) * ND);                              \
         if (!_br) { rc = WUBU_INKLING2_ERR_IO; break; }                                \
@@ -189,6 +193,14 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             for (int _i = 0; _i < d; ++_i) { double _v = h[(size_t)_t * d + _i]; _s += _v * _v; } \
             fprintf(stderr, "LT seq=%d il=%02d pos0=%d ntok=%d l2_last=%.12e\n", ltseq++, (IL), pos0, n_tok, _s); \
         }                                                                               \
+        { const int _vin = in2_visit_no++;                                             \
+          if (rc == WUBU_INKLING2_OK && getenv("IN2_DUMP_VISITS")) {                      \
+              const char *_vd = getenv("IN2_DUMP_VISITS");                              \
+              char _vp[512]; snprintf(_vp, sizeof _vp, "%s/V%03d_il%02d_p%d.bin",       \
+                  _vd, _vin, (IL), in2_dump_pass);                                      \
+              FILE *_vf = fopen(_vp, "wb");                                             \
+              if (_vf) { fwrite(h, sizeof(float), (size_t)ND, _vf); fclose(_vf); }      \
+          } }                                                                           \
         if (rc == WUBU_INKLING2_OK && getenv("IN2_DUMP_LAYERS")) {                     \
             char _lp[512]; snprintf(_lp, sizeof _lp, "%s/L%02d_p%d.bin",                \
                 getenv("IN2_DUMP_LAYERS"), (IL), in2_dump_pass);                        \
