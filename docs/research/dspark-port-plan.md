@@ -693,3 +693,34 @@ matrices, `BF16` for w1/w2) and a block forward that follows `build_layers`.
 **Immediate next step:** read `dflash.cpp`'s layer builder (~:114-200) for the exact block maths with `ctx_mix`/`ctx_norm`, then
 write a GGUF dequantiser (Q8_0 = 32-weight blocks with an fp16 scale, *not* the Strata Q8_ROW plane layout) and dump the 58
 tensors, so the new implementation runs on real weights instead of the Strata pack's.
+
+## The drafter GGUF is decoded, and two independent cross-checks tie it to the Strata pack
+
+`tools/gguf_extract.py` dequantises the drafter to flat f32. It implements ggml `Q8_0` - a 34-byte block per 32 weights
+(`fp16 d` + `32 x int8`, `value = d*q`) - which is **not** the Strata `Q8_ROW` plane layout, so sharing a decoder between the two
+would have been wrong. Verified by closing the byte budget:
+
+    58 tensors, 491,956,264 B of data, data_start = 11,933,600
+    11,933,600 + 491,956,264 = 503,889,864   vs file 503,889,952   (88 bytes of padding)
+
+and by decoding `blk.0.attn_q.weight [2304, 3072] Q8_0` to 28,311,552 B of f32 with rms 0.0208 - a plausible weight scale, not
+garbage. All 58 now sit as .f32 in `C:/Users/eman5/models/inkling-2-drafter/f32/` (470 MB).
+
+**The cross-checks that matter.** Two values in this GGUF reproduce numbers I measured independently in the Strata pack:
+
+    output_norm.weight        rms 3.09236        Strata dspark.norm.weight        rms 3.0923
+    blk.0.ctx_mix.weight      [0.0926 .. 0.6879]  Strata fuse row 0 softmax      [0.093, 0.113, 0.688, 0.106]
+
+The norm is identical to four significant figures, and the mainline `ctx_mix` vector is exactly the **softmax of the Strata
+`fuse_weight` row** - mainline stores the mix pre-softmaxed as a `[4]` vector where Strata stores a `[4,4]` matrix and softmaxes
+a row per output feature. That is the same first layer under two parametrisations, and it settles that both packs derive from the
+same checkpoint rather than from different models.
+
+**What this means for the port.** The weights are not in dispute and never were - my Strata extraction was correct. What differs is
+the *wiring*: mainline mixes the four taps with a learned `[4]` vector and one `ctx_norm` per layer, while Strata applies a `[4,4]`
+matrix and `dflare_norm`. And the markov head, as established last step, is a rank-256 vocabulary bias rather than a 2304-wide
+correction. So the remaining work is a block forward that follows `dflash.cpp`, on weights that are now decoded and cross-checked.
+
+**Next step:** write the forward - `x0 = tok_norm(embd[anchor]) ++ mask_embd`, three blocks
+(`attn_q/k/v` with `q_norm`/`k_norm`, ctx K/V from `rms_norm(ctx_mix·taps)·ctx_norm` through `attn_k_ctx`/`attn_v_ctx`, SwiGLU),
+then `output_norm` and the markov chain - and run it against the engine's own continuation.
