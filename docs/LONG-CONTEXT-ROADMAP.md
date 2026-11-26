@@ -1032,3 +1032,36 @@ KV mirror just landed - and unlike the mirror, its benefit applies in the DEFAUL
 
 This also retroactively explains the earlier chunked-prefill projection: the O(N^2) decode-on-read analysis was right about
 the TQ path (where the mirror delivered 4.8x) but the dominant cost in the shipped configuration was always the call count.
+
+## Hardware check closes the loop: not bandwidth, not the kernels - it is fork/join per visit-call
+
+    CPU       Ryzen 5 8645HS, 12 logical processors (6 cores + SMT)
+    RAM       2 x 8 GB DDR5-5600, both slots populated -> dual channel, ~90 GB/s theoretical
+    GPU       RTX 4050 Laptop 6 GB
+
+Sliding attention traffic at 60 tokens: 64 visits x 60 pos x 1024 dim x 4 B x 2 (K and V) = 31.5 MB per token, which over
+71 ms is **443 MB/s** - three orders of magnitude below what dual-channel DDR5-5600 can carry. **Bandwidth is not the limit.**
+
+Thread scaling of the same path:
+
+    1 thread   sliding 11.532 s   full 2.414 s
+    8 threads  sliding  4.296 s   full 1.257 s     -> 2.68x and 1.92x
+
+On a 6-core/12-thread part the ceiling is ~6x, so the engine reaches less than half of it. Combined with the per-call figure
+(3,072 visit-calls per token, 23 us each, 57-123 K MAC apiece) the only explanation left standing is **OpenMP fork/join
+executed per visit-call**: each call is far too small to repay a parallel region, so the pool cost is paid 3,072 times per
+token, and that is simultaneously why the per-call rate is 2.5-5.3 GMAC/s and why scaling stalls below the core count.
+
+**So the fix is to hoist the parallel region out of the visit loop** - parallelise over visits (64 independent) or over tokens
+at the layer level, so the fork/join happens once per layer instead of 3,072 times per token. That is a restructure of the
+attention loop, not a kernel, not a cache, and not the GPU.
+
+This is also the first explanation in the whole session that is consistent with every measurement taken:
+
+    - allocation hoisting      : no effect (the allocs were not the shared cost)
+    - granularity/chunk size   : scaling got WORSE with bigger buckets - consistent with fixed per-region overhead
+    - MoE per-token flat       : it uses one parallel region per expert-batch, not per call
+    - every path ~2-2.7x       : the same fork/join tax appears wherever calls are small
+
+Next step: count the parallel regions entered per token (a counter beside the fork sites) and confirm it is thousands, then
+hoist. That counter is a five-line change and it converts the last remaining hypothesis into a number.
