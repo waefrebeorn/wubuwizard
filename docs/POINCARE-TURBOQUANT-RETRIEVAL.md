@@ -1677,3 +1677,32 @@ only remaining item on this thread.
 Scorecard for the whole batching exercise, in order of measurement: 2.39x in isolation, 0.87x wired with a host gather,
 0.87x with a D2D entry that never hit, then 0.97x once the entry could fill the cache itself. The four numbers are the
 argument for measuring every stage on the real path instead of extrapolating the first one.
+
+## Why `down` cannot be batched, and why this thread stops here
+
+Plan step 3 said batching `down` needed an `act_stride`. Checking the kernel instead of assuming:
+
+    WUBU_EXPORT int wubu_cuda_matvec_iq2s_v2(const void *d_w, const void *d_q8, float *d_y,
+                                             int K, int n_cols, long long col_stride)
+
+`d_q8` is a **single** activation shared by all `n_cols` rows - the kernel's whole design is one quantised vector dotted
+against a slab of rows. `down` is the opposite shape: the same slab shape, but every expert has its own post-SiLU
+activation, so batching it needs a kernel that indexes the activation by row group. That is a new kernel, not a
+parameter, and it is the honest end of this thread.
+
+Final position of MoE-on-GPU on this hardware, every number measured:
+
+    dense decode                5208 ms / 24 tok
+    expert offload, per expert  5509 ms      (+5.8 %)
+    expert offload, batched     5378 ms      (+3.3 %)   <- best it has ever been, still a loss
+    expert rows device vs CPU   242/242 exact at 8 threads
+    oracle                      12/12 identical in every configuration above
+
+**Conclusion: on a 6 GB RTX 4050 with PCIe, expert offload does not pay for this model, and the reason is now measured
+rather than suspected** - 6144 slabs against 6 GB forces a fill on first sight of every expert, and `down` cannot be
+batched at all, so half the launches stay per-expert. It is correct, it is opt-in (`IN2_GPU_MOE`, `IN2_MOE_BATCH`), and
+it should stay off. The path that does pay is the dense tier, -5.5 % on decode, exact, and zero risk.
+
+The remaining wall for the actual goal - 1M context on a tandem GPU - is unchanged and is not this one: q6 KV at 1M costs
+12.99 GB per step (20.89 GB with the model) against a 6 GB card, and 262k prefill measures ~35 h at 6 bits. Those are the
+numbers that decide whether 1M context is reachable here, and they are not addressed by any amount of expert offload.
