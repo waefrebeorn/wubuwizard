@@ -234,3 +234,32 @@ O(d) work, no large matrix to store or seed. A 4x4 block is equally fine but buy
 This also means the transform does not need to be stored at all - it can be regenerated from one 64-bit seed by the same
 splitmix64 sequence, which is what makes the quantiser genuinely data-oblivious: the entire "codebook" is a seed plus a
 table of 2^b numbers that depends only on (d, b).
+
+## Implementation: `src/wubu_tqvec.c`
+
+Written and verified. **Name collision to know about:** `src/wubu_turboquant.c` already existed and is a *KV-cache
+tile manager* — allocation, LRU eviction, frame planning — whose header comment mentions "TurboQuant+/RotorQuant" and
+Q2_0/Q4_0. It does not contain any of the algorithm from the paper. The quantiser therefore lives in `wubu_tqvec.c` /
+`wubu_tqvec.h`, and the two must not be merged; anyone searching for "turboquant" in this tree will land on the tile
+manager first and should be told so by the comment it now carries.
+
+The module is exactly the design the three verifications settled: seeded 8x8 block-diagonal rotation, Lloyd-Max
+codebook computed at init from the `(1-t^2)^((d-3)/2)` law, bit-packed codes, and a score that reads the code without
+expanding it back to d floats.
+
+Self-test against the probe's numbers, d=32, 2000 random unit vectors, seed 0xC0FFEE:
+
+    bits  D_mse      bound      verdict  bytes/code  IP rmse
+    1     0.3538     0.6802     PASS     4           0.10655
+    2     0.1120     0.1700     PASS     8           0.05871
+    3     0.0321     0.0425     PASS     12          0.03205
+    4     0.0090     0.0106     PASS     16          0.01691
+
+Byte counts are exactly `d*b/8`, so the storage claim is now a property of the code rather than of a table in a
+document: **d=32 at b=3 is 12 bytes per item**, and 1M items is **12 MB**.
+
+The API is five calls - init/free, code_bytes, encode, score, decode - with the index being a flat array of codes and
+no side structure. Query cost is one rotation of the query plus `d` multiply-adds and a 3-bit unpack per item.
+
+What a caller must not do, because it was measured: use `score` alone as the ranking. `tools/turboquant_recall.c`
+showed 0.23-0.62 recall@10 for that; the top-100 plus an exact re-rank is what reaches 0.94-1.00.
