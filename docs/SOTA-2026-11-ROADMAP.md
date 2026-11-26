@@ -333,6 +333,31 @@ builds; the card is compute capability 8.9 (Ada). So the device side is further 
 is missing is exactly the part the three engines above are built around: a **tandem scheduler** - a placement plan,
 the doorbell, and the CPU/GPU split - not more kernels.
 
+### Measured: the GPU library builds here, but the tier is not ready
+
+`wubu_cuda.dll` builds on this box (657 KB, sm_89, CUDA 13.5, MSVC 14.44 via `-ccbin`), and
+`tools/gpu_iq_wall.c` drives the host-callable entry `wubu_cuda_quant_matvec_host` to find out what it can do. Three
+results, the first of which matters most:
+
+- **IQ2_XXS (type 16) returns zeros while reporting success.** `rc=0`, `y[0]=0`, `y[n-1]=0`. That is the exact silent
+  no-op class this engine's own comments warn about ("a half-finished type returning 1 silently changed the logit from
+  29.67 to 22.52"). 25.5% of this model's weight bytes are IQ2_XXS, so the dominant format for the VRAM tier has **no
+  working device path yet** - only IQ2_S, Q2_0 and Q8_0 do.
+- **End-to-end host-call throughput is launch/copy-bound at these sizes.** 2304x2304 slab (1.31 MB):
+  IQ2_S 7.33, Q2_0 9.58, Q8_0 9.15 G weights/s, against 19.08 G weights/s for one CPU thread. The copy measures
+  2.4 GB/s against a PCIe 4.0 x8 expectation of ~10-13, so at 1.3 MB per call this is synchronisation and kernel
+  launch, not transfer - the measurement says nothing yet about a *resident* slab, which is the regime the design
+  actually needs.
+- **Environment trap, worth fixing in the tools:** `cuda-env.sh` adds `$CUDA_ROOT/bin` but the runtime lives in
+  `bin/x64`, so any nvcc-built DLL fails to load with a bare exit 127 that names no missing file. And a harness linked
+  without `-static` picks up `api-ms-win-crt-private-l1-1-0.dll`, which this Windows build does not provide - the same
+  silent-start failure. Both cost a build cycle each to find.
+
+So LP-21's first task is not the doorbell but a device-resident IQ2_XXS dot that agrees with the CPU kernel, because
+without it 45% of the per-token bytes (dense attention projections are partly IQ2_XXS/IQ2_XS) cannot live on the card
+at all. The ordering changes accordingly: **LP-21 becomes "a bit-exact IQ2_XXS device row kernel, verified against
+`tools/iq_kernel_wall.c`'s CPU reference"**, and the doorbell moves to LP-22.
+
 ### Pads
 
 - **LP-21 - the doorbell and the split loop.** Gate: one layer executes with the GPU doing the attention projections
