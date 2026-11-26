@@ -1604,3 +1604,34 @@ single optimisation: it converts a recurring human error into a compiler-style f
 
 From here the workflow for the per-position-logits refactor (or anything else) is: `bash tools/oracle_gate.sh` before, make
 the change, `bash tools/oracle_gate.sh --rebuild` after. Two commands, no ambiguity about what "still exact" means.
+
+## Speculative decoding: the cache-rewind question, answered from the code
+
+The draft/verify loop accepts fewer tokens than it verified whenever the model disagrees with the drafter, so the KV cache
+holds rows for positions that were never accepted. That is the classic reason speculative decoding needs a rollback, and
+`wubu_inkling2_kv.h` has no truncate/rewind/rollback call at all. I expected to find a blocker and instead found this:
+
+    src/wubu_inkling2_fwd.c:210   void in2_kv_begin(int pos0) { g_visit = 0; g_kv_pos = pos0; }
+
+The cache is **position-addressed with a cursor**, not an append-only log. Every forward begins by setting the write position
+to `pos0`, so a verification pass that writes rows at `n..n+K-1` and accepts only `n..n+j-1` is corrected by the next call
+beginning at `n+j`: the phantom rows are simply overwritten when the cursor reaches those positions again. Attention reads
+only positions < current, and the two conv streams (`g_kv2`) read backwards, so nothing reads a phantom row before it is
+rewritten.
+
+**One thing must be checked before the loop is written, and it is the only remaining unknown:** whether attention bounds its
+window with the true cursor (`g_kv_pos`) or with a high-water mark such as `in2_kv_t.n_stored` ("positions stored so far",
+kv.h:13). If it is the latter, a verification pass silently extends the visible sequence by the number of rejected drafts and
+the model would attend over garbage - and because the gate compares tokens, it WOULD be caught, at the cost of a confusing
+debugging session.
+
+So the ordered next steps are now:
+
+1. confirm attention's length source is the cursor, not `n_stored` (one grep, one read);
+2. then write the loop sketched earlier: prime one ordinary step, draft K by suffix match over `toks[]`, one
+   `in2_forward_at` over `feed[0..K]` with `in2_set_logits_all(la)` (now available, gate-clean), accept while
+   `argmax(la + q*vocab) == draft[q]`, emit accepted plus one correction, and let the cursor rollback happen by construction;
+3. gate on the 15-token oracle at K=1 first (where the loop degenerates to almost the plain path), then K=2, then K=4.
+
+Finding the cursor semantics was worth more than writing the loop blind: a rewind bug would have produced wrong tokens from
+correct-looking code, which is the single most expensive failure mode this project has.
