@@ -468,4 +468,29 @@ same conclusion `flop_count.py` reached from the other direction when it showed 
 Recorded as LP-25 = **do not build**, with the reopen condition stated: if a decode step falls below ~0.05 s
 (bandwidth-bound regime, e.g. once a working device tier carries the dense weights), re-run this arithmetic, because
 the conclusion inverts exactly there.
+### LP-26 - the attention projections still run on float32 materialised weights, and that is bigger than the token
+
+Hooking the resident tier into `in2_matvec_nt` engaged nothing, and the reason is worth more than the hook.
+`attn_q`, `attn_k` and `attn_v` never reach a quantised kernel at all: in `wubu_inkling2_fullseq.c` those three
+projections call `in2_matvec` on a **float32 matrix** (lines 139, 171, 172) with no `IN2_FULL_KERNEL` alternative,
+while `wrel`, `sink`, `wgate` and `wo` all have one. So q/k/v materialise their weights to floats, and the arithmetic
+is stark:
+
+    attn_q  2304 x 2304 float32 = 20.2 MB per layer
+    attn_k  2304 x 1024          =  9.0 MB
+    attn_v  2304 x 1024          =  9.0 MB
+    --------------------------------------------
+    per layer                      38.2 MB  x 48 layers = 1,836 MB
+
+    the same weights as Q8_0: attn_q 5.4 MB + k/v 4.8 MB = 10.2 MB/layer x 48 = 488 MB
+
+**1,836 MB against 488 MB.** That is larger than the entire measured 1,535 MB of quantised traffic per token, and it
+is invisible to the per-type instrumentation, because float materialisation never enters a typed kernel - the type
+table still reads 16/17/19/22/40/42 and says nothing about it. It also explains two things this register already
+records without connecting them: the 4.9 GB resident set on a model whose quantised weights are 12.4 GB but whose
+hot floats are gigabytes, and why the dequant cache had to be sized in the hundreds of MB.
+
+Whether it costs per token or once depends on whether `in2_tensor_to_f32` caches; that is the first thing to measure,
+and it decides whether LP-26 is a per-token win or a memory win. Either way it comes before LP-22: routing q/k/v
+through `in2_matvec_nt` removes the materialisation, and only a quantised q/k/v can be resident on the card.
 
