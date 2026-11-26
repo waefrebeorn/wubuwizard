@@ -831,6 +831,9 @@ WUBU_EXPORT int wubu_cuda_resident_matvec(int type, const void *h_w, size_t wbyt
             for (int i = 0; i < g_res_n; ++i)
                 if (g_res_d[i] && g_res_use[i] < oldest) { oldest = g_res_use[i]; victim = i; }
             if (victim < 0) break;
+            /* the engine issues the activation DMA async on stream 0 and never syncs, so freeing a slab that a
+             * pending copy or kernel still references is a use-after-free. Sync before evicting. */
+            cudaDeviceSynchronize();
             cudaFree(g_res_d[victim]);
             g_res_d[victim] = NULL;
             g_res_used -= g_res_bytes[victim];

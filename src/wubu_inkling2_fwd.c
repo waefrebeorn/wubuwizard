@@ -410,7 +410,7 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                      * the read that dominates a token. Experts are excluded by name: they are 48x128 distinct slabs,
                      * far more than the resident tier holds, and they are the thing the cache policy is for. */
                     if (getenv("IN2_GPU_DENSE") && t->info && t->info->name[0] &&
-                        strstr(t->info->name, "exps") == NULL) {
+                        (getenv("IN2_GPU_EXP") || strstr(t->info->name, "exps") == NULL)) {
                         in2_gpu_init();
                         if (in2_gpu_state == 1) {
                             const int act_bytes = q8_0_act
@@ -619,7 +619,7 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                      * Experts are excluded by name: 48x128 slabs is far more than the resident tier can hold. */
                     int gpu_took = 0;
                     if (nn == 1 && getenv("IN2_GPU_DENSE") && t && t->info && t->info->name[0] &&
-                        strstr(t->info->name, "exps") == NULL) {
+                        (getenv("IN2_GPU_EXP") || strstr(t->info->name, "exps") == NULL)) {
                         in2_gpu_init();
                         const int g_rc2 = (in2_gpu_state == 1)
                             ? in2_gpu_resident(ty, base, (size_t) rb * (size_t) n_out, ap[0],
@@ -639,6 +639,26 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                             if (ty >= 0 && ty < 256 && !ok2[ty]) {
                                 ok2[ty] = 1;
                                 fprintf(stderr, "NT-GPU ok ty=%d (%s)\n", ty, t->info->name);
+                            }
+                        }
+                        /* IN2_GPU_CHECK: when the device takes a matvec, compute the same row with the CPU kernel and
+                         * report the worst element. Written for the expert slices, which are the only tensors whose device
+                         * result has never been compared to anything - opening the expert gate changes the greedy ids at
+                         * token 5 and the per-type trace cannot say whether an expert matvec ran at all, let alone
+                         * whether it was right. Doubles the work on purpose; env-gated, never in a timed run. */
+                        if (g_rc2 == 0 && getenv("IN2_GPU_CHECK")) {
+                            float *ref = (float *)malloc((size_t)n_out * sizeof(float));
+                            if (ref) {
+                                { float *refp = ref; wubu_iq_rows(ty, base, (size_t)rb, n_in, ap[0], 1, &refp, 0, n_out); }
+                                double mx = 0.0, mag = 0.0; int at = -1;
+                                for (int i = 0; i < n_out; ++i) {
+                                    const double dd = fabs((double)op[0][i] - (double)ref[i]);
+                                    if (dd > mx) { mx = dd; at = i; }
+                                    if (fabs((double)ref[i]) > mag) mag = fabs((double)ref[i]);
+                                }
+                                fprintf(stderr, "GPUCHECK ty=%d n_in=%d n_out=%d (%s) max_abs=%.3e max|ref|=%.3e rel=%.3e at=%d%c",
+                                        ty, n_in, n_out, t->info->name, mx, mag, mag > 0 ? mx / mag : 0.0, at, 10);
+                                free(ref);
                             }
                         }
                         if (g_rc2 == 0) {
@@ -1647,7 +1667,7 @@ int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
                          * multi-token one. */
                         int gpu_took = 0;
                         if (nn == 1 && getenv("IN2_GPU_DENSE") && t && t->info && t->info->name[0] &&
-                            strstr(t->info->name, "exps") == NULL) {
+                            (getenv("IN2_GPU_EXP") || strstr(t->info->name, "exps") == NULL)) {
                             in2_gpu_init();
                             if (in2_gpu_state == 1) {
                                 const int ab = (int) (ablk * (size_t) nab);
