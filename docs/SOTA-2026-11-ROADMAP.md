@@ -668,3 +668,27 @@ but the resident GPU hook inside `in2_matvec_nt` **still does not fire for them*
 either that function's fast-path guard is not satisfied for types 14/8 at this call site, or the hook's own entry
 refuses and the refusal trace is not reached. Both are checkable in one instrumented run next; neither is assumed
 here.
+
+### Most of the device type table computes nothing, and the throughput numbers I quoted for it were measuring copies
+
+`tools/gpu_q8_check.c` asks the device for a Q8_0 matvec and compares against the exact dequantised reference in
+double. Result:
+
+    rc=0   non-zero rows 0 / 512
+    y[0]=0  ref[0]=7.62655     y[last]=0  ref[last]=-19.6473
+    max |ref-gpu| = 4.766e+01 on magnitude 47.6593 ; rows over 1e-3 rel = 512 / 512
+
+**Q8_0 returns success and writes nothing**, which is the third instance of this exact failure in this file (after
+IQ2_XXS and IQ4_XS), and it has a direct consequence for numbers already in this register: the host-entry figures of
+9.23 G weights/s for type 8, 4.21 for type 14 and 4.41 for type 23 were measing *the host->device copy and a kernel
+that did nothing*. They are not compute rates and must not be compared with anything. Only type 16 has a verified
+number (2.86e-06 against the exact reference) and only type 23 works at all, because it has a dedicated kernel plus
+the `c_iq4nl` upload.
+
+So `wubu_cuda_quant_matvec`, the generic dispatcher, is not a working fallback for our formats: it returns true
+without computing. Any resident dispatch added on top of it would silently produce zeros on the GPU path - the tokens
+would still be "produced", and the only sign would be wrong output.
+
+That makes the ordering clear and non-negotiable: **a device kernel exists for IQ2_XXS and IQ4_XS only.** Q8_0 (k, v,
+attn_output, attn_rel) and Q6_K (q, attn_gate) each need their own kernel and their own reference check before any of
+them is allowed near the resident tier, and the check must assert non-zero and a numeric error, not just a return code.
