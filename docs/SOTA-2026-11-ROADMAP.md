@@ -650,3 +650,21 @@ tensors that still have no quantised path on the fullseq side). The expert cache
 router-ahead prefetch, gated on the dirty-layer metric. And the CPU lane's 4-7x dequant headroom is a real target that
 the toolchain brief's null result does not apply to, because its roofline assumed 1 byte per weight.
 
+
+### q is Q6_K, not Q8_0 - and the resident hook still does not fire there
+
+Read from the GGUF rather than assumed: `blk.N.attn_q.weight` is **[2304, 3072] type 14 (Q6_K)**, `attn_k` and
+`attn_v` are [2304, 1024] type 8 (Q8_0), `attn_gate` is type 14, `attn_output` and `attn_rel` are type 8. So the
+"dense tier is mostly Q8_0" note earlier in this register is right for k/v/output/rel but **wrong for q and gate**,
+which are Q6_K at 6.56 bits. That changes the residency budget: q and attn_gate are the two fattest attention
+tensors (3072-wide) and they are at nearly triple the bit width of the rest.
+
+`IN2_TRACE_TY` only prints from `in2_matvec_quant`, so it never showed the q/k/v path at all - the trace in that run
+was the head being chunked into 8192-row slabs (`matvec ty=23 n_in=2304 n_out=8192`). Absence of a q/k/v line was
+therefore never evidence about q/k/v.
+
+What is established: the q/k/v quantised path is live (the float production fell 180 MB and the tokens are unchanged),
+but the resident GPU hook inside `in2_matvec_nt` **still does not fire for them** - only `output.weight` engages. So
+either that function's fast-path guard is not satisfied for types 14/8 at this call site, or the hook's own entry
+refuses and the refusal trace is not reached. Both are checkable in one instrumented run next; neither is assumed
+here.
