@@ -129,14 +129,20 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
 
     FP2(1); /* mix+gates */
     /* 2. q with scaled clip and tau (tau is 1.0 at positions below 8192, so it only bites on long context) */
-    const float *Wq = in2_tensor_borrow(ctx, &L->wq);   /* table-owned, never freed */
+    /* q/k/v are the only projections with no quantised path, so they read a borrowed float view: 38.2 MB per layer
+     * per position, 1,836 MB across 48 layers, against 488 MB for the same weights quantised. IN2_FULL_KERNEL routes
+     * them through in2_matvec_nt like wrel/sink/gate/wo, and the borrow is skipped entirely when it does - the point
+     * is to stop touching the float view, not merely to add a second way to read it. */
+    const int qkv_kernel = getenv("IN2_FULL_KERNEL") != NULL;
+    const float *Wq = qkv_kernel ? NULL : in2_tensor_borrow(ctx, &L->wq);   /* table-owned, never freed */
     float *qcl = in2_tensor_to_f32(ctx, &L->q_clip, NULL);
     float *q = (float *)calloc((size_t)n_tok * qdim, sizeof(float));
-    if (!Wq || !q) { free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
+    if ((!qkv_kernel && !Wq) || !q) { free(qn); free(kn); free(vn); free(state); free(xq); free(xk); free(xv);
                      free(qcl); free(q); return WUBU_INKLING2_ERR_IO; }
     for (int t = 0; t < n_tok; ++t) {
         float *qt = q + (size_t)t * qdim;
-        in2_matvec(Wq, xq + (size_t)t * d, d, qdim, qt);
+        if (qkv_kernel) in2_matvec_nt(ctx, &L->wq, xq + (size_t)t * d, 1, d, qdim, qt);
+        else            in2_matvec(Wq, xq + (size_t)t * d, d, qdim, qt);
         in2_l2_clip(qt, qcl, NH, HD, cfg->qk_clip);
         /* tau = 1 + alpha * log(max(1, (pos+1)/floor)); reads 1.0 for every position below the floor.
          * It scales the relative-bias query as well as q (llama.cpp inkling2.cpp:357-358), which the
@@ -152,8 +158,8 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
      * matrix memcpy per full-layer visit (wk/wv are 9.4 MB each) and the copies were used once and freed. The
      * borrowed pointer is the dequant cache's own buffer - identical floats, no copy - and must NOT be freed, which is
      * why the free list at the end of this function no longer mentions them. */
-    const float *Wk = in2_tensor_borrow(ctx, &L->wk);
-    const float *Wv = in2_tensor_borrow(ctx, &L->wv);
+    const float *Wk = qkv_kernel ? NULL : in2_tensor_borrow(ctx, &L->wk);
+    const float *Wv = qkv_kernel ? NULL : in2_tensor_borrow(ctx, &L->wv);
     const float *kc = in2_tensor_borrow(ctx, &L->k_conv);
     const float *vc = in2_tensor_borrow(ctx, &L->v_conv);
     const float *kp = in2_tensor_borrow(ctx, &L->k_conv_proj);
@@ -165,11 +171,16 @@ int  in2_layer_full_seq(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wub
     float *k = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     float *v = (float *)calloc((size_t)n_tok * kdim, sizeof(float));
     int rc = WUBU_INKLING2_OK;
-    if (!Wk || !Wv || !kc || !vc || !kp || !vp || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
+    if ((!qkv_kernel && (!Wk || !Wv)) || !kc || !vc || !kp || !vp || !kraw || !vraw || !kt || !vt || !k || !v) rc = WUBU_INKLING2_ERR_IO;
     if (rc == WUBU_INKLING2_OK) {
         for (int t = 0; t < n_tok; ++t) {
-            in2_matvec(Wk, xk + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
-            in2_matvec(Wv, xv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
+            if (qkv_kernel) {
+                in2_matvec_nt(ctx, &L->wk, xk + (size_t)t * d, 1, d, kdim, kraw + (size_t)t * kdim);
+                in2_matvec_nt(ctx, &L->wv, xv + (size_t)t * d, 1, d, kdim, vraw + (size_t)t * kdim);
+            } else {
+                in2_matvec(Wk, xk + (size_t)t * d, d, kdim, kraw + (size_t)t * kdim);
+                in2_matvec(Wv, xv + (size_t)t * d, d, kdim, vraw + (size_t)t * kdim);
+            }
         }
         if (kv) {
             /* Prepend the three cached raw rows as if they were part of this batch, run the tested conv over
