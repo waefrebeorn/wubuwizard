@@ -393,3 +393,46 @@ Caveat, stated because the radii here were assigned, not measured: the radius sp
 WuBu/GAAD encoder's radius distribution is the thing that decides how much of the boundary penalty you actually pay, and
 that is still the outstanding measurement. If real encoders put many items near radius 1, the 0.74 figure gets worse and
 the case for tangent-space scoring gets stronger, not weaker.
+
+## The WuBu encoder itself: two defects, one fixed, and the outstanding question answered as "not yet"
+
+The last open item was the real encoder's radius distribution. Running the shipped code
+(`WuBuMath/src/model/wubu_gaad_encoder.c`, the GAAD WuBu nested Poincare encoder) on 400 random 64x64 images:
+
+    ||latent|| : min 0.0022  mean 0.0022  max 0.0022      <- identical for every input everywhere
+    cos(lat0,lat1) = 1.00000000    cos(lat0,lat2) = 1.00000000    cos(lat1,lat2) = 1.00000000
+
+The encoder was returning a **constant vector**. The cause is not training and not precision, it is line 181:
+
+    float rgb[3]={0.5f,0.3f,0.7f};     /* and `image` is never read again in this function */
+
+`wubu_gaad_encode` ignored its own `image` argument and pushed a hardcoded colour through the network, so every input
+produced a bit-identical latent. `wubu_gaad_encode_full` does sample the image correctly (it indexes
+`image[(iy*IMG_DIM+ix)*3]` at each spiral point), so the single-latent path was simply missing the same step.
+
+Fixed in WuBuMath: `wubu_gaad_encode` now averages the same spiral-sampled pixels that `encode_full` reads, falling back
+to the whole image when `num_spiral == 0`. Verified after the change:
+
+    cos(lat0,lat1) = 0.624570   cos(lat0,lat2) = 0.720172   cos(lat1,lat3) = 0.715404
+    ||latent|| : 0.000334 / 0.000473 / 0.000583 / 0.000864  for inputs scaled 1x/2x/3x/4x
+
+so the output now responds to the input and scales with it.
+
+**But the radius question is still not answered, and now we know why it cannot be from this code as it stands.** After
+the fix the untrained encoder produces `||latent|| ~ 5e-4`, i.e. a Poincare radius of ~4e-4 - everything collapses to the
+origin, because `wubu_gaad_init` sets random weights and the header contains no weight-loading path at all. An untrained
+encoder has no geometry to preserve: at radius 4e-4 the hyperbolic metric is Euclidean to any precision that matters, so
+"does Poincare storage work" is untestable on it.
+
+This is the honest state of the last link:
+
+  - the quantiser is verified against its bound, on clustered synthetic data, and on real trained vectors (0.999 rerank
+    at 12 B/item);
+  - tangent-space scoring is verified to beat ball-space scoring, and hyperbolic-distance scoring is verified to be
+    unsafe on quantised data;
+  - the encoder that was supposed to supply the vectors returns a constant, which is now fixed, but it is untrained and
+    collapses to the origin, so its radius distribution remains unmeasured.
+
+Training it (`WuBuMath/examples/train_gaad.c` exists) is the prerequisite, and it is a larger job than any single step
+in this document. Until then the retrieval design is complete and verified but has no encoder that produces usable
+geometry - and no amount of quantiser work substitutes for that.
