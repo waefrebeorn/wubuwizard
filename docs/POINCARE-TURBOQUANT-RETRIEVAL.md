@@ -1538,3 +1538,27 @@ oracle, and honestly not worth the PCIe.
 
 Verified in this state: oracle 12/12 identical for CPU only, dense, and dense + experts; expert rows 242/242 exact at
 8 threads.
+
+## Knob sweep: the cache cannot be tuned into profitability, only built around
+
+    24-token decode                                  hit / miss      rate
+    dense, 3 GB                                      5261 / 110      98.0 %   5214 ms
+    dense + experts, 3.0 GB                          9018 / 769      92.1 %   5616 ms
+    dense + experts, 5.5 GB                          9018 / 769      92.1 %   5597 ms
+
+Raising the byte budget from 3 GB to 5.5 GB changes **nothing** - identical hits, identical misses - because the 1536-slot
+table fills at roughly 3 GB of slabs and caps everything after that. Nor can the table simply grow: the working set is
+6144 expert slabs at ~2.36 MB = **14.5 GB**, on a 6 GB card, so eviction is unavoidable at any setting. 92 % is near the
+ceiling this design can reach, and 92 % still loses to the CPU by 7 %.
+
+Two conclusions worth keeping, both measured rather than argued:
+
+  - **The 769 misses are not the problem.** At 1-2 MB each that is ~3-6 ms per token of PCIe against a ~15 ms deficit.
+    Even a perfect cache would not close it.
+  - **Launch count is the problem.** 24 layers x 8 experts = 192 serialised launches per token, each doing ~2.6 MMAC.
+    The CPU does that work in the same order of time without paying any launch at all.
+
+So the next change is not a knob. It is one batched launch per layer - gather the 8 active experts' slabs into one
+contiguous device span and run a single matvec with 8 x n_out rows. That is a new device entry (the gather is 8 memcpys
+of ~1.4 MB each, already resident at 92 % hit rate) plus one call-site restructure in `in2_moe`, and it is the only path
+left where MoE offload can beat the CPU on this hardware.
