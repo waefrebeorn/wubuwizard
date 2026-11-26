@@ -235,6 +235,33 @@ Sharpened LP-18: compress along the sequence dimension FIRST (m = 2/4/8, pooled,
 q4/fp4), then consider index reuse. Footprint and read bandwidth both scale with m, and m is the difference between
 a 4.3 tok/s ceiling and a usable one.
 
+### The box is on the Balanced power plan, which is a measurement hazard
+
+Every throughput number in this register was taken on the **Balanced** scheme (`381b4222`), which was the only scheme
+present on the machine until now. Two settings matter and both were read directly:
+
+    powercfg /query SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN
+        Current AC = 0x50 (80 %)      Current DC = 0x05 (5 %)
+
+So on battery the CPU is allowed to sit at 5 % minimum processor state, which would gut sustained inference, and on AC
+it is held no lower than 80 % but never asked to run at 100 %. `MaxClockSpeed` reports 4301 MHz and
+`\Processor Information(_Total)\% Processor Performance` read 94.5-99.6 % during load, i.e. the part was **not**
+boosting at all - it was sitting just under nominal.
+
+Created but not yet adopted: `High performance` (fda6462b-bd6b-479e-8540-6f39d95cf766) and `Ultimate Performance`
+(83161a31-a738-495a-aef5-79af342790c8), both via `powercfg -duplicatescheme`.
+
+**Pending A/B, and the reason it is pending matters:** three consecutive 320-token prefills measured 55.8 s, 79.6 s
+and 70.8 s against 37.4 s for the same work earlier. That looks like a 2x sustained-load fall-off and it is NOT one
+yet - five research subagents were running local tool calls at the same time, which is exactly how a `-march` A/B got
+polluted earlier in this project (base swung 2.65 -> 1.02 tok/s and the numbers were discarded). The clock counters
+said 94-99 % throughout, so it was not thermal throttling either.
+
+To run when the box is quiet: Balanced vs High performance vs Ultimate Performance, 320-token prefill, three
+interleaved reps each, recording prefill seconds and `% Processor Performance` per rep. Until that exists, treat all
+absolute GFLOPS figures as "Balanced scheme, idle box" and do not compare them against measurements taken while any
+of these research fan-outs is running.
+
 Evidence base, all local, each with its own verified citation ledger:
 `C:/Users/eman5/kv-1m-brief.md` (KV representation), `C:/Users/eman5/longcontext-kv-offload-brief.md` (engines),
 `C:/Users/eman5/kvbrief/KV-MEMORY-BRIEF.md` (Windows memory, measured on this box, with kvbench.c),
