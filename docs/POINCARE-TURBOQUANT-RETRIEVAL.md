@@ -212,3 +212,25 @@ did not improve monotonically with bit-width in the first two tables (0.235 at b
 above 0.253 on d=128). That is not a bug in the codebook - the probe showed MSE falling monotonically. It is the ranking
 metric saturating against near-ties: past a point, more bits do not change WHICH items are top-10 because the top-100 set
 is already correct. Bit-width buys the candidate set, and the candidate set is what the re-rank consumes.
+
+## Verification 3: the rotation can be block-diagonal, so applying it is O(d) not O(d^2)
+
+TurboQuant's construction needs only *some* fixed orthogonal transform that makes coordinates approximately i.i.d.
+Beta; the theory does not require it to mix every dimension with every other. That matters for implementation cost:
+a full d x d rotation is O(d^2) per vector and 8 KB of stored matrix at d=32, while a block-diagonal one is O(d) and
+64 doubles.
+
+Measured, d=32, 3000 trials, TQ_BLK selects the block size:
+
+    transform          D_mse(b=1)  D_mse(b=2)  D_mse(b=3)  D_mse(b=4)
+    full 32x32            0.3529      0.1111      0.0318      0.0087
+    block-diagonal 8x8    0.3533      0.1113      0.0323      0.0088
+    4x4                   0.3539      0.1104      0.0324      0.0087
+
+Identical within run-to-run noise at every bit-width, and all three pass the bound with the same margin. So the
+implementation should use **8x8 block-diagonal rotations**: 8 blocks of 64 doubles for d=32, applied as 8 small matvecs,
+O(d) work, no large matrix to store or seed. A 4x4 block is equally fine but buys nothing over 8x8 and mixes less.
+
+This also means the transform does not need to be stored at all - it can be regenerated from one 64-bit seed by the same
+splitmix64 sequence, which is what makes the quantiser genuinely data-oblivious: the entire "codebook" is a seed plus a
+table of 2^b numbers that depends only on (d, b).

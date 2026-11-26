@@ -105,19 +105,26 @@ int main(int argc, char **argv)
     const int d = argc > 1 ? atoi(argv[1]) : 32;
     const int trials = argc > 2 ? atoi(argv[2]) : 4000;
 
-    /* fixed random orthogonal matrix by Gram-Schmidt on a Gaussian matrix (data-oblivious) */
+    /* fixed random orthogonal matrix by Gram-Schmidt on a Gaussian matrix (data-oblivious).
+     * TQ_BLK=8 builds it block-diagonal in 8x8 blocks instead, which is O(d) per vector to apply rather than O(d^2) -
+     * the practical choice if the bound survives it. */
     double *R = malloc(sizeof(double) * d * d);
-    for (int i = 0; i < d * d; ++i) R[i] = nrand();
-    for (int i = 0; i < d; ++i) {
-        for (int k = 0; k < i; ++k) {
-            double dot = 0.0;
-            for (int j = 0; j < d; ++j) dot += R[i * d + j] * R[k * d + j];
-            for (int j = 0; j < d; ++j) R[i * d + j] -= dot * R[k * d + j];
+    memset(R, 0, sizeof(double) * d * d);
+    const char *blk = getenv("TQ_BLK");
+    const int B = blk ? atoi(blk) : d;
+    for (int b0 = 0; b0 + B <= d; b0 += B) {
+        for (int i = 0; i < B; ++i) for (int j = 0; j < B; ++j) R[(size_t)(b0 + i) * d + (b0 + j)] = nrand();
+        for (int i = 0; i < B; ++i) {
+            for (int k = 0; k < i; ++k) {
+                double dot = 0.0;
+                for (int j = 0; j < B; ++j) dot += R[(size_t)(b0 + i) * d + (b0 + j)] * R[(size_t)(b0 + k) * d + (b0 + j)];
+                for (int j = 0; j < B; ++j) R[(size_t)(b0 + i) * d + (b0 + j)] -= dot * R[(size_t)(b0 + k) * d + (b0 + j)];
+            }
+            double nrm = 0.0;
+            for (int j = 0; j < B; ++j) { const double v = R[(size_t)(b0 + i) * d + (b0 + j)]; nrm += v * v; }
+            nrm = sqrt(nrm);
+            for (int j = 0; j < B; ++j) R[(size_t)(b0 + i) * d + (b0 + j)] /= nrm;
         }
-        double nrm = 0.0;
-        for (int j = 0; j < d; ++j) nrm += R[i * d + j] * R[i * d + j];
-        nrm = sqrt(nrm);
-        for (int j = 0; j < d; ++j) R[i * d + j] /= nrm;
     }
 
     double *x = malloc(sizeof(double) * d), *y = malloc(sizeof(double) * d);
