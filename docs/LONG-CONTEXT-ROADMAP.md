@@ -559,3 +559,27 @@ each expert collects 8-32 rows and the measured 373-648 GMAC/s becomes reachable
 That is the real shape of the remaining work: a grouped-GEMM MoE kernel over the union of routed experts, driven by large
 prefill chunks. It is a bigger job than anything attempted in this session, and it is the first one whose expected payoff
 is measured rather than assumed - 14x on 85 % of the work, versus the 0.8 % the projection wiring was chasing.
+
+## The prerequisite the grouped-GEMM plan was missing: there is no token-blocked routing anywhere
+
+Checked the routing histogram (`g_moe_hist`, printed at fwd.c:1882) during a long-text prefill. Every line reads
+
+    MOEHIST <layer> <expert> 1
+
+one count per (layer, expert), for the experts of the layers that printed. Nothing aggregates across tokens. Read
+conservatively this says either the counter is printed and reset per token, or routing is only ever computed for a single
+token at a time - and both readings agree on the fact that matters: **no multi-token routing block exists in the engine.**
+
+That is the actual prerequisite for the 14x. A grouped MoE GEMM cannot be driven by a per-token loop, and the projection
+work proved that merely giving the GPU a batch at one call site changes nothing if the surrounding structure stays
+per-token. The work is therefore, in order:
+
+1. build a token-blocked MoE stage: for a chunk of N tokens, compute all N x 8 routings up front, invert them into
+   per-expert token lists (the union over the chunk), and only then dispatch;
+2. a grouped-GEMM kernel over that inverted index - M = tokens routed to expert e, which for N >= 128 gives the 8-32 rows
+   the 8-column tile needs;
+3. keep both on the device: the inverted index and the gathered activations, so the per-call round trips that cost this
+   session four separate failed wirings cannot come back.
+
+Step 1 is the one to size first: the histogram as written cannot answer "how many tokens per expert at N = 480", and that
+number decides whether the payoff is 14x or 2x. Instrumenting it properly is cheaper than any kernel and should come first.
