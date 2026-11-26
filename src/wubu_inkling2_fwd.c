@@ -931,9 +931,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     if (msgs) {
         float *g_k = getenv("IN2_DUMP_MSG2") ? (float *)calloc((size_t)n_tok * d, sizeof(float)) : NULL;
         for (int s = 0; s < 3; ++s) {   /* slot 3 (mlp) is gated later, on the MLP depth mix, not on mixh */
-            float *dw = in2_tensor_to_f32(ctx, &L->loop_down[s], NULL);
-            float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[s], NULL);
-            float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[s], NULL);
+            /* Borrowed: read-only message-gate weights, previously copied and freed per visit. */
+            const float *dw = in2_tensor_borrow(ctx, &L->loop_down[s]);
+            const float *fw = in2_tensor_borrow(ctx, &L->loop_forget[s]);
+            const float *gw = in2_tensor_borrow(ctx, &L->loop_gain[s]);
             float *dst = (s == 0) ? xn : (s == 1 ? xkk : xvv);
             for (int t = 0; t < n_tok; ++t) {
                 float *gated = (float *)calloc((size_t)d, sizeof(float));
@@ -944,7 +945,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
                 in2_rmsnorm(gated, an, d, eps, dst + (size_t)t * d);
                 free(gated);
             }
-            free(dw); free(fw); free(gw);
+            
         }
         if (g_k && il == cfg->loop_core_start) {
             static int _vg = 0;
@@ -1309,13 +1310,13 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
             /* the mlp slot's message gate acts on THIS mix (the reference's node_3652 = [mlp mix, msg]),
              * and its output is normalised with ffn_norm - not attn_norm. */
             if (msgs && g2) {
-                float *dw = in2_tensor_to_f32(ctx, &L->loop_down[3], NULL);
-                float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[3], NULL);
-                float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[3], NULL);
+                const float *dw = in2_tensor_borrow(ctx, &L->loop_down[3]);
+                const float *fw = in2_tensor_borrow(ctx, &L->loop_forget[3]);
+                const float *gw = in2_tensor_borrow(ctx, &L->loop_gain[3]);
                 if (dw && fw && gw) in2_message_gate(tmp, msgs + ((size_t)t * 4 + 3) * d, dw, fw, gw,
                                                      d, cfg->loop_gate_rank, eps, g2);
                 else                memcpy(g2, tmp, sizeof(float) * d);
-                free(dw); free(fw); free(gw);
+                
                 in2_rmsnorm(g2, fn, d, eps, moein + (size_t)t * d);
             } else {
                 in2_rmsnorm(tmp, fn, d, eps, moein + (size_t)t * d);
@@ -1587,7 +1588,7 @@ void in2_shortconv_dynamic(const float *x, int n_tok, int channels, const float 
             }
         }
     }
-    free(dw);
+    
 }
 
 /* Messages (reference: node_3491/node_3495). Per TOKEN, four role queries attend over the block-end residuals of
@@ -1715,9 +1716,9 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
      * the three input norms, so the messages must gate the three mixed states here too - otherwise those
      * 24 tensors are dead weight, which no converter emits. blk.23 has no gates and passes msgs == NULL. */
     for (int sl = 0; sl < 4 && msgs; ++sl) {
-        float *dw = in2_tensor_to_f32(ctx, &L->loop_down[sl], NULL);
-        float *fw = in2_tensor_to_f32(ctx, &L->loop_forget[sl], NULL);
-        float *gw = in2_tensor_to_f32(ctx, &L->loop_gain[sl], NULL);
+        const float *dw = in2_tensor_borrow(ctx, &L->loop_down[sl]);
+        const float *fw = in2_tensor_borrow(ctx, &L->loop_forget[sl]);
+        const float *gw = in2_tensor_borrow(ctx, &L->loop_gain[sl]);
         if (dw && fw && gw) {
             float *gated = (float *)calloc((size_t)d, sizeof(float));
             float *dst = (sl == 0) ? state : (sl == 1 ? state + d : (sl == 2 ? state + 2 * d : NULL));
@@ -1731,7 +1732,7 @@ int in2_layer_full(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             }
             free(gated);
         }
-        free(dw); free(fw); free(gw);
+        
     }
     in2_rmsnorm(state,           qn, d, eps, xq);
     in2_rmsnorm(state + d,       kn, d, eps, xk);
@@ -1932,7 +1933,11 @@ float *in2_tensor_to_f32(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t *n_o
      * speed cache, so capping it changes no arithmetic. IN2_DQ_MB overrides. */
     if (dq_budget == 0) {
         const char *_dqmb = getenv("IN2_DQ_MB");
-        dq_budget = (size_t)(_dqmb ? atoi(_dqmb) : 512) * 1024u * 1024u;
+        /* 1024 MB, not 512: once the router and the loop message gates borrow (4c7e6f5) the borrowed working set is
+         * ~558 MB, so a 512 MB budget sits just under it and thrashes - measured 2.41 tok/s with 1880 misses and
+         * 4460 MB re-dequantised per 8 tokens, against 3.63 tok/s, 235 misses and 557 MB at 1024. Going higher buys
+         * nothing (2048 and 3000 measure the same), which is what a working-set-sized cache looks like. */
+        dq_budget = (size_t)(_dqmb ? atoi(_dqmb) : 1024) * 1024u * 1024u;
     }
     if (cache_on && in2_dq_n < IN2_DQ_MAX && in2_dq_bytes + (size_t)ne * sizeof(float) <= dq_budget) {
         float *keep = (float *)malloc((size_t)ne * sizeof(float));
