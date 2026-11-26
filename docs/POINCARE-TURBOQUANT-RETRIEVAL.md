@@ -130,3 +130,36 @@ TurboQuant's bound is exactly the right bound.
 Not yet verified anywhere in this repo: the encoder's output-norm distribution, and whether 32 dimensions is enough for
 the target catalogue. Both are one dump of 10k vectors away, and both should be measured before any of the above is
 written.
+
+## Verification: the bound is real, measured independently
+
+`tools/turboquant_probe.c` builds the actual pipeline — fixed random orthogonal rotation (Gram-Schmidt on a Gaussian
+matrix, seeded), the coordinate density `(1-t^2)^((d-3)/2)` integrated numerically, a Lloyd-Max codebook derived from
+that density by 1-D k-means, quantise/dequantise, and measures `E||x - x_hat||^2` and the inner-product error over
+4,000 random unit vectors. No codebook training, no data fitting — every table is a constant of `(d, b)`.
+
+    d=32, 4000 trials
+    bits  meas D_mse   bound D_mse   verdict   meas IP err   bound IP
+    1     0.3525       0.6802        PASS      0.10476       0.36545
+    2     0.1111       0.1700        PASS      0.05941       0.18272
+    3     0.0322       0.0425        PASS      0.03142       0.09136
+    4     0.0086       0.0106        PASS      0.01644       0.04568
+
+and the same at d = 16, 64, 128 (MSE at b=2: 0.1064 / 0.1147 / 0.1164), i.e. **dimension-free MSE**, which is the
+paper's central claim and is now reproduced here.
+
+Against the information-theoretic lower bound `4^-b`, the measured error is
+
+    b=1  1.41x    b=2  1.78x    b=3  2.06x    b=4  2.20x
+
+so this implementation sits **inside** the paper's guaranteed 2.7x factor, and close to the floor at low bit-widths.
+Inner-product error falls as `1/sqrt(d)` as predicted: at b=2 it is 0.081 / 0.059 / 0.043 / 0.030 for d = 16 / 32 / 64
+/ 128, in every case well under the bound.
+
+What this buys, stated as numbers rather than adjectives: at **d=32, b=3** the per-item cost is 14 B with 0.032 MSE, so
+1M items occupy **14 MB** against 3.07 GB for 768-dim f32 — 219x — and the error is a *proven* quantity, not an
+empirical hope. At b=4 it is 18 MB and 0.009 MSE, 170x smaller.
+
+What it does not buy: nothing here says anything about retrieval *quality* on real embeddings. The error is on random
+unit vectors. Whether 3.2% squared coordinate error preserves the neighbour ordering of real encoder outputs is a
+separate measurement that needs actual embeddings, and the caveat section above is still the architectural decision.
