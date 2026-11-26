@@ -1808,3 +1808,35 @@ per chunk into an f32 mirror, run every query in the chunk against that mirror, 
 `n_visit x N x (N/chunk)` instead of `n_visit x N^2/2` - at a chunk of 512 that is ~256x fewer, and the f32 mirror is
 512 x 1024 x 4 B x 2 x 72 = 300 MB, which fits. Until that exists, `IN2_KV_TQ` should be understood as a decode-only
 tier, and no long-context prefill number should be quoted from it at all.
+
+## The binding constraint is prefill throughput, not KV memory - and it rules out 1M on this box
+
+Two points from the working harness, TQ-6 versus f32 at the same prefix:
+
+    N= 60   f32 0.117 s/tok   TQ 0.479 s/tok   excess 0.362   excess/N 0.00603
+    N=120   f32 0.110 s/tok   TQ 0.827 s/tok   excess 0.717   excess/N 0.00597
+
+`excess/N` is constant to within 1 %, so the decode cost is exactly linear in the prefix and the total is quadratic:
+**excess = 0.00597 x N s/token**, with no free parameters. Projecting that fit:
+
+    ctx        TQ as-is      TQ chunked-512     f32 prefill (measured 0.11 s/tok)
+    1 024        0.9 h            0.4 h                0.03 h
+    8 192       55.7 h            3.5 h                0.3 h
+    65 536    3563   h           27.8 h                2.0 h
+    262 144  57016   h          111.4 h                8.0 h
+
+The important column is the last one. **Even with no compression at all, 262k prefill costs 8 hours** at this engine's
+measured prefill rate. The TQ tier multiplies that by 500-7000x depending on whether chunking lands, but fixing TQ would
+still leave a 111-hour prefill. So the KV tier was never the thing standing between this box and long context: prefill
+runs at ~1.66 GMAC/s here (tools/batchprice.c) and a 262k prompt needs ~500x more throughput than it has before any KV
+decision matters.
+
+Both walls, now measured rather than assumed:
+
+  - **memory**: 512k fits (14.03 GB of 16), 1M does not (20.06 GB at 6 bits, 16.01 GB at 4 bits where fidelity fails)
+  - **time**: 262k prefill is 8 h uncompressed and 111 h with a chunked TQ mirror; 1M scales as N^2 again from there
+
+That is the honest state of "1M context on a tandem GPU" for this model on this hardware: the memory half is solvable at
+512k and already solved to 6-bit fidelity, and the time half is not solvable by any KV or cache change - it needs roughly
+two orders of magnitude of prefill FLOPs that a 6 GB laptop GPU over PCIe does not have, and the dense GPU tier measured
+only -5.5 % on decode, so the device is not that lever either.
