@@ -955,3 +955,35 @@ target being Q2_0 from 16.7 to somewhere near 90 GOPS, which would remove roughl
 
 Recording the null result matters as much as the positive ones: it is the fourth cheap hypothesis this document has
 tested and closed, and each one cost minutes where the alternative was hours of a refactor built on a guess.
+
+## The int8/maddubs probe: hoisting the activation quantisation is the whole difference
+
+`tools/q2_dot_lab.c` runs the reference float-activation Q2_0 dot against an int8-activation + `maddubs` version on
+identical synthetic blocks (18-byte layout, 64 fields per block, 512 rows of 2304 in-features):
+
+    float-activation   12.43 GMAC/s
+    int8 + maddubs      4.69 GMAC/s     0.38x
+
+The int8 version came out **2.6x slower**, and the reason is structural rather than a dead end: that probe quantises the
+activations **inside the row loop**, so the same 2304 values are re-quantised 512 times. Doing that per row costs more
+than the dot it feeds. This is exactly why the engine's Q8_0 path reaches 94.54 GOPS while Q2_0 sits at 16.71 - the
+q8_0 path quantises the activation vector **once per matvec** into `in2_q8_0_blk` and then sweeps many rows against
+that buffer, whereas type 40/42 never reach that machinery at all.
+
+The measured ordering is therefore:
+
+    94.54 GOPS   type 8   q8_0 activations, quantised once per matvec, integer maddubs
+    12-23 GOPS   types 16/17/19/22/40/42   float activations, per-row expansion, no shared quantisation
+     4.69 GMAC/s int8 without hoisting   - worse than either
+
+So the fix is not "write an int8 kernel". It is **make types 40 and 42 live in the same place type 8 lives**: implement
+them as rows kernels in `wubu_iq_c11.c` taking the already-quantised `in2_q8_0_blk` activation buffer, so they inherit
+the once-per-matvec quantisation and the maddubs sweep that Q8_0 already proves runs at ~95 GOPS. Today
+`wubu_iq_supported(42)` is false, which is why the `q8_0_act` branch in `wubu_inkling2_fwd.c:386` - which already
+handles `ty == 40 || ty == 42` - is never taken for them, and a second, float-activation implementation in
+`wubu_dequant_fp4.c` does the work instead at a quarter of the rate.
+
+That is a well-scoped change with a reference implementation sitting next to it in the same file, and it is the next
+piece of work. The probe also stands as a warning about the measurement itself: had I only measured the int8 variant
+against nothing, I would have concluded that int8 activations were slower than floats, which is the opposite of what the
+Q8_0 number in the same engine shows.
