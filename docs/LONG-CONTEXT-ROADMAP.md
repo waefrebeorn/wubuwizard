@@ -2036,3 +2036,29 @@ pack-specific and would need to be recomputed for our weights and our prompts.
 
 Incidental but useful: the histogram shows routing spread over all 24 MoE layers with 1265 of 3072 slots touched in 40 tokens,
 which is the expected shape for top-8 routing and further confirms the loop accounting (24 MoE layers, 48 visits).
+
+## The 180 ms per-forward constant, decomposed at n_tok = 1
+
+`FWD wall: embed+layers=0.161 s head=0.016 s (ntok=1)` - so a one-token forward is ~180 ms, and the diagnostics that people
+usually blame are empty: `arq load 0.000 s (40 calls)`, `in2_mix 0.001 s`, `tailconv 0.000 s`. It is all inside the layer loop:
+
+    moe       0.069 s  41.8 %      <- 48 MoE visits, M = 1 per expert
+    q         0.022 s  13.4 %
+    attn      0.006 s   3.5 %
+    resconv   0.001 s   0.5 %
+    mix       0.001 s   0.6 %
+    (remainder: k+v+conv, rel+sink, gate+wo)
+
+MoE at **M = 1** is the single largest item in decode as well as prefill: 0.069 s / 48 visits = **1.4 ms per visit**, against
+~8 MMAC of gate_up+down per expert, i.e. about **11 GMAC/s** - the single-thread rate again. With eight experts each holding one
+token there is almost nothing to parallelise: the work per expert is a handful of 2304-wide dots.
+
+That is precisely why speculative decoding is the right lever here and why its ceiling is acceptance: drafts turn M = 1 into
+M = K, which is the only thing that makes the MoE visits efficient. It is also why the measured 1.22x is modest - with 100 %
+acceptance the forward count fell 2.8x but each forward grew to ~5 tokens, and the phases that scale linearly with tokens ate
+the difference.
+
+So the honest ranking of remaining work, all measured:
+1. acceptance rate on real text - the multiplier on everything above;
+2. MoE efficiency at small M (1.4 ms per visit at M = 1);
+3. `q` at 13 % (already at the engine's best rate, so this is only addressable by fewer forwards).
