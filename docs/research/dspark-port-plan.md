@@ -867,3 +867,45 @@ was deleted rather than left to rot on disk.
 layers" is consuming *visits*, and every intermediate I have computed this session used engine dumps taken at visit indices - which
 is consistent with the design rather than a mistake. What has never been checked is whether the drafter's `ctx_mix` expects the four
 taps in visit order or in physical-layer order, and that question is now answerable from the model file rather than by guessing.
+
+## The reference is RUNNING and it accepts tokens: acceptance 0.149, mean length 2.00
+
+Two things were wrong with my attempts to run upstream, and neither was the binary.
+
+**The trunk was the obstacle, and a correct one was already on disk.** `models/inkling-2-mini/mainline/Inkling-2-Mini-UD-IQ2_XXS.gguf`
+is architecture **`inkling2_loop`**, `block_count = 24`, 744 tensors, 1,280 bytes larger than the copy I had been fighting. The file
+I kept trying to load declares `inkling2.block_count = 48` with 48-entry per-layer arrays and 24 physical layer tensors - internally
+inconsistent for any loader that reads block_count as a layer count, which is exactly why it failed twice. The mainline export exists
+and needed no rewriting at all. (`tools/gguf_reindex_layers.py` was written for that case and correctly refused to proceed on any
+array that was not provably periodic; it is kept because it is the tool for converting the visit-indexed export, not because the
+mainline one needed it. `--override-kv` in upstream would also have covered the scalar case.)
+
+**`completion` cannot drive a draft model.** Only `cli` and `serve` accept `--spec-draft-model`; `completion` offers the draft cache
+types but no draft model, and `cli` insists on conversation mode in this build (`-no-cnv` is defined in arg.cpp yet rejected by the
+subcommand). The server is the way in, because `/completion` takes a raw prompt with no chat template.
+
+    llama.exe serve -m mainline/Inkling-2-Mini-UD-IQ2_XXS.gguf \
+                    -md dspark-Inkling-2-Mini-Q8_0.gguf \
+                    --spec-type draft-dspark --spec-draft-n-max 7 -c 2048 --port 8099
+
+and it comes up with the implementation genuinely active:
+
+    common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dspark'
+    common_speculative_impl_draft_dflash: - n_max=7, n_min=0, p_min=0.00
+    common_speculative_impl_draft_dflash: - block_size=8, mask_token_id=0, n_extract=4
+    common_speculative_impl_draft_dspark: - sample_from_anchor=false, has_markov_context=true
+
+**`n_extract=4`** is the name upstream gives the tap count, and `block_size=8, mask_token_id=0, sample_from_anchor=false,
+has_markov_context=true` match the drafter's metadata read earlier - independent confirmation that the parameter set I implemented
+against is the one being used.
+
+**And the acceptance, measured on the same 263-token prompt used for the out-of-sample test:**
+
+    draft acceptance = 0.14894 ( 7 accepted / 47 generated ), mean len = 2.00
+
+So dspark on this trunk accepts 14.9% of drafted tokens, at a mean accepted length of 2.00 per step. That is the number this port
+has to reach. It also settles something important: the drafter is *not* expected to be near-perfect on this model, and my 0/7 is a
+real gap rather than the ceiling - upstream gets seven accepted tokens where mine gets none.
+
+A live reference implementation, on this machine, for this model, with a measured acceptance figure to match, is exactly what every
+failed hypothesis this session was missing. The next step is to run the same prompt through both and compare intermediates.
