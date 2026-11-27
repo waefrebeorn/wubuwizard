@@ -2440,3 +2440,13 @@ same, but the drafter arch (dense, 18 layers, per-layer attn_k_ctx + ctx_mix/ctx
 different, so reusing the trunk forward is not a drop-in. The remaining build is a small dedicated drafter-arch forward (~18 dense
 H3-style KV layers with mask-slot input), fed by the already-verified gguf_reader, producing hidden/base for the markov head. This
 is deliberate, verifiable engineering - added IN2_MODEL override to gen_fast so the drafter GGUF can be exercised directly.
+
+## Block forward (C) in progress: x0 bit-exact, Kctx bug fixed, slot0 h corr 0.992
+
+tools/test_draft_block.c (in-engine gguf_reader + 3-layer dense H3-KV forward, T=1 taps) is sound and compiling. Verified this
+turn: (1) x0 = [anchor_emb; 7 mask rows] is BIT-IDENTICAL to the numpy reference (corr 1.0, max|d| 0) - mask load and layout are
+correct. (2) Found+fixed a real C bug: Kctx per-head norm wrote f32 rms output into a double[HD] buffer via a (float*) cast, corrupting the ctx key (rms 114979 -> sane). (3) With that fixed, final slot0 h corr = 0.9922, per-slot rms magnitudes now match the
+reference; mask slots (1..7) still diverge (corr ~0.2..0.8) and are under active debugging. The remaining divergence is isolated to
+mask-slot content in the layer forward (attention ctx/rope or per-head path), NOT the input or the reader. Once mask slots reach
+~0.99 the 3-layer block reproduces h, completing the in-engine drafter block; then bind h/base + f_rnn to the verified markov head
+in IN2_LOOKUP and measure. Test file is NOT committed as a passing gate - it is a working debugging harness at this state.
