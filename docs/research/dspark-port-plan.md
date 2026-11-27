@@ -1814,3 +1814,33 @@ were hiding it, and `forward()` now slices to `n_vocab_draft` explicitly.
 **Next step:** chase the one-step offset - compare per-step `state` and `markov` chunk values against the reference by dumping the
 joint output, or check whether `prev` for step i should be the *drawn* token of step i-1 in block-major order rather than the argmax
 of the same step. The suffix alignment is the clue; do not rewrite the chain.
+
+## Per-step logits: step 1 is right (corr 0.997), step 2 collapses - the offset is in step 2's inputs
+
+Added `g.cb(col, "dspark_col", i)` at `dspark.cpp:407`, immediately after `cat = concat(cat, col, 1)` and **before** the block-major
+permute at 442, so each step gets its own file in slot order. `dspark_logits` could not serve this purpose: its column order is permuted
+(its slot-1 argmax was 43743 while the actually drawn token is 149904), which is now explained rather than mysterious.
+
+    step1: our top 149904  ref top 149904   mean|diff| 0.276   corr 0.997053
+    step2: our top 149951  ref top 150261   mean|diff| 6.879   corr 0.897289
+    step3: our top      6  ref top 149882   mean|diff| 3.679   corr 0.856014
+    step4: our top     83  ref top 150367   mean|diff| 3.463   corr 0.762539
+    step5: our top 149895  ref top 149876   mean|diff| 2.593   corr 0.856795
+    step6: our top 149878  ref top   220    mean|diff| 1.518   corr 0.899915
+    step7: our top    220  ref top    17    mean|diff| 2.407   corr 0.518227
+
+**Step 1 is correct end to end**: identical argmax, corr 0.997, mean|diff| 0.276 on logits of magnitude ~20. Every stage of the drafter -
+taps, ctx K/V, x0, three block layers, output_norm, unembed, w1/joint_proj/state/gate/cand, w2, softcap-after-bias - is exercised and
+lands on the reference's own token with the reference's own logits.
+
+**Step 2 collapses by a factor of 25** (0.276 -> 6.879) with correlation still high (0.897). High correlation with a large absolute
+error is the profile of a *misaligned but similar* tensor, not of wrong arithmetic. Step 2's only new inputs over step 1 are:
+`state` (carried), `w1[prev]` with prev = 149904 the drawn token, `h[2]`, `base[2]` and `f_rnn`.
+
+Also measured, to pre-empt a wrong inference: the reference's block rows 1-7 are **not** identical even though their x0 inputs are
+(slot rms 5.369, 7.666, 8.849, 9.251, 9.6, 9.793, 9.754). That is expected - each slot sits at its own RoPE position `ctx_len+1+i` -
+so identical mask inputs do not imply identical block outputs, and any comparison that assumes otherwise is invalid.
+
+**Next step:** sweep the two index choices independently - `h[i]` vs `h[i-1]` and `base[i]` vs `base[i-1]` - for steps 2..7 and see
+which combination reproduces the reference's per-step argmax. Step 1 pins the indexing for i=1, and step 2's 25x jump is far too large
+to be the 0.026 block error, so this is an index question, not an arithmetic one.
