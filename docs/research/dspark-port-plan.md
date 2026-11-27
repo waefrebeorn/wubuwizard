@@ -2114,3 +2114,29 @@ FMA GEMM micro-kernel (broadcast-A / contiguous-B, `_mm256_fmadd_ps`), NEON 4x4,
 (`jax_act_batch`); no external deps, selected by `__AVX2__`/`__ARM_NEON__`. This is the direction the user is researching for the math
 optimization route and is directly relevant to the wubuwizard GEMM/RMSNorm path. Only two test compute shaders (mobius_add, poincare_dist)
 in `shaders/`; no embedded CUDA/Vulkan infer kernels yet.
+
+## Token-graph paired compare: block is exact; the markov head's hidden rows 2-7 are not the block output
+
+Captured `l_out` + `dspark_hidden_i` + `inp_pos` in one serve (dump_tok), identified the token-batch draft graph's l_out as
+`l_out-2-1` (its normed row 1 == hidden_i step 1 at 0.0000, rms 3.1716 both).
+
+1. Our 8-slot block output vs `l_out-2-1` (the TOKEN-batch graph, same serve): per-slot mean|d| **0.049-0.063** on rms 5.4-24.8, all
+   eight slots. So our block, positions (arange(8)+1) and inputs are confirmed correct against the token-graph too, not just the
+   embed-graph.
+2. Reference `hidden_i` vs `norm(l_out-2 slot i)`:
+      step1  ref 3.1716  = norm(slot1) 3.1716  d 0.0000   (matches)
+      step2  ref 1.6270  vs norm(slot2) 2.3766  d 1.0948
+      step3  ref 1.6243  vs norm(slot3) 2.1869  d 0.8360
+      step4  ref 1.5653  vs norm(slot4) 1.9104  d 0.7882
+      step5  ref 1.6670  vs norm(slot5) 1.9172  d 0.7246
+      step6  ref 1.6091  vs norm(slot6) 1.7422  d 0.6626
+      step7  ref 1.5738  vs norm(slot7) 1.7097  d 0.6168
+
+**Row 1 IS the block output exactly; rows 2-7 are a different tensor** - nearly constant rms 1.57-1.67, while the block's own normed
+rows vary 1.71-2.38. Since our x matched ref l_out-2-1 at 0.05 AND ref's hidden != ref's own norm(l_out-2) at rows 2-7, the markov
+head's `hidden` is not `cur`/result_norm for draft steps i>=2. This is strong, paired support for the draw-row hypothesis: rows 2-7
+carry the per-step draw state (`[uniform | 1/temp | 0...]` from `rnn_state`), which is exactly the flat-rms ~1.6 signature we see.
+
+**Next step:** dump `rnn_state` and `f_rnn` per step and confirm hidden rows 2-7 equal the corresponding draw rows - or read the
+token-batch dsv4 path (dspark.cpp 558+) to see what `cur`/res->t_embd actually is at the markov call and whether rnn_state rows are
+installed into `hidden` for i>=2.
