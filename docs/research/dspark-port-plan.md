@@ -1844,3 +1844,34 @@ so identical mask inputs do not imply identical block outputs, and any compariso
 **Next step:** sweep the two index choices independently - `h[i]` vs `h[i-1]` and `base[i]` vs `base[i-1]` - for steps 2..7 and see
 which combination reproduces the reference's per-step argmax. Step 1 pins the indexing for i=1, and step 2's 25x jump is far too large
 to be the 0.026 block error, so this is an index question, not an arithmetic one.
+
+## 6 of 7 drafts exact - the chain is right, and only step 2 is wrong
+
+Fed the reference's own `prev` chain into the sweep so that one bad step could not contaminate the rest. Indexing is now settled by
+measurement:
+
+    h[i], base[i]      tops [149904, 149951, 149882, 149895, 149878, 220, 68111]   6/7
+    h[i], base[i-1]    tops [196997, 150261, 149882, 149895, 149878, 220, 68111]   6/7
+    h[i-1], base[i]    tops [  220, 149951, 149882, 149895, 149878, 220, 68111]   5/7
+    h[i-1], base[i-1]  tops [196997, 149951, 149882, 149895, 149878, 220, 68111]   5/7
+
+`h[i]`/`base[i]` wins and step 1 pins it, so the shift hypothesis in the previous entry is refuted: there is no off-by-one. Against the
+reference's drafts `[149904, 150261, 149882, 149895, 149878, 220, 68111]` we reproduce **six of seven exactly** - steps 1, 3, 4, 5, 6,
+7 - and only step 2 differs (149951 vs 150261).
+
+**The recurrence is not the cause.** Mean|diff| on step 2's column under four state variants:
+
+    state = cand + gate*(state-cand)   [current]   6.88   6/7 overall
+    state = 0 (no carry)                           6.98   5/7   (fixes step2, breaks 4 and 7)
+    state = cand                                   7.13   6/7
+    state = gate*(state-cand)                      6.66   3/7
+
+Step 2 sits at 6.7-7.1 in all four. A quantity that does not move with the recurrence is not produced by the recurrence, so step 2's
+error enters through its own inputs - `h[2]`, `base[2]`, `w1[149904]` or `f_rnn` - and is then amplified by the joint projection.
+
+Note the practical asymmetry: with our own `prev` chain the score is 1/7, because step 2's wrong token becomes step 3's `w1[prev]`
+input and the chain diverges. That is why the earlier 1/7 was not an independent signal of six broken steps - it was one broken step
+propagating.
+
+**Next step:** isolate step 2's inputs directly - dump the reference's `joint` output (`joint = joint_proj @ [state|w1|hidden_i|f_rnn]`)
+per step and compare against ours at step 2 only, which separates `h[2]` from `w1[prev]` without touching the recurrence again.
