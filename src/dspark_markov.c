@@ -16,6 +16,62 @@
 #include <math.h>
 #include <string.h>
 
+/* col = base_i + b2 + W2 . markov, then softcap tanh(col/c)*c when c>0.
+ * W2 is (V,R) row-major, markov is (R). base_i/b2 are (V). */
+void dspark_col_output(const float *base_i, const float *markov,
+                       const float *W2, const float *b2,
+                       size_t V, size_t R, float softcap, float *col) {
+    for (size_t v = 0; v < V; ++v) {
+        const float *w = W2 + (size_t)v*R;
+        float acc = base_i[v] + (b2 ? b2[v] : 0.0f);
+        for (size_t r = 0; r < R; ++r) acc += w[r]*markov[r];
+        if (softcap > 0.f) acc = tanhf(acc/softcap)*softcap;
+        col[v] = acc;
+    }
+}
+
+/* cumsum draw, mirroring dspark.cpp draw(): top n_cand by logit, sort desc,
+ * probs = softmax(vals*inv_temp), cumsum, pick first candidate whose cumsum
+ * >= uniform; $greedy keeps the argmax of col. Returns the drawn token and
+ * writes ids[0..n_cand) and probs[0..n_cand). */
+int dspark_draw(const float *col, size_t V, size_t n_cand,
+                float inv_temp, float uniform, int greedy,
+                int *ids, float *probs) {
+    /* naive top-k: collect the n_cand largest col indices by insertion sort */
+    size_t k = n_cand < V ? n_cand : V;
+    int *idx = ids;
+    float *val = probs;                 /* reused as scratch, then overwritten */
+    for (size_t i = 0; i < k; ++i) { idx[i] = (int)i; val[i] = col[i]; }
+    /* insertion keep-top-k */
+    for (size_t i = k; i < V; ++i) {
+        /* find min in kept */
+        size_t m = 0; for (size_t j = 1; j < k; ++j) if (val[j] < val[m]) m = j;
+        if (col[i] > val[m]) { val[m] = col[i]; idx[m] = (int)i; }
+    }
+    /* sort kept desc by value (selection) */
+    for (size_t i = 0; i < k; ++i) {
+        size_t b = i; for (size_t j = i+1; j < k; ++j) if (val[j] > val[b]) b = j;
+        if (b != i) { int ti=idx[i]; idx[i]=idx[b]; idx[b]=ti;
+                      float tv=val[i]; val[i]=val[b]; val[b]=tv; }
+    }
+    float maxs = val[0];
+    float sum = 0;
+    for (size_t i = 0; i < k; ++i) {
+        float p = (float)expf((val[i]*inv_temp) - (maxs*inv_temp));
+        probs[i] = p; sum += p;
+    }
+    for (size_t i = 0; i < k; ++i) probs[i] /= sum;
+    float cs = 0;
+    int drawn = idx[k-1];
+    for (size_t i = 0; i < k; ++i) {
+        cs += probs[i];
+        if (cs >= uniform) { drawn = idx[i]; break; }
+    }
+    if (greedy) drawn = idx[0];
+    return drawn;
+}
+
+
 void in2_static_assert_markov_dim(size_t R, size_t E) {
     /* nothing at runtime; the caller is expected to size against the model */
     (void)R; (void)E;
