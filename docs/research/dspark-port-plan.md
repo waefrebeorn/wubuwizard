@@ -2140,3 +2140,27 @@ carry the per-step draw state (`[uniform | 1/temp | 0...]` from `rnn_state`), wh
 **Next step:** dump `rnn_state` and `f_rnn` per step and confirm hidden rows 2-7 equal the corresponding draw rows - or read the
 token-batch dsv4 path (dspark.cpp 558+) to see what `cur`/res->t_embd actually is at the markov call and whether rnn_state rows are
 installed into `hidden` for i>=2.
+
+## Markov head source walk: hidden_i = hidden row i, and the joint width confirms f_rnn on
+
+Read `build_dspark_markov_head` (dspark.cpp:234-453) end to end. Facts that pin the model:
+
+- `hidden_i = view_2d(hidden, hidden->ne[0], n_blocks, block_drafts*hidden->nb[1], i*hidden->nb[1])` (line 367) = row i of `hidden`
+  for a single block. So `dspark_hidden_i-i` is genuinely hidden row i, confirming the metric.
+- `sample_from_anchor` comes from GGUF `dflash.sample_from_anchor` (absent or "true" => true, i_draft_beg=0; "false" => 1).
+  With rnn_state non-null the code asserts `!sample_from_anchor` (line 294), so a real f_rnn run must be sample_from_anchor=false
+  (i_draft_beg=1). This means my earlier "the drafter samples, is_greedy off" holds via rnn_state draw path (line 432: `draw()`),
+  and the first markov step is i=1 (the first draft), consistent with hidden_i dumps starting at step 1.
+- `n_joint = (dspark_f_rnn ? 2*n_embd : n_embd) + 2*rank` = 5120 with f_rnn, matching the 5120-wide joint = [state|w1_prev|hidden_i|f_rnn].
+  The joint projection is confirmed exactly right.
+- The draw (line 308-333): top_k(n_cand=64), sort by logit desc, soft_max(vals*inv_temp), cumsum, threshold = `state_rows(1,0,i)`
+  (the uniform comes from rnn_state, not a fresh RNG), pick first candidate over threshold, argmax if is_greedy. `draws` are
+  block-major restored via permute at 442-444 (dspark_draws). This is the sampler to port next: cumsum-draw keyed off rnn_state.
+
+**The standing contradiction is now fully scoped to one fact:** with block == l_out-2 == our x validated 0.05, reference `hidden`
+row 1 == `norm(l_out-2 slot1)` exactly, while rows 2-7 == a distinct near-constant-rms 1.6 tensor. Since hidden_i is a view of the
+single `hidden` tensor, `hidden` itself must differ from the base result_norm at rows 2-7 - i.e. `cur` passed at dspark.cpp:509 is not
+simply the base result_norm. Next: read what graph_dflash's `build_layers` returns (dspark.cpp around 470-505) - whether graph_dflash
+overrides build_layers / resets res->t_embd or feeds the drawn prev tokens into hidden rows 2-7.
+
+(wubumm = WuBuMM pulled again to d773abe; measured H3 findings recorded in docs/research/wubumm-kernel-glean.md.)
