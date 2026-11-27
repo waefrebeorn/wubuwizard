@@ -2313,3 +2313,13 @@ Remaining port checklist: (1) exact softcap constant for col (mild - col corr al
 f_final_logit_softcapping is set), (2) the cumsum draw sampler (top_k 64, sort desc, softmax(vals*inv_temp), cumsum threshold from
 rnn_state, greedy->argmax) which produces next prev and dspark_draws, (3) acceptance, (4) the pure-C drafter in wubuwizard and the
 15/15 token-for-token gate.
+
+## gen_fast wiring: the actual blocker for the speed clause is the batched-vs-sequential divergence, not the drafter
+
+tools/inkling_gen.c already contains a speculation skeleton (IN2_LOOKUP). Its own comment (line 228-231) states the blocker:
+"verification feeds n_tok>1, and the batched path is NOT bit-identical to sequential stepping - parity not achieved (diverges at
+token 13 with zero accepts)." So even with the drafter's block/markov/sampler ported and C-verified, speculative verification cannot
+be enabled until the engine's n_tok>1 batched forward matches the 1-token sequential forward bit-for-bit. That is the concrete next
+task on the speed track: root-cause and fix the batched-vs-sequential divergence at token 13 (likely KV ring caching / pos handling or
+an accumulation-order difference in the batched kernel), then wire dspark_draw + the verified C markov head into IN2_LOOKUP and measure
+tok/s vs upstream - and only then can any speed claim be made. Token-identity on greedy remains gate-met (15/15) independent of this.
