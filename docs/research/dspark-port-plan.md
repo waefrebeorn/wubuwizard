@@ -1267,3 +1267,29 @@ layer dump was already the post-tail residual and there is no off-by-one in the 
 **Next step:** read the trunk side of the extraction - `common/speculative.cpp` sets `embd_row` and the trunk writes
 `layer_inp_src`; that code decides what sits at index `n_layer`. My guess-free answer requires reading how that buffer is sized and
 filled rather than testing more candidate states from our side.
+
+## How the reference actually extracts taps - read from the trunk side, not inferred
+
+`llama_context::layer_inp_dev_alloc()` (llama-context.cpp:1496) and `build_inp_target_features` (dflash.cpp:226) together settle the
+mechanism:
+
+    layer_inp_dev = ggml_new_tensor_2d(ctx, F32, n_layer_inp * n_embd, cparams.n_batch)
+
+So the buffer is **one row per token, with `n_layer_inp` layer states concatenated across the row** - not one row per layer. The
+count `n_layer_inp` comes from counting the true entries of `cparams.embeddings_layer_inp`, a per-layer boolean mask, and
+dflash.cpp:59 sets `n_embd_inp_enc_impl = target_layer_ids.size() * n_embd`. `build_inp_target_features` then does
+`ggml_get_rows(layer_inp_src, embd_rows)` - embd_row selects a **token**, and the row that comes back is the concatenation of the
+selected layers' states, which dflash reshapes to `[n_embd, n_target, n_tokens]`.
+
+That reconciles everything measured earlier: comparing `feats[j]` against per-visit dumps is comparing a single layer's state, which
+is why three of them matched bit-exactly and the fourth did not - the fourth entry of that concatenation is a *layer*, and I have
+been looking for it among *visits*, where only 0-41 were ever captured in the relevant run.
+
+    visits captured in dump_ref10: 0..41 (40 files; 42-47 absent)
+
+`trunk_tail_in` was captured in a separate run, and `trunk_final` in another, so no single dump contains the whole schedule and the
+"tap 3 = post-tail residual" test compared across runs while the tail visits themselves were never in the same scan as `feats`.
+
+**Next step:** one run that captures the tail visits (42-47) together with `feats`, so the fourth tap can be matched against them in
+the same pass. That is the last unidentified input in the drafter's context path, and the only thing between the current state
+(three taps bit-exact, block input and layer-0 attention verified) and an exactly-correct context K.
