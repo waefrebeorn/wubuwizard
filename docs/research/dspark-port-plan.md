@@ -2076,3 +2076,25 @@ That is exactly the contradiction left standing: row 1 of that tensor equals `no
 view match none of `norm(l_out-2 slot j)` for any j. The next move is to read, not guess: trace what `hidden` actually is at the point
 `build_dspark_markov_head` is called in `dflash.cpp` (the `res->t_embd` argument) and whether it is reassigned between block
 invocations, instead of inferring from dumps.
+
+## The draft graph passes `cur` (block output) as hidden; dflash's base-graph result_norm is a separate tensor that is irrelevant here
+
+The speculative call site is `dspark.cpp:509`: `build_dspark_markov_head(ctx, model, inp_tokens, cur, rnn_state, /*sample_from_anchor=*/true)`
+where `cur = build_layers(inp_tokens)` at line 501. So `hidden` in the markov head is the block output produced by the *token-batch
+DSV4/draft* graph, not by the embd-batch `graph_base::build_layers` whose `result_norm` we have been dumping.
+
+Verified occurrence-aligned, in `dump_hall`: even the single closest `result_norm-*.bin` is mean|diff| ~2.23 away from `hidden_i`
+step 1, which is a vector mismatch, not an rms quirk. `result_norm` (the embd-batch norm at `dflash.cpp:552`) is simply not the tensor
+`hidden_i` comes from. Our `output_norm.weight` itself remains correct - `hidden_i` step 1 equals `norm(l_out-2 slot 1, output_norm)`
+to 0.0000.
+
+The remaining contradiction is now precise: in the *same* draft graph, `hidden` row 1 rms 3.17 matches our `norm(x1, W)` while
+`hidden` rows 2-7 (rms ~1.57-1.67) match none of our `norm(xj, W)`. Exactly one feature distinguishes our model of the block from the
+reference's: we fill draft slots 1-7 with the **fixed** `mask_embd` rows, while the reference's draft graph computes those slots with
+real per-step inputs (the drawn tokens / the block conditioned on context or on prior drafts). A real-embedding block would produce
+rows 2-7 that are some function of the drawn tokens - and therefore would not equal any mask-based row, which is what we observe.
+
+**Next step:** test this directly. Recompute our draft-slot embeddings by placing the actual drawn token ids (the recovered
+chain 11 -> 40 -> 150261 -> 149882 -> 150367 -> 149876 -> 220) into the block input slots instead of `mask_embd`, run the block, and
+see whether `hidden` rows 2-7 then match the reference - or inspect how `build_dspark_inp_block`/`build_inp_noise` assembles draft-slot
+embeddings for the token-batch draft graph at `dspark.cpp` around line 470-500.
