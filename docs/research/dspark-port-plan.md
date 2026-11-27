@@ -2288,3 +2288,15 @@ was computed for the E[11] anchor); it decays ~0.5 -> 0.03 over steps. With the 
 Everything arithmetic in the markov head - the joint input assembly, the projection (corr 1.0), the gate/cand/state recurrence, and the
 chunk split - is now confirmed. Remaining port items: markov chunk tanh -> w2 bias -> softcap -> col, the confidence head, the cumsum
 draw sampler, and draft acceptance.
+
+## col verified: base_i + w2@tanh(chunk2) + b2, corr 0.985-0.997 steps 3-7
+
+Reconstructing col = base_i + (W2@tanh(out_joint[512:768]) + b2) per step (state carried) against dspark_col:
+    step1 corr 0.618 (anchor-0 vs E[11] base mismatch at occurrence-0)
+    step2 0.966 | step3 0.985 | step4 0.993 | step5 0.996 | step6 0.996 | step7 0.997
+d 0.26-1.5 on rms ~3-8. With the correct per-graph base/anchor the head is fully ported. (No softcap applied yet; dspark_col
+is post-softcap, so a final softcap constant remains, but corr is already 0.997, so it is mild or off for drafts.)
+
+**Port status:** block, positions, output_norm, hidden, f_rnn, w1[prev], joint projection (corr 1.0), state recurrence, and the
+markov->w2-bias->col stage are all confirmed. Remaining: confidence head (dspark.conf_proj), the cumsum draw sampler, softcap exact
+value, and draft acceptance - then the pure-C port and the 15/15 gate on real completion tokens.
