@@ -1965,3 +1965,29 @@ Note our own state chain was still used for these numbers, so part of the residu
 **Next step:** drive the chain with the reference's `joint` for `state` *and* the recovered prev chain, to see whether the residual
 0.36-0.91 collapses. Then implement the sampler (`top_k 64`, `inv_temp` from the rnn_state row, cumsum draw) so drafts can be compared
 as tokens at all - argmax parity is not the target.
+
+## prev is now exact at every step; hidden and f_rnn are not constant across steps, which they should be
+
+With the recovered chain every step's `w1_prev` slice matches bit-exactly (0.000000 at steps 1, 2, 3 - and at 1 it was already
+0.000000), so `prev` is fully settled. Slice detail:
+
+    step1 (prev 11)      state 0.00000   w1 0.00000   hidden 0.02741 (3.167/3.172)   f_rnn 0.00505 (0.7505/0.7503)
+    step2 (prev 40)      state 0.72463   w1 0.00000   hidden 1.09122 (2.373/1.627)   f_rnn 0.49226 (0.7505/0.7936)
+    step3 (prev 150261)  state 0.21807   w1 0.00000   hidden 0.83329 (2.180/1.624)   f_rnn 0.49226 (0.7505/0.7936)
+
+Driving `state` from the reference's own joint changes essentially nothing (0.9061 -> 0.9063 at step 2, and only ~0.02 elsewhere), so
+the state is excluded a second time, now with the correct chain.
+
+**The important observation is not the magnitude - it is that the reference's `f_rnn` slice changes between steps.** At step 1 it has
+rms 0.7503 and matches ours to 0.005; at steps 2 and 3 it has rms 0.7936 and matches ours only to 0.49. `f_rnn` is a *fixed* context
+row in our model of the graph (`state_rows(n_embd, 0, 0)` - row 0 of the block, taken once outside the loop), so a version of it that
+varies per step means the draft graph's `rnn_state` is not the injection graph's `f_rnn` tensor we verified earlier. The reference's
+own comment says as much: row 0 holds f_rnn for the *anchor*, while **draft row i holds `[uniform | 1/temp | 0...]`** - the per-step
+draw state. So the rows we are reading at i>=2 are the draw rows, not the anchor row, and both the `hidden` (rms 1.627) and `f_rnn`
+(0.7936) slices at steps 2-3 are consistent with that rather than with a drafter arithmetic error.
+
+This also explains why step 1 - the only step whose slices match - is also the only step whose joint matches to 0.0167.
+
+**Next step:** stop inferring from slices and dump the actual tensors by name: `f_rnn` (already hookable at `dflash.cpp:410`),
+`hidden`/`res->t_embd`, and `rnn_state` itself, each with the step index in the name. That identifies what the reference really feeds
+the joint at steps 2+, instead of inferring it from offsets into a concatenation.
