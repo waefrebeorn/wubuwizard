@@ -1322,3 +1322,31 @@ That closes the tap question completely and moves the error one stage further ou
 **This also explains the ctx K discrepancy** measured much earlier (mean|diff| 0.148 while the Q path was 0.005): the context mixer is fed three exact taps and one tap that is off by 2.26, and the error propagates through `ctx_mix`.
 
 **Next step:** dump the reference's `mix(...)` result *before* the norm (one `cb` at inkling2.cpp:443) and compare it against our `final_mixed.bin`, which isolates mix from norm in a single measurement. Whichever of the two differs is the last piece of the context path.
+
+## The "2.26" was my Python, not the engine - our mix already matches the reference
+
+Dumping the reference's pre-norm mix (identity `ggml_scale` to stop the reshape being elided - a bare `cb` on a reshape feeding
+`rms_norm` never executes, which is why the first attempt produced an empty dump dir while the string was present in llama.dll):
+
+    our final_mixed vs reference trunk_mix    mean|diff| 0.028871    rms 0.855 vs 0.855
+    our final_resid vs reference post-tail    mean|diff| 0.071300
+
+**Our `in2_mix` already reproduces the reference's `mix(blocks, cur, output_res_query)` to 0.029**, with identical rms. The
+`output_res_query` mixing was never the defect.
+
+And the 2.26 gap that made it look like a defect was an artifact of my own measurement: applying my hand-rolled RMSNorm to the
+*reference's own* mix does not reproduce the *reference's own* final_norm - it is off by 2.256 at every epsilon (0, 1e-6, 1e-5,
+1e-4) and with or without the norm weight. A formula that cannot map a known input to a known output of the same graph is a broken
+formula, not evidence about the engine. The norm weight I extracted also looks wrong for this role (rms 3.09, range -5.06..13.13,
+while the target has rms 3.99) - so either the extraction is the wrong tensor or the scale is applied differently.
+
+That retires the last "defect" in the context path. Standing tally of what is *proven* by measurement:
+
+    3 of 4 taps     bit-exact (visits 5, 23, 41)
+    tap 4 source    identified exactly: build_norm(mix(...)) at t_layer_inp[n_layer]
+    our mix         0.029 from the reference's mix, same rms
+    our post-tail   0.071 from the reference's post-tail residual
+
+**Next step:** stop comparing through my own numpy. Dump the engine's final hidden (`IN2_DUMP_H`) and the reference's
+`trunk_final_norm` for the same position and compare those two numbers directly - engine against engine, no intermediate formula of
+mine in the path. That also removes the suspected-bad `output_norm.weight` extraction from the critical path.
