@@ -1293,3 +1293,32 @@ been looking for it among *visits*, where only 0-41 were ever captured in the re
 **Next step:** one run that captures the tail visits (42-47) together with `feats`, so the fourth tap can be matched against them in
 the same pass. That is the last unidentified input in the drafter's context path, and the only thing between the current state
 (three taps bit-exact, block input and layer-0 attention verified) and an exactly-correct context K.
+
+## ALL FOUR TAPS IDENTIFIED - and the fourth is bit-exact, just not in our engine's output path
+
+`src/models/inkling2.cpp:442-447` names the fourth tap outright:
+
+    void llama_model_inkling2::graph::build_output(ggml_tensor * cur, ...) {
+        cur = ggml_reshape_2d(ctx0, mix(blocks, cur, model.output_res_query), n_embd, n_tokens);
+        cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+        // DSpark target features: the last one is the final norm output of every token
+        res->t_layer_inp[n_layer] = cur;
+        ...
+
+So tap 3 is the **final normalised output**, computed as `build_norm(mix(blocks, post-tail residual, output_res_query))`, stored at visit index `n_layer` - which is why `cparams.embeddings_layer_inp` is resized to `n_layer()+1` and why the second index setter accepted id 48. Dumping that exact tensor and diffing:
+
+    tap3 vs trunk_final_norm      mean|diff| 0.00000000    rms 3.9934 vs 3.9934   <- bit-exact
+    our norm(mix(resid)) vs same  mean|diff| 2.260794      rms 3.2432
+
+**The complete tap list, all verified:**
+
+    tap 0 = residual entering visit 5   (bit-exact vs our L04_p0)
+    tap 1 = residual entering visit 23  (bit-exact vs our L10_p1)
+    tap 2 = residual entering visit 41  (bit-exact vs our L16_p2)
+    tap 3 = final normed output         (bit-exact vs the reference's own tensor; ours differs by 2.26)
+
+That closes the tap question completely and moves the error one stage further out: three taps come from the residual stream, which our engine reproduces **exactly**, and the fourth comes from `build_output`, which it does not. So the remaining defect is in our `output_res_query` mix or the final RMSNorm - `in2_mix` feeding the final norm.
+
+**This also explains the ctx K discrepancy** measured much earlier (mean|diff| 0.148 while the Q path was 0.005): the context mixer is fed three exact taps and one tap that is off by 2.26, and the error propagates through `ctx_mix`.
+
+**Next step:** dump the reference's `mix(...)` result *before* the norm (one `cb` at inkling2.cpp:443) and compare it against our `final_mixed.bin`, which isolates mix from norm in a single measurement. Whichever of the two differs is the last piece of the context path.
