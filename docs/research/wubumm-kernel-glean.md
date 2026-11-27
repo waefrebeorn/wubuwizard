@@ -34,3 +34,32 @@ Ranked by expected gain for an RTX-4050/8GB target:
   speeding up some parts this stack is "stuck on" with CUDA, and is learning the hardware for more.
 - Latest WuBuMM commits approach specificity: F16C load, branchless scalar; H3 attention tiled fix;
   safetensors f16; gemm_tiled BK tuning. All bit-identical where claimed.
+
+## WuBuMM measured findings (docs/H3_MEASURED_FINDINGS.md) — the load-bearing lessons for our engine
+Pulled again 2026-11-27, now at d773abe (611-file sync; TAE decoder, Vulkan shader audit, attention/tensor-core
+benchmarks, INT8 tooling, `wubumm_gguf.c` self-contained GGUF reader, `wubumm_fastmath.h` f16/bf16 tables).
+
+- **qknorm+rope was half the "attention" span and uncoalesced** (thread-per-row, 512-byte lane stride,
+  3.51 GB/s vs ~450 available) -> coalesced gives ~100x (30.8 -> 0.32 ms/block). Rule for our Norm/Rope:
+  coalesce along the lane-safe contiguous dim, never thread-per-row.
+- **Attention at 0.9 TFLOPS was NOT instruction-bound — it was 6.39 GB of avoidable K/V traffic.** Six
+  scheduling hypotheses, five refuted (ILP-8 slower, float4 +3.7% noise, bank-conflict fix no change,
+  occupancy 12%->25% no change, stride-129 39% slower). Rule: optimize reuse/coalesced volume first;
+  do-not-burn budget on ILP/occupancy/conflict micro-tuning.
+- **Tensor cores matter**: wmma attention 28.3 -> 11.87 ms (2.36x), QK^T 2.404 TFLOPS exact to 1.5e-7,
+  both gated on cos >= 0.999. 16 query rows/block = -14% from reuse volume.
+- **Residual stream must stay f32** — fp16 cap 65,504 vs residuals peaking near 5e5; block-0 measured
+  28,118 (2.33x headroom). Our Inkling path must not fp16 the residual.
+- **Turing has no BF16 hardware** (bf16 emulated, f16 hits tensor cores). Ada (RTX 4050) is different —
+  verify, don't assume the wing-7 "bf16 faster" rule transfers.
+- **W8A8 cannot meet the cos>=0.999 gate** (best SmoothQuant alpha 0.99821); W8A16 can. Q4 degrades FID.
+- **Batching M is the largest serving lever** (-42% at B=2), ahead of INT8: weights stream 77 GB/run vs
+  ~120 MB activations, weights ~6x a request.
+- **Audit conversions exhaustively** — WuBuMM caught parse_dtype testing len==3 for the 2-char "I8" (so
+  every INT8 tensor silently parsed as F32), a bf16 bit-pattern numeric cast returning 1.065e9, and a
+  f16_to_f32 that approximated 2^-14 and double-negated inf (-inf -> +1e30). All 65,536-pattern exhaustive
+  now. Parallel to our gguf_extract `unsupported type 23` blocker: verify the dtype parser switches on
+  exact token-length/kind, not a heuristic.
+- **WDDM context-switch tax scales with burst duration, not load** — any CUDA work taxes an active stream.
+  Measure bursts <1s with standalone CPU-compiled harnesses on random buffers; never load the checkpoint
+  just to time a kernel.
