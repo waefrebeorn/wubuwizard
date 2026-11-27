@@ -2256,3 +2256,19 @@ To compare the project factor it cleanly we need a single hook that emits, in th
 joint input and joint output for one graph - no cross-name resolution. Next: add `g.cb(prev, "dspark_prev", (int) i)` next to the
 joint_in/joint cbs (dspark.cpp:377-379) and rebuild; then per-step occurrence N gives (prev_i, joint_in, joint) all from one graph, so
 the projection can be validated exactly.
+
+## joint projection confirmed exact: out = Jw @ x + b, Jw = dr.w row-major (768,5120), corr 1.00000
+
+With the `dspark_prev` hook I recovered the true per-run draft chain at occurrence 0: [0, 149904, 150261, 149882, 149895, 149878, 220]
+(w1_prev slice bit-exact 0.000000 against markov_w1[prev] at every step - the alignment trap that blocked this comparison is now
+solved by dumping prev). The joint output was failing at corr ~0.1 because of the accessor orientation again: dr.get gave (5120,768)
+but dr.w gives the row-major (768,5120).
+
+    step1  Jw@x+b: corr 1.00000  d 0.0023  rms 3.536/3.536
+    step2  corr 1.00000  d 0.0018  rms 3.476/3.476
+    step3  corr 1.00000  d 0.0017  rms 3.675/3.675
+
+So the markov joint = [state | w1[prev] | hidden | f_rnn] projected by joint_proj (row-major 768x5120, dr.w) plus bias is EXACT. The
+previous joint-output "failure" (corr ~0.1) was 100% the dr.get/dr.w orientation. This locks the whole joint stage of the markov head.
+Next: validate the full state recurrence (gate/cand from this exact projection, state=gate*state+(1-gate)*cand) then the markov chunk
+(tanh of chunk(2)) into w2 bias + softcap -> col, then confidence head and the cumsum draw/acceptance.
