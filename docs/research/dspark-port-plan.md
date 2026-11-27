@@ -1155,3 +1155,37 @@ last round (mean|diff| 0.148 against ~0.005 for the Q path), and with the persis
 at which layers, from `inp_target_features`' own structure (four taps at +6 stride implies four core visits), against our engine's
 `for il in [loop_core_start, loop_core_end)` executed three times. If the reference runs the core four times, that is a trunk
 difference to fix in the engine, and the drafter parity follows from it rather than from further drafter work.
+
+## Taps 0-2 matching and tap 3 not matching localises a TRUNK divergence to layers 17-22
+
+Least squares over all 48 of our residual dumps, per tap, on 120 positions:
+
+    tap 0:  residual 0.0424   L04_p0 = +1.000   (everything else <= 0.004)
+    tap 1:  residual 0.1260   L10_p1 = +0.979
+    tap 2:  residual 0.1224   L16_p2 = +0.995
+    tap 3:  residual 1.4345   L20_p2 = -1.639, L23_p2 = +1.462, L21_p2 = +0.816 ...  (no single tap, no fit)
+
+Three taps are single residuals with weight ~1. The fourth cannot be expressed as *any* linear combination of our 48 residuals,
+so it is not a tap my engine fails to dump - it is a state my engine computes differently.
+
+**Both trunks declare the same loop schedule**, so the schedules are not the difference:
+
+    non-mainline:  inkling2.num_loops = 3, inkling2.loop.core_start = 6, core_end = 18
+    mainline:      inkling2_loop.loop.count = 3, loop.start = 6, loop.end = 18, attn_res.block_size = 6
+
+and our engine implements exactly that: 6 leading layers + 12 core layers x 3 passes + 6 tail layers = 48 visits,
+`n_layer_phys = 48 - (3-1)*12 = 24`.
+
+**What the tap pattern actually says.** Taps 0-2 are layers 4, 10, 16 - in visit terms 4, 22, 40, spacing 18. The fourth visit at
+that spacing would be 58, which no 48-visit schedule contains; the tail's L22 sits at visit 46. Since taps 0-2 match this engine's
+own residuals to 0.04-0.13 but tap 3 (L22) differs by 1.65, the divergence cannot be in layers 0-16 at any pass. It lies between
+**layer 16 in the final core pass and layer 22 in the tail** - i.e. in the last core pass (layers 17) or the tail block itself
+(18-23), and it accumulates rather than appearing at the input.
+
+That is the most precise localisation this port has had: not "the trunk differs" but "the trunk agrees through L16_p2 and disagrees
+by L22". Everything downstream - the injected context K, the attention, and the drafter's 0/7 - is consistent with that.
+
+**Next step:** bisect the tail. Dump the reference's residual at the layer-22 position (or an equivalent named tensor) so the
+first layer after L16_p2 where the two disagree can be identified - the same bracketing technique that located the divergence to
+layer 0 earlier. In the engine that means comparing successive tail layer outputs against a reference dump of the same layers,
+which needs one more `cb()` in the trunk's tail loop.
