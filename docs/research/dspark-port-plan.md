@@ -2450,3 +2450,13 @@ reference; mask slots (1..7) still diverge (corr ~0.2..0.8) and are under active
 mask-slot content in the layer forward (attention ctx/rope or per-head path), NOT the input or the reader. Once mask slots reach
 ~0.99 the 3-layer block reproduces h, completing the in-engine drafter block; then bind h/base + f_rnn to the verified markov head
 in IN2_LOOKUP and measure. Test file is NOT committed as a passing gate - it is a working debugging harness at this state.
+
+## DRAFTER BLOCK COMPLETE IN C: 3-layer dense H3-KV forward reproduces h at corr 1.0 (all 8 slots, max|d| 9e-5)
+
+tools/test_draft_block.c now loads the drafter GGUF via the in-engine gguf_reader, builds x0=[anchor_emb;7 mask], runs the 3 dense
+H3-KV layers (attn f32 proj + f64 attention + SwiGLU ffn), and produces h. After fixing two real C bugs (Kctx per-head norm writing
+f32 into a double[] buffer via a float* cast; and the ctx-kv tap read hardcoding (t*4+c) while taps are packed as T=1 -> reading
+uninitialized memory for the ctx keys), the final h matches the verified numpy reference: per-slot corr [1.0 x8], rms identical
+(2.3757 etc.), max|d| 9e-5. The block that produces hidden/base for the markov head is ported and validated. Remaining for the
+speed track: add base = h @ unembed.T in C, then bind h/base + f_rnn to the already-verified dspark_markov head to produce the
+draft proposal inside gen_fast's IN2_LOOKUP, then measure forwards/token and tok/s vs the 4.56 baseline before claiming anything.

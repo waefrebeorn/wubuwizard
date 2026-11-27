@@ -116,8 +116,9 @@ int main(int argc, char **argv) {
         /* mixed[c][e] = sum_t cmx[t]*tapbuf[t][c][e]; rms(,cn); -> kc/vc. Use T=4 rows. */
         for(int c=0;c<T;++c){
             double mm[E]; double s=0;
-            for(int e=0;e<E;++e){ double a=0; for(int t=0;t<4;++t) a+=(double)cmx[L][t]*tapbuf[(t*4+c)*E+e]; mm[e]=a; s+=a*a; } s=s/E+EPS;
+            for(int e=0;e<E;++e){ double a=0; for(int t=0;t<4;++t) a+=(double)cmx[L][t]*tapbuf[(t*T+c)*E+e]; mm[e]=a; s+=a*a; } s=s/E+EPS;
             float m[E]; for(int e=0;e<E;++e) m[e]=(float)((double)cn[L][e]*mm[e]/sqrt(s));
+            if (L==0&&c==0){ FILE*pw=fopen("cM.bin","wb"); fwrite(m,4,E,pw); FILE*pw2=fopen("cMix.bin","wb"); fwrite(cmx[L],4,4,pw2); FILE*pw3=fopen("cCn.bin","wb"); fwrite(cn[L],4,E,pw3); fclose(pw); fclose(pw2); fclose(pw3); }
             float kc[1024],vc[1024]; gemv(wkct[L],E,1024,m,kc); gemv(wvct[L],E,1024,m,vc);
             for(int kv=0;kv<NKV;++kv){ float nb[HD]; rms_f64row(kc+kv*HD,HD,kcn[L],nb);
                 for(int d=0;d<HD;++d) Kctx[(c*NKV+kv)*HD+d]=nb[d];
@@ -137,20 +138,25 @@ int main(int argc, char **argv) {
             for(int h=0;h<NKV;++h){ float nh[HD]; rms_f64row(&k[h*HD],HD,kn[L],nh); rope_split_hd(nh,1,HD,b+1,krr); for(int d=0;d<HD;++d) KK[(b*NKV+h)*HD+d]=krr[d]; }
             memcpy(&V[b*NKV*HD],v,sizeof v);
         }
+        if (L==0){ FILE*pw=fopen("cQ.bin","wb"); fwrite(Q,4,B*NH*HD,pw); fclose(pw); FILE*pw2=fopen("cKK.bin","wb"); fwrite(KK,4,B*NKV*HD,pw2); fclose(pw2); }
         for(int c=0;c<T;++c) for(int h=0;h<NH;++h){ int kv=h/G; memcpy(&Kbig[(c*NH+h)*HD],&Kctx[(c*NKV+kv)*HD],HD*4); memcpy(&Vbig[(c*NH+h)*HD],&Vctx[(c*NKV+kv)*HD],HD*4); }
         for(int b=0;b<B;++b) for(int h=0;h<NH;++h){ int kv=h/G; memcpy(&Kbig[((T+b)*NH+h)*HD],&KK[(b*NKV+kv)*HD],HD*4); memcpy(&Vbig[((T+b)*NH+h)*HD],&V[(b*NKV+kv)*HD],HD*4); }
         double sc=1.0/sqrt((double)HD);
         float oarg[B*NH*HD];
+        float *attlog=(float*)calloc((size_t)B*NH*Total,4);
         for(int b=0;b<B;++b) for(int h=0;h<NH;++h){
             double logit[16]; double mx=-1e300;
             for(int j=0;j<Total;++j){ double a=0; const float*qq=&Q[(b*NH+h)*HD],*kk=&Kbig[(j*NH+h)*HD];
-                for(int d=0;d<HD;++d) a+=(double)qq[d]*(double)kk[d]; logit[j]=a*sc; if(logit[j]>mx)mx=logit[j]; }
+                for(int d=0;d<HD;++d) a+=(double)qq[d]*(double)kk[d]; logit[j]=a*sc; if(logit[j]>mx)mx=logit[j];
+                attlog[((size_t)b*NH+h)*Total+j]=(float)(a*sc); }
             double sum=0; for(int j=0;j<Total;++j){ logit[j]=exp(logit[j]-mx); sum+=logit[j]; }
             for(int d=0;d<HD;++d){ double a=0; for(int j=0;j<Total;++j) a+= (logit[j]/sum)*(double)Vbig[(j*NH+h)*HD+d]; oarg[(b*NH+h)*HD+d]=(float)a; }
         }
+        if (L==0){ FILE*pw=fopen("cattlog.bin","wb"); fwrite(attlog,4,(size_t)B*NH*Total,pw); fclose(pw); }
         float o230[E];
         for(int b=0;b<B;++b){ float oa[3072]; for(int hd=0;hd<NH*HD;++hd) oa[hd]=oarg[b*NH*HD+hd]; gemv(wo[L],NH*HD,E,oa,o230);
-            if (L==0 && strcmp(argv[7],"-")==0) { char pn[128]; snprintf(pn,sizeof pn,"cL0attO%d.bin",b); FILE*pw=fopen(pn,"wb"); fwrite(o230,4,E,pw); fclose(pw); }
+            if (L==0){ char pn[128]; snprintf(pn,sizeof pn,"catt%d.bin",b); FILE*pw=fopen(pn,"wb"); fwrite(oa,4,NH*HD,pw); fclose(pw);
+                       snprintf(pn,sizeof pn,"cattO%d.bin",b); FILE*pw2=fopen(pn,"wb"); fwrite(o230,4,E,pw2); fclose(pw2); }
             for(int e=0;e<E;++e) x[b*E+e]+=o230[e]; }
         /* --- ffn --- */
         float h2[B*E];
