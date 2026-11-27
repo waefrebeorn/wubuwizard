@@ -2019,3 +2019,36 @@ captured graph may not be the round we assume even though its first slot matches
 **Next step:** capture `inp_noise_embd`, `dspark_hidden_i` and `ffn_inp` in a *single* serve and verify the graph identity by matching
 `inp_noise_embd` slot 0 to `E[11]` before comparing anything else - the discipline that made the ctx and block comparisons trustworthy.
 Do not compare hidden rows across separate serves again.
+
+## Single serve: the block is EXACT on every slot - and hidden_i at i>=2 is not the block output
+
+Captured `inp_noise_embd`, `ffn_inp`, `l_out` and `dspark_hidden_i` in ONE serve and verified graph identity before comparing anything
+(`inp_noise_embd-1` slot 0 vs `E[11]` = 0.00000000). With everything in the same graph:
+
+    L0  our rms [23.77, 1.17, 1.08, 0.94, 0.92, 0.93, 0.91, 0.88]
+        ref rms [23.76, 1.18, 1.08, 0.94, 0.92, 0.93, 0.91, 0.88]     per-slot 0.008-0.040
+    L1  our rms [24.20, 2.26, 2.21, 2.14, 2.16, 2.21, 2.26, 2.23]
+        ref rms [24.19, 2.27, 2.21, 2.14, 2.16, 2.22, 2.27, 2.24]     per-slot 0.023-0.042
+    L2  our rms [24.84, 5.36, 7.67, 8.87, 9.26, 9.62, 9.82, 9.76]
+        ref rms [24.83, 5.37, 7.67, 8.85, 9.25, 9.60, 9.79, 9.75]     per-slot 0.049-0.063
+
+That is 0.2-0.5% on values of magnitude 5-25, on all eight slots, at all three layers, in one graph. **The block is correct** - and the
+earlier "hidden_i slots 2-7 are flat 1.6 while ours are 2.2" was a cross-serve artifact, exactly as suspected, since `ffn_inp` in
+`dump_blk9` had already matched at 0.00580.
+
+**`hidden_i` at step 1 is bit-exact against `norm(l_out-2 slot 1)`**: mean|diff| **0.0000**, rms 3.1716 both. So the markov head does
+receive the normed block output, and our `h` derivation (`rms(l_out, output_norm)`) is right.
+
+**But at steps 2-7 it is not that tensor.** `norm(l_out-2 slot i)` gives rms 2.377 at i=2 and 2.187 at i=3, while the reference's
+`hidden_i` is 1.627 and 1.624 there (mean|diff| 1.0948 and 0.8360). Checking every slot rather than assuming i:
+
+    step2 best: slot7 1.0314, slot6 1.0371, slot4 1.0410
+    step3 best: slot4 0.7897, slot6 0.7980, slot7 0.8088
+    step7 best: slot7 0.6168, slot6 0.6324, slot5 0.6903
+
+No slot matches, and neither the raw row (3.98) nor the unit-rms row (1.26) does. So `hidden_i` at i>=2 is drawn from a different
+tensor than the block output we can see - most likely `hidden` inside the markov head is not `res->t_embd`/`result_norm` at those steps.
+
+**Next step:** dump the whole `hidden` argument once per step (not the view) - `g.cb(hidden, "dspark_hidden_all", i)` - and compare it
+against `result_norm` for the same graph. That answers whether the markov head receives the block output at all at i>=2, instead of
+inferring from views.
