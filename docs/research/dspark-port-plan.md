@@ -1128,3 +1128,30 @@ One wrong tap out of four, weighted 1/4, is the right order of magnitude to prod
 **Next step:** determine the fourth tap. The reference's own features give a target; the candidates our engine cannot currently
 produce (a per-position final hidden, or the tail block's last layer in a pass we do not dump) need a dump hook in the engine
 first - the same `IN2_DUMP_VISITS` machinery that produced the others, extended to emit the tail layers at every pass.
+
+## The fourth tap is a state our engine never produces - a schedule-level difference, not a modelling one
+
+Tap 3 resists every candidate. Measured by elementwise difference over the same 259 positions, with the known-good tap 2 as a
+control:
+
+    tap 2 vs L16_p2    segments [0:64] 0.128   [64:128] 0.111   [128:] 0.315      <- exact, as established
+    tap 3 vs L22_p2    segments 2.101 / 2.405 / 1.980 / 1.655   min 1.061 at position 1
+    tap 3 vs L23_p2    segments 1.859 / 2.148 / 1.564 / 1.161   min 0.732 at position 195
+    tap 3 vs L17_p2    segments 3.251 / 3.415 / 3.421 / 3.324   (worse everywhere)
+
+Also eliminated: normalisation (best residual 1.814 with `L23_p2` scaled 0.844, against a tap3 rms of 3.64 - barely better than
+predicting zero), and position misalignment (±3 offsets change nothing beyond the fourth decimal).
+
+The taps that *do* fit follow a completely regular pattern - layers **4, 10, 16** with passes **0, 1, 2**, i.e. stride 6 with the
+pass index advancing by one each time. The natural fourth member is **layer 22 at pass 3**, and our engine has no pass 3: the core
+(6..17) runs three times (p0, p1, p2) and the tail (18..23) once (dumped as p2). So the reference is consuming a residual that our
+loop-core schedule never materialises.
+
+**That reframes the remaining error.** It is not that my drafter code misuses the tap - it is that the trunk schedule feeding it
+differs. The injected context K mixes all four taps, so one missing tap of four is consistent with the ctx K discrepancy measured
+last round (mean|diff| 0.148 against ~0.005 for the Q path), and with the persistent 0/7 that survived every drafter-side fix.
+
+**Next step:** compare the two loop-core schedules directly - count how many times the reference's trunk visits the core block and
+at which layers, from `inp_target_features`' own structure (four taps at +6 stride implies four core visits), against our engine's
+`for il in [loop_core_start, loop_core_end)` executed three times. If the reference runs the core four times, that is a trunk
+difference to fix in the engine, and the drafter parity follows from it rather than from further drafter work.
