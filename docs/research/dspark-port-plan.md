@@ -2377,3 +2377,12 @@ lowers corr toward 0.98 and rms only approaches ref at softcap->infinity (i.e., 
 scale difference maps to the base-logits attribution at occurrence-0, consistent with the step-1 anchor family. When the drafter runs
 with its runtime prev token as the anchor (as the real engine will), these residuals are expected to vanish. All arithmetic stages are
 reproduced; the port is input-attribution-correct, not limit-corrected.
+
+## Speed baseline (measured): gen_fast non-speculative CPU = 4.56 tok/s
+
+gen_fast.exe 64 tokens, oracle prompt 371 151451 149879, CPU (mingw gcc -O3/OpenMP on Ryzen 5 8645HS): wall 14.03 s = 4.56 tok/s,
+rc 0. This is the non-speculative baseline. The drafter integration targets raising this by verifying K drafts in one batched forward
+(which is proven bit-identical to K sequential steps, so token-identity is undisturbed) to cut forwards/token below 1.0, then tok/s
+must be re-measured against this baseline - and only a measured increase may be claimed. Note the fairness caveat: gen_fast is a CPU
+engine while the instrumented upstream reference runs on CUDA (RTX 4050); any cross-backend speed claim needs the same-backend
+comparison stated, otherwise it is invalid.
