@@ -2164,3 +2164,24 @@ simply the base result_norm. Next: read what graph_dflash's `build_layers` retur
 overrides build_layers / resets res->t_embd or feeds the drawn prev tokens into hidden rows 2-7.
 
 (wubumm = WuBuMM pulled again to d773abe; measured H3 findings recorded in docs/research/wubumm-kernel-glean.md.)
+
+## Which graph serves the Inkling-2-Mini drafter: graph_dsv4, and it has no rnn_state -> the 5120 joint must be graph_dspark
+
+Graph factory (dflash.cpp:616-638): `BACKBONE_DSV4 -> graph_dsv4` WINS over variant. backbone is set at dflash.cpp:73 to
+BACKBONE_DSV41/DSV4 for non-Mistral Inkling architectures (`dsv4_hc_single_pass ? DSV41 : DSV4`). So Inkling-2-Mini builds graph_dsv4.
+
+`graph_dsv4` (dspark.cpp:517-655) NEVER references rnn_state; its markov call at dspark.cpp:652 is
+`build_dspark_markov_head(*this, model, inp_tokens)` with NO hidden and NO rnn_state. With is_rnn=true (joint_proj present) and
+hidden==nullptr it would dereference nullptr at the hidden_i view (line 367) - so a run that dumped hidden_i cannot be graph_dsv4:652.
+
+Evidence that reconciles it: the :8112 serve dumped `l_out-0..17`, `inp_noise_embd` and `hidden_i` but NO `result_norm` and NO
+`dspark_cur` (my hooks in graph_dspark). A graph_dspark rnn run (line 510) would dump result_norm (dflash.cpp:553) and dspark_cur
+(line 502) AND build the hidden_i/5120 joint - but result_norm and dspark_cur never fired. So :8112's graph produced hidden_i through a
+DIFFERENT markov path than graph_dspark's. Meanwhile the earlier :8106 run (dump_jin) produced dspark_joint_in at 5120 with f_rnn -
+which only graph_dspark (line 510) can build, since graph_dsv4 has no rnn_state. Two different draft graphs can be exercised depending
+on ubatch/n_embd_state wiring, and they interleave in the same server.
+
+**Decision lock:** before any further hidden-rows-2-7 port work, determine which markov call actually runs for our `--spec-type
+draft-dspark` + Inkling-2-Mini by dumping `dspark_joint_in` (5120 => graph_dspark; 2816 => graph_dsv4) and `result_norm` presence in
+the SAME run that also dumps hidden_i and l_out. That pins the graph and makes hidden-rows-2-7 interpretable (draw rows if graph_dspark,
+block rows otherwise).
