@@ -167,6 +167,8 @@ def forward(dr, anchor_emb, taps, ctx_pos, blk_pos, taps_frnn=None):
         print(f"  layer {L}: rms {np.sqrt((x.astype(np.float64)**2).mean()):.4f}")
     h = rms(x, dr.get('output_norm.weight'))
     base = h @ dr.unembed.T                                     # [8, vocab] raw: softcap is applied AFTER the markov bias
+    n_vocab_draft = dr.get('markov_w2.bias').shape[0]           # 200058; the trunk head is 201024 wide, markov is narrower
+    base = base[:, :n_vocab_draft]                              # broadcasting silently mixed widths before; slice explicitly
 
     # f_rnn: the markov-side context mix
     mixm = dr.get('markov_ctx_mix.weight')

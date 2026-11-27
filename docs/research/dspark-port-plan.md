@@ -1785,3 +1785,32 @@ accepted) - not as ids. Base logits show the oracle token at rank 4-5, which is 
 **Next step:** build a gate that actually tests draft parity - a prompt with near-total acceptance (repetitive text) where the
 reference's accepted tokens ARE its drafts, so token identity becomes meaningful; or add a dump of the drafted ids and compare those
 directly. Until then, do not read MATCH n/7 as a correctness signal.
+
+## A real draft-parity gate at last: our first draft is exact, the chain then drifts
+
+Added two name hooks in `dspark.cpp` (`g.cb(res->t_h_nextn, "dspark_draws")` at 437 and `g.cb(out, "dspark_logits")` at 444) so the
+drafted ids can be dumped instead of guessed. Pairing verified first: `inp_noise_embd-1` slot 0 vs `E[11]` is **0.00000000**.
+
+    reference drafted ids   [149904, 150261, 149882, 149895, 149878, 220, 68111]
+    our drafted ids         [149904, 149951,    6,     83, 149895, 149878, 220]
+    MATCH 1/7
+
+Read the shape of this rather than the count:
+
+* **Draft 1 is exact.** 149904 == 149904. That exercises taps -> block -> x0 -> three layers -> h -> output_norm -> unembed ->
+  w1/joint_proj/state/gate/cand -> w2 -> pick, end to end, and lands on the same token the reference drafts. Every piece verified
+  separately is now verified composed.
+* **Our steps 5, 6, 7 equal the reference's steps 4, 5, 6** (149895, 149878, 220). A suffix that matches one index earlier is the
+  signature of a propagation/indexing offset in the chain, not of wrong arithmetic.
+* Steps 2-4 diverge (149951, 6, 83 vs 150261, 149882, 149895).
+
+**Caveat on the other new dump:** `dspark_logits` is *not* the tensor the pick is made from - its slot-1 argmax is 43743 while the
+actual drawn id is 149904. So it must not be used as ground truth for the pick; `dspark_draws` is the authoritative one. Recording
+that now so it is not mistaken for a mismatch later.
+
+Also fixed: `base` comes out 201024 wide from the trunk head while the markov bias is 200058 wide; numpy broadcast-compatible widths
+were hiding it, and `forward()` now slices to `n_vocab_draft` explicitly.
+
+**Next step:** chase the one-step offset - compare per-step `state` and `markov` chunk values against the reference by dumping the
+joint output, or check whether `prev` for step i should be the *drawn* token of step i-1 in block-major order rather than the argmax
+of the same step. The suffix alignment is the clue; do not rewrite the chain.
