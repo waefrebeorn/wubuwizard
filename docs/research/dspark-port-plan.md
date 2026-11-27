@@ -1991,3 +1991,31 @@ This also explains why step 1 - the only step whose slices match - is also the o
 **Next step:** stop inferring from slices and dump the actual tensors by name: `f_rnn` (already hookable at `dflash.cpp:410`),
 `hidden`/`res->t_embd`, and `rnn_state` itself, each with the step index in the name. That identifies what the reference really feeds
 the joint at steps 2+, instead of inferring it from offsets into a concatenation.
+
+## hidden_i dumped by name: slot 1 matches, slots 2-7 do not - and two serves disagree about them
+
+`g.cb(hidden_i, "dspark_hidden_i", i)`, `dspark_frnn_i` and `dspark_state_i` added inside the loop, then compared against our h rows:
+
+    step1 hidden_i rms 3.1716   best h[1]  0.0274
+    step2 hidden_i rms 1.6270   best h[7]  1.0301
+    step3 hidden_i rms 1.6243   best h[4]  0.7873
+    step4 hidden_i rms 1.5653   best h[7]  0.7594
+    step5 hidden_i rms 1.6670   best h[6]  0.6877
+    step6 hidden_i rms 1.6091   best h[7]  0.6559
+    step7 hidden_i rms 1.5738   best h[7]  0.6147   (f_rnn 0.7936 vs ours 0.7505, mean|diff| 0.4923)
+
+Our h rows run 2.376 / 3.167 / 2.373 / 2.180 / 1.901 / 1.905 / 1.731 / 1.702 - **monotonically decreasing**, while the reference's
+hidden_i for slots 2-7 is nearly flat at 1.57-1.67. Step 1 matches to 0.027 and nothing after it does.
+
+**The contradiction that matters:** in the `dump_blk9` serve our block matched the reference's `ffn_inp` at **0.00580** across all eight
+slots, with pairing verified by `inp_noise_embd-1` slot 0 == `E[11]` at 0.00000000. In this serve the same anchor gives hidden rows of
+rms ~1.6 that match none of our h rows. Both serves were `Hello` with `n_predict=16`. Two runs of the reference therefore disagree about
+the drafter's hidden state for the same anchor - which is the same nondeterminism already visible in the generated token sequences
+(`[11, 68014, 40, 23064, 76, ...]` in some runs, `[11, 68014, 40, 150087, 153221, ...]` in others).
+
+That makes any per-slot comparison across serves unreliable, and it is the most likely explanation for the "flat 1.6" rows as well: the
+captured graph may not be the round we assume even though its first slot matches.
+
+**Next step:** capture `inp_noise_embd`, `dspark_hidden_i` and `ffn_inp` in a *single* serve and verify the graph identity by matching
+`inp_noise_embd` slot 0 to `E[11]` before comparing anything else - the discipline that made the ctx and block comparisons trustworthy.
+Do not compare hidden rows across separate serves again.
