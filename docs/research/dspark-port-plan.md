@@ -1350,3 +1350,31 @@ That retires the last "defect" in the context path. Standing tally of what is *p
 **Next step:** stop comparing through my own numpy. Dump the engine's final hidden (`IN2_DUMP_H`) and the reference's
 `trunk_final_norm` for the same position and compare those two numbers directly - engine against engine, no intermediate formula of
 mine in the path. That also removes the suspected-bad `output_norm.weight` extraction from the critical path.
+
+## Engine against engine: the output path is correct to 0.032
+
+No numpy, no formula of mine - our `IN2_DUMP_H` final hidden against the reference's `trunk_final_norm` for the *same* input:
+
+    prompt "Hello" (1 token on both sides, so row 0 aligns exactly)
+    our final hidden vs ref trunk_final_norm    mean|diff| 0.031800   max|diff| 0.2073
+    rms 3.4390 vs 3.4477                        corr 0.999934
+
+That is a 0.9% relative difference with correlation 0.99993 - the output path (`mix(blocks, cur, output_res_query)` followed by the
+final RMSNorm, i.e. the state stored at `t_layer_inp[n_layer]` and fed to the drafter as tap 4) is **correct**. The 2.26 "defect"
+was my hand-rolled norm and nothing else.
+
+Note the earlier attempt at this comparison was invalid and I should record why: `pre3` tokenises to 263 tokens in our engine but
+259 in the reference, so a 263-vs-259 prefill cannot be aligned by row index, and scanning all 259 rows for a match produced a
+meaningless "best" of 2.49. A one-token prompt removes the alignment problem entirely.
+
+**Where the port now stands, every line measured:**
+
+    trunk residual stream        3 taps bit-exact (visits 5, 23, 41); post-tail residual 0.071
+    output path (mix + norm)     final hidden 0.032, corr 0.99993  <- the state that is tap 4
+    tap 4 source                build_norm(mix(...)) at t_layer_inp[n_layer], identified exactly
+    our in2_mix                 0.029 vs the reference's mix, identical rms
+
+So all four drafter inputs are now either bit-exact or within 1%, and none of them is structurally wrong.
+
+**Next step:** recompute the ctx K in `tools/dflash_ref.py` with the corrected tap set and compare it against a dump of the
+reference's own `ctx_mix` output - the same engine-to-engine discipline that just retired the output-path doubt.
