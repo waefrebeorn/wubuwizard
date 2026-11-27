@@ -1471,3 +1471,39 @@ distinguished, and not to be concluded either way until the dump carries its gra
 **Next step:** make the dump self-identifying before drawing any further conclusion from it - append `n_tokens` (and the ubatch
 n_seqs) to the dump filename in the `cb` helper - then re-capture `dspark_anchor_raw`, `l_out-*` and `result_norm` from a graph whose
 slot count is actually 8. Only then compare the block path. Every conclusion above that was drawn from a 2-slot file is provisional.
+
+## The 8-slot block input, finally captured - and both halves of x0 are wrong in our Python
+
+The dump helper was dumping **only the first occurrence** of each tensor name (`g_llama_dump_counts[name] > 0 -> return`), so every
+file we had came from the warmup/reserve graph and the real draft graphs were silently suppressed. Fixed in `common.cpp`: every
+occurrence is now written under its own index (`name-<n>.bin`), and the `.txt` sidecar already carries `ne[]`.
+
+With that, on `"Hello"` and `n_predict=16`, the real 8-slot graphs appear (`inp_noise_embd-1` ... slots 8).
+
+Comparing our `x0 = [rms(emb, tok_norm); mask_embd rows]` against the reference's 8-slot block input:
+
+    slot 0 (anchor):  ours rms 4.3168   ref rms 1.1826   corr 0.365   mean|diff| 0.932
+    slots 1-7 (masks): ours rms 0.5956  ref rms 0.5956   corr 0.008   mean|diff| 0.507
+
+Three facts follow, each measured rather than argued:
+
+1. **Our mask rows are not the reference's mask embedding.** Correlation 0.008 - not a scale, not a permutation, a different vector.
+   The *norms* agree exactly (0.5956 both), which is what made this look like a near miss earlier. It is not: correlation zero with
+   equal norm means different data, and the equal norm is a coincidence of the extraction, not evidence of a match.
+2. **The reference's seven mask slots are byte-identical to each other** (`ref slots1 identical? True`), while our seven rows are all
+   distinct (`mask rows identical across ours? False`). Whatever `dspark_mask_embd` holds, it is one vector repeated - so our
+   `mask_embd.f32` (7 distinct rows, each rms 0.5956) is not that tensor.
+3. **The reference's anchor is not `E[32269]`.** Correlation 0.365 and rms 1.18 vs 4.32; `unit_norm(E[32269])` has rms exactly 1.0000
+   and correlates 0.227 with it. So the captured graph is a *later* round whose anchor is a generated token, not the prompt - the
+   first 8-slot graph appears only after the first token has been produced.
+
+Slot 0 tracked our anchor at a constant ~0.46 across *every* graph in the earlier `result_norm` sweep, which is now explained: none of
+those comparisons was against the prompt anchor either.
+
+**So the 0/7 is not yet localised to the block internals.** Both inputs to `x0` disagree with the reference on data we extracted
+ourselves, and the f32/ directory has already produced one provably wrong tensor (`output_norm.weight`). The suspect is now the
+extraction, not the block math.
+
+**Next step:** stop trusting `f32/` for these tensors - dequantize `mask_embd.weight` and `token_embd_norm.weight` directly out of the
+GGUF, and check whether the seven mask rows really are identical and whether our f32 copies match the file at all. Also dump
+`dspark_anchor_raw` per occurrence so the anchor token for each round can be identified instead of guessed.
