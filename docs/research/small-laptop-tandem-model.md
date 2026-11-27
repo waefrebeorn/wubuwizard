@@ -143,3 +143,18 @@ through a different code path, so the GPU path is NOT bit-identical to CPU and s
 (tokens diverge ~step 8-10); keep `G4_GPU=1` on both the reference and the timed run when comparing.
 This is the fastest measured number on this host and it is from using the hardware - the lane, not a
 kernel rewrite. The same bridge (`include/wubu_gpu.h`) is the path to extend to gen_fast.
+
+## MEASURED on the target (gen_fast, Inkling-2 UD): the GPU-resident hook is token-identical but NOT faster (0.95x)
+
+gen_fast already has an opt-in GPU-resident matvec path (`IN2_GPU_DENSE=1`, `IN2_GPU_MOE=1`) that loads
+`wubu_cuda.dll` at runtime, uploads the IQ grids, drives an on-device expert LRU cache
+(`wubu_cuda_resident_matvec[_id]` keyed by file offset), and stays token-identical. Verified:
+**the full 64-token golden IDS are identical CPU vs GPU**. But the speed is not there:
+interleaved A/B (G/C/G/C/G/C) at n=64 on a warm model, this host:
+  GPU mean 4.52 tok/s (4.50-4.54), CPU mean 4.78 (4.78-4.79) => 0.95x, GPU slightly SLOWER.
+A cold-load run makes GPU look faster only because both legs pay the same ~6.5 s NVMe read; with page cache
+warm, CPU wins. `IN2_GPU_STATS=1` prints only "GPU tier: engaged" - the resident hook engages the first
+tensor but does not move the whole decode, and each per-tensor resident call still carries a round trip.
+Conclusion: per-tensor device matvec does not beat the CPU engine on this host; the fused per-layer lane
+that reaches 16 tok/s in the Gemma engine (`wubu_gpu_qkv3/ffn3/attn_half`) is what gen_fast lacks. No
+speedup is claimed for gen_fast - the honest number is token-identical, 0.95x, and the route is fusion.
