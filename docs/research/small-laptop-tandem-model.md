@@ -125,3 +125,21 @@ On a 16 GB-RAM / 6 GB-VRAM laptop the model is RAM-resident (SSD is a one-time c
 PCIe) hides under fused GPU compute (λ ≈ 7), so throughput is decided by how few device calls the
 per-layer forward makes — attribute with timestamps, fuse the layer chain, then repack and stream.
 The number to chase is device calls per token, not kernel GFLOPS.
+
+## MEASURED: the fused GPU lane is 3.0x decode / 4.6x total on this host (RTX 4050, gen_text_gemma4, 12B IQ2_M)
+
+Same binary, same model, same 21-token prompt, greedy. The only change is `G4_GPU=1` (device-resident
+weights, fused qkv/ffn3/attn_half lane) vs the CPU default:
+
+| path | prefill | decode | total (46 tok) |
+|---|---|---|---|
+| CPU default | 2.4 tok/s | 5.3 tok/s | 3.4 tok/s (13.4 s) |
+| **GPU fused (G4_GPU=1)** | **14.9** | **16.0** | **15.5 tok/s (2.97 s)** |
+
+The engine uploaded all 337 tensors (4005 MiB, 0 left on CPU). Launch+download was 247.5 ms across
+85 matvecs (~2.9 ms/call) - still interface-heavy, and decode already at 16 tok/s, so fusion collapsed
+most of the round-trip cost. Caveat (honest, from `GPU-LANE-PLAN.md`): the device Q8_K quantizer rounds
+through a different code path, so the GPU path is NOT bit-identical to CPU and stays opt-in
+(tokens diverge ~step 8-10); keep `G4_GPU=1` on both the reference and the timed run when comparing.
+This is the fastest measured number on this host and it is from using the hardware - the lane, not a
+kernel rewrite. The same bridge (`include/wubu_gpu.h`) is the path to extend to gen_fast.
