@@ -2353,3 +2353,13 @@ Consequence: speculative VERIFICATION of drafts is safe (no token drift), so the
 it fast is to replace the prompt-token draft PROPOSAL with the real DSpark drafter (block + markov + dspark_draw, all C-verified) so
 the proposed drafts are model-informed and acceptance becomes meaningful, then measure forwards/token and tokens/sec against upstream
 - and only then claim any speedup. Gen_fast stays token-identical on greedy throughout (gate 15/15 held).
+
+## Drafter GGUF confirmed loadable in engine tooling; block is 18 dense layers reusing the trunk layer arch
+
+`tools/gguf_extract.py --list` on dspark-Inkling-2-Mini-Q8_0.gguf: 58 tensors, 491,956,264 B data, data_start 11,933,600. Real dims:
+- block: blk.0..blk.17 (18 dense layers), E=2304, attn_q (2304->3072), attn_k/v and k_ctx (2304->1024), output (3072->2304), ffn_up/gate (2304->9216), ffn_down (9216->2304), per-layer ctx_mix(4)/ctx_norm(2304)/attn_k_ctx_norm(128).
+- markov head: joint_proj (5120,768), markov_w1/w2 (256,200058), markov_ctx_mix(4)/ctx_norm(2304), mask_embd(2304,7), output_norm(2304), token_embd_norm(2304).
+The drafter block is a smaller dense net sharing the trunk's layer types, so the C port reuses the existing in2_layer_* machinery and
+adds the drafter GGUF load path plus the markov/ctx/tap assembly. This is loader piece 1 of the speed-track wiring; next sub-steps are
+the drafter-GGUF load path in wubu_inkling2_load.c, the 4-tap ctx feature capture already stubbed (visit 5/23/41/final), the block
+forward for K drafts, then dspark_draw proposal into IN2_LOOKUP, then the tok/s measurement vs upstream.
