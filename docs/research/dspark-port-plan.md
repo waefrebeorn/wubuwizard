@@ -1569,3 +1569,48 @@ by correlation against `l_out-2` gave a best of only 0.256, so that pairing is n
 **Next step:** isolate attention from the MLP by adding a `cb` for the post-attention residual inside `dflash.cpp`'s `build_layers`
 (alongside the existing `noise_norm` hook), then compare that one tensor - the drift is 6-8% after a single layer, so whichever
 half it appears in is the culprit.
+
+## Block positions are ctx_len+1 .. - found by scanning, 0.1452 -> 0.00266
+
+The base path already carried the hooks needed to split attention from MLP (`Qcur_raw`, `Qcur`, `Kcur`, `Vcur`, `attn_post_norm`,
+`ffn_inp`), so no rebuild was required. Pairing the graphs properly (the graph anchored on `E[11]` is `inp_noise_embd-1`, but the
+per-name occurrence counters advance independently, so `Qcur-0-*`'s 8-slot instance is occurrence **2**):
+
+    ours vs ref, layer 0 of the block, x0 bit-exact:
+      V   0.00544   (rms 0.884 vs 0.884)
+      Q   0.09576   (rms 1.860 vs 1.860)
+      K   0.14520   (rms 1.762 vs 1.762)
+
+V is essentially exact and Q/K are wrong **with identical rms**. Equal rms on a wrong vector that was produced by a rotation means the
+rotation is the wrong rotation - a norm-preserving map. Ruled out by measurement, not reasoning:
+
+    ours (neox, theta 1e6)   0.145203
+    neox 1e4                 0.145830
+    interleaved 1e6          0.404320
+    no rope at all           0.353663
+
+So the convention was right and the difference had to be the *angle* - the positions. Scanning offset x partial-rotary:
+
+    offset 1, n_rot 128   0.002664     <- the answer
+    offset 0, n_rot 128   0.145203
+    offset 2, n_rot 128   0.145565
+    offset 3, n_rot 128   0.268520
+
+**The block's slots sit at positions `ctx_len+1 .. ctx_len+8`**, not `0..7`. `blk_pos = arange(8)+1` cuts the K error 54x.
+
+**Attention is still not right.** After the fix, our post-attention residual `ffn_inp` is 0.371 mean|diff| against the reference
+(rms 0.8248 vs 0.8502), and the block's layer outputs run 2-3% high (8.6853/9.1017/12.3442 vs 8.4496/8.8012/11.9958). Base logits are
+still far from the oracle (ranks ~1e5). By elimination:
+
+    ctx+block, GQA repeat      0.37144   <- current, best
+    ctx+block, GQA tile        0.68732
+    block only, no ctx         0.65712
+
+so the ctx inclusion and the head mapping are both confirmed correct, and the remaining 0.37 is inside the attention computation or
+the ctx K/V themselves.
+
+Note the block's residual stream grows to rms ~12 by layer 2 while `ffn_inp` is only ~0.85 - the MLP output dominates the magnitude,
+which is why a 40% relative error in the attention term shows up as only 2-3% on rms at the layer output.
+
+**Next step:** compare our ctx `kc`/`vc` for layer 0 against `Kcur_injected-0` / `Vcur_injected-0` **from this same dump**, so the ctx
+K/V are checked in the exact graph the block runs in rather than in a separate serve.
