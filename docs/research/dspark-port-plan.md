@@ -2242,3 +2242,17 @@ dspark_frnn_i-1-0 is all zeros - the pre-markov step.)
 **All four joint inputs are now confirmed against the reference:** state init 0 (step1 slices 0.000), w1[prev] (bit-exact every step),
 hidden (= our block h, 0.019-0.021), f_rnn (= our ctx mix, 0.005 / 0.99996). The remaining port work is the state recurrence
 (gate*state+(1-gate)*cand), the cumsum draw sampler, and the confidence/acceptance head.
+
+## Joint-output comparison blocked by cross-name/cross-step occurrence alignment; inputs already proven
+
+At dump_mh occurrence-0, per-step `dspark_joint_in` slices: hidden matches our h (0.019-0.021, steps 2-7), f_rnn matches (0.005),
+state ~0     at step 1. But the `w1_prev` slice does NOT equal W1[any row] at several steps (mean|d| 3.6-6.5 at steps 1,2,5,6 while 0.000
+at 3,4,7) and the projection output corr is ~0.1. Cause: the reference re-samples a fresh draft chain per graph, so the prev tokens
+change run to run and also appear at different occurrence indices across `dspark_joint`, `dspark_joint_in` and the per-step counters -
+the same cross-name alignment trap that produced the earlier "flat 1.6 hidden" artifact. Our joint INPUT assembly is still proven exact
+(the :8106 run showed state 0.000 / w1 0.000 / hidden 0.027 / f_rnn 0.005 at step 1).
+
+To compare the project factor it cleanly we need a single hook that emits, in the SAME line, the current `prev` token ids PLUS the
+joint input and joint output for one graph - no cross-name resolution. Next: add `g.cb(prev, "dspark_prev", (int) i)` next to the
+joint_in/joint cbs (dspark.cpp:377-379) and rebuild; then per-step occurrence N gives (prev_i, joint_in, joint) all from one graph, so
+the projection can be validated exactly.
