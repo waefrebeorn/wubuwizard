@@ -2300,3 +2300,16 @@ is post-softcap, so a final softcap constant remains, but corr is already 0.997,
 **Port status:** block, positions, output_norm, hidden, f_rnn, w1[prev], joint projection (corr 1.0), state recurrence, and the
 markov->w2-bias->col stage are all confirmed. Remaining: confidence head (dspark.conf_proj), the cumsum draw sampler, softcap exact
 value, and draft acceptance - then the pure-C port and the 15/15 gate on real completion tokens.
+
+## Confidence head is ABSENT in the Inkling rnn path - do not port it
+
+The `dspark.cpp:294` assert `GGML_ASSERT(!has_conf && !sample_from_anchor && rnn_state->ne[0]==n_embd)` inside `if (rnn_state)`
+means the f_rnn/rnn path requires the confidence head off. Serving a fresh run with a `dspark_conf` hook recorded ZERO conf dumps
+while dspark_col/joint/prev/inp_noise_embd all dumped - so has_conf is false for Inkling-2-Mini. Acceptance therefore comes from the
+verifier (target model scores the draft against expected probability), not a per-position learned head. That removes the confidence
+head from the port.
+
+Remaining port checklist: (1) exact softcap constant for col (mild - col corr already 0.997; the softcap is on only if
+f_final_logit_softcapping is set), (2) the cumsum draw sampler (top_k 64, sort desc, softmax(vals*inv_temp), cumsum threshold from
+rnn_state, greedy->argmax) which produces next prev and dspark_draws, (3) acceptance, (4) the pure-C drafter in wubuwizard and the
+15/15 token-for-token gate.
