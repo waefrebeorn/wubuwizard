@@ -2399,6 +2399,16 @@ proposal is one tested C path. Remaining for the in-engine speedup: feed this pr
 dense layers) and the 4 target taps into IN2_LOOKUP replacing prompt-recycling, and re-measure forwards/token and tok/s vs the 4.56
 baseline.
 
+## CORRECTION (verified this session): the drafter block is THREE dense H3-KV layers, not 18
+
+Counting distinct blk.N.* index prefixes in the drafter GGUF gives indices {0,1,2}, 16 tensors per layer - exactly the N_LAYER=3
+the verified dflash_ref forward uses (and which reproduced upstream hidden at corr 0.9999). The earlier "18 dense layers" in the
+4410884 note was a misreading of a grep that only matched blk.0 and the blk.17 pattern; there are no blk.3..17 blocks. The C block
+forward is therefore a 3-layer dense H3-KV port (block_size 8 = 1 anchor + 7 mask slots, N_HEAD 24 / N_KV 8 / HD 128, FFN 9216,
+rope theta 1e6 split-half, softcap 30 after markov bias), not an 18-layer engine.
+
+## Loader pieces 1-3
+
 ## Loader piece 2: the in-engine C gguf_reader opens the drafter GGUF and finds the markov tensors
 
 tools/probe_drafter.c (compiled with src/gguf_reader.c src/wubu_win.c src/wubu_dequant_fp4.c) opens dspark-Inkling-2-Mini-Q8_0.gguf:
