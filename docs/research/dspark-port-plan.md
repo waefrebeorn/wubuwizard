@@ -1537,3 +1537,35 @@ attributable to extraction, layout or the anchor.
 **Next step:** compare the block's own layers now that x0 is exact - our post-layer-0/1/2 states against `l_out-0/1/2`, and `h`
 against `result_norm`, captured in a single run so the graph instances can be paired by slot count and by matching
 `inp_noise_embd` slot 0 to our `E[a]`.
+
+## Block path: x0 exact, layers within 8% and drifting - one systematic difference left
+
+Captured `inp_noise_embd`, `l_out-0/1/2` and `result_norm` in a single run and paired the graphs properly. The first 8-slot graph is
+anchored on token 11, and `inp_noise_embd-1` slot 0 equals `E[11]` at **mean|diff| 0.0** - so the pairing is exact and not a guess.
+
+Layer by layer, our forward (anchor `E[11]`, taps at `,`) against that graph:
+
+    inp_noise_embd-1   rms  0.6966 vs  0.6966   per-slot 0.0000 x8            <- bit-exact input
+    l_out-0-1          rms  8.6766 vs  8.4496   per-slot 0.49-0.70
+    l_out-1-1          rms  9.1012 vs  8.8012   per-slot 1.01-1.44
+    l_out-2-1          rms 12.2761 vs 11.9958   per-slot 1.58-2.89
+
+Read this for what it is: the *magnitudes* now track the reference closely (within 1-3%) at every layer, and the per-slot error is a
+consistent 5-8% that **grows monotonically with depth**. That is the signature of one small systematic difference applied once per
+layer, not of a wrong structure - a wrong projection, layout or missing term would not land within 3% on rms at layer 2.
+
+Ruled out already: `kq_scale` is `1/sqrt(n_embd_head)` in the reference (`dspark.cpp:715`) and identical in ours; the drafter GGUF
+carries no scale override in its metadata; the ctx tensors we use (`attn_k_ctx`, `attn_k_ctx_norm`, `attn_v_ctx`, `ctx_mix[4]`,
+`ctx_norm`) are exactly the set the block has.
+
+An earlier attempt at this comparison was invalid and is worth recording: with the anchor slot holding a *different* token, the
+non-causal block mixed that difference into all eight slots and produced 9+ errors that looked like a structural failure. The block
+attends slot-to-slot, so a single wrong input slot invalidates the whole comparison - the anchor must match before any layer number
+means anything.
+
+Also noted: `result_norm` cannot be paired by tensor-name occurrence index (its counter advances differently from `l_out`'s); pairing
+by correlation against `l_out-2` gave a best of only 0.256, so that pairing is not yet resolved and the `h` comparison is provisional.
+
+**Next step:** isolate attention from the MLP by adding a `cb` for the post-attention residual inside `dflash.cpp`'s `build_layers`
+(alongside the existing `noise_norm` hook), then compare that one tensor - the drift is 6-8% after a single layer, so whichever
+half it appears in is the culprit.
