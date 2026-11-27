@@ -1019,3 +1019,33 @@ compare over the same prompt and the same n_predict.
 **Next step:** name the block input (`cur` after `build_dspark_inp_block`) and each of the three block outputs, dump them, and
 compare stage by stage against `dflash_ref.py` - the same technique that pinned `f_rnn` to cosine 0.982 and identified the taps as
 layers 4/10/16/22. That localises the divergence to a stage instead of leaving it in "the block" as a whole.
+
+## The input pipeline is verified exactly - three cosines of 1.000000 - and the divergence is inside layer 0
+
+Naming the raw anchor with one `g.cb(anchors, "dspark_anchor_raw", -1)` in `build_dspark_inp_block` closed the last input question
+and exposed the real defect in the process.
+
+    cos(ref position 0, tok_norm(anchor_raw)) = +1.000000    rms 0.9760 both
+    cos(ref position 1, mask_embd row)        = +1.000000    rms 0.5956 both
+    cos(ref noise_norm-0, rms(x0, blk.0.attn_norm)) = +1.000000  rms 0.8378 both
+    cos(ref noise_norm-1, ...) = +0.0905     cos(ref noise_norm-2, ...) = +0.0979
+
+So every stage before layer 0's attention is now confirmed exactly against the reference: the block input (anchor row AND mask
+row), and the first layer's pre-attention norm. `noise_norm-1` and `-2` differ only because they are downstream of layer 0's
+output. **The divergence is inside layer 0's attention or FFN.**
+
+**And it explains the whole session's 0/7.** `cos(dspark_anchor_raw, our_embd.bin) = +0.0657` - the vector our engine dumps as the
+"anchor embedding" is *not* the anchor token's token embedding. Every tap hypothesis, every RoPE convention, every position offset
+tried in this document was run with a wrong anchor row in slot 0. My construction was right (`tok_norm(token_embd[anchor])`, which
+reproduces the reference to 1.000000) and the input was wrong - which is exactly the class of error that survives every
+architecture-level check while making all of them look like failures.
+
+Note also what the reference's own tensors say about the mask: all seven `mask_embd` rows are identical, a single broadcast vector
+(rms 0.5956). Our code indexes them individually, which happens to be equivalent.
+
+**Two facts about the embedded `our_embd.bin` worth fixing separately:** it disagrees with the reference's raw anchor (0.066) and
+also with the Strata pack's `model.llm.embed.weight` row 220 (0.137), so the engine's `IN2_DUMP_EMBD` is dumping something that is
+neither. That is a bug in our tooling, not in the drafter, and it should be fixed before the parity harness relies on it.
+
+**Next step:** dump `Qcur`/`Kcur`/`Vcur` for layer 0 (the reference already `cb`s them as `Qcur-0` etc.) and compare against
+`dflash_ref.py`'s layer-0 projections, which splits the remaining divergence into attention versus FFN in one measurement.
