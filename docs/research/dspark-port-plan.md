@@ -2468,3 +2468,15 @@ test_draft_block.c now runs the WHOLE drafter in C in one binary: the 3-layer bl
   proposed greedy chain: C [68014 40 6 359 151016 149878 150046] == numpy [68014 40 6 359 151016 149878 150046] (7/7)
   (h already corr 1.0 across all 8 slots)
 So the drafter is fully ported to C and reproduces the reference from raw anchor+mask+taps inputs. That completes every standalone drafter piece. Remaining for a measured speedup is the engine splice: capture the 4 target taps and the anchor embedding from the live trunk during gen_fast decode, feed them to this C drafter to propose up to K informed drafts, verify them in the proven-bit-identical batched forward, accept/replay - then measure forwards/token and tok/s vs the 4.56 baseline (same-backend vs upstream) and only claim on the numbers.
+
+## MEASURED: batched verification is NOT cheaper than sequential on this CPU engine - speculation via batch-verify can't win here
+
+Timing gen_fast (Ryzen 8645HS, gcc -O3/OpenMP) with IN2_BATCH_PROBE after the 3-token oracle prefill: batched-2 forward 1.470 s vs two
+sequential 1-token forwards 1.230 s (both include the same prefill). Delta +0.24 s for the pair - the batched n_tok=2 forward runs at
+roughly 1.7x the per-token cost of sequential decode, not less. (The prefill dominates; decode portion is batched ~285 ms/tok vs
+sequential ~165 ms/tok.) So even though the batched path is bit-identical to sequential (proven earlier), the engine's batched
+forward is computationally MORE expensive per token, so speculative verification via batch does not amortize on this CPU build -
+the skeleton's "batched path" concern was about cost as much as correctness. Conclusion: the speed clause cannot be met by batch
+verifying the already-correct drafter drafts on this CPU engine; that would only slow throughput. "Faster than upstream" here would
+require a genuinely cheaper per-token trunk forward (kernel/compute work, the WuBuMM / wubuOS GPU direction), not speculative
+batching. The drafter port is complete and exact; the speed mechanism as measured does not reward it on CPU. No speedup is claimed.
