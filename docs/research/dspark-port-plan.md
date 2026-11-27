@@ -2185,3 +2185,24 @@ on ubatch/n_embd_state wiring, and they interleave in the same server.
 draft-dspark` + Inkling-2-Mini by dumping `dspark_joint_in` (5120 => graph_dspark; 2816 => graph_dsv4) and `result_norm` presence in
 the SAME run that also dumps hidden_i and l_out. That pins the graph and makes hidden-rows-2-7 interpretable (draw rows if graph_dspark,
 block rows otherwise).
+
+## CONFIRMED single-run: hidden rows 2-7 are not any block result_norm; joint is 5120 so the graph is graph_dspark
+
+dump_fork (one serve): `dspark_joint_in` width **5120** => the markov call is graph_dspark:510 (rnn_state/f_rnn present), NOT graph_dsv4.
+Reading `hidden` directly as the joint slice [512:2816] and comparing against every row of every `result_norm` occurrence in the SAME
+run:
+
+    step1  hidden rms 3.1716  closest result_norm row 1.74-2.12  (but == norm(l_out slot1) exactly from the paired test)
+    step2  hidden rms 1.6270  closest (result_norm occ1 row6) d 1.8772
+    step3  1.6243                                                           1.7726
+    step4  1.5653                                                           1.7722
+    step5  1.6670                                                           1.7611
+    step6  1.6091                                                           1.7537
+    step7  1.5738                                                           1.7442
+
+Rows 2-7 are near-constant rms 1.57-1.67; every block `result_norm` row is 2.1-3.4. No occurrence/row matches. Since joint=5120
+(graph_dspark, rnn_state present) and f_rnn is on, and `hidden` row 1 IS the block output while rows 2-7 are a distinct constant-rms
+tensor, the draw-row hypothesis is now supported with hard numbers: rows 2-7 carry the per-step draw state. The one remaining
+confirmation is to dump `rnn_state` and check rows 2-7 of `hidden` == the draw rows `[token, n_cand, ids, probs]` packed by
+`draw()` (dspark.cpp:308-333). This ends the fork question and keys the port: the markov head's hidden for i>=2 is the draw state, not
+the block norm.
