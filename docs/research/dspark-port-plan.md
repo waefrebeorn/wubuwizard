@@ -2098,3 +2098,19 @@ rows 2-7 that are some function of the drawn tokens - and therefore would not eq
 chain 11 -> 40 -> 150261 -> 149882 -> 150367 -> 149876 -> 220) into the block input slots instead of `mask_embd`, run the block, and
 see whether `hidden` rows 2-7 then match the reference - or inspect how `build_dspark_inp_block`/`build_inp_noise` assembles draft-slot
 embeddings for the token-batch draft graph at `dspark.cpp` around line 470-500.
+
+## Draft-slot inputs ARE the fixed mask rows; wubumm glean (WuBuMath SIMD kernel route)
+
+Closed the "real embeddings" hypothesis from the call-site read: `graph_base::build_layers` assembles the block input via
+`build_dspark_inp_block` (dflash.cpp:447-448), and dspark.cpp:220-221 takes the draft-slot masks directly from
+`model.dspark_mask_embd` (shape {n_embd, block_size-1} = 7 rows of 2304, col-major => rows 0..6 of the mask weight). The token-batch
+draft graph and our model both put the fixed mask rows in slots 1-7, so mask-vs-real embedding is NOT what separates hidden row 1
+(bit-exact) from rows 2-7 (rms 1.57-1.67 vs our 2.2-2.4). The remaining candidates are the position assignment (inp_pos) or the mask row
+order in the block.
+
+**wubumm = WuBuMath** (no separate "wubumm" repo exists on this machine or on GitHub; WuBuMath origin is up to date at 2026-11-26).
+Relevant math-optimization content to fold into the engine going forward: `include/jax_simd.h` is a portable C11 SIMD layer - AVX2 8x8
+FMA GEMM micro-kernel (broadcast-A / contiguous-B, `_mm256_fmadd_ps`), NEON 4x4, scalar fallback, SIMD batch relu/gelu/silu/tanh
+(`jax_act_batch`); no external deps, selected by `__AVX2__`/`__ARM_NEON__`. This is the direction the user is researching for the math
+optimization route and is directly relevant to the wubuwizard GEMM/RMSNorm path. Only two test compute shaders (mobius_add, poincare_dist)
+in `shaders/`; no embedded CUDA/Vulkan infer kernels yet.
