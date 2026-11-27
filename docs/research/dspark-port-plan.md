@@ -1646,3 +1646,34 @@ output, only its rms.
 **Next step:** dump the reference's own `logits` for this graph (the default dump pattern already includes it) and compare against
 our `base` for the same slot. That separates "wrong unembed/orientation" from "wrong h" in one measurement, instead of guessing
 between them.
+
+## The block is exonerated by the reference's own tensor - the unembed is the failure
+
+The decisive test: feed the reference's **own** `l_out-2` (occurrence 1, the `E[11]` graph) through our norm and head, so nothing of
+our block is in the path.
+
+    h from reference l_out-2, our output_norm, our unembed   -> slot1 argmax 157014   (expected 68014, rank 164008)
+
+So the block, the positions, the ctx and the layers cannot be the cause: with the reference's own layer-2 output we reproduce the same
+wrong token. The remaining path is `build_norm(output_norm)` then `get_lm_head` (dflash.cpp:552-561, and line 544 shows an optional
+per-layer `out_scale` we do not apply).
+
+Norm variants tested on that same reference tensor, none of which recover the token:
+
+    raw x, no norm        slot1 top3 [1815, 1557, 150725]   rank(68014) 183218
+    unit rms norm         slot1 top3 [1815, 1557, 150725]   rank(68014) 183218
+    our output_norm       slot1 top3 [157014, 740, 194320]  rank(68014) 164008
+
+**Our `unembed.f32` is the problem, and its provenance is unverified.** `tools/gguf_extract.py --list` on the trunk
+(`Inkling-2-Mini-UD-IQ2_XXS.gguf`) fails with `unsupported type 23`, so this table cannot have come out of that extractor run against
+that file - the 463,159,296-float (201024 x 2304) table we are multiplying against has no verified origin. Two concrete reasons to
+distrust it beyond the wrong argmax: the trunk stores 201024 rows while the drafter's markov projections are 200058 wide with **no
+d2t mapping tensor**, and `output_norm.weight` from the same f32 directory has rms 3.0924 with range -5.06..13.12, implausible for
+an RMSNorm gain (this was flagged as suspect long before today and is still unverified).
+
+Rank 164008 out of 200058 is what a *random* row set would give, which is the signature of a wrong matrix rather than a near-miss.
+
+**Next step:** get ground truth before changing anything - dump the reference's own `logits` for this graph and record its top-k for
+slot 1, then either (a) extend `gguf_extract.py` to the trunk's quant types so `unembed.f32` can be re-derived and diffed against the
+file, or (b) take the embedding/output tensors from a GGUF the extractor already supports. Do not adjust the block again: it is now
+verified against the reference to 0.6-0.5% per layer using the reference's own intermediate tensors.
