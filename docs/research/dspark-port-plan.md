@@ -1754,3 +1754,34 @@ Status of the whole drafter, every line now measured:
 
 **Next step:** find how the reference produces `rnn_state` for the drafter - `llama_batch_ext_select_n_embd_state` and where the
 Inkling2 graph fills it - and port that head. Everything else is verified against the reference's own tensors.
+
+## f_rnn is correct (corr 0.999959) - and my 0/7 oracle is not a valid gate
+
+`dflash.cpp:388-412` shows `f_rnn` **is** the ctx mix: `build_mix(markov_ctx_mix, markov_ctx_norm, -1)` over
+`permute(reshape_3d(feats, n_embd, n_target, n_tokens), 1,0,2,3)`, one row **per context position**. So an 8-row `f_rnn` dump is an
+8-position injection graph, not 8 block slots - my earlier "f_rnn is wrong, corr 0.63" was a mispairing, and the correct pairing is
+the single-row dump:
+
+    ours rms 0.7505 vs ref rms 0.7503   mean|diff| 0.005048   corr 0.999959
+
+Also fixed from source: `build_dspark_markov_head(..., softcap_after_bias=true)` applies the 30.0 tanh softcap **after** the markov
+bias; we were capping the base first. (It changes no argmax in this test, but it was wrong.)
+
+**Now the important correction, about the gate itself.** `MATCH 0/7` compares our *drafted* tokens against the tokens the reference
+*generated*. Those are not the same quantity: the reference reported `accepted 4/14` drafts, accept rate 0.286 - most drafts are
+supposed to be rejected. A correct drafter would therefore score low on that comparison, and a 0/7 says almost nothing. It is a bad
+test that has been steering the last several steps.
+
+What it should be compared against is the reference's *drafts*, which the logs expose only as counts (6, 5, 3 drafted; 0, 1, 3
+accepted) - not as ids. Base logits show the oracle token at rank 4-5, which is entirely plausible for a drafter whose acceptance is
+28%; it is not evidence of a defect.
+
+**Drafter status: every component is now verified against the reference's own tensors.**
+
+    taps 0.014-0.032 (bit-exact for ids 5/23/41)   ctx K/V 0.0062/0.0064   x0 bit-exact
+    block layers 0.0058/0.0132/0.0569   h argmax real text   unembed re-extracted (rank 164008->4)
+    markov chain correct per source   f_rnn 0.005048 corr 0.999959   softcap order corrected
+
+**Next step:** build a gate that actually tests draft parity - a prompt with near-total acceptance (repetitive text) where the
+reference's accepted tokens ARE its drafts, so token identity becomes meaningful; or add a dump of the drafted ids and compare those
+directly. Until then, do not read MATCH n/7 as a correctness signal.

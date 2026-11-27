@@ -166,8 +166,8 @@ def forward(dr, anchor_emb, taps, ctx_pos, blk_pos, taps_frnn=None):
         x = dr.block(x, taps, ctx_pos, blk_pos, L)
         print(f"  layer {L}: rms {np.sqrt((x.astype(np.float64)**2).mean()):.4f}")
     h = rms(x, dr.get('output_norm.weight'))
-    base = h @ dr.unembed.T                                     # [8, vocab]
-    base = 30.0 * np.tanh(base / 30.0)                          # softcap
+    base = h @ dr.unembed.T                                     # [8, vocab] raw: softcap is applied AFTER the markov bias
+
     # f_rnn: the markov-side context mix
     mixm = dr.get('markov_ctx_mix.weight')
     mixn = dr.get('markov_ctx_norm.weight')
@@ -193,6 +193,7 @@ def markov(dr, base, h, f_rnn, anchor, n_draft, verbose=True):
         state = (c + g * (state - c)).astype(np.float32)
         mk = np.tanh(j[2 * R:3 * R]).astype(np.float32)
         col = base[i] + mk @ w2.T + w2b
+        col = 30.0 * np.tanh(col / 30.0)     # softcap_after_bias = true (build_dspark_markov_head(..., true))
         prev = int(np.argmax(col))
         out.append((prev, float(col[prev])))
         if verbose:
