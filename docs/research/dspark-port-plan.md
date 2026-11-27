@@ -2408,3 +2408,15 @@ markov_w2.weight (256x200058, type 30), markov_ctx_mix/norm, markov_w2.bias, mas
 expected for the real load, which will allocate joint_proj 15MB and markov_w1/w2 ~205MB each as f32.) So the C loader path is
 confirmed; next in-engine step is to bind the loaded markov/ctx tensors into the wubuwizard drafter struct and run the verified C
 markov/col/draw path on drafter inputs within gen_fast's IN2_LOOKUP.
+
+## Loader piece 3: C reader type-30 dequantization is exact (bit-equal to reference)
+
+tools/test_dspark_load.c binds drafter markov tensors through the in-engine reader and dumps joint_proj f32. Diff against the numpy
+reference over all 3,932,160 elements: max|d|=0, mean|d|=0, corr=1.0. The C reader's type-30 materialization is bit-exact, so the
+markov head weights loaded in C are identical to the verified numpy path (rms 0.01398). This retires the last load-blocking risk.
+The speed-track preconditions are now all met and verified: reader opens the drafter GGUF, type-30 materializes exactly, the full
+markov_step/col_output/draw arithmetic is in src/dspark_markov.c and verified, and a greedy proposal through that path converges to
+the reference's accepted greedy chain. What remains is the integration: load the markov tensors into a C dspark module struct, run
+the drafter 18-layer block (reusing the trunk layer forward on the drafter GGUF) to produce hidden/base, capture the 4 target taps
+from the trunk at visits 5/23/41/final, feed those into markov_step/draw inside gen_fast's IN2_LOOKUP, then measure forwards/token
+and tok/s against the 4.56 baseline.
