@@ -2227,3 +2227,18 @@ Our block output IS the markov head's `hidden` for the draft steps. All the earl
 RETRACTED - they compared against occurrence-1 hidden_i files, which belong to a different (later-context) graph. This confirms the block,
 positions (arange(8)+1), output_norm, and the markov hidden are ported to ~0.02. Remaining port items are now the two pure inputs that
 feed the joint: the initial rnn state (state=0 at step 1) and f_rnn (the ctx feature mix), plus the cumsum draw sampler and acceptance.
+
+## f_rnn reconstructed exactly: mix of the 4 target taps, rmsnormed with markov_ctx_norm (corr 0.999959)
+
+f_rnn = rmsnorm( sum_t markov_ctx_mix[t] * target_tap[t], markov_ctx_norm ), built at dflash.cpp:402-410 (feats reshape/permute
+[n_target,n_embd,n_tokens] then mul_mat by ctx_mix then rmsnorm by ctx_norm). Reconstructed from our four taps (V004/V022/V040/ourh1)
+with markov_ctx_mix=[0.2021, 0.0150, 0.7479, 0.0350] (sum=1.000) and ctx_norm rms 0.952:
+
+    dspark_frnn_i-7-0.bin (occurrence 0): ref rms 0.7503, reconstructed rms 0.75048, mean|diff| 0.005048, corr 0.999959
+
+That is an exact match at the draft graph (occurrence 0). (dspark_frnn_i-7-1 rms 0.7936 corr 0.63 is the later-graph occurrence again;
+dspark_frnn_i-1-0 is all zeros - the pre-markov step.)
+
+**All four joint inputs are now confirmed against the reference:** state init 0 (step1 slices 0.000), w1[prev] (bit-exact every step),
+hidden (= our block h, 0.019-0.021), f_rnn (= our ctx mix, 0.005 / 0.99996). The remaining port work is the state recurrence
+(gate*state+(1-gate)*cand), the cumsum draw sampler, and the confidence/acceptance head.
