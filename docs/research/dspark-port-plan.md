@@ -2398,3 +2398,13 @@ Greedy proposed chain: 68014 6 149882 149895 149878 220 68111 - which converges 
 proposal is one tested C path. Remaining for the in-engine speedup: feed this proposal with the drafter block's hidden/base (the 18
 dense layers) and the 4 target taps into IN2_LOOKUP replacing prompt-recycling, and re-measure forwards/token and tok/s vs the 4.56
 baseline.
+
+## Loader piece 2: the in-engine C gguf_reader opens the drafter GGUF and finds the markov tensors
+
+tools/probe_drafter.c (compiled with src/gguf_reader.c src/wubu_win.c src/wubu_dequant_fp4.c) opens dspark-Inkling-2-Mini-Q8_0.gguf:
+"GGUF v3, 58 tensors, 39 KV pairs", and gguf_find_tensor returns joint_proj.weight (dims 5120x768, type 30), markov_w1.weight and
+markov_w2.weight (256x200058, type 30), markov_ctx_mix/norm, markov_w2.bias, mask_embd, output_norm. The reader recognizes type 30
+(no dequant error). (The "tensor too large" lines are the probe passing a 64-float cap: this reader materializes the whole tensor -
+expected for the real load, which will allocate joint_proj 15MB and markov_w1/w2 ~205MB each as f32.) So the C loader path is
+confirmed; next in-engine step is to bind the loaded markov/ctx tensors into the wubuwizard drafter struct and run the verified C
+markov/col/draw path on drafter inputs within gen_fast's IN2_LOOKUP.
