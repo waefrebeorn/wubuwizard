@@ -158,3 +158,19 @@ tensor but does not move the whole decode, and each per-tensor resident call sti
 Conclusion: per-tensor device matvec does not beat the CPU engine on this host; the fused per-layer lane
 that reaches 16 tok/s in the Gemma engine (`wubu_gpu_qkv3/ffn3/attn_half`) is what gen_fast lacks. No
 speedup is claimed for gen_fast - the honest number is token-identical, 0.95x, and the route is fusion.
+
+## WHY gen_fast GPU ties CPU: coverage, not kernel (and the exact required type set)
+
+The engine's GPU trace (`IN2_GPU_TRACE=1`) names the problem precisely. gen_fast's resident hook routes to
+the device ONLY type 8 (Q8_0); every heavy tensor is refused (rc=-1) and falls back to CPU:
+  dense  attn_q: ty=14,12,18 refused ; attn_k: ty=8 OK, ty=13,18 refused
+  MoE    ffn_gate_up_exps: ty=19,17 refused ; ffn_down_exps: ty=42,40 refused
+So the per-token weight traffic gen_fast streams on CPU (696 MB dense + 369 MB experts + 469 MB head)
+stays on the CPU because wubu_cuda_quant.cu's resident-matvec kernels were built for the Gemma model's
+types (IQ2_M/8/21/etc.), not the Inkling UD set. RESSTAT confirms a hot cache exists (hit 5824 / miss 603,
+90.6%, budget=0) - it just caches only the type-8 slabs. The WHY-tie is therefore coverage, matching the
+model's rule: streaming a slow / uncovered path feeds it nothing.
+Required device resident-matvec types for gen_fast (from the refused trace): {8,14,12,13,18} dense and
+{19,17,42,40} expert. That tensor->type histogram is the spec for the kernel port; until those kernels
+exist no amount of fusion or residency helps gen_fast - the device refuses, correctly, and the CPU is the
+fallback. This is the same shape as the Gemma lane before its types were covered.
