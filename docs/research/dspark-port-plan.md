@@ -1049,3 +1049,31 @@ neither. That is a bug in our tooling, not in the drafter, and it should be fixe
 
 **Next step:** dump `Qcur`/`Kcur`/`Vcur` for layer 0 (the reference already `cb`s them as `Qcur-0` etc.) and compare against
 `dflash_ref.py`'s layer-0 projections, which splits the remaining divergence into attention versus FFN in one measurement.
+
+## A real loader bug found and fixed (ggml weight orientation) - acceptance unchanged, layer 0 still unresolved
+
+Comparing layer 0's projections against the reference exposed a genuine bug in `dflash_ref.py`, independent of everything else:
+
+    blk.0.attn_q projected with fromfile().reshape(2304,3072) then x @ W   -> q rms 1.6453
+    same tensor as .reshape(3072,2304) then x @ W.T                        -> q rms 1.9230
+    reference Qcur-0                                                        -> q rms 1.9231
+
+ggml stores `ne0` fastest, so element `(i, j)` sits at `i + ne0*j`; reshaping the flat file to the ggml dims `(ne0, ne1)` in
+row-major gives the **transpose** of the matrix the file represents. The correct reader is `reshape(ne1, ne0)` as `(out, in)` and
+`x @ W.T` for `mul_mat`. Only the corrected form reproduces the reference's magnitude (1.9230 vs 1.9231, against 1.6453 for the
+wrong one) - a 17% error in every projection, silently applied to all nine matmul sites.
+
+The `w()` helper in `dflash_ref.py` now does this, and the Markov head uses it too: `markov_w1` row `prev` (a contiguous 256-float
+run, which the old code sliced wrongly), `joint_proj` as `(768, 5120)`, `markov_w2` as `(vocab, 256)`.
+
+**What it did not fix:** acceptance is still 0/7, and the layer-0 projections still disagree in content even with the right
+magnitude - `cos(mine, ref Qcur-0)` is ~0.02 at every layout permutation tried (`[t,h,d]`, `[t,d,h]`, and both reference
+readings), while the norms agree to four decimals. Equal norm with orthogonal content is not a scaling or transposition problem;
+something upstream of the projection differs in *which* elements are combined, most plausibly the per-head norm axis or a
+pre-projection operation the reference applies that this forward does not.
+
+**Where the port stands, precisely.** Verified against the reference: block input (anchor row and mask row, both cos 1.000000),
+layer-0 pre-attention norm (cos 1.000000), `f_rnn` (cos 0.982), tap identity (layers 4/10/16/22, cos 0.99+ for three of four).
+Not yet verified: layer-0 q/k/v content, attention output, FFN, and the Markov chain. The divergence is inside layer 0's
+attention, and the next probe is to dump the reference's pre-norm `Qcur` (before `attn_q_norm` and RoPE) so the norm axis and the
+rotation stop being confounded with the projection.

@@ -78,6 +78,21 @@ class Drafter:
             self.t[name] = a
         return a
 
+    def w(self, name):
+        """Weight matrix as (out, in) so that `x @ W.T` matches ggml's mul_mat.
+
+        ggml stores ne0 fastest: element (i, j) sits at i + ne0*j. Reading the file with np.fromfile and reshaping to the
+        ggml dims therefore yields (in, out) in ROW-major, which is the transpose of what the file means. Verified against
+        the reference: blk.0.attn_q rms comes out 1.9230 either way, but only the transposed form matches the reference's
+        Qcur magnitude (1.9231 vs 1.6453 for the untransposed form).
+        """
+        dims = self.shapes[name]
+        flat = np.fromfile(os.path.join(self.d, name + '.f32'), dtype='<f4')
+        # ggml: element (i, j) lives at i + ne0*j, so reshaping to (ne1, ne0) yields the true (out, in) matrix.
+        a = flat.reshape(dims[1], dims[0])
+        self.t[name + '#w'] = a
+        return a
+
 
     def ctx_kv(self, taps, layer, ctx_pos):
         """taps: [4, T, 2304] -> K,V for this layer over ctx positions."""
@@ -85,8 +100,8 @@ class Drafter:
         cn = self.get(f'blk.{layer}.ctx_norm.weight')          # [2304]
         mixed = np.tensordot(mix, taps, axes=(0, 0))           # [T, 2304]
         mixed = rms(mixed, cn)
-        k = mixed @ self.get(f'blk.{layer}.attn_k_ctx.weight')  # [T, 1024]
-        v = mixed @ self.get(f'blk.{layer}.attn_v_ctx.weight')
+        k = mixed @ self.w(f'blk.{layer}.attn_k_ctx.weight').T  # [T, 1024]
+        v = mixed @ self.w(f'blk.{layer}.attn_v_ctx.weight').T
         T = k.shape[0]
         k = k.reshape(T, N_KV, HD)
         kn = self.get(f'blk.{layer}.attn_k_ctx_norm.weight')   # [128]
@@ -98,9 +113,9 @@ class Drafter:
         an = self.get(f'blk.{layer}.attn_norm.weight')
         h = rms(x, an)
         B = h.shape[0]
-        q = (h @ self.get(f'blk.{layer}.attn_q.weight')).reshape(B, N_HEAD, HD)
-        k = (h @ self.get(f'blk.{layer}.attn_k.weight')).reshape(B, N_KV, HD)
-        v = (h @ self.get(f'blk.{layer}.attn_v.weight')).reshape(B, N_KV, HD)
+        q = (h @ self.w(f'blk.{layer}.attn_q.weight').T).reshape(B, N_HEAD, HD)
+        k = (h @ self.w(f'blk.{layer}.attn_k.weight').T).reshape(B, N_KV, HD)
+        v = (h @ self.w(f'blk.{layer}.attn_v.weight').T).reshape(B, N_KV, HD)
         q = rms(q, self.get(f'blk.{layer}.attn_q_norm.weight'))
         k = rms(k, self.get(f'blk.{layer}.attn_k_norm.weight'))
         q = rope(q, blk_pos)
@@ -127,14 +142,14 @@ class Drafter:
         p = np.exp(att)
         p /= p.sum(axis=-1, keepdims=True)
         o = np.einsum('bhk,khd->bhd', p, V.astype(np.float64)).astype(np.float32)
-        o = o.reshape(B, N_HEAD * HD) @ self.get(f'blk.{layer}.attn_output.weight')
+        o = o.reshape(B, N_HEAD * HD) @ self.w(f'blk.{layer}.attn_output.weight').T
         x = x + o
 
         h2 = rms(x, self.get(f'blk.{layer}.ffn_norm.weight'))
-        gate = h2 @ self.get(f'blk.{layer}.ffn_gate.weight')
-        up = h2 @ self.get(f'blk.{layer}.ffn_up.weight')
+        gate = h2 @ self.w(f'blk.{layer}.ffn_gate.weight').T
+        up = h2 @ self.w(f'blk.{layer}.ffn_up.weight').T
         act = (gate / (1.0 + np.exp(-gate))) * up        # silu(gate) * up
-        x = x + act @ self.get(f'blk.{layer}.ffn_down.weight')
+        x = x + act @ self.w(f'blk.{layer}.ffn_down.weight').T
         return x
 
 
@@ -157,22 +172,22 @@ def forward(dr, anchor_emb, taps, ctx_pos, blk_pos, taps_frnn=None):
 
 
 def markov(dr, base, h, f_rnn, anchor, n_draft, verbose=True):
-    w1 = dr.get('markov_w1.weight')      # [256, vocab]
-    w2 = dr.get('markov_w2.weight')      # [256, vocab]
+    w1 = dr.w('markov_w1.weight')        # (vocab, 256): row `prev` is that token's embedding
+    w2 = dr.w('markov_w2.weight')        # (vocab, 256)
     w2b = dr.get('markov_w2.bias')       # [vocab]
-    jp = dr.get('joint_proj.weight')     # [5120, 768]
+    jp = dr.w('joint_proj.weight')       # (768, 5120)
     jb = dr.get('joint_proj.bias')       # [768]
     state = np.zeros(R, dtype=np.float32)
     prev = int(anchor)
     out = []
     for i in range(1, n_draft + 1):
-        w1p = w1[:, prev]
-        j = np.concatenate([state, w1p, h[i], f_rnn]) @ jp + jb
+        w1p = w1[prev]
+        j = np.concatenate([state, w1p, h[i], f_rnn]) @ jp.T + jb
         g = 1.0 / (1.0 + np.exp(-j[:R]))
         c = np.tanh(j[R:2 * R])
         state = (c + g * (state - c)).astype(np.float32)
         mk = np.tanh(j[2 * R:3 * R]).astype(np.float32)
-        col = base[i] + mk @ w2 + w2b
+        col = base[i] + mk @ w2.T + w2b
         prev = int(np.argmax(col))
         out.append((prev, float(col[prev])))
         if verbose:
