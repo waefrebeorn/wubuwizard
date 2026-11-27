@@ -91,7 +91,8 @@ static double wall_now(void)
 int main(int argc, char **argv)
 {
     const double t_proc = wall_now();
-    const char *path = "C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf";
+    const char *path = getenv("IN2_MODEL") ? getenv("IN2_MODEL")
+        : "C:/Users/eman5/models/inkling-2-mini/Inkling-2-Mini-UD-IQ2_XXS.gguf";
     if (argc < 3) { fprintf(stderr, "usage: %s <n_gen> <token> [token ...]\n", argv[0]); return 2; }
     const int n_gen = atoi(argv[1]);
 

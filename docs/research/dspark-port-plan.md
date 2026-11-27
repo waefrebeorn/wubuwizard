@@ -2420,3 +2420,13 @@ the reference's accepted greedy chain. What remains is the integration: load the
 the drafter 18-layer block (reusing the trunk layer forward on the drafter GGUF) to produce hidden/base, capture the 4 target taps
 from the trunk at visits 5/23/41/final, feed those into markov_step/draw inside gen_fast's IN2_LOOKUP, then measure forwards/token
 and tok/s against the 4.56 baseline.
+
+## The drafter block is a separate dense arch: it needs its own small forward, not the trunk loader
+
+Loading the drafter GGUF through wubu_inkling2_load fails by design: that loader's required-map is hard-coded to the 24-layer MoE
+trunk (ffn_gate_up_exps / ffn_down_exps / router / per-expert scales / loop-core / attn_res_query), and the drafter is 18 dense
+layers with none of those. wubu_inkling2_probe returns ERR_MISSING_TENSOR, so "probe failed". The per-layer attention shapes ARE the
+same, but the drafter arch (dense, 18 layers, per-layer attn_k_ctx + ctx_mix/ctx_norm, no MoE/gate/res-loop) is structurally
+different, so reusing the trunk forward is not a drop-in. The remaining build is a small dedicated drafter-arch forward (~18 dense
+H3-style KV layers with mask-slot input), fed by the already-verified gguf_reader, producing hidden/base for the markov head. This
+is deliberate, verifiable engineering - added IN2_MODEL override to gen_fast so the drafter GGUF can be exercised directly.
