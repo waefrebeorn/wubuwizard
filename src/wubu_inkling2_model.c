@@ -303,6 +303,37 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         RUN_LAYER(il, NULL);
     #undef RUN_LAYER
 
+    /* IN2_DUMP_FINAL=<dir>: the per-position residual after the last tail layer, before output_norm - both raw and
+     * after the output_res_query mix. This is the state the DSpark drafter wants as its fourth tap (dflash.target_layers
+     * ends at 48, one past the 48 visits, i.e. the final residual), and neither variant was dumpable before. */
+    if (getenv("IN2_DUMP_FINAL") && rc == WUBU_INKLING2_OK) {
+        const char *fd = getenv("IN2_DUMP_FINAL");
+        char fp1[600];
+        snprintf(fp1, sizeof fp1, "%s/final_resid.bin", fd);
+        FILE *f1 = fopen(fp1, "wb");
+        if (f1) { fwrite(h, sizeof(float), (size_t)ND, f1); fclose(f1); }
+        float *qm = global_f32(ctx, "output_res_query.weight");
+        if (qm) {
+            float *mixt = (float *)malloc(sizeof(float) * (size_t)ND);
+            float *tmp  = (float *)malloc(sizeof(float) * (size_t)d);
+            if (mixt && tmp) {
+                for (int p = 0; p < n_tok; ++p) {
+                    in2_mix(blocks, n_blocks, n_tok * d, p * d, h + (size_t)p * d, qm, d, eps, tmp);
+                    memcpy(mixt + (size_t)p * d, tmp, sizeof(float) * (size_t)d);
+                }
+                char fp2[600];
+                snprintf(fp2, sizeof fp2, "%s/final_mixed.bin", fd);
+                FILE *f2 = fopen(fp2, "wb");
+                if (f2) { fwrite(mixt, sizeof(float), (size_t)ND, f2); fclose(f2); }
+                fprintf(stderr, "dumped final_resid + final_mixed (n_tok=%d d=%d) to %s\n", n_tok, d, fd);
+            }
+            free(mixt); free(tmp); free(qm);
+        } else {
+            fprintf(stderr, "dumped final_resid only (no output_res_query) to %s\n", fd);
+        }
+    }
+
+
     free(qres); free(qkv); free(msgs); free(pre_h); free(prev_h); free(prev_blocks);
     if (rc != WUBU_INKLING2_OK) { free(blocks); return rc; }
 

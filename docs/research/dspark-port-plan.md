@@ -1229,3 +1229,41 @@ least-squares test showed (tap 3 unexplained by any combination, residual 1.56).
 **Next step:** dump our engine's final residual per position (after the last tail layer, before the final norm) and test it against
 tap 3. That is a small change at the end of the prefill path, and if it lands the context K becomes exact - the piece that has been
 loose since the ctx K measured 0.148 while the Q path measured 0.005.
+
+## Three of four taps are BIT-EXACT, and the fourth is an index past the last layer
+
+Dumping every visit input from the reference (`cb(cur, "trunk_inp", visit)` at all three sites in `inkling2-loop.cpp`) turns the
+tap question into a lookup:
+
+    tap 0 = visit 5    mean|d| 0.00000      (visit 4 -> 1.43)
+    tap 1 = visit 23   mean|d| 0.00000      (visit 22 -> 0.74)
+    tap 2 = visit 41   mean|d| 0.00000      (visit 40 -> 1.16)
+    tap 3 = no match   best visit 40 -> 2.88
+
+**0.00000 is not a loose match - that is bit-identical**, which means our trunk reproduces the reference's residual stream exactly
+at visits 5, 23 and 41. Given the engine's whole purpose is parity, this is the strongest confirmation the trunk has had: correct
+weights, correct schedule, correct numerics, at three widely separated points in the 48-visit sequence.
+
+And the ids are exactly the drafter's metadata, 0-based:
+
+    dflash.target_layers = [5, 23, 41, 48]
+
+So the fourth tap is **index 48 of a per-visit array**, i.e. one past the last layer. Two candidates for what lives there were
+tested, and neither is it:
+
+    reference post-tail residual (cb after the tail loop):  rms 2.210   vs tap3 rms 3.993   mean|d| 1.986
+    our engine's final residual (final_resid == L23_p2):    rms 2.516   vs tap3              mean|d| 1.822
+    our engine's final residual after output_norm:          rms 3.227                        mean|d| 2.226
+    our engine's final residual after the output_res_query mix: rms 0.861                     mean|d| 2.416
+
+So index 48 is neither the residual entering the LM head, nor the post-tail residual, nor the res-query mix of it. Since taps 0-2
+are bit-exact through the same mechanism, the mechanism is settled and only this one entry's *content* is unknown - it is some
+state with rms ~4, larger than the post-tail residual, that the trunk stores at the visit index one past its last layer.
+
+**New engine hook:** `IN2_DUMP_FINAL=<dir>` writes `final_resid.bin` and `final_mixed.bin` - the per-position residual after the
+last tail layer, raw and after the `output_res_query` mix. Verified `final_resid` is byte-identical to `L23_p2`, so the existing
+layer dump was already the post-tail residual and there is no off-by-one in the engine's naming.
+
+**Next step:** read the trunk side of the extraction - `common/speculative.cpp` sets `embd_row` and the trunk writes
+`layer_inp_src`; that code decides what sits at index `n_layer`. My guess-free answer requires reading how that buffer is sized and
+filled rather than testing more candidate states from our side.
