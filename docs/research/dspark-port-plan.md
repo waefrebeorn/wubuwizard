@@ -2386,3 +2386,15 @@ rc 0. This is the non-speculative baseline. The drafter integration targets rais
 must be re-measured against this baseline - and only a measured increase may be claimed. Note the fairness caveat: gen_fast is a CPU
 engine while the instrumented upstream reference runs on CUDA (RTX 4050); any cross-backend speed claim needs the same-backend
 comparison stated, otherwise it is invalid.
+
+## Unified C proposal path runs end-to-end: markov_step -> col_output -> draw
+
+tools/test_dspark_propose.c drives the whole markov proposal in C on real drafter data: dspark_markov_step (state carry + markov
+chunk) -> dspark_col_output (W2 bias, softcap 0) -> dspark_draw (greedy argmax). Result:
+    step1 col mean|d|=15.80 (occurrence-0 anchor-vs-E11 base mismatch, known)
+    step2 0.34 | step3 0.22 | step4 0.14 | step5 0.14 | step6 0.14 | step7 0.12
+Greedy proposed chain: 68014 6 149882 149895 149878 220 68111 - which converges to the reference's accepted tokens
+(149882 149895 149878 220), i.e. to the target-greedy continuation, as speculative acceptance requires. The full markov-based draft
+proposal is one tested C path. Remaining for the in-engine speedup: feed this proposal with the drafter block's hidden/base (the 18
+dense layers) and the 4 target taps into IN2_LOOKUP replacing prompt-recycling, and re-measure forwards/token and tok/s vs the 4.56
+baseline.
