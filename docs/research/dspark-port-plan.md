@@ -2206,3 +2206,24 @@ tensor, the draw-row hypothesis is now supported with hard numbers: rows 2-7 car
 confirmation is to dump `rnn_state` and check rows 2-7 of `hidden` == the draw rows `[token, n_cand, ids, probs]` packed by
 `draw()` (dspark.cpp:308-333). This ends the fork question and keys the port: the markov head's hidden for i>=2 is the draw state, not
 the block norm.
+
+## RESOLVED: hidden_i at occurrence 0 == our block h (0.02), all steps 2-7; the "1.6 rows" were occurrence-index misalignment
+
+The decisive reading came from `dspark_hidden_all`: there are TWO different `hidden` tensors across dump occurrences.
+- `dspark_hidden_all-7-0.bin` rms row-by-row [2.375, 3.172, 2.377, 2.187, 1.910, 1.917, 1.742, 1.710] = EXACTLY our h rows
+  [2.376, 3.167, 2.373, 2.180, 1.901, 1.905, 1.731, 1.702].
+- `dspark_hidden_all-7-1.bin` rms [2.307, 3.295, 1.627, 1.624, 1.565, 1.667, 1.609, 1.574] = the "mystery 1.6" values, a later graph.
+
+Pairing `dspark_hidden_i-<i>-0.bin` (occurrence 0) against our forward-block h in dump_fork:
+    step1  ref 3.12493  (this occ's row1)
+    step2  ref 2.37663  our 2.37291  d 0.02120
+    step3  ref 2.18691  our 2.17997  d 0.01911
+    step4  ref 1.91042  our 1.90082  d 0.01883
+    step5  ref 1.91716  our 1.90465  d 0.01971
+    step6  ref 1.74219  our 1.73067  d 0.01856
+    step7  ref 1.70975  our 1.70164  d 0.01878
+
+Our block output IS the markov head's `hidden` for the draft steps. All the earlier "hidden rows 2-7 are draw rows / not the block" notes are
+RETRACTED - they compared against occurrence-1 hidden_i files, which belong to a different (later-context) graph. This confirms the block,
+positions (arange(8)+1), output_norm, and the markov hidden are ported to ~0.02. Remaining port items are now the two pure inputs that
+feed the joint: the initial rnn state (state=0 at step 1) and f_rnn (the ctx feature mix), plus the cumsum draw sampler and acceptance.
