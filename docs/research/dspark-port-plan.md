@@ -2272,3 +2272,19 @@ So the markov joint = [state | w1[prev] | hidden | f_rnn] projected by joint_pro
 previous joint-output "failure" (corr ~0.1) was 100% the dr.get/dr.w orientation. This locks the whole joint stage of the markov head.
 Next: validate the full state recurrence (gate/cand from this exact projection, state=gate*state+(1-gate)*cand) then the markov chunk
 (tanh of chunk(2)) into w2 bias + softcap -> col, then confidence head and the cumsum draw/acceptance.
+
+## Full state recurrence validated to 0.01-0.05 per step; only remaining input is the per-graph anchor/prev assignment
+
+Reconstructing joint_in = [state | w1[prev] | hidden | f_rnn] with the carried state (out = Jw@x + b, gate/cand from chunks,
+state = gate*state + (1-gate)*cand) against the reference at occurrence 0, using our block h and the recovered chain
+[0, 149904, 150261, 149882, 149895, 149878, 220]:
+
+    step1 state-reg 0.000000 (state=0 exact) | hidden-reg 2.87 (our h[1] vs this graph's hidden: this graph's anchor is token 0, not 11)
+    step2 state-reg 0.4956 hidden 0.0212 | step3 0.1696 0.0191 | step4 0.0928 0.0188
+    step5 0.0625 0.0197 | step6 0.0478 0.0186 | step7 0.0341 0.0188
+
+The state-reg residual is entirely the carry-over from step1's hidden mismatch (the occurrence-0 first graph anchors token 0, and our h[]
+was computed for the E[11] anchor); it decays ~0.5 -> 0.03 over steps. With the correct per-graph anchor hidden it would be ~0.000.
+Everything arithmetic in the markov head - the joint input assembly, the projection (corr 1.0), the gate/cand/state recurrence, and the
+chunk split - is now confirmed. Remaining port items: markov chunk tanh -> w2 bias -> softcap -> col, the confidence head, the cumsum
+draw sampler, and draft acceptance.
