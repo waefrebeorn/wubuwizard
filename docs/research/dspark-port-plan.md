@@ -1906,3 +1906,31 @@ visible directly instead of by elimination.
 
 **Next step:** add `g.cb(joint_in, "dspark_joint_in", i)` on the concatenated tensor before `ggml_mul_mat`, dump, and compare the four
 256/2304/256-wide slices separately at step 2. This is the last unwatched point in the chain.
+
+## Joint input split by slice: step 1 is exact on all four, step 2 is misaligned - and my ref-draft order is suspect
+
+`g.cb(joint, "dspark_joint_in", i)` before the matmul, then the 5120-wide input split into its four parts:
+
+    step1  state 0.00000 (rms 0.000/0.000)   w1_prev 0.00000 (5.605/5.605)   hidden 0.02741 (3.167/3.172)   f_rnn 0.00485 (0.796/0.795)
+    step2  state 0.73863 (0.457/0.784)       w1_prev 3.55741 (5.963/6.853)   hidden 1.09122 (2.373/1.627)   f_rnn 0.49003 (0.796/0.865)
+    step3  state 0.81271 (0.542/0.803)       w1_prev 0.00000 (6.327/6.327)   hidden 0.83329 (2.180/1.624)   f_rnn 0.49003 (0.796/0.865)
+
+Three facts, each exact rather than inferred:
+
+1. **At step 1 every slice matches**: `state` zeros, `w1_prev` bit-exact, `hidden` 0.027, `f_rnn` 0.005. So the concat order is
+   `[state | w1_prev | hidden | f_rnn]`, `jp` is right, and our h row 1 and f_rnn are right.
+2. **At step 3 `w1_prev` is bit-exact again** (0.00000, rms 6.327 both) while at step 2 it is not (3.557). So our `prev` sequence is
+   right for steps 1 and 3 and wrong for step 2 - not a systematic offset, a single wrong link.
+3. **The reference's own `f_rnn` slice changes between steps** (rms 0.795 at step 1, 0.865 at steps 2-3) and the `hidden` slice at
+   step 2 has rms 1.627, which matches none of our h rows (2.376/3.167/2.373/2.180/1.901/1.905/1.731/1.702). Both indicate the
+   reference's per-step slices are **not in the order I assumed**.
+
+**This invalidates my own reference-draft ordering.** The `dspark_draws` tensor is explicitly permuted for block-major restore
+(`dspark.cpp:435-437`), so reading it row-by-row and calling the result "the reference's drafts in slot order" was wrong, and the
+`ref = [149904, 150261, ...]` chain I have been driving the comparison with is that misordered list. The 6/7 result therefore stands
+as *six of seven tokens appear in that list*, not as *six of seven at the right position*.
+
+**Next step:** derive the reference's true per-step order empirically instead of from the permuted dump - for each step, identify
+which token id's `w1` row matches the dumped `w1_prev` slice exactly (a 200058-way search, cheap), and which h row matches the dumped
+`hidden` slice. That reconstructs the reference's actual prev/hidden sequence, and only then is a positional score meaningful. Do not
+trust any positional claim built on `dspark_draws` row order.
