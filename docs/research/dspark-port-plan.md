@@ -1507,3 +1507,33 @@ extraction, not the block math.
 **Next step:** stop trusting `f32/` for these tensors - dequantize `mask_embd.weight` and `token_embd_norm.weight` directly out of the
 GGUF, and check whether the seven mask rows really are identical and whether our f32 copies match the file at all. Also dump
 `dspark_anchor_raw` per occurrence so the anchor token for each round can be identified instead of guessed.
+
+## x0 is bit-exact - and both of our errors were ours, not the model's
+
+Dequantised `mask_embd.weight` and `token_embd_norm.weight` straight out of the GGUF with `tools/gguf_extract.py` and compared with
+the `f32/` copies: **max|diff| 0.00000000** on both. The extraction was never wrong. Both F32 in the file, so this was a byte
+comparison all along.
+
+What *was* wrong, twice, in our own Python:
+
+1. **`mask_embd.weight.T`** - the tensor's 7 rows are byte-identical, and with `reshape(7, 2304)` (no transpose) they match the
+   reference's slots 1-7 at **0.000000** with corr 1.000. `.T` read the flat data column-wise and produced seven *distinct* rows that
+   each happened to carry rms 0.5956 - which is precisely why this looked like a near miss instead of a bug.
+2. **our anchor was normalised and the reference's is not** - `forward()` applied `rms(anchor_emb, token_embd_norm)`, giving rms
+   4.3168. The reference's slot 0 has rms **1.1826**, which is exactly the raw `E[11]` rms; raw vs slot 0 is
+   **mean|diff| 0.00000000, corr 1.00000000**. So this drafter loads no `tok_norm` and `build_dspark_inp_block`'s
+   `if (model.tok_norm)` is skipped. The maintainer note "the anchor is n_embed_norm(E[a])" describes a model that *has* a
+   `tok_norm`; this checkpoint does not, and I applied the doc instead of the file.
+
+With both fixed, the full 8-slot block input is bit-exact:
+
+    slot 0 (anchor, raw E[a])   0.00000000
+    slots 1-7 (mask rows)       0.000000   x7
+
+**Still 0/7 on the oracle.** Base logits peak on 1666/150688, h rms 2.368 against the reference's ~2.0-2.2. So with the input to the
+block now provably correct, the error is inside the block - attention, MLP, position handling or the ctx injection - and no longer
+attributable to extraction, layout or the anchor.
+
+**Next step:** compare the block's own layers now that x0 is exact - our post-layer-0/1/2 states against `l_out-0/1/2`, and `h`
+against `result_norm`, captured in a single run so the graph instances can be paired by slot count and by matching
+`inp_noise_embd` slot 0 to our `E[a]`.

@@ -27,6 +27,7 @@ import argparse, os, struct, sys
 import numpy as np
 
 N_EMBD, N_LAYER, N_HEAD, N_KV, HD, FF, R = 2304, 3, 24, 8, 128, 9216, 256
+N_MASK = 7          # dflash.block_size 8 = 1 anchor + 7 masks
 EPS = 1e-6
 THETA = 1e6
 
@@ -155,7 +156,11 @@ class Drafter:
 
 def forward(dr, anchor_emb, taps, ctx_pos, blk_pos, taps_frnn=None):
     tok = dr.get('token_embd_norm.weight')
-    x0 = np.concatenate([rms(anchor_emb[None, :], tok), dr.get('mask_embd.weight').T], axis=0)  # [8, 2304]
+    # x0 is bit-exact against the reference's inp_noise_embd: slot 0 is the RAW anchor embedding (this drafter loads
+    # no token_embd_norm - model.tok_norm is null, so build_dspark_inp_block's `if (model.tok_norm)` is skipped) and
+    # slots 1..7 are the mask rows. Verified 0.00000000 on every slot.
+    masks = dr.get('mask_embd.weight').reshape(N_MASK, N_EMBD)
+    x0 = np.concatenate([anchor_emb[None, :], masks], axis=0)  # [8, 2304]
     x = x0
     for L in range(N_LAYER):
         x = dr.block(x, taps, ctx_pos, blk_pos, L)
