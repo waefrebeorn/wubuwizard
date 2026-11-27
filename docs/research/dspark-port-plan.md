@@ -1189,3 +1189,43 @@ by L22". Everything downstream - the injected context K, the attention, and the 
 first layer after L16_p2 where the two disagree can be identified - the same bracketing technique that located the divergence to
 layer 0 earlier. In the engine that means comparing successive tail layer outputs against a reference dump of the same layers,
 which needs one more `cb()` in the trunk's tail loop.
+
+## Corrected again: the trunk is NOT the problem, and the tap list is in the drafter's metadata
+
+Two of last round's claims have to be retracted, both from better measurement.
+
+**The trunk is fine.** Dumping the reference's per-layer tail inputs (`cb(cur, "trunk_tail_in", il)` before `build_layer` in
+`inkling2-loop.cpp`) and diffing them against our residual dumps over 200 positions:
+
+    reference input to layer 19  vs our L18_p2   0.0267
+    reference input to layer 20  vs our L19_p2   0.0381
+    reference input to layer 21  vs our L20_p2   0.0496
+    reference input to layer 22  vs our L21_p2   0.0611
+    reference input to layer 23  vs our L22_p2   0.0774
+    reference input to layer 18  vs our L17_p2   0.2935
+
+The tail agrees to 0.03-0.08 - the same order as the taps that were already matching. So the earlier claim that "the trunk diverges
+between L16_p2 and L22" is **wrong**: there is no divergence in the tail. What diverges is only the *fourth tap*, and it is not one
+of the tail residuals:
+
+    tap 3 vs reference in18..in23    3.35 / 2.74 / 2.65 / 2.54 / 2.37 / 2.13
+    tap 3 vs our L21/L22/L23_p2      2.37 / 2.14 / 1.82
+
+**The tap list was in the drafter GGUF, and my GGUF reader was silently skipping it.** `dflash.target_layers` is an *array*, and
+`gguf_extract.read_header` skips arrays (it walks them only to advance the cursor). Reading it with the array-capable reader:
+
+    dflash.target_layers = [5, 23, 41, 48]
+
+That is the authoritative list, it matches the value inherited from the Strata manifest at the very start of this port, and it is
+**1-based against the 48 visits** our engine performs. Note the schedule in `inkling2-loop.cpp:84-120` is explicit that
+`res->t_layer_inp[visit++] = cur` records the residual *entering* each layer, visit-indexed - so the taps are layer inputs, not
+outputs, and visits 5/23/41 map to the inputs of layers 4/10/16, exactly the three we matched.
+
+**Which leaves id 48.** Visits are 0-based over 48 entries (0..47), so id 48 is one past the end: the natural reading is the
+residual *after* the last tail layer, i.e. the final hidden before `output_norm`. Our engine never dumps that per position -
+`IN2_DUMP_H` writes a single 2304-float row for one token - and none of our 48 residuals is it, which is precisely what the
+least-squares test showed (tap 3 unexplained by any combination, residual 1.56).
+
+**Next step:** dump our engine's final residual per position (after the last tail layer, before the final norm) and test it against
+tap 3. That is a small change at the end of the prefill path, and if it lands the context K becomes exact - the piece that has been
+loose since the ctx K measured 0.148 while the Q path measured 0.005.
