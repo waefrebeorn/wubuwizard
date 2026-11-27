@@ -1708,3 +1708,49 @@ a projection of h that is almost certainly meant to be applied first. 5120 = 20x
 **Next step:** read `build_dspark_markov_head` in `dspark.cpp:234+` and take the joint input layout from the source rather than
 inferring it from shapes, then fix `markov()`. Every input to the block is verified, the block is verified, and the head matrix is now
 verified; the markov chain is the last piece.
+
+## The markov chain is written correctly - and `f_rnn` is not what we compute
+
+Read `build_dspark_markov_head` (`dspark.cpp:234-390`) rather than inferring from shapes. The chain is:
+
+    for i in [i_draft_beg .. block_drafts):
+        w1_prev = w1[prev]                       # [R=256]
+        joint = concat(state[R], w1_prev[R], hidden_i[n_embd], f_rnn[n_embd])   # 256+256+2304+2304 = 5120
+        joint = joint_proj @ joint + bias         # [3R] = 768
+        gate = sigmoid(chunk0); cand = tanh(chunk1)
+        state = cand + gate*(state - cand);  markov = tanh(chunk2)
+        bias = w2 @ markov + w2_b                 # [n_vocab_draft]
+        ... base + bias -> pick
+
+`joint_proj.weight` is `[5120, 768]` in the file, which matches exactly `256+256+n_embd+n_embd`. Our `markov()` implements this
+line for line - the concat, the gate/cand/state recurrence, `tanh(chunk2)`, `w2 @ markov + bias`, `prev = argmax`. So the chain was
+never the bug, and the earlier "(768, 5120)" note in the code was just the transposed reading of the same tensor.
+
+**`f_rnn` is.** The reference's `f_rnn` comes from `rnn_state` - the *trunk* per-token rnn-head state passed through the batch
+(`llama_batch_ext_select_n_embd_state`, `state_rows(...)`), and it is **different for every block slot** (`ref slots identical?
+False`). Ours is a single vector, `rms(markov_ctx_mix . taps, markov_ctx_norm)[-1]`, identical for all slots:
+
+    ours (rms 0.7505) vs f_rnn-1 slot0   mean|diff| 0.492263   corr 0.630974
+    ours vs slot1                        0.588883   corr 0.479928
+    ours vs slot7                        0.659845   corr 0.269906
+
+Correlation 0.63 with a decaying profile is the signature of "the right kind of quantity at the wrong position": our ctx-mix
+reproduces something close to the anchor's state and nothing at all for later slots.
+
+**So the port is missing a component, not carrying a bug.** The drafter's markov conditioning needs the trunk's rnn head state per
+token, which we have never ported - the taps (layer inputs and final state) are not it, which is exactly why `markov_ctx_mix` over
+taps gets 0.63 and no better.
+
+Status of the whole drafter, every line now measured:
+
+    taps                 0.014-0.032   (bit-exact for target ids 5/23/41 via V{k-1})
+    ctx K/V              0.0062/0.0064
+    block x0             bit-exact (0.00000000 on all 8 slots)
+    block layers 0/1/2   0.0058 / 0.0132 / 0.0569
+    h                    matches the reference's result_norm rms, argmax now real text
+    unembed              re-extracted from Q8_0; oracle rank 164008 -> 4
+    markov chain         correct per source
+    f_rnn                WRONG - 0.63 corr, needs the trunk rnn head
+
+**Next step:** find how the reference produces `rnn_state` for the drafter - `llama_batch_ext_select_n_embd_state` and where the
+Inkling2 graph fills it - and port that head. Everything else is verified against the reference's own tensors.
