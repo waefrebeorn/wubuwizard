@@ -1412,3 +1412,27 @@ input). Both produced plausible-looking numbers in the 1.2-3.1 range that were p
 
 **Next step:** the same engine-to-engine discipline for the block/anchor path (`inp_block_anchor` -> 8-slot input -> 3 layers ->
 head), where the only remaining unverified inputs are the anchor embedding and the mask rows.
+
+## Upstream research settles the block contract (and confirms the 1-based tap list)
+
+Three independent sources, fetched rather than inferred:
+
+1. **ninfer-3090 maintainer notes** (`docs/maintainer/inkling2-model.md`): *"the anchor is `n_embed_norm(E[a])`, and the 7
+   masks are `mask_embd`"*; block size 8 = one anchor plus 7 drafts; **attention within the block is non-causal**
+   (`dflash.attention.causal = false`); the drafter borrows the target's `token_embd`, `token_embd_norm` and `output`.
+2. **ufrik's GGUF card** for a different draft: `dflash.target_layers = [6, 24, 42, 48]` explicitly documented as **1-based** -
+   which is exactly our `[5, 23, 41, 48]` 0-based, independently confirming the offset derived from the dumps.
+3. **unsloth's dspark README**: `--spec-draft-n-max` is clamped to 7 because the trained block size is 8 and *"the first slot of
+   each block is the last accepted token"*; mainline llama.cpp has no DSpark support yet, it is carried by the unsloth pin.
+
+So our `x0 = [rms(anchor_emb, token_embd_norm) ; mask_embd rows]` with 8 slots and non-causal block attention matches the
+documented architecture.
+
+**Dead end recorded so it is not chased again:** `inp_noise_embd` (cb in dflash.cpp) is *not* the block input. Dumped for a
+one-token prompt it has **2 slots**, rms 0.976, while our computed anchor has rms 4.317 and the mask rows 0.596. It belongs to a
+different (noise-embedding) branch of the file, and one slot did match the mask rows' rms exactly (0.5956) with mean|diff| 0.507,
+which is a permutation-shaped near miss, not a match. The block input is not exposed by an existing cb and would need its own hook.
+
+**Next step:** verify the drafter end-to-end on the thing that actually matters - drafted token identity against the reference's own
+draft - instead of continuing to match intermediate tensors one at a time. The intermediates are now all verified (taps 0.014-0.032,
+ctx K/V 0.005-0.037, output path 0.0318/corr 0.99993), so a token-level comparison is the only remaining meaningful gate.
