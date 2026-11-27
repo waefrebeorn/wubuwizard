@@ -2460,3 +2460,11 @@ uninitialized memory for the ctx keys), the final h matches the verified numpy r
 (2.3757 etc.), max|d| 9e-5. The block that produces hidden/base for the markov head is ported and validated. Remaining for the
 speed track: add base = h @ unembed.T in C, then bind h/base + f_rnn to the already-verified dspark_markov head to produce the
 draft proposal inside gen_fast's IN2_LOOKUP, then measure forwards/token and tok/s vs the 4.56 baseline before claiming anything.
+
+## COMPLETE C DRAFTER, END-TO-END: block + f_rnn + markov proposal all match the numpy reference
+
+test_draft_block.c now runs the WHOLE drafter in C in one binary: the 3-layer block (h, corr 1.0) + f_rnn = rms(markov_ctx_mix.taps, markov_ctx_norm) + the 7-step markov proposal (dspark_markov_step + dspark_col_output with softcap 30) fed by C-produced h/f_rnn and the drafter weights loaded through the in-engine gguf_reader (bit-exact type-30/8). Result vs the numpy reference:
+  f_rnn: corr 1.0, max|d| 0.0 (BIT-EXACT)
+  proposed greedy chain: C [68014 40 6 359 151016 149878 150046] == numpy [68014 40 6 359 151016 149878 150046] (7/7)
+  (h already corr 1.0 across all 8 slots)
+So the drafter is fully ported to C and reproduces the reference from raw anchor+mask+taps inputs. That completes every standalone drafter piece. Remaining for a measured speedup is the engine splice: capture the 4 target taps and the anchor embedding from the live trunk during gen_fast decode, feed them to this C drafter to propose up to K informed drafts, verify them in the proven-bit-identical batched forward, accept/replay - then measure forwards/token and tok/s vs the 4.56 baseline (same-backend vs upstream) and only claim on the numbers.

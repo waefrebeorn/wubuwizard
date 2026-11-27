@@ -14,6 +14,8 @@
 #include <string.h>
 #include <math.h>
 #include "gguf_reader.h"
+void dspark_markov_step(const float*,const float*,const float*,const float*,const float*,size_t,size_t,float*,float*);
+void dspark_col_output(const float*,const float*,const float*,const float*,size_t,size_t,float,float*);
 
 #define E 2304
 #define NL 3
@@ -62,7 +64,7 @@ static void rope_split_hd(const float *x, int H, int D, int pos, float *o) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 8) { fprintf(stderr, "usage: test_draft_block <gguf> <emb> <taps> <hout> <bout> <rmslog> <fout_after_layer>\n"); return 2; }
+    if (argc < 10) { fprintf(stderr, "usage: test_draft_block <gguf> <emb> <t1,t2,t3,t4> <hout> <bout_dummy> <rmslog> <fout_flags> <f_rnn_out> <base.bin>\n"); return 2; }
     gguf_ctx *ctx = gguf_open(argv[1]);
     if (!ctx) { fprintf(stderr, "OPEN FAIL\n"); return 1; }
     /* anchors + masks -> x0 */
@@ -176,9 +178,31 @@ int main(int argc, char **argv) {
     float h[B*E]; for(int b=0;b<B;++b) rms_f64row(&x[b*E],E,outnorm,&h[b*E]);
     /* unembed: read from a companion .f32 file (200058 rows x 2304) - engine dump; the test harness checks h only */
     FILE *ho=fopen(argv[4],"wb"); fwrite(h,4,B*E,ho); fclose(ho);
-    /* base via unembed matrix file (argv[5] base output) - we need unembed; write h only and let harness diff */
-    if (rmslog){ double s=0; for(int i=0;i<E;++i)s+=(double)h[i]*h[i]; fprintf(rmslog,"h_slot0 rms %.4f f_rnn slot n/a\n",sqrt(s/E)); fclose(rmslog); }
+    /* f_rnn = rms( markov_ctx_mix . taps , markov_ctx_norm ) (row 0, T=1) */
+    float *mmix=load_flat(ctx,"markov_ctx_mix.weight");
+    float *mcn=load_flat(ctx,"markov_ctx_norm.weight");
+    double mm_E[E]; double s0=0;
+    for(int e=0;e<E;++e){ double a=0; for(int t=0;t<4;++t) a+=(double)mmix[t]*tapbuf[t*E+e]; mm_E[e]=a; s0+=a*a; } s0=s0/E+EPS;
+    float f_rnn[E]; for(int e=0;e<E;++e) f_rnn[e]=(float)((double)mcn[e]*mm_E[e]/sqrt(s0));
+    FILE*fr=fopen(argv[8],"wb"); fwrite(f_rnn,4,E,fr); fclose(fr);
+    /* full markov proposal in C on the C-produced h/f_rnn, numpy base + drafter weights */
+    float *W1=load_flat(ctx,"markov_w1.weight");        /* ggml [256,200058] -> row-major (200058,256): elem(prev,r)=W1[prev*256+r] */
+    float *W2=load_flat(ctx,"markov_w2.weight");
+    float *b2=load_flat(ctx,"markov_w2.bias");
+    float *Jw=load_flat(ctx,"joint_proj.weight");
+    float *Jb=load_flat(ctx,"joint_proj.bias");
+    FILE *bf=fopen(argv[9],"rb"); float *base=malloc((size_t)B*VV*4); size_t bn=fread(base,4,(size_t)B*VV,bf); fclose(bf);
+    fprintf(stderr,"  base.bin floats=%zu (expect %d)\n",bn,B*VV);
+    const size_t R=256; float state[256]; memset(state,0,sizeof state); float markov[256]; float col[VV];
+    int chain[7]; int prev=0;   /* occ-0 anchor = token 0 */
+    for(int i=1;i<=7;++i){
+        dspark_markov_step(Jw,Jb,W1+(size_t)prev*R,h+(size_t)i*E,f_rnn,R,E,state,markov);
+        dspark_col_output(base+(size_t)i*VV,markov,W2,b2,VV,R,30.0f,col);
+        int am=0; for(int v=1;v<VV;++v) if(col[v]>col[am]) am=v; prev=am; chain[i-1]=am;
+        fprintf(stderr,"  c-draft %d: %d\n",i,am);
+    }
+    fprintf(stderr,"C proposed chain: %d %d %d %d %d %d %d\n",chain[0],chain[1],chain[2],chain[3],chain[4],chain[5],chain[6]);
+    printf("DONE wrote %d-byte h to %s and f_rnn to %s\n",(int)(B*E*4),argv[4],argv[8]);
     gguf_close(ctx);
-    printf("DONE wrote %d-byte h to %s\n",(int)(B*E*4),argv[4]);
     return 0;
 }
