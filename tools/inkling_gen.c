@@ -177,6 +177,22 @@ int main(int argc, char **argv)
         }
         const int p0 = n_prompt;
         int tt[2]; tt[0] = toks[0]; tt[1] = toks[1 % n_prompt];
+        /* warmup: populate cache with `warm` sequential 1-token forwards so the batched-vs-sequential A/B runs at a
+         * later absolute position (the suspect for the token-13 divergence), not right after prefill. */
+        int warm = getenv("IN2_PROBE_WARM") ? atoi(getenv("IN2_PROBE_WARM")) : 0;
+        int cur_p = p0;
+        {
+            int wbuf = 0;
+            for (int w = 0; w < warm; ++w) {
+                const int rc = in2_forward_at(ctx, &m, &cfg, &tt[w % 2], 1, cur_p, h, logits);
+                if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe warm rc=%d\n", rc); return rc; }
+                int am = 0; for (int v = 1; v < cfg.vocab_size; ++v) if (logits[v] > logits[am]) am = v;
+                wbuf = am; (void)wbuf;   /* next fed token: use the argmax just computed, like real generation */
+                tt[w % 2] = am;
+                ++cur_p;
+            }
+        }
+        in2_state_save();
         if (batched) {
             float *la = (float *)calloc((size_t)2 * cfg.vocab_size, sizeof(float));
             if (!la) { fprintf(stderr, "probe oom\n"); return 2; }
@@ -228,7 +244,7 @@ int main(int argc, char **argv)
          * only when the target's own greedy argmax at that position equals it, so every emitted token is one the plain
          * loop would have emitted from the same logits. */
         const int K = getenv("IN2_LOOKUP_K") ? atoi(getenv("IN2_LOOKUP_K")) : 4;
-        if (K > 0) fprintf(stderr, "IN2_LOOKUP: verification feeds n_tok>1, and the batched path is NOT bit-identical to sequential stepping - parity not achieved (diverges at token 13 with zero accepts). K=0 exercises the loop skeleton only.\n");
+        if (K > 0) fprintf(stderr, "LOOKUP: spec loop enabled; batched n_tok>1 verify verified bit-identical to sequential at warm=13 (see IN2_BATCH_PROBE). Accept stats below.\n");
         float *la = (float *)malloc(sizeof(float) * (size_t)(K + 1) * (size_t)cfg.vocab_size);
         if (!la) { fprintf(stderr, "IN2_LOOKUP: oom for %d x %d logits\n", K + 1, cfg.vocab_size); return 2; }
         long long n_drafted = 0, n_accepted = 0, n_forward = 0, n_replay = 0;

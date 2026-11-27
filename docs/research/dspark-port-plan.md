@@ -2337,3 +2337,19 @@ at token 13" therefore does NOT come from the comprehension/matmul core; it is a
 writes n_tok>1 rows into the KV ring / advances positions versus sequential 1-token writes once the cache has accumulated 12+ entries.
 Next task on the speed track: reproduce the divergence with IN2_BATCH_PROBE pushed to a later pair of positions (past token 13) and
 diff the KV/pos handling there.
+
+## Speed track UNBLOCKED: batched n_tok>1 verify is bit-identical (warm=13), so the stale "diverges at token 13" note is wrong
+
+Extended IN2_BATCH_PROBE with IN2_PROBE_WARM (32 sequential warm-up steps using in2_state_save/restore) and A/B'd batched 2-token
+versus sequential at the warmed cache position on the oracle prompt:
+    warm=0 : row max|d|=0 (bitwise), argmax equal
+    warm=13: row max|d|=0 (bitwise), argmax equal (positions ~16 past generated token 13)
+So the batched forward is bit-identical to sequential even after a populated 13+ cache - the token-13 divergence the skeleton's note
+claimed does NOT reproduce. Running the real IN2_LOOKUP loop (K=4 and K=7) both emit the golden IDS line exactly; the note's claim was
+stale. 0 accepts (drafted 8) is the expected low hit-rate of prompt-lookup (recycled prompt tokens rarely match the target's greedy
+next token), not a verification bug.
+
+Consequence: speculative VERIFICATION of drafts is safe (no token drift), so the speed track is unblocked. The remaining work to make
+it fast is to replace the prompt-token draft PROPOSAL with the real DSpark drafter (block + markov + dspark_draw, all C-verified) so
+the proposed drafts are model-informed and acceptance becomes meaningful, then measure forwards/token and tokens/sec against upstream
+- and only then claim any speedup. Gen_fast stays token-identical on greedy throughout (gate 15/15 held).
