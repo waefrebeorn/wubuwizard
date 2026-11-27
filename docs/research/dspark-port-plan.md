@@ -2052,3 +2052,27 @@ tensor than the block output we can see - most likely `hidden` inside the markov
 **Next step:** dump the whole `hidden` argument once per step (not the view) - `g.cb(hidden, "dspark_hidden_all", i)` - and compare it
 against `result_norm` for the same graph. That answers whether the markov head receives the block output at all at i>=2, instead of
 inferring from views.
+
+## result_norm is not the source of hidden_i, and hidden_all dumps only for steps 1 and 7
+
+Captured `inp_noise_embd`, `result_norm`, `dspark_hidden_all` and `dspark_hidden_i` in one serve, graph identified again as
+`inp_noise_embd-1` (slot 0 == `E[11]`).
+
+* `result_norm-1` is 8 x 2304, rows rms 3.61 / 3.56 / 3.32 / 3.70 / 3.50 / 3.25 / 2.16 / 3.29.
+* But `hidden_i` step 1 in the same serve had rms 3.1716 and matched `norm(l_out-2 slot 1)` **bit-exactly** (0.0000) in the earlier
+  single-serve test. `result_norm` row 1 here is 3.56, not 3.17. **So `result_norm` is a different tensor from `hidden`
+  (`res->t_embd`) - do not compare normed blocks against it.**
+* Also, a fixed-weight rmsnorm would give every row the same rms (rms of the weight), but `result_norm` rows span 2.16-3.70, which is
+  impossible for a single `output_norm.weight`. Either it incorporates per-row gating from somewhere, or it is not what the name
+  implies. Either way it is not on the markov/block critic path we care about.
+
+**`dspark_hidden_all` only produced files for i=1 and i=7** (i=1 one occurrence, i=7 eight). The same per-name occurrence counter is
+shared, and steps 2-6 did not write because the `hidden` tensor itself is only newly-allocation-flagged on the first and last
+iteration, or the dump deduplicates by internal pointer the way the graph reuses the same tensor. Whatever the mechanism, it means the
+`hidden` tensor pointer is reused across iterations 2-6 - so `hidden` is genuinely the same tensor each step, and `hidden_i` (the
+view at offset i) *should* be row i of it.
+
+That is exactly the contradiction left standing: row 1 of that tensor equals `norm(l_out-2 slot 1)` to bit-exact, but rows 2-7 of the
+view match none of `norm(l_out-2 slot j)` for any j. The next move is to read, not guess: trace what `hidden` actually is at the point
+`build_dspark_markov_head` is called in `dflash.cpp` (the `res->t_embd` argument) and whether it is reassigned between block
+invocations, instead of inferring from dumps.
