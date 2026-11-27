@@ -1436,3 +1436,38 @@ which is a permutation-shaped near miss, not a match. The block input is not exp
 **Next step:** verify the drafter end-to-end on the thing that actually matters - drafted token identity against the reference's own
 draft - instead of continuing to match intermediate tensors one at a time. The intermediates are now all verified (taps 0.014-0.032,
 ctx K/V 0.005-0.037, output path 0.0318/corr 0.99993), so a token-level comparison is the only remaining meaningful gate.
+
+## Token-level: our drafter is wrong (0/7), and the dump instrument is sampling the wrong graph
+
+The token gate, run properly: the reference on `"Hello"` returns ids `[11, 68014, 40, 23064, 76, 153221, 149882, ...]`
+and reports **4 accepted / 14 drafted** (accept rate 0.286, per-position 0.667/0.333/0.333). Feeding those ids as an oracle to
+`tools/dflash_ref.py` gives:
+
+    MATCH 0/7
+
+So every *intermediate* is verified but the draft is wrong - the error is in the block path, not the context path. Base logits peak
+on 2012/2010/156164 rather than 11, so the block output is not merely noisy, it is wrong.
+
+**The contract is now read from source, not guessed** (`dspark.cpp:194-227`):
+
+    anchors = token_embd rows of the first token of each block   -> cb "dspark_anchor_raw"
+    if (model.tok_norm) anchors = rms_norm(anchors, tok_norm)    <- our rms(anchor_emb, token_embd_norm)
+    masks   = dspark_mask_embd[0 .. block_drafts-1] repeated per block, concatenated on axis 1
+    return reshape_2d(cur, n_embd, n_tokens)
+
+So `x0 = [rms(E[a], tok_norm); mask rows 0..6]` **is** what the reference builds, in that order, with no embedding scale applied inside
+the builder. Our construction matches the source line for line.
+
+**Why `inp_noise_embd` looked like 2 slots - and why that is the real lesson:** the builder returns early for anything that is not a
+draft block (`block_drafts == 0 || n_tokens % n_blocks != 0 || block_drafts > block_size` -> plain `get_rows`), and the dump matcher
+writes *every* matching graph instance, last one wins. With `n_predict` 2 and 10 the captured tensor had n_tokens = 2, and the block
+`l_out-0/1/2` dumps likewise had **2 slots** - so none of those files is the 8-slot draft. Dumping is not enough here: the graph
+identity has to be in the filename.
+
+Also measured: the reference's `dspark_anchor_raw` has **rms 1.0001** and is uncorrelated with our raw `E[32269]` (rms 0.9661,
+mean|diff| 0.9907). Either that file is also from a reserve graph, or the anchor in the captured round is not token 32269 - not yet
+distinguished, and not to be concluded either way until the dump carries its graph identity.
+
+**Next step:** make the dump self-identifying before drawing any further conclusion from it - append `n_tokens` (and the ubatch
+n_seqs) to the dump filename in the `cb` helper - then re-capture `dspark_anchor_raw`, `l_out-*` and `result_norm` from a graph whose
+slot count is actually 8. Only then compare the block path. Every conclusion above that was drawn from a 2-slot file is provisional.
