@@ -1614,3 +1614,35 @@ which is why a 40% relative error in the attention term shows up as only 2-3% on
 
 **Next step:** compare our ctx `kc`/`vc` for layer 0 against `Kcur_injected-0` / `Vcur_injected-0` **from this same dump**, so the ctx
 K/V are checked in the exact graph the block runs in rather than in a separate serve.
+
+## The block is correct - the 0.371 was my ctx, and the error is now in the head
+
+The ctx K/V test exposed my own pairing error. In the graph anchored on `,` the block's *context* is `Hello`, not the anchor:
+
+    ctx from Hello taps   K mean|diff| 0.006227 (rms 1.8815 vs 1.8820)   V 0.006396 (rms 0.7372 vs 0.7371)
+    ctx from comma taps   K mean|diff| 0.574528 (rms 2.1064 vs 1.8820)   V 0.562015 (rms 0.6719 vs 0.7371)
+
+So `ctx_kv` was right all along, and the 0.371 attention gap was me feeding the anchor's taps where the previous token's belonged.
+With the correct ctx, the block matches the reference to well under a percent:
+
+    L0 ffn_inp   mean|diff| 0.00580   rms 0.8501 vs 0.8502
+    L0 l_out-0   mean|diff| 0.01316   rms 8.4522 vs 8.4496
+    L1 l_out-1   mean|diff| 0.02648   rms 8.8026 vs 8.8012
+    L2 l_out-2   mean|diff| 0.05692   rms 12.0064 vs 11.9958
+
+Textbook error accumulation - 0.6%, 0.16%, 0.3%, 0.5% - with no structural disagreement anywhere. The three block layers, the
+non-causal attention, the ctx injection, the conv-free SiLU MLP and the `ctx_len+1` positions are all verified against the
+reference. `h` is now rms 2.2132 against the reference's 2.2197 (it was 2.646 before the position fix).
+
+**The head is where it now fails.** `h` matches the reference but `base = h @ unembed.T` puts the oracle token at rank 163892, and
+`argmax` lands on 157014. So the block is producing the right state and something after it is wrong: the shared unembed matrix we use
+(`$TEMP/unembed.f32`, extracted from the *trunk*, 200058 rows of 2304) or its orientation, or the final norm's weight.
+
+One measurement to record as *not* evidence: `h rms` matching the reference's `result_norm` rms is coincidence-strength evidence at
+best - variance matches while the vector can still be wrong, exactly as with Q/K before the position fix. `result_norm` could not be
+paired by occurrence in this dump at all (no 8-slot instance), so `h` is **not** yet verified against the reference's own normed
+output, only its rms.
+
+**Next step:** dump the reference's own `logits` for this graph (the default dump pattern already includes it) and compare against
+our `base` for the same slot. That separates "wrong unembed/orientation" from "wrong h" in one measurement, instead of guessing
+between them.
