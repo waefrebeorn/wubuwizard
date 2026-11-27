@@ -1934,3 +1934,34 @@ as *six of seven tokens appear in that list*, not as *six of seven at the right 
 which token id's `w1` row matches the dumped `w1_prev` slice exactly (a 200058-way search, cheap), and which h row matches the dumped
 `hidden` slice. That reconstructs the reference's actual prev/hidden sequence, and only then is a positional score meaningful. Do not
 trust any positional claim built on `dspark_draws` row order.
+
+## The reference's true prev chain, recovered exactly - and it proves the drafts are SAMPLED, not argmax
+
+Instead of trusting the permuted `dspark_draws` ordering, each step's `w1_prev` slice was matched against all 200058 rows of
+`markov_w1.weight` (via `dr.w`, which is the accessor that reproduces a known-exact match; `dr.get` has the opposite orientation and
+gave a false "closest id" of 25944 at step 1 where the truth is 11 at 0.000000).
+
+    step1 prev 11   step2 prev 40   step3 prev 150261   step4 prev 149882
+    step5 prev 150367   step6 prev 149876   step7 prev 220        (all mean|diff| 0.000000)
+
+**Consequence 1: the reference does not pick the argmax of its own column.** At step 1 its `col` argmax is 149904, yet the token it
+feeds forward as `prev` at step 2 is **40**. So `is_greedy` is not active and the drafts come out of the top-k/cumsum sampler. That
+retires the entire "MATCH n/7 against generated tokens" framing - draft parity cannot be tested with an argmax at all.
+
+**Consequence 2: with the true chain the joint agrees closely at every step.**
+
+    step1 0.01671 corr 0.99998      step4 0.44494 corr 0.98391
+    step2 0.90614 corr 0.94943      step5 0.43011 corr 0.98638
+    step3 0.54786 corr 0.98177      step6 0.38510 corr 0.99024
+                                    step7 0.35741 corr 0.99398
+
+Step 2 remains the worst, but 0.9 on a joint of rms ~6 with corr 0.95 is a different animal from the 1.66/corr 0.81 seen with the
+wrong prev. Errors also decay monotonically after step 2 rather than growing, which is what a small per-step difference looks like when
+the prev chain is right.
+
+Note our own state chain was still used for these numbers, so part of the residual is our state drifting from the reference's; driving
+`state` from the reference's own joint is the clean isolation and has not been redone with the corrected chain.
+
+**Next step:** drive the chain with the reference's `joint` for `state` *and* the recovered prev chain, to see whether the residual
+0.36-0.91 collapses. Then implement the sampler (`top_k 64`, `inv_temp` from the rnn_state row, cumsum draw) so drafts can be compared
+as tokens at all - argmax parity is not the target.
