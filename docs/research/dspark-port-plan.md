@@ -1677,3 +1677,34 @@ Rank 164008 out of 200058 is what a *random* row set would give, which is the si
 slot 1, then either (a) extend `gguf_extract.py` to the trunk's quant types so `unembed.f32` can be re-derived and diffed against the
 file, or (b) take the embedding/output tensors from a GGUF the extractor already supports. Do not adjust the block again: it is now
 verified against the reference to 0.6-0.5% per layer using the reference's own intermediate tensors.
+
+## The unembed table was wrong - ranks 164008 -> 4. Re-extracted, verified by shape and rms.
+
+`gguf_extract.py` cannot read the IQ2_XXS trunk (`unsupported type 23`), and the `gguf` python package cannot either (the file carries a
+type 42 the released enum does not know). The Q4_K_XL trunk carries the same tensor as plain **Q8_0**, `output.weight [2304, 201024]`,
+which both can read:
+
+    fresh dequant (Q8_0)   shape (201024, 2304)  rms 0.020834
+    our old unembed.f32    same 463,159,296 floats  rms 0.029796
+    row 0: fresh rms 0.0208, old rms 0.0400, mean|diff| 0.034225
+
+Different rms and a row-0 difference the size of the vector itself - the table we had been multiplying against was not this matrix.
+
+With the fresh table, feeding our (block-verified) `h` through the head:
+
+    slot1 base top3 [11, 149904, 13]        oracle 68014 rank 4      (was rank 163892)
+    slot2 base top3 [13, 200008, 11]        oracle 40    rank 5
+    slot5 base top3 [13, 200008, 11]        oracle 149882 rank 162
+
+The argmax is now real text (`,`, `13`) instead of token 157014, and the oracle moved from rank ~164k to rank 4-5. That is the
+difference between a wrong matrix and a nearly-right one.
+
+**Still MATCH 0/7 on drafts**, and the failure has moved again: the drafts cluster in 1498xx with high scores while the base logits
+peak on 11/13, so the **markov head now dominates and is wrong**. `markov()` currently feeds `h[i]` straight into `joint_proj`
+(768x5120) alongside `state` and `w1[prev]` and `f_rnn`, but the drafter carries `dspark_hidden_out` (markov_head.hidden_out), i.e.
+a projection of h that is almost certainly meant to be applied first. 5120 = 20x256 does not match a naive
+`[state | w1 | h | f_rnn]` = 4x256 concatenation either, so the joint input layout is not what we assumed.
+
+**Next step:** read `build_dspark_markov_head` in `dspark.cpp:234+` and take the joint input layout from the source rather than
+inferring it from shapes, then fix `markov()`. Every input to the block is verified, the block is verified, and the head matrix is now
+verified; the markov chain is the last piece.
