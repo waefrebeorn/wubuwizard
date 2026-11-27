@@ -223,7 +223,7 @@ def main():
     emb = np.fromfile(a.emb, dtype='<f4')[:N_EMBD]
     anchor_pos = T - 1                        # slot 0 IS the anchor, at its own position
     ctx_pos = np.arange(T)
-    blk_pos = anchor_pos + np.arange(8)
+    blk_pos = np.arange(8)                    # the draft block is its own sequence, positions restart at 0 (verified vs Qcur-0)
     h, base, f_rnn = forward(dr, emb, taps, ctx_pos, blk_pos)
     print('[base] per-slot top-5 (before markov):')
     for i in range(8):

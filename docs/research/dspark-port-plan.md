@@ -1077,3 +1077,54 @@ layer-0 pre-attention norm (cos 1.000000), `f_rnn` (cos 0.982), tap identity (la
 Not yet verified: layer-0 q/k/v content, attention output, FFN, and the Markov chain. The divergence is inside layer 0's
 attention, and the next probe is to dump the reference's pre-norm `Qcur` (before `attn_q_norm` and RoPE) so the norm axis and the
 rotation stop being confounded with the projection.
+
+## Layer 0 verified exactly against the reference, and a second real bug fixed: the draft block's RoPE positions start at 0
+
+Dumping the reference's pre-norm projections (`cb(Qcur, "Qcur_raw", il)` right after the reshape in `build_layers`) split the
+remaining divergence cleanly, and corrected an earlier wrong conclusion of mine.
+
+**My "orthogonal content" claim last round was a bug in my own comparison code, not in the forward.** Comparing the reference's
+`Qcur_raw-0` against my `x @ W.T`-with-corrected-orientation projection by elementwise difference rather than cosine:
+
+    first values  mine [0.6077 -0.8311 0.7203 -1.6762 ...]   ref [0.6021 -0.8295 0.7189 -1.6781 ...]
+    max|diff| = 0.028017     mean|diff| = 0.005031     over all 6144 values
+
+That is Q8_0 dequantisation plus f32 rounding. The projections were right; my cosine was computed over mismatched layout views.
+This is the same failure mode as the tautological `rms_pre` earlier - a measurement that looks like evidence and isn't.
+
+**A second real bug: block positions.** Feeding Q through the per-head norm and NeoX RoPE and diffing against the reference's
+post-norm `Qcur-0`:
+
+    no rope   max|diff|  6.16674   mean 0.050178
+    rope@0    max|diff|  0.07677   mean 0.003223     <-- exact
+    rope@256  max|diff| 24.84287   mean 1.007973
+    rope@257  ... 24.9 / 0.98     rope@258  ... 25.0 / 0.99     rope@259  ... 25.0 / 1.01
+
+The draft block is its own sequence and its RoPE positions **start at 0**, not at the anchor's position. `dflash_ref.py` used
+`anchor_pos + arange(8)`; it now uses `arange(8)`. Every earlier tap/RoPE experiment in this document carried that error.
+
+**So layer 0 is now verified end to end up to attention:** block input (cos 1.000000 for both the anchor and mask rows), layer-0
+pre-attention norm (max|diff| 0), Q projection (max 0.028), Q after norm+RoPE (max 0.077), K and V raw (rms 2.1364 vs 2.1361).
+Acceptance is still 0/7, so what remains is attention composition, the FFN, or the Markov head - not the block input.
+
+**Taps re-identified by elementwise difference instead of cosine (cosine was what misled me before):**
+
+    tap 0  L04_p0   mean|d| 0.038866   max 3.36
+    tap 1  L10_p1   mean|d| 0.192188   max 11.22
+    tap 2  L16_p2   mean|d| 0.218398   max 19.15
+    tap 3  best candidate L23_p2, mean|d| 1.676690   max 81.82      <- no match
+
+Three of four are exact (the residual is quantisation). The fourth is **not any residual our engine dumps** - the tail layers are
+only dumped once, in pass 2, and neither L22_p2 nor L23_p2 fits. `IN2_DUMP_H` is no help: it writes a single 2304-float file for
+the final position only, not a per-position tensor.
+
+That fourth tap is the immediate suspect for the remaining error, since the injected context K - which mixes all four taps - is
+close but not exact:
+
+    Kcur_injected-0  rope@0:  mean|diff| 0.147888   max 7.45633     (vs ~0.005 for the Q path)
+
+One wrong tap out of four, weighted 1/4, is the right order of magnitude to produce exactly that.
+
+**Next step:** determine the fourth tap. The reference's own features give a target; the candidates our engine cannot currently
+produce (a per-position final hidden, or the tail block's last layer in a pass we do not dump) need a dump hook in the engine
+first - the same `IN2_DUMP_VISITS` machinery that produced the others, extended to emit the tail layers at every pass.
