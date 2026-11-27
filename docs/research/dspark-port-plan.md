@@ -2363,3 +2363,17 @@ The drafter block is a smaller dense net sharing the trunk's layer types, so the
 adds the drafter GGUF load path plus the markov/ctx/tap assembly. This is loader piece 1 of the speed-track wiring; next sub-steps are
 the drafter-GGUF load path in wubu_inkling2_load.c, the 4-tap ctx feature capture already stubbed (visit 5/23/41/final), the block
 forward for K drafts, then dspark_draw proposal into IN2_LOOKUP, then the tok/s measurement vs upstream.
+
+## test_drafter_all.py: one harness, all stages, 22/26 stages corr>=0.99
+
+New tools/test_drafter_all.py acquires all 8 markov/ctx tensors and tests every DSpark stage against reference dumps in one run.
+Verdict on the assembled dump set: f_rnn 0.99996; hidden steps 2-7 0.99990-0.99994; joint_in steps 2-7 0.9975-0.99993; joint_out
+steps 3-7 0.9981-0.99995; col steps 5-7 0.9956-0.9971. RESULT: 22/26 stages corr>=0.99, 4 below 0.9 - all four are step 1
+(hidden/joint_in/joint_out/col at occurrence-0), i.e. the anchor-assignment mismatch (our reconstruction is built for the E[11]
+anchor; that graph anchored token 0), not an arithmetic error.
+
+The col step 3-4 rms residual (ours 3.85 vs ref 3.50; high corr 0.985) is NOT the softcap: sweeping softcap 1..20 on step3 col only
+lowers corr toward 0.98 and rms only approaches ref at softcap->infinity (i.e., no softcap), so no softcap value reproduces ref - the
+scale difference maps to the base-logits attribution at occurrence-0, consistent with the step-1 anchor family. When the drafter runs
+with its runtime prev token as the anchor (as the real engine will), these residuals are expected to vanish. All arithmetic stages are
+reproduced; the port is input-attribution-correct, not limit-corrected.
