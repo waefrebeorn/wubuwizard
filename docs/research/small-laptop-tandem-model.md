@@ -174,3 +174,20 @@ Required device resident-matvec types for gen_fast (from the refused trace): {8,
 {19,17,42,40} expert. That tensor->type histogram is the spec for the kernel port; until those kernels
 exist no amount of fusion or residency helps gen_fast - the device refuses, correctly, and the CPU is the
 fallback. This is the same shape as the Gemma lane before its types were covered.
+
+## MEASURED (and REVERTED): opening the resident gate for types 17/18 engages them but breaks token identity
+
+The resident matvec dispatch ALREADY has device kernels for type 17 (IQ2_XS) and 18 (IQ3_XXS) but the
+allowlist gate refused them. Widening the gate alone (`type != 8 && !=16 && !=17 && !=18 && !=22 && !=23`)
+made the trace engage the tensors (`NT-GPU ok ty=18 blk.20.attn_q`), but two measured consequences killed it:
+  (a) the full 64-token IDS were NOT identical to CPU (GPU==CPU False) - the device IQ2_XS/IQ3_XXS
+      kernels are not bit-identical to gen_fast's CPU reference (they were validated against the Gemma
+      reference path, not this engine's per-type kernels);
+  (b) interleaved A/B was still a tie: GPU 4.77 (4.73-4.84) vs CPU 4.79 (4.75-4.82).
+So opening the gate is not the fix; it just silently routes tensors through a divergent kernel and gives
+no speed. The change was reverted (allowlist back to {8,16,22,23}), the DLL rebuilt, and the CPU oracle
+gate re-passed 15/15. The defined work is unchanged and now sharper: the device IQ2_XS/IQ3_XXS (and later
+the K-quants 12/13/14 and experts 19/42/40) kernels must be re-derived 1:1 from gen_fast's own CPU kernels
+(wubu_tqvec.c / the per-type CPU dots) until the token IDS are identical, THEN enabled - not enabled first
+and hoped to match. Gating on token identity over a 64-token run (not one tolerance number) is mandatory,
+because exactly this class of coverage change produces a tie in speed and a silent divergence in tokens.
