@@ -1875,3 +1875,34 @@ propagating.
 
 **Next step:** isolate step 2's inputs directly - dump the reference's `joint` output (`joint = joint_proj @ [state|w1|hidden_i|f_rnn]`)
 per step and compare against ours at step 2 only, which separates `h[2]` from `w1[prev]` without touching the recurrence again.
+
+## Step 2 survives every hypothesis - and each candidate is now excluded by measurement
+
+Added `g.cb(joint, "dspark_joint", i)` at `dspark.cpp:373`, immediately after the `joint_proj` matmul, so the per-step joint output is
+comparable. Per-step joint error (reference's own `prev` chain, our state chain):
+
+    step1 0.01671 corr 0.99998     step5 3.06454 corr 0.31720
+    step2 1.65930 corr 0.81188     step6 2.30938 corr 0.59641
+    step3 0.46827 corr 0.98623     step7 0.57339 corr 0.98529
+    step4 0.42868 corr 0.98474
+
+Then each candidate in turn, all excluded:
+
+* **state** - replaying the chain while taking `state` from the *reference's own* joint changes step 2 not at all (1.65946 vs 1.65930).
+  A quantity that does not move the result is not the cause. Five state-update variants (cand+g(s-c), cand, tanh(cand), g*c+(1-g)*s,
+  s+g*(c-s)) all land at 1.66-1.72 with corr 0.80-0.81.
+* **h[i]** - our `h` matches the reference's normed `l_out-2` per slot at 0.0062/0.0274/0.0212/0.0191/0.0188/0.0197/0.0186/0.0188,
+  corr >= 0.99990 on every slot. Slots 2, 5, 6 are not worse than the rest, so the joint errors are not coming from `hidden_i`.
+* **prev** - `prev=ref[1]` (149904) gives 1.65946; `ref[2]` (150261) gives 3.85423 corr 0.071; anchor 11 gives 3.95863 corr 0.085.
+  The index is right, decisively.
+* **chunk order** - step 1's column matched at 0.28 with `markov = tanh(chunk2)`, so gate/cand/markov assignment is right.
+* **concision of scale** - step 1 joint is 0.01671 with corr 0.99998 using the same `joint_proj`, `f_rnn` and concat order, so the
+  projection, the concatenation order and `f_rnn` are all correct at i=1.
+
+So step 2 is off by 1.66 while its own inputs are each verified to ~0.02, and no parameter choice within the chain moves it. That
+points at the one thing not yet dumped: the **concatenated input vector** itself (`[state | w1[prev] | hidden_i | f_rnn]`, 5120 wide).
+If that input matches the reference's, the discrepancy is inside the matmul's operand order; if it does not, the guilty component is
+visible directly instead of by elimination.
+
+**Next step:** add `g.cb(joint_in, "dspark_joint_in", i)` on the concatenated tensor before `ggml_mul_mat`, dump, and compare the four
+256/2304/256-wide slices separately at step 2. This is the last unwatched point in the chain.
