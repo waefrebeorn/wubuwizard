@@ -1378,3 +1378,37 @@ So all four drafter inputs are now either bit-exact or within 1%, and none of th
 
 **Next step:** recompute the ctx K in `tools/dflash_ref.py` with the corrected tap set and compare it against a dump of the
 reference's own `ctx_mix` output - the same engine-to-engine discipline that just retired the output-path doubt.
+
+## The drafter's whole context path is verified - and the dump was off by one layer
+
+Comparing our `ctx_kv` against the reference's own `Kcur_injected` / `Vcur_injected` (cb at dflash.cpp:425-426), on a one-token
+prompt so positions align and RoPE at position 0 is the identity:
+
+    using the reference's own feats:   K 0.0034-0.0046   V 0.0036-0.0195   (rms equal to 3 dp)
+    using our taps V004/V022/V040:     K 0.0052-0.0094   V 0.0064-0.0371
+    using our taps V005/V023/V041:     K 0.230-0.269     V 0.256-0.905
+
+So `tools/dflash_ref.py:ctx_kv` - `rms(sum_i ctx_mix[i]*tap_i, ctx_norm)` -> `attn_k_ctx`/`attn_v_ctx` -> `attn_k_ctx_norm` -> RoPE -
+**is correct**, and the 1.5-3.1 discrepancy in the middle row was our *dump naming*, not the engine or the port.
+
+`IN2_DUMP_VISITS` writes `h` after the layer has been applied (the surrounding code even labels the other hook `l_out-%d`), so
+`V005` is the **output** of visit 5, while the reference's tap for id 5 is the residual **entering** visit 5 - which is the output of
+visit 4:
+
+    tap for id k = our V{k-1}
+
+With that one-line correction our taps land 0.0139-0.0318 from the reference's, and the injected K/V land at 0.005-0.037.
+
+**Two measurement bugs, same family, both now recorded:** first the feats layout (after `permute(1,0,2,3)` the fastest axis is
+`n_target`, so `reshape(1,n_embd,n_target)` and transpose - not `reshape(-1,n_embd)`), then the tap index (layer output vs layer
+input). Both produced plausible-looking numbers in the 1.2-3.1 range that were pure artifact.
+
+**Status of the drafter context path: verified end to end.**
+
+    taps            0.014-0.032 from the reference
+    ctx mixed K/V   0.005-0.037
+    ctx math        correct in dflash_ref.py
+    output path     final hidden 0.0318, corr 0.99993
+
+**Next step:** the same engine-to-engine discipline for the block/anchor path (`inp_block_anchor` -> 8-slot input -> 3 layers ->
+head), where the only remaining unverified inputs are the anchor embedding and the mask rows.
