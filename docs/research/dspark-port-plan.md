@@ -2323,3 +2323,17 @@ be enabled until the engine's n_tok>1 batched forward matches the 1-token sequen
 task on the speed track: root-cause and fix the batched-vs-sequential divergence at token 13 (likely KV ring caching / pos handling or
 an accumulation-order difference in the batched kernel), then wire dspark_draw + the verified C markov head into IN2_LOOKUP and measure
 tok/s vs upstream - and only then can any speed claim be made. Token-identity on greedy remains gate-met (15/15) independent of this.
+
+## Batched-vs-sequential probe: bit-identical at the first draft slots, so token-13 divergence is a cache-write issue, not the kernel
+
+Using the engine's own IN2_BATCH_PROBE (prefill the oracle prompt 371 151451 149879, then compare a 2-token batched forward at
+positions n_prompt/n_prompt+1 against two sequential 1-token forwards, in the populated-cache speculation config):
+
+    row0 max|d|=0 (bitwise) argmax equal;  row1 max|d|=0 (bitwise) argmax equal
+    (the 1e30 spike seen first was a padding column at vocab index 200058+ within the 201024 buffer - irrelevant, argmax unaffected)
+
+So the batched n_tok=2 forward is bit-identical to sequential stepping at the first speculative positions. The skeleton's "diverges
+at token 13" therefore does NOT come from the comprehension/matmul core; it is a later effect - most likely how the batched forward
+writes n_tok>1 rows into the KV ring / advances positions versus sequential 1-token writes once the cache has accumulated 12+ entries.
+Next task on the speed track: reproduce the divergence with IN2_BATCH_PROBE pushed to a later pair of positions (past token 13) and
+diff the KV/pos handling there.
