@@ -2910,3 +2910,28 @@ code one would be WRITING during a port. Iterating further stops being measureme
 architecture implementation. The clause stays unimplementable, no multiplier is quoted, and the file remains one that this
 engine loads and upstream (in five distinct configuration attempts plus one reconstruction) does not.
 STATE: 95 commits, gate 15/15, identity exact, 4.45-4.65 tok/s, 11 reference checks green, kernel coverage 192/192.
+
+## CORRECTION: DECODE IS NOT DISK-BOUND - a hot page cache buys only 5%, and the engine faults 40,600 pages per token
+Earlier in this document the default rate of 4.45-4.65 tok/s was attributed to being I/O bound at ~637 MB/s with 186 MB read
+per token. That attribution was derived from READIO byte counts taken when the file was COLD. The file has since been read
+end-to-end (a copy operation), and the measurement now available says something different:
+  raw read of the 7.9 GB file, fully cached:  bs=1M 2.2 GB/s | bs=4M 4.8 GB/s | bs=16M 8.0 GB/s
+  engine, model HOT in page cache:            32 tokens in 6.8 s = 4.70 / 4.72 tok/s   (two runs)
+  engine, model COLD (earlier, same binary):  4.45 - 4.65 tok/s
+So making the entire model resident in RAM moves throughput by about FIVE PERCENT. Disk is not the binding constraint; it
+cannot be, if removing disk latency entirely buys 5%.
+WHAT THE ENGINE IS ACTUALLY DOING, from its own counters on the hot run:
+  READIO  ops=5839  bytes=11,304,296 (10.8 MB) over 32 tokens      <-- almost no read() traffic
+  PAGEFAULT total=1,299,992  = 40,625 pages per token
+40,625 pages x 4 KB = 162 MB per token touched through the MMU, consistent with the 186 MB/forward figure, but delivered by
+page faults on an mmap rather than by read(). At 0.2 s per token that is ~203,000 faults per second sustained, and the per-token
+wall time is set by that fault/compute path, not by the storage device.
+WHY THIS MATTERS: the previous "at the hardware bound" conclusion is now RETRACTED for the cached case. If the same 162 MB were
+delivered with fewer, larger, or pre-faulted mappings (huge pages, MAP_POPULATE on the expert slabs, sequential-access advice,
+or a reused staging buffer instead of touching fresh pages each forward), the fault count is the number that would move first.
+That is a real, identity-safe optimisation space - prefetching cannot change greedy tokens - and it was previously closed on
+the strength of an I/O-bound attribution that this measurement contradicts.
+NOTE ON INSTRUMENT LIMITS: bash `time` is unusable for this decomposition on this host (a 4.05 s run reports user 0.015 s,
+sys 0.000 s - Windows child CPU is not attributed through MSYS), so kernel-vs-user split cannot be read from the shell. The
+fault count is the usable signal, and it is already instrumented.
+STATE: 96 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192.
