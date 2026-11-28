@@ -3329,3 +3329,34 @@ try. The framing was never broken; the instrument reporting on it was.
 METHOD LESSON, the sharpest of this arc: two instruments measuring the same thing disagreed by 6.7x, and the resolution was to ask
 which one wrapped WHICH ENTRY POINT rather than which number looked more plausible. A timer's scope is part of its reading.
 STATE: 113 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
+
+## PHASE ALLOCATION FOUND WITHOUT A PHASE TIMER: experts 39%, output 9%, attention+router+loop gates 53%
+The census prints only its top sites, but the top thirteen are enough to allocate the token, and the arithmetic reconciles both
+instruments at once:
+    CALLSITE CENSUS total (220 sites)      1.4481 s over 4 tokens
+      experts (12 expert-layer sites)      0.559 s   38.6%
+      output.weight  (1 site, 96 calls)    0.126 s    8.7%
+      remaining 206 sites                  0.763 s   52.7%   <- attention projections, router, loop gate/forget/gain
+Through the measured 1.9x parallelism that is, per token of the 219 ms wall:
+    experts   ~74 ms  34%
+    output    ~17 ms   8%
+    other     ~100 ms 46%
+AND THIS RESOLVES THE ENTRYTIME CONTRADICTION WITHOUT RETIRING EITHER NUMBER. ENTRYTIME's "nt total" counts the expert quant_single
+calls (MOEPATH reports quant_single=5760 over 16 tokens = 360/token, matching ENTRYTIME's 5488 calls), i.e. the expert subset only -
+0.058 s/token, which is 25-34% of the wall and agrees with the census's 0.559 s/4 tokens / 1.9 once the same subset is compared.
+So ENTRYTIME was never wrong, it was SCOPED: it measures the expert matvecs, and the expert matvecs are a third of the token.
+My "25%" section reported that scope faithfully and then drew a conclusion about the whole engine from it, which was the error -
+not the instrument.
+THE ACTIONABLE CONSEQUENCE, and it is a redirection: the single largest block is NOT the expert path that eleven hypotheses
+attacked. It is the 206 attention/router/loop-gate sites at ~46% of the wall, followed by experts at ~34%. Every probe in this arc
+- residency, streams, TLB, locks, faults, page source, row geometry - was aimed at the 34%.
+WHAT IS KNOWN ABOUT THE 46% BY CONSTRUCTION: those sites are 2304-wide projections (QKV, output, loop gain/forget/down) over 24
+physical layers, all of them Q8_0/Q6_K/Q5_K/Q4_K/IQ3_XXS per the coverage census, and each is a full matvec whose weights are already
+resident (disk is idle). They differ from the expert path in ONE structural way: they are DENSE, so their rows are contiguous by
+construction and there is no gather and no 8-way interleave - meaning any memory effect already priced (1.95x faults, 2.5x streams)
+should be ABSENT there, and their cost should be close to the clean probe rate. If it is not, that single fact localises the
+remaining inefficiency to the kernel rather than to the access pattern.
+NEXT MEASUREMENT, now precisely aimed at 46%: pick one attention projection site (attn_q, 2304>2304-ish, dense, contiguous) and
+compare its census us/call against real_slab_probe walking the SAME tensor from the SAME file with the same rb. They must agree
+within noise if the kernel is clean; any gap is the kernel's, and it applies to the largest block in the engine.
+STATE: 114 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
