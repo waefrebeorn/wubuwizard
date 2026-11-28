@@ -3537,3 +3537,29 @@ METHOD, recorded because it has now cost four turns: a printed instrument is not
 allocate work, check that its total equals the wall. 23% coverage means 77% of conclusions are unmoored, and every "the remainder is X"
 claim in this document since the first phase print has been an inference from an incomplete sum dressed as a measurement.
 STATE: 121 commits, gate 15/15 (binary 12:20:29), identity exact, kernel coverage 192/192, 4.63-4.68 tok/s hot.
+
+## FOUR INSTRUMENTS, FOUR DIFFERENT TOTALS FOR THE SAME WORK - reconciliation must precede any further optimisation
+Per token, for the same quantised matvec work:
+    TY table            17.9 ms      (sum of in2_ty_sec over all types)
+    ENTRYTIME (nt)      58.1 ms
+    CALLSITE census    372.0 ms
+    wall               215.1 ms
+None reconciles with another, and two are self-evidently broken on their face:
+    TY reports 654 GOPS for ty=40 and 143-153 GOPS for ty=16/17/19 on a 6 GB laptop whose fp32 peak is a small fraction of that, so
+    TY brackets a FRAGMENT of each call (probably the dispatch, not the row loop) and cannot be used for allocation.
+    census 372 ms exceeds the 215 ms wall, which is possible only if it sums across threads (consistent with the measured 1.7x) AND
+    double-counts nested calls - so it is a CPU-time sum, not a wall decomposition, and it was used as one for several sections.
+    ENTRYTIME covers only the nt entry point (58 ms) and was used as if it were the whole engine two sections ago.
+    wall is the only figure that cannot lie, and it is the only one that no instrument currently decomposes.
+THE RULE THIS PRODUCES, and it is the one this document has needed since its first phase print: an instrument is admissible only if its
+total reconciles with the wall, and reconciliation must be shown, not assumed. Three of four instruments in this file fail that test.
+WHERE THIS LEAVES THE ENGINE, stated in units that survive every correction so far:
+    identity          exact, gate 15/15 on a freshly built binary, 192/192 quantised tensors verified against independent specs
+    speed             4.63-4.68 tok/s hot, 8 threads, ceiling from Amdahl measured earlier at 5.35
+    experts           26% of wall, 98% kernel, 5.4x of 8 threads parallel - measured, near-optimal, not worth attacking
+    the rest          74% of wall, and NO instrument currently decomposes it correctly
+NEXT STEP, unambiguous and small: build ONE instrument that brackets whole-call wall time at the top of the forward pass and at every
+return, plus a per-visit split, and require that its total reconcile with the process wall to within a few percent BEFORE it is used for
+anything. Every optimisation this arc attempted was aimed with a number that later failed reconciliation; the fix is to make
+reconciliation the gate that a measurement must pass, the same way token identity is the gate that a change must pass.
+STATE: 122 commits, gate 15/15, identity exact, kernel coverage 192/192, 4.63-4.68 tok/s hot.
