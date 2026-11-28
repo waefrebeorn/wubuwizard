@@ -1943,3 +1943,23 @@ resting on a dispatcher I cannot see through.
 SESSION TOTALS: 51 commits, gate 15/15 at every one, identity byte-identical throughout, throughput ~3.45 tok/s cold and
 unchanged. Four retractions, all of them from unverified denominators or unread call sites rather than bad measurements. The
 instrument that finally worked was counting by NAME, and its first version lied by truncating.
+
+## BRANCH-TAG HANDOFF (next executable step, specified to run cold)
+Zero-code identification was tried and failed: IN2_DEBUG=1 yields only the 192 "[moe LN] d=... TOPK=8 ... rc=0" config lines
+(120 + 72 for 12 MoE layers x n_gen), and no per-expert message. So the branch that actually executes cannot be identified by
+existing logging.
+TO DO, exactly:
+  1. In src/wubu_inkling2_fwd.c add: long long in2_moe_path[8];
+  2. Increment in2_moe_path[N]++ immediately before each of the gate_up call sites, one N per site:
+     2186 -> N=1 in2_matvec_quant_nt (batched slab)
+     2389 -> N=2 in2_gpu_moe_batch / _res (GPU batch)
+     2438 -> N=3 in2_matvec_quant (single)
+     2472 -> N=4 in2_matvec_quant_mt (fused multi-thread)
+     2495 -> N=5 in2_dequant_slice (materialising fallback)
+  3. Dump the array at exit in tools/inkling_gen.c next to the CALLSITE CENSUS, printing non-zero entries only.
+  4. Run n_gen=4 and n_gen=12 warm; the path that scales 3*tokens per MoE layer is the hot one.
+WHY THIS MATTERS MORE THAN ANY REMAINING KERNEL WORK: five-plus implementations of the same arithmetic, selected by env
+flags, is the reason every optimisation in this session measured as a no-op. Knowing which one runs is the precondition for
+touching any of them, and it is a ~10-line change with no arithmetic.
+STATUS AT HANDOFF: 52 commits, gate 15/15, tree clean, throughput ~3.45 tok/s cold unchanged. Four retractions, all from
+unverified denominators or unread call sites. Open anomaly: ~22-29 expert gate_up calls per token per layer against TOPK=8.
