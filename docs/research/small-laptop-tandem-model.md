@@ -1293,3 +1293,16 @@ helper's 1024 threshold, so they should not have been blocked at all. Something 
 pattern, and that is unexplained rather than assumed. Reverted; gate 15/15; tree clean.
 NEXT DIAGNOSTIC (cheap): log the helper's entry ONCE (n_out, ty, predicate result, whether it blocked) into a single
 line per layer, so the 24->816 increase is attributed to a specific call site instead of inferred from aggregate counts.
+
+## WHERE THE 89% GOES: kernel is ~11% of a token, and the read-timing attempt did not emit
+The leaf per-type counters (IN2_TIMETY, now working once IN2_PERF is also set) sum to 0.034 s of quant-kernel time
+against ~0.296 s/token, so the kernels themselves are ~11% and the other ~89% is everything around them. That is the
+single most useful number in this document, and it reframes the target: not FLOPs (dense ops are only ~0.88 MMAC each),
+not bandwidth (5.9 GB/s against a 30-40 GB/s ceiling), not threads - but per-call overhead.
+ATTEMPTED: a counter around the weight read in in2_matvec_nt (in2_nt_read_sec/n, plus an unmapped counter to see whether
+the mapping is being used at all), dumped next to the other per-forward stats in wubu_inkling2_model.c.
+RESULT: the dump never printed under IN2_PERF, so the read time is still unmeasured. Reverted - an instrument that
+emits nothing is worse than none, and the tree stays exactly as the gate verified it.
+NEXT STEP, corrected: put the dump in tools/inkling_gen.c beside the PHASE/TIMETY exit dump (that block demonstrably
+runs) rather than in model.c's per-forward block, and report three numbers per shape: read seconds, kernel seconds, and
+the residual. That bisects the 89% into I/O, kernel and dispatch in one run.
