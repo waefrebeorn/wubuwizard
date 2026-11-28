@@ -910,3 +910,15 @@ GPU idles during exactly the phase that costs 45% of decode. Moving expert matve
 tandem pattern the goal calls for.
 RETRACTED AGAIN: + the mac counter must not be used for GFLOPS at all (it charges n_out*n_in per call regardless of
 how many experts run); the trustworthy rates are the ones above, computed from real param counts.
+
+## FALSIFIED: "the GPU f16 lane idles during expert matvecs, so round-trips are the cost"
+Measured A/B at the same thread count, same prompt:
+  CPU only (no IN2_F16_DIR, no CUDA dll) : 3.64 tok/s
+  f16 lane on (IN2_GPU_F16=1, +IN2_GPU_MOE=1): 3.66 tok/s
+Within run-to-run noise. The lane reports ups=161 reuse=3771 evict=0 used=2107 MB vram_free=2846 MB in both cases, so
+it is engaged and hitting, but it buys nothing measurable. Two hypotheses died here: (a) that the expert phase is
+GPU round-trip latency, and (b) that IN2_GPU_MOE selects a different path - it is identical with and without.
+Consequence: the expert matvec cost is CPU unpack+dot, so the wins are (i) fewer weights touched per token, or
+(ii) a kernel that unpacks faster. Not PCIe, not sync count, not this lane as it stands.
+CURRENT RUNNING NUMBERS (12 tokens, 8 threads): 3.64 tok/s, moe phase 1.093 s of 3.4 s = 32%, of which the matvec
+is ~0.51 s of CPU-seconds/8 ~ 0.51 s, so ~0.58 s of the moe phase is router + top-k + accumulation, not matvec.
