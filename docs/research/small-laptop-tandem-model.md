@@ -946,3 +946,24 @@ EFFECTIVE RATES, same 12-token run, measured twice so they are not mixed:
    the aggregate ceiling, so decode is UNPACK+DOT bound at both thread counts. Faster storage does not help.
 TOOLING DEFECT FOUND: IN2_MOE_IDS emits nothing (0 lines with IN2_MOE_HIST=1 + IN2_MOE_IDS=1 in a 1-token run), so
 the per-token routing trace that the header comment promises does not work. The aggregate histogram works.
+
+## KERNEL KNOB SWEEP: NULL RESULT, plus a harness I do not trust and a claim that needs re-testing
+Swept the existing IQ2 tuning knobs on gen_fast (12 tokens, same oracle prompt). Single-pass sweep reported:
+  baseline 4.57, MAYA_IQ2_VAR=0 4.52, MAYA_IQ2_VAR=2 4.63, MAYA_IQ_PF_ROWS=0 4.54, =4 4.31, MAYA_IQ2XXS_1T=1 4.57
+Then ran the only comparison worth believing - 5 INTERLEAVED pairs, base against MAYA_IQ2_VAR=2:
+  base 3.46 3.52 3.52 3.49 3.49   var2 3.49 3.49 3.49 3.51 3.51
+  => the knob is NEUTRAL. The apparent +1.3% did not survive interleaving. Score = byte-identical on all 10 runs.
+MAYA_IQ_PF_ROWS=4 looking worse (4.31) is unverified for the same reason and is not being adopted.
+TWO PROBLEMS THIS EXPOSED:
+1. The sweep harness reported a 4.57 tok/s baseline that I CANNOT reproduce anywhere else. Under controlled conditions the
+   same binary, prompt and env gives 3.46-3.52, and bare (no env at all) gives 3.51. A 30% phantom cannot be explained
+   by the knobs, so the sweep's stdout/stderr capture (2>&1 >/dev/null piped twice through grep) is taking the wrong
+   number. Treat that column as invalid rather than as a discovery.
+2. Run-to-run spread on this box is ~0.07 tok/s but session-to-session spread is larger (3.43-3.64 earlier today,
+   3.46-3.52 now). Therefore the "+6% from removing the 42 MB lazily-allocated buffers" claim is NOT safe yet: that A/B
+   was before/after, not interleaved, and the two ends were measured minutes apart. It needs an env-gated rebuild to be
+   switchable at runtime, then 5 interleaved pairs, exactly like the test that just killed the knob result.
+   The allocation itself was provably dead work (gu/dn are NULL and unused in the fused path - visible in the debug
+   dump as bufs=0/0/...), so removing it cannot have hurt; what is unproven is the SIZE of the win.
+DISCIPLINE NOTE: three conclusions in this document died to proper measurement today (experts = 4.44 s, coopmat 6-10x,
+GPU lane round-trips). The pattern is always the same - a number taken once, not interleaved, on a noisy box.
