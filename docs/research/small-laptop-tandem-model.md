@@ -2560,3 +2560,22 @@ kernel uses, llama.cpp AGREES with it on real data. So (ii) can only be true if 
 convention that master's ggml-quants.c no longer expresses. The next step that would settle it is to compare against the
 dequantiser from the llama.cpp revision that WROTE this quant (UD/S version-matched), not current master.
 STATE: 79 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified and wired: Q8_0, Q2_0, Q6_K.
+
+## THE OFFSET BUG WAS AN ORDERING BUG IN MY PARSER - fixed, and now reproducible on demand
+Root cause, exactly: my first parser captured the file position AFTER the metadata kv section but BEFORE reading the
+tensor-info section, then aligned that position and called it the data origin. GGUF order is kv entries -> tensor-info
+entries -> align -> data, so the reported origin was low by the size of the 734 tensor-info records:
+  kv_end              = 11931802
+  after 734 tensors   = 11978661   (pad 27 -> 11978688)
+  engine data_blob_offset = 11978688   MATCH
+  blk.5.ffn_gate_up_exps.weight abs = 11978688 + 1991275776 = 2003254464   (engine: 2003254464)
+Fixed parser committed as tools/gguf_offsets.py, verified to reproduce the engine's own numbers exactly. This also retires
+a suspicion: the 66-byte IQ2_XXS block size and the tensor offsets were never in doubt, only my data-section arithmetic was.
+WHAT THAT LEAVES: with a verified-correct offset, wubu_iq_rows(16) still disagrees with MASTER's dequantize_row_iq2_xxs on
+real bytes (rel err 0.51..14.4). So the disagreement is now confined to DECODE SEMANTICS, not addressing. Three
+implementations of the same format now exist in play - the kernel, master's ggml-quants.c, and this repo's own
+dequantize_iq2_xxs_row in gguf_reader.c - and the cheap decisive next step is a three-way comparison on the same real block:
+if the kernel agrees with THIS REPO's dequantiser, the engine is internally consistent and master is the outlier; if it
+disagrees with both, the kernel is the outlier despite the gate passing, which would be a genuinely surprising finding and
+would need explaining. That comparison needs no new file-offset work - the block is now readable at a verified address.
+STATE: 80 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
