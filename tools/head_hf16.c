@@ -57,6 +57,15 @@ int main(int argc,char**argv){
         /* F32: elements are stored as IEEE f32 directly; only the f32->f16 step applies. */
         const float*src=(const float*)raw; rawsz=(long)ne*4;
         for(long long i=0;i<ne;i++) f[i]=src[i];
+    } else if(t->ggml_type==12){
+        /* Q4_K: reader's llama-reference dequant (engine-identical, avoids transcription risk). */
+        extern void dequantize_q4_K_row(const uint8_t*, float*, int64_t);
+        rawsz=(long)(((ne+255)/256)*144);
+        dequantize_q4_K_row(raw,f,ne);
+    } else if(t->ggml_type==14){
+        extern void dequantize_q6_K_row(const uint8_t*, float*, int64_t);
+        rawsz=(long)(((ne+255)/256)*210);
+        dequantize_q6_K_row(raw,f,ne);
     } else { fprintf(stderr,"unsupported type %d for dequant\n",t->ggml_type); return 6; }
     /* f32 -> f16 (IEEE round-to-nearest-even, the same cuBLAS/f16 uses) */
     unsigned short*hf=(unsigned short*)malloc((size_t)ne*2);
@@ -90,6 +99,23 @@ int main(int argc,char**argv){
             fprintf(stderr,"VERIFY: eng=%.6f mine=%.6f  (eng-mine)/eng=%.3e  (correct dequant if ~0 / cos->1)\n",
                     (double)eng,(double)mine, den!=0?dnme/den:0.0);
         } else fprintf(stderr,"VERIFY: skip (K%%256 != 0)\n");
+    }
+    } else if(t->ggml_type==12||t->ggml_type==14){
+    {
+        const long long nb=(ne+255)/256;
+        const int K=2304; if(K%256==0 && nb>=K/256){
+            extern void ggml_vec_dot_q4_K_q8_K_generic(int,float*,size_t,const void*,size_t,const void*,size_t,int);
+            extern void ggml_vec_dot_q6_K_q8_K_generic(int,float*,size_t,const void*,size_t,const void*,size_t,int);
+            srand(17); float x[2304]; for(int i=0;i<K;i++) x[i]=0.11f*(float)(rand()%2001-1000);
+            block_q8_K q8[9]; quantize_row_q8_K(x,q8,K);
+            float eng; 
+            if(t->ggml_type==12) ggml_vec_dot_q4_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
+            else                  ggml_vec_dot_q6_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
+            float xr[2304]; for(int i=0;i<K;i++) xr[i]=q8[i/256].d*(float)q8[i/256].qs[i%256];
+            float mine=0; for(int i=0;i<K;i++) mine+=f[i]*xr[i];
+            double dnme=(double)(mine-eng), den=(double)eng;
+            fprintf(stderr,"VERIFY[ty%d]: eng=%.6f mine=%.6f rel=%.3e\n",t->ggml_type,(double)eng,(double)mine,den!=0?dnme/den:0.0);
+        } else fprintf(stderr,"VERIFY: skip\n");
     }
     } else { /* non-23: finite / magnitude sanity */
         float smin=f[0],smax=f[0],ssum=0; int nfin=0;

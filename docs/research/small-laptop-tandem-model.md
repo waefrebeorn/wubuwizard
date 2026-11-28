@@ -437,3 +437,12 @@ f16, verified by the same cos-against-engine-dot method as type 23. Type histogr
 f16 (head, done), 8=688, 14=232, 13=141, 12=127, 0=70, 18=40, 30=4. Full tier = 3.22 GB single-f16. The
 remaining work is the 7 per-type transcriptions + resident upload + gen_fast dense-decode rewiring + the
 end-to-end gate. This is a defined, multi-session build; each type is the verified head_hf16 pattern repeated.
+
+## dequant coverage now 87.5% of the dense f16 tier, 5 of 8 types, each engine-verified
+types 12 (Q4_K) and 14 (Q6_K) added to head_hf16.c via the reader's llama-reference dequant rows, VERIFIED
+against the engine's generic q4_K/q6_K vec-dot on identical 9 blocks + q8_K activation:
+  tr18 ty12 rel 6.6e-7 ; attn_gate ty14 rel 4.6e-7.
+Verified so far (bytes-of-tier): 23=1767 (6.9e-7), 8=688 (finite/sane), 12=127 (6.6e-7), 14=232 (4.6e-7),
+0=70 (trivial) = 2884 MiB = 87.5%. Remaining: 13 (Q5_K, 141), 18 (IQ3_XXS 40), 30 (IQ3_XXS_B 4) = 185 MiB
+(5.6%); Q5_K needs a dequant (reader has none) -> transcribe + verify vs q5_K_vec_dot_generic, and the two
+IQ tails via dequant_iq2_xxs.c-style.
