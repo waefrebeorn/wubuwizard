@@ -2190,3 +2190,24 @@ WHAT THIS LEAVES, and it is now a genuinely short and honest list:
     lane -25%, speculation 0/45.7% acceptance and slower at every K, row/op split dead code;
   - identity is exact and verified beyond the gate (KV vs no-KV byte-identical at 32 tokens; prefix property holds).
 STATE: 63 commits, gate 15/15, default 4.45-4.65 tok/s depending on run length.
+
+## IDENTITY COVERAGE EXTENDED: 3 prompts x 16 tokens KV==no-KV, and the oracle holds past the gate's length
+The gate checks one prompt at 12 generated tokens. Two extensions were measured, both clean:
+1. KV vs full-recompute (IN2_NO_KV), 16 generated tokens, three DIFFERENT prompts of 3, 4 and 8 prompt ids:
+     prompt1 (3 ids): IDENTICAL
+     prompt2 (4 ids): IDENTICAL
+     prompt3 (8 ids): IDENTICAL
+   So the incremental path is bit-exact against full recompute across prompt content and prompt length, not just on the gate
+   prompt.
+2. Oracle extension: a run generating 16 tokens (19 ids total) reproduces the golden 15-id line exactly, then continues
+   74282 220 39607 13. The gate only asserts the first 15; the engine matches them as a prefix of a longer run, which is the
+   property that matters for streaming.
+BOTH comparisons above initially printed NO - first an off-by-3 from counting IDS with its prompt tokens, then a sed that
+failed to strip the "IDS:" colon so the strings never matched. Two fabricated failures in a row on an IDENTITY check, which is
+the most dangerous place to have them; both were caught by printing the actual strings rather than trusting the verdict. The
+rule this session keeps re-learning: print the data, not just the comparison result.
+WHAT THIS STILL DOES NOT COVER, stated so it is not mistaken for full verification: there is no second implementation to
+compare against for this architecture, so quantization-level agreement with upstream llama.cpp remains asserted only for the
+one gate prompt. Numeric drift that is deterministic (i.e. both our paths agree with each other but not with llama.cpp) would
+be invisible to every test in this repo.
+STATE: 64 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
