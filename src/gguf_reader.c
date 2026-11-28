@@ -1667,6 +1667,28 @@ int wubu_gguf_prefetch(gguf_ctx *ctx, long long off, long long len)
 #endif
 }
 
+/* Pin a mapped range into the process working set. Same bytes, same pointer, same code path - so identity is exact by
+ * construction - the only change is that the OS stops evicting them. Raises the working-set maximum first, because
+ * VirtualLock fails outright when the request exceeds the default quota. Returns 1 on success. */
+int wubu_try_lock(void *addr, size_t len)
+{
+#if defined(_WIN32)
+    {
+        typedef int (__stdcall *wubu_swss_t)(void *, size_t, size_t, unsigned long);
+        static wubu_swss_t s_swss; static int s_tried;
+        if (!s_tried) {
+            HMODULE k = GetModuleHandleA("kernel32.dll");
+            s_swss = k ? (wubu_swss_t) (void *) GetProcAddress(k, "SetProcessWorkingSetSizeEx") : NULL;
+            s_tried = 1;
+        }
+        if (s_swss) s_swss((void *) -1, (size_t) (256u << 20), (size_t) ((size_t) len + (512u << 20)), 0);
+        return VirtualLock(addr, len) ? 1 : 0;
+    }
+#else
+    (void) addr; (void) len; return 0;
+#endif
+}
+
 // Map the entire GGUF data blob for random access. Uses mmap (lazy, shared
 // with the page cache — the "raw mmap'd blob" the weight law demands), with
 // a malloc+fread fallback when mmap is unavailable.

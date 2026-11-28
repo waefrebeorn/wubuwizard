@@ -441,6 +441,24 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
               } }
 
             const int CHUNK = 8192;
+            /* Keep the LM head's pages resident. The head is ~119 MB at 2.06 bpw and is read EVERY token, which is
+             * ~64% of the measured 186 MB/token of disk traffic (READIO) for a tensor used once per token. Locking the
+             * mapped pages changes no arithmetic - same pointer, same bytes, same kernel - it only stops the OS evicting
+             * them, so token identity is exact by construction. Opt-in via IN2_LOCK_HEAD. */
+            if (getenv("IN2_LOCK_HEAD")) {
+                static int _hl_done;
+                if (!_hl_done) {
+                    extern int wubu_try_lock(void *, size_t);
+                    const int _hty = ot.info ? ot.info->ggml_type : -1;
+                    const int64_t _hrb = gguf_raw_size(_hty, d);
+                    _hl_done = 1;
+                    if (_hrb > 0 && ctx->data_blob)
+                        fprintf(stderr, "HEADLOCK %s (%lld MB)\n",
+                                wubu_try_lock((void *) (ctx->data_blob + ot.file_offset),
+                                              (size_t) (_hrb * (int64_t) cfg->vocab_size)) ? "ok" : "refused",
+                                (long long) (_hrb * (int64_t) cfg->vocab_size / (1024 * 1024)));
+                }
+            }
             head_done = 1;
             /* in2_wall_now(), not clock(): on Windows clock() sums CPU time across threads, so a threaded
              * head reports ~7x its wall cost (measured 0.281 "s" for a ~40 ms GEMM). This is the same trap

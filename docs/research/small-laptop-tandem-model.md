@@ -1731,3 +1731,21 @@ needs a build-fix-verify loop; the session has already shown that unverified edi
 stale-binary readings, one link error, four retractions). The specification above is deliberately complete enough to
 execute cold in a fresh context.
 GATE: 15/15, 41 commits, tree clean.
+
+## HEAD-LOCK BUILT AND INERT - which proves the head is NOT computed where I assumed
+Implemented wubu_try_lock() (VirtualLock after raising the working-set maximum) and hooked it, opt-in, at the LM-head call
+site in wubu_inkling2_model.c. It changes no arithmetic: same pointer, same bytes, same kernel, only the OS's eviction
+behaviour. Measured:
+  baseline          : 3.41 tok/s, read 2126.8 MB
+  IN2_LOCK_HEAD=1   : 3.43 tok/s, read 2126.7 MB
+and the HEADLOCK line NEVER PRINTED. The hook sets _hl_done and prints unconditionally when it fires, so its silence means
+either ot.info was NULL / gguf_raw_size returned <=0, or - much more likely - THE CODE AT model.c:443 IS NOT EXECUTED ON
+THE KV-CACHE DECODE PATH AT ALL. The path I have been reasoning about ("for each 8192-row chunk call in2_matvec_quant") is
+the full-recompute path; incremental decode must compute the head somewhere else, which also explains why the 12-token KV
+runs show quant=8748 matvec-quant calls while a 1-token full-recompute run showed quant=1.
+CONSEQUENCE: the ~119 MB/token head-re-read figure is still inferred from arithmetic (201024 x 2304 at 2.06 bpw), NOT
+confirmed by the traffic measurement, because I have been reading the wrong call site. The next step is to find the head
+call in the KV path - start from the quant=8748 count: whatever issues 8748 in2_matvec_quant calls per 12-token run is the
+real head path, and that is where a resident buffer or a page lock would actually apply.
+STATE: the lock code is committed but default-off and provably inert on both paths until the real head call is located, so
+it cannot affect the gate or the shipped behaviour. Gate 15/15.
