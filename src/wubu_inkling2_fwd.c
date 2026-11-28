@@ -1696,7 +1696,7 @@ int in2_matvec_quant_mt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
 {
     int nt = 0;
 #ifdef _OPENMP
-    nt = omp_get_max_threads();
+    nt = in2_threads();
 #endif
     if (getenv("IN2_THREADS")) nt = atoi(getenv("IN2_THREADS"));
     if (nt <= 1 || n_out < 2 * nt) return in2_matvec_quant(ctx, t, elem_off, x, n_out, n_in, y);
