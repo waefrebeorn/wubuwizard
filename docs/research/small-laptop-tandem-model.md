@@ -1529,3 +1529,30 @@ NEXT CHECK, and it needs no new software: the same shape/type table, but printin
 only the mean. If ty=14's max is far above its mean, the 6197 us is a measurement of a bimodal mix and not of one kernel -
 which is the same trap that produced the last four wrong mechanisms, all of which were averages over mixtures.
 GATE: 15/15, tree clean, 32 commits, identity byte-identical.
+
+## SOLVED: it is DEMAND PAGING of an mmap'd 7.9 GB model - min/max kills the Q6_K theory
+Min/max per (ty, shape), one full-recompute run:
+  ty=14  2304 -> 3072 : mean 6187.6 us [min   147.0  max 187192.7]  37.1%
+  ty=8   2304 -> 3072 : mean 1760.4 us [min   146.1  max   5318.5]  15.3%
+  ty=8   3072 -> 2304 : mean 1755.9 us [min   150.8  max   5230.5]  13.4%
+  ty=8   2304 -> 1024 : mean  722.1 us [min    87.4  max   2361.7]  10.4%
+TY=14's MIN IS 147.0 us - the same as ty=8's 146.1 us. The Q6_K kernel is NOT slower than Q8_0. The 4.5x "per-byte
+defect" was the arithmetic mean of a BIMODAL distribution, and the mean belonged to no call that actually ran.
+WHAT THE TWO MODES ARE, from the same numbers:
+  fastest 5.81 MB call: 147.0 us -> 39.5 GB/s  (the 5.81 MB tensor fits L3; this is cache-warm execution)
+  slowest 5.81 MB call: 187192.7 us -> 31.0 MB/s  (this is page-in from disk, not ALU and not DRAM)
+  max/min = 1273x within one shape and one type.
+So the dominant cost in decode is DEMAND PAGING of the mmap'd 7.9 GB GGUF. `unmapped=0` and `read 0.0000 s` were both
+true and both misleading: with mmap there is no copy to time, so the read counter reads zero while the page faults land
+inside the kernel. That is why per-call kernel time was flat across thread counts (page faults on one mapping serialise),
+why the "GFLOPS" figures were nonsense (they divided compute by page-fault time), and why every shape/type average moved
+when the access pattern moved.
+THIS IS THE STANDING GOAL'S OWN SUBJECT: SSD streaming on a 16 GB laptop is the bottleneck, exactly as the tandem model
+predicts, and the fix is not a faster kernel - the kernel already runs at 39.5 GB/s when warm.
+FIX DIRECTION, in order of expected effect:
+  1. MADV_WILLNEED / sequential prefetch ahead of the layer loop, so paging overlaps compute instead of serialising it.
+  2. Read-ahead window sized to the 5.8 MB per-tensor working set rather than per call.
+  3. Keep the hot dense tensors (the 2304->3072 set) resident - they are small enough to hold, and they carry 37% of time.
+ACCEPTANCE: the max/min ratio for a shape must collapse toward 1.0, and mean us/call must approach the min. tok/s is a
+downstream consequence, not the check.
+GATE: 15/15.

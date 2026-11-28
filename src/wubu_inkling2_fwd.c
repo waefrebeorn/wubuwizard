@@ -54,16 +54,20 @@ typedef struct {
 
 double in2_wj_sec; long in2_wj_rows, in2_wj_n, in2_wj_printed;
 /* Per-shape cost table: the table this project never had. Aggregated in the in2_matvec_nt wrapper. */
-struct in2_shp_rec { int ni, no, ty; double sec; long n; };
+struct in2_shp_rec { int ni, no, ty; double sec, mn, mx; long n; };
 struct in2_shp_rec in2_shp[96]; int in2_shp_n;
 static void in2_shp_add(int ni, int no, int ty, double sec)
 {
     for (int i = 0; i < in2_shp_n; ++i)
         if (in2_shp[i].ni == ni && in2_shp[i].no == no && in2_shp[i].ty == ty) {
-            in2_shp[i].sec += sec; in2_shp[i].n++; return;
+            in2_shp[i].sec += sec; in2_shp[i].n++;
+            if (sec < in2_shp[i].mn) in2_shp[i].mn = sec;
+            if (sec > in2_shp[i].mx) in2_shp[i].mx = sec;
+            return;
         }
     if (in2_shp_n < 96) { in2_shp[in2_shp_n].ni = ni; in2_shp[in2_shp_n].no = no; in2_shp[in2_shp_n].ty = ty;
-                          in2_shp[in2_shp_n].sec = sec; in2_shp[in2_shp_n].n = 1; in2_shp_n++; }
+                          in2_shp[in2_shp_n].sec = sec; in2_shp[in2_shp_n].mn = sec; in2_shp[in2_shp_n].mx = sec;
+                          in2_shp[in2_shp_n].n = 1; in2_shp_n++; }
 }
 static DWORD WINAPI in2_rows_worker(LPVOID p)
 {
