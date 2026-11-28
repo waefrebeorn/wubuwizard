@@ -3252,3 +3252,31 @@ by the fraction of expert traffic served from the tier and throughput moves in p
 memory-bound part. If the fault count does NOT drop, the first-touch factor is not being paid on expert bytes at all and the whole
 memory model here needs rebuilding before any cache work continues.
 STATE: 109 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## FALSIFIER FIRED: DISK READS ARE 0.1 MB/s DURING A FULL GENERATION - the I/O model is dead, cache work must not proceed
+Ran the falsifier this document itself specified, before writing any cache code. typeperf "\PhysicalDisk(_Total)\Disk Read
+Bytes/sec" sampled once per second across a 16-token generation at 4.65 tok/s:
+    avg disk read = 0.1 MB/s over 9 samples
+0.1 MB/s x 0.219 s/token = 0.02 MB per token, against a ~110-160 MB/token working set. The weights are, for practical purposes,
+entirely page-resident: the engine reads NOTHING from the SSD during decode. Every statement in this document that attributed the
+ceiling to streaming, to 637 MB/s, to "I/O bound", or to trimmed pages being re-read is now FALSIFIED by direct measurement of the
+device rather than by inference about it.
+WHAT THAT LEAVES, with the arithmetic re-done:
+    token budget                     218.8 ms
+    soft faults 40,625 x ~0.7 us     ~28 ms   = 13%     (derived from the unfaulted-vs-warm probe delta)
+    disk                             ~0 ms    = 0%
+    everything else                  ~190 ms  = 87%
+So the engine spends ~190 ms/token on work that is neither disk nor fault handling, over bytes that are already in RAM, at a rate
+of ~0.55 GB/s of effective traffic. The warm contiguous probe does the same kernel work at 0.175 us/row; the engine does it at
+1.250. The gap is therefore in HOW the engine walks its resident bytes, not in where they come from.
+CONSEQUENCE FOR PLANNED WORK, recorded so it is not repeated: an expert resident cache would have bought ZERO, because the experts
+are already resident. Building it would have been a week of identity-critical change against a measured 0% available. That is the
+first time in this arc that a falsifier fired BEFORE the code was written rather than after, and it is the entire reason the probes
+were worth running.
+WHERE TO LOOK INSTEAD, now constrained by measurement rather than narrative: the bytes are resident and the disk is idle, so the
+remaining 87% is per-row work at memory-subsystem speed. Among the candidates that survive: the TLB behaviour specific to a
+FILE-BACKED 7.9 GB mapping (my TLB sweep used an anonymous 136 MB buffer - different page-table structure and different sharing), the
+stride at which the engine's row loop touches its slab versus the probe's straight walk, and the possibility that the engine's rows
+are not in fact contiguous because elem_off/row addressing interleaves experts. Each is testable with the real_slab_probe by
+changing ONE loop parameter at a time, with no engine change and no identity risk.
+STATE: 111 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
