@@ -967,3 +967,16 @@ TWO PROBLEMS THIS EXPOSED:
    dump as bufs=0/0/...), so removing it cannot have hurt; what is unproven is the SIZE of the win.
 DISCIPLINE NOTE: three conclusions in this document died to proper measurement today (experts = 4.44 s, coopmat 6-10x,
 GPU lane round-trips). The pattern is always the same - a number taken once, not interleaved, on a noisy box.
+
+## CORRECTION: the lazy-allocation win is +0.7%, not +6% (interleaved A/B, same binary)
+Added IN2_MOE_EAGER=1 to restore the old up-front 42 MB allocation, so the change became switchable at runtime and
+the comparison could finally be interleaved instead of before/after across minutes. Five interleaved pairs:
+  lazy  (new) 3.51 3.49 3.51 3.52 3.51  mean 3.508
+  eager (old) 3.49 3.46 3.51 3.48 3.48  mean 3.484
+  delta +0.024 tok/s = +0.7%, and lazy >= eager on 5 of 5 pairs. All 10 runs byte-identical to the oracle.
+So the earlier "+6% (3.43 -> 3.64)" was SESSION DRIFT, not the allocation. The change stays (42 MB of provably dead
+allocation per layer visit removed, numerics untouched, no downside) but it is not the win it was reported as.
+This is the fourth number today that shrank or died when measured properly. The standing rule this document now
+follows: an A/B is only a result if both arms are interleaved in one session through the same binary.
+TOP-LINE, current truth: 3.51 tok/s on this prompt (12 tokens, 8 threads), decode expert matvec ~32% of wall,
+unpack+dot bound, GPU unable to take the experts without a device-side IQ2 kernel.

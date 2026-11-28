@@ -2176,6 +2176,13 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
      * of 42 MB per layer visit (2*DFF*d + d*DFF floats) on the default fused path, where they are never touched -
      * 456 visits in a 12-token run. Lazy now. */
     float *gu = NULL, *dn = NULL;
+    /* IN2_MOE_EAGER=1 restores the old up-front 42 MB allocation so the lazy-alloc change can be A/B'd INTERLEAVED
+     * (same binary, same session) instead of before/after across minutes, which is how the earlier +6% claim got
+     * exposed as unproven. */
+    if (getenv("IN2_MOE_EAGER")) {
+        gu = (float *)malloc((size_t)2 * DFF * d * sizeof(float));
+        dn = (float *)malloc((size_t)d * DFF * sizeof(float));
+    }
     float *g  = (float *)malloc((size_t)TOPK * 2 * DFF * sizeof(float));
     float *act = (float *)malloc((size_t)TOPK * DFF * sizeof(float));
     float *eo = (float *)malloc((size_t)TOPK * d * sizeof(float));
