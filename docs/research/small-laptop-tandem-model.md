@@ -2598,3 +2598,26 @@ CONSEQUENCES, and one of them matters for the reference work:
   - It does mean the engine has a multiplication in the expert path that no instrument in this document has ever counted, and
     that is worth knowing before anyone claims the expert path is fully understood.
 STATE: 81 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Reference tests verified: Q8_0, Q2_0, Q6_K.
+
+## IQ2_XXS SYNTHETIC NOW PASSES - the bug was a POINTER-TYPE STRIDE, and the reference is validated against real bytes
+ROOT CAUSE, found by comparing the two struct definitions side by side:
+  upstream master and this repo's llama/ggml-common.h BOTH declare  block_iq2_xxs { ggml_half d; uint16_t qs[QK_K/8]; }
+  with a static_assert pinning it to 66 bytes. My earlier note claiming upstream was 130 bytes was WRONG.
+  Because qs is uint16_t*, upstream's `memcpy(aux32, x[i].qs + 4*ib32, 8)` is an EIGHT-byte stride. I had declared qs as
+  uint8_t* and written the same expression, which is a FOUR-byte stride. Group 0 matched (both start at 0), every later group
+  read the wrong bytes - which is exactly the signature observed: first six values identical, then divergence (worst idx 177).
+AFTER THE FIX (qs + 8*ib32):
+  synthetic  : rel err min 1.232e-08  median 1.166e-07  max 5.957e-07   PASS
+  repo-vs-master on a REAL block (blk.5.ffn_gate_up_exps.weight, abs 2003254464): maxabs 0.000000e+00 - EXACT agreement
+So the reference implementation is now validated two ways: it matches upstream's loop by construction, and it matches this
+repo's own dequantize_iq2_xxs_row element-for-element on real file bytes. That is the strongest oracle available for a format
+with no external reference implementation on this machine.
+STILL FAILING, and now sharply bounded: the REAL-DATA row test (8 rows x 2304 elements through wubu_iq_rows(16)) gives
+rel err 0.51..14.4 while the synthetic block test passes at 6e-07 and the dequantisers agree exactly on the same real bytes.
+That combination means the DECODE is right and the disagreement is in ADDRESSING OR SHAPE for the real row - a 2304-element
+row at 594-byte stride may not be how this tensor is laid out (dims are [2304,2304,128], and with 40 per-expert .scale
+tensors present the expert blocks may be arranged per-expert rather than as flat rows).
+NEXT STEP, cheap: run ONE real 66-byte block (not a whole row) through both the kernel and the reference. If that block
+matches, the decode is confirmed and the problem is purely the row geometry; if it does not, the kernel's ty=16 path differs
+from its own dequantiser, which would be a genuine finding given the gate passes.
+STATE: 82 commits, gate 15/15. Wired and PASSING: Q8_0, Q2_0, Q6_K, IQ2_XXS (synthetic).

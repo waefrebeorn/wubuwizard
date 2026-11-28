@@ -37,7 +37,7 @@ static void deq_iq2xxs(const blk16 *x, double *y)
     const uint8_t *aux8 = (const uint8_t *) aux32;
     const double d = (double) in2_f16_to_f32(x->d);
     for (int ib32 = 0; ib32 < QKK / 32; ++ib32) {
-        memcpy(aux32, x->qs + 4 * ib32, 2 * sizeof(uint32_t));
+        memcpy(aux32, x->qs + 8 * ib32, 2 * sizeof(uint32_t));   /* upstream indexes uint16_t*, so 4*ib32 there == 8*ib32 BYTES here */
         const double db = d * (double) (0.5f + (float) (aux32[1] >> 28)) * 0.25;
         for (int l = 0; l < 4; ++l) {
             const uint8_t *grid = (const uint8_t *) (iq2xxs_grid + aux8[l]);
