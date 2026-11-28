@@ -772,3 +772,20 @@ what a 6-core AVX2 box should do for these formats. THAT is the lever: expert ma
 more dense-lane batching. Note the GPU MoE batch path (IN2_GPU_MOE) measured neutral here (4048 vs 4040 ms) because
 the experts are NOT in the f16 resident tier (dequant_all excluded "exps"), so that path still gathers quantised
 host bytes per expert.
+
+## Thread scaling: 1.66-1.77x from 8 threads, so ~55% is serial; and only the expert block scales
+12 tokens, prompt 371 151451 149879:
+  threads=1 6655/6549 ms | 2 5284 | 4 4359 | 8 4011/3985 | 12 4019
+Amdahl: 6655/4011 = 1.66x at 8 threads -> serial fraction ~0.55. PHASE comparison 1t vs 8t:
+  phase           1t     8t
+  state/mix     0.002  0.001
+  q             0.046  0.046
+  kv+conv       0.061  0.060
+  attention     0.055  0.050
+  gate+wo       0.056  0.086   (WORSE at 8 threads)
+  mlp+moe       0.083  0.081
+  "?"           0.658  0.232   <- only thing that scales (2.8x)
+  remaining     5.04   2.84    <- scales 1.77x, this is the expert matvec block
+So the expert matvec work IS the parallel part but achieves only 1.77x of 8x on 12 hardware threads, i.e. ~19 GFLOPS
+effective. Phases 0-5 are ~0.30 s total and completely flat in thread count - they are not the target. The lever is
+expert-kernel parallel efficiency (per-call work too small / dequant traffic), not the head, not the dense lane.
