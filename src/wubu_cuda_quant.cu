@@ -4196,7 +4196,8 @@ WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16
         &one, g_f16_d[slot], CUDA_R_16F, K, g_f16_sx, CUDA_R_16F, K,
         &zero, g_f16_sy, CUDA_R_32F, n_cols, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     if (st != CUBLAS_STATUS_SUCCESS) return -10;
-    cudaDeviceSynchronize();  /* cublas may run on its own stream; order the copy back explicitly */
+    /* No explicit cudaDeviceSynchronize: cublas and this cudaMemcpy share the default stream, so the D2H copy
+     * is already ordered after the GEMM. The old full-device barrier here was redundant and measured ~2x/call. */
     if (cudaMemcpy(h_y, g_f16_sy, (size_t)n_cols * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
     return 0;
 }

@@ -637,3 +637,23 @@ CONCLUSIONS (both are true):
 3. The GPU is NOT bandwidth-limited vs the CPU: M=1 N=8192 reads at 181 GB/s (full VRAM) = 14x the CPU's
    ~13 GB/s DRAM read. So a properly-overlapped resident lane SHOULD win on the weight read; my per-call
    cudaDeviceSynchronize (2.1x) plus host round trips were the entire blocker, not physics.
+
+## CORRECTION: my cuBLAS-vs-coopmat comparison was UNFAIR (hard device facts, not assumptions)
+tool tools/probe_coopmat_props.c enumerates vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR. On this box:
+  dev0 AMD Radeon iGPU: 11 configs, all 16x16x16 scope=SUBGROUP
+  dev1 RTX 4050 Laptop: 15 configs, ALL scope=SUBGROUP(3) - 16x16x16 f16/f16/f32 (A0 B0 C1 R1), 16x8x16,
+       16x8x8, and K=32 int8 (A7/3 B7/3 C5 R5). NO workgroup scope -> VK_NV_cooperative_matrix2 unavailable.
+  device subgroupSize = 64 (min 32, max 64); subgroupSizeControl = true.
+What this invalidates: WuBuMM's coopmat shaders are written for warp=32 (one 16x16 tile per 32-lane subgroup;
+v10 = 128x128, 512 threads = 16 warps) and the host does NOT pin requiredSubgroupSize, so on a 64-wide-subgroup
+device the tiling math and VGPR pressure are wrong - and v10 (the CORRECT 128x128 + 16KB shared-staging kernel)
+FAILS pipeline creation here (VK_ERROR_INVALID_SHADER_NV). So the earlier "cuBLAS 6-10x faster than Vulkan
+coopmat" measured the FALLBACK v6/SMEM variants (v7 even removes shared staging - the exact anti-pattern the
+Khronos docs call out: "subgroup-scope matrices used the natural way do not lead to good performance"), NOT a
+fair Vulkan result. Retraction: cuBLAS faster here is TRUE FOR THE FALLBACK PATH ONLY, not a verdict on coopmat.
+Correct path (research, not assumption): coopmat MUST use large workgroup tiles + cooperative global->shared
+staging (Khronos/NVIDIA: 8 subgroups splitting a 256x256 tile into 8x128x64, K=32 -> 21.8 TFLOPS on an RTX 2070,
+vs low single digits naive). On this device that means pinning requiredSubgroupSize=32 (subgroupSizeControl is
+supported) or tiling for 64-wide subgroups, then re-measuring v10-class kernels. Until that runs, the honest
+statement is: naive/fallback coopmat = 0.34-2.74 TFLOPS on this laptop; cuBLAS = up to 17.9 TFLOPS; the gap is
+TILING + subgroup width, not a Vulkan-vs-CUDA law.

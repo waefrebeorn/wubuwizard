@@ -394,6 +394,20 @@ int main(int argc, char **argv)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);
         fprintf(stderr, "PHASE kvproj %.3f kvconv %.3f\n", in2_kvproj_sec, in2_kvconv_sec);
     }
+    if (getenv("IN2_F16_STATS")) {
+        typedef int (*st_t)(long long*,long long*,long long*,long long*,int*);
+        typedef int (*fr_t)(void);
+        const char *nm = getenv("IN2_CUDA_DLL");
+        HANDLE h = LoadLibraryA(nm && nm[0] ? nm : "wubu_cuda.dll");
+        if (h) {
+            st_t st = (st_t)(void*)GetProcAddress(h, "wubu_cuda_f16_stats");
+            fr_t fr = (fr_t)(void*)GetProcAddress(h, "wubu_cuda_vram_free_mb");
+            if (st) { long long ups=0,reuse=0,evict=0,usedmb=0; int slabs=0;
+                st(&ups,&reuse,&evict,&usedmb,&slabs);
+                fprintf(stderr, "F16STAT ups=%lld reuse=%lld evict=%lld used=%lldMB slabs=%d vram_free=%dMB\n",
+                        ups, reuse, evict, usedmb, slabs, fr?fr():-1); }
+        }
+    }
     /* What the f32 materialisation path actually moved. `to_f32` copies on a cache hit and dequantises on a miss;
      * `borrow` hands out the table's own pointer. Bytes/token from the GGUF say nothing about this traffic, so it has
      * to be counted where it happens (counters live in wubu_inkling2_fwd.c). */
