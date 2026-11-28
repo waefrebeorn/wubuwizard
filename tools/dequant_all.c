@@ -85,6 +85,12 @@ static int dequant_one(gguf_ctx*c, gguf_tensor_info*t, const char*outpath){
         else { r=sig|((unsigned)e<<10)|(m>>13); if(m&0x1000) r++; }
         hf[i]=(unsigned short)r;
     }
+    /* optional exact-f32 ref output (DQ_F32=1): write the f32 dequant as a _ref.f32 sibling */
+    if(getenv("DQ_F32")){
+        char rp[1600]; snprintf(rp,sizeof rp,"%s_ref.f32",outpath);
+        FILE*rf=fopen(rp,"wb"); if(rf){ fwrite(f,sizeof(float),(size_t)ne,rf); fclose(rf); }
+        fprintf(stderr,"f32 ref written %s\n",rp);
+    }
     { size_t fz=(size_t)ne*2; FILE*out=fopen(outpath,"wb"); if(!out){fprintf(stderr,"cannot open %s\n",outpath);free(f);free(hf);return 7;}
       long long d0=t->n_dims>0?t->dims[0]:1,d1=t->n_dims>1?t->dims[1]:1;
       fwrite(&d0,8,1,out); fwrite(&d1,8,1,out); fwrite(hf,2,(size_t)ne,out); fclose(out); (void)fz; }

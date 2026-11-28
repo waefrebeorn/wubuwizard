@@ -496,3 +496,25 @@ DRAM + dequant) to ~24 ms/token (VRAM, dequant-free) = ~3-4x on the dense-tier r
 ~1.4-1.5x on overall decode. Residency fits (3.22 GB W + KV/acts in 6 GB). The remaining build is the actual
 gen_fast integration: route the dense tensors in in2_matvec to cuBLAS against the resident set (expert path
 stays CPU), then the end-to-end per-token gate.
+
+## CHASING 1:1 - error audit (the real accumulation question)
+Two audits, both tools committed (dequant_audit.c, lane_check.cu).
+
+### 1. Dequant is exact vs the engine (1:1 at the dequant step)
+dequant_audit runs engine-vec-dot vs my-f32-dequant dot over 50 random q8_K activations per type:
+  IQ4_XS worst rel 3.4e-5, Q4_K 1.4e-4, Q5_K 2.1e-5, Q6_K 9.6e-5, IQ3_XXS 4.2e-6 (60-72% of dots <=1e-6)
+The worst-percentile >1e-6 are near-CANCELLING dots (small absolute value, so relative noise inflates); the
+dequant formula IS the engine's formula (transcribed 1:1), so these are fp32 summation-order artifacts, not
+per-element errors. The dequant step is 1:1.
+
+### 2. The f16 COMPUTE is NOT 1:1 - but the error is common-mode (this is the real finding)
+lane_check loads the single-f16 head AND the exact-f32 reference head, computes lane logits (f16 cuBLAS f32
+accum) vs reference (double-accum f32 dequant) over 8 synthetic activations:
+  8/8 greedy argmax MATCH, even at top-2 margins down to 0.007.
+  BUT err@top1 ~ err@top2 ~ 2.7-3.2 absolute (0.1-1% relative on the large-magnitude logits the head produces).
+  The top-1 and top-2 errors are nearly IDENTICAL (2.7281 vs 2.7212 = the 0.007 margin) - the f16 error is
+  COMMON-MODE, shifting the top contenders together and preserving their difference.
+So the f16 lane is argmax-stable on a single matmul despite a large absolute error. Caveat: this is ONE matvec on
+synthetic activations; the full model runs 30 layers of f16 dense matmuls, so hidden-state errors compound before
+reaching the head. Whether greedy identity holds end-to-end can ONLY be proven by the oracle gate with the lane
+wired in - not by this local test. The common-mode result is encouraging but not a 1:1 proof.
