@@ -2640,3 +2640,22 @@ per row for this entry point, or this tensor is not laid out as flat 2304-elemen
 are 40 per-expert .scale tensors). That is a harness-shape bug of exactly the same family as the uint8_t/uint16_t stride bug
 one section above: my transcription of the calling convention, not the kernel.
 STATE: 83 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified decodes: Q8_0, Q2_0, Q6_K, IQ2_XXS.
+
+## CALL CONVENTION CONFIRMED: nb = n / QK_K, and it is what the row test already passed
+DEFINE_DOT_ROWS(TY,NT) expands to:
+    for (int r = r0; r < r1; ++r) {
+        row_dot_any_##TY##_##NT(w + (size_t) r * row_bytes, n / QK_K, y, res, pd);
+        for (int t = 0; t < NT; ++t) out[t][r] = res[t];
+    }
+so for this family `n` IS the element count of one row (Q8_0 differs: there nb = n/QK8_0, same shape) and nb = n/256. My
+row test passed n=2304 -> nb=9, w+o*594, r0..r1 = one row: that is exactly the convention. So the row-level disagreement is
+NOT a wrong `n`, which removes the last "calling convention" hypothesis I had.
+WHERE THAT LEAVES IT: the kernel and reference agree block-by-block on real bytes at 3.8e-07 over 16 consecutive real blocks,
+and the row test groups the SAME first 4752 bytes as 8 x 594 and disagrees. Both fact sets were produced by tests in this
+repo, so one of the two harnesses is wrong about grouping, and the block test is the one whose expectation is unambiguous
+(one block, one dot, no row arithmetic at all). The next diagnostic is therefore not another kernel read but a self-check of
+the row harness: print nb as the kernel would compute it (n/256) alongside the reference's block count, and assert they are
+equal before comparing any numbers - the same guard that would have caught the 96-slot census truncation and the fabricated
+112-per-forward divisor earlier in this document.
+STATE: 84 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified decodes: Q8_0, Q2_0, Q6_K, IQ2_XXS
+(block granularity, synthetic + real bytes + repo dequantiser + upstream loop all agreeing).
