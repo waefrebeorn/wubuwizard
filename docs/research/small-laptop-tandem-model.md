@@ -1379,3 +1379,24 @@ NOTE ON COUNTS THAT HAVE BITTEN TWICE: 448 was right last turn (it was the 48 th
 total across 4 forwards, not a per-forward count. Both numbers were mine; both were misread the first time. Always
 divide run-wide counters by the forward count before quoting a per-call cost.
 GATE: 15/15.
+
+## THE 82% IS THE CPU ROWS KERNEL, AND TIMETY's 18% WAS MY OWN INSTRUMENT LYING
+Span inside in2_matvec_nt's kernel branch, run-wide over 448 calls:
+  read 0.0000 s | act-quant 0.0004 s (0.8 us/call) | kernel 0.7535 s (1681.9 us/call)
+The GPU dense attempt is gated on IN2_GPU_DENSE, which was never set, so gpu_took never fired: the whole 1681.9 us is
+the CPU rows kernel. Activation quantisation is 0.8 us - irrelevant. The read is zero.
+SO THE KERNEL IS THE COST AFTER ALL, and the earlier "TIMETY says the dot is only 18%" was WRONG: in2_ty_par suppresses
+leaf timers inside parallel regions (a change I made earlier in this session to stop double counting), and the rows
+kernel runs inside a parallel region, so TIMETY measured almost nothing of it. My own anti-double-counting guard turned
+the profiler into an under-counter for the one region that matters. Instrument discipline: a suppression flag must
+report what it suppressed, or it silently becomes a lie.
+WHAT THE KERNEL IS DOING, with the shape finally known:
+  per call 1683 us for 0.88 MMAC  ->  1.05 GFLOP/s
+  228 KB of packed weights per call -> 135 MB/s effective
+Neither ALU nor DRAM explains those numbers on a Ryzen 5 8645HS. 448 calls x 228 KB = 102 MB touched per forward against
+a 7.9 GB model, so the weights are cold every step - but 135 MB/s is still far below what cold page-cache reads cost.
+NEXT INSTRUMENT STEP, and it is the last one needed: accuse the kernel itself. Take ONE shape (ty=8 or 12, 2304x384)
+out of the engine, call the rows kernel directly in a microbenchmark over the same bytes with the same thread count,
+and time it in isolation. That separates "the kernel is slow" from "the kernel is slow when called 448 times per
+forward in this pattern" (allocator churn, false sharing, TLB/page-cache thrash, or nested parallel regions).
+GATE: 15/15.

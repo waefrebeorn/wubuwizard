@@ -158,6 +158,7 @@ double in2_fph[8];
 double in2_nt_read_sec, in2_nt_kern_sec; long in2_nt_calls, in2_nt_unmapped;
 /* dense entry-point population: who is actually called, and how often */
 long in2_ent_calls[8]; double in2_ent_sec[8]; int in2_ent_on;
+double in2_nt_act_sec;
 double in2_kvproj_sec, in2_kvconv_sec;
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
@@ -928,12 +929,14 @@ static int in2_matvec_nt_impl(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
             in2_nt_calls++; if (!mapped) in2_nt_unmapped++;
             if (have) {
                 const unsigned char *base = mapped ? mapped : whole;
+                const double _a0 = in2_now();
                 for (int i = 0; i < nt; ++i) {
                     const float *x = X + (size_t)i * n_in;
                     void *a = (unsigned char *)act + ablk * (size_t)nab * (size_t)i;
                     if (q8_0_act) in2_q8_0_quantise(x, nab, (in2_q8_0_blk *)a);
                     else          in2_q8k_quantise(x, nab, (in2_q8k_blk *)a);
                 }
+                in2_nt_act_sec += in2_now() - _a0;
                 int done = 1;
                 for (int g = 0; g < nt && done; g += 8) {
                     const int nn = (nt - g < 8) ? (nt - g) : 8;
