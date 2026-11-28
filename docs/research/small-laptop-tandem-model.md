@@ -3751,3 +3751,22 @@ WHAT IT PROVES ABOUT THE REMAINING 2x: the lever named two sections ago - concur
 single serial 16 ms block, parallelised with no arithmetic change, bought 3.2x on itself. The same pattern now applies to every other
 serial chunk loop and every dense matvec still called through the serial entry; the head was simply the largest and the easiest.
 STATE: 132 commits, gate 15/15 (binary 12:40:35), identity exact, kernel coverage 192/192, 4.97-5.22 tok/s.
+
+## OUTER-LOOP PARALLELISM WINS, INNER-CALL PARALLELISM LOSES - the head's 3.2x does not transfer to mt per call
+Tested delegating the nt==1 decode path to the row-parallel mt entry (gate/wo go through in2_matvec_quant_nt):
+    baseline      5.28 / 5.23 tok/s      (binary 12:42:48, gate 15/15)
+    IN2_NT1_MT=1  4.95 / 4.90 tok/s      <- SLOWER by ~7%
+Gate passed both ways, so identity is not the discriminator - throughput is, and per-call parallelisation LOSES here.
+WHY THE HEAD WON AND THIS LOSES, and it is a general rule for this engine:
+    the head parallelised ACROSS 25 chunk calls in ONE parallel region  -> 3.2x on that block, +10% end to end
+    mt parallelises INSIDE one call over its rows                        -> thread spawn + f16 probe per call, net negative
+A 183-650 us matvec is simply too short to amortise an OpenMP region, and the dense projections are all in that range. The expert
+path escapes this only because its parallel-for covers 8 experts in one region rather than one expert per region.
+SO THE CONCURRENCY LEVER HAS A SHAPE, not just a size: it pays when there are MULTIPLE INDEPENDENT CALLS to put in one region, and it
+costs when there is one call to split. The head had 25 such calls; the sliding layer's projections have one each, in a dependency chain
+(q -> kv -> attn -> gate+wo -> moe) that cannot be reordered.
+WHERE THAT LEAVES THE 2x: the remaining serial work is genuinely serial - a 48-visit dependency chain of one-call-per-tensor dense
+matvecs at 25 GB/s, each at the memory wall. The lever that worked (batched independent calls) has already been spent on the only place
+in the engine that had 25 of them. Recovering more now requires either fusing the dependency chain's independent halves (q and kv can
+share a region; they do not depend on each other) or a fundamentally faster dense kernel, not more threads.
+STATE: 133 commits, gate 15/15 (binary 12:42:48), identity exact, kernel coverage 192/192, 5.23-5.28 tok/s.

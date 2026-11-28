@@ -2019,6 +2019,10 @@ int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
                         const float *X, int nt, int n_out, int n_in, float *Y)
 {
     if (n_in <= 0 || n_out <= 0 || nt <= 0) return WUBU_INKLING2_ERR_IO;
+    /* nt==1 is the decode path: one activation vector, n_out independent rows. That is exactly what the mt entry
+     * parallelises, and the sliding layer's gate/wo projections come through here, so a single-token step was running a
+     * 2304x3072 matvec on one thread. Gated while it is measured; identity is checked by the oracle gate either way. */
+    if (nt == 1 && getenv("IN2_NT1_MT")) return in2_matvec_quant_mt(ctx, t, elem_off, X, n_out, n_in, Y);
     const int ty = (t && t->info) ? t->info->ggml_type : -1;
     const int q8_0_act = (ty == 8 || ty == 40 || ty == 42);
     const int be = q8_0_act ? 32 : 256;
