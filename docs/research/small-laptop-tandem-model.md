@@ -723,3 +723,15 @@ Perf: M=64 V6 0.94 / NV 0.90 / V5 0.89 / W4 0.86 / SMEM 0.45 TFLOPS; M=256 V6 2.
 SMEM 0.84 / NV 0.52 TFLOPS. No regression from the pin - it was correctness-only, as the earlier perf A/B said.
 NOTE the two-stage truth: subgroup width was NOT the cause of shader 38's pipeline failure (that was the wrong
 buffer count) and NOT a perf lever, but it WAS the cause of silent wrong results in the warp-assuming variants.
+
+## Post-fix M-sweep (N=3072 K=2304): real coopmat ceiling, and a NEW small-M correctness gap
+  M=16  variants correct 2/5   NV 0.29 TFLOPS
+  M=32  variants correct 3/5   NV 0.59
+  M=64  variants correct 5/5   NV 1.02  V6 0.93
+  M=128 5/5                    NV 0.71  V6 1.71
+  M=256 5/5                    NV 0.52  V6 2.73
+  M=512 5/5                    NV 0.52  V6 3.42  <- coopmat ceiling measured on this laptop
+So V6 tops out at 3.42 TFLOPS at M=512 vs cuBLAS 17.9 at M=128 - the remaining ~5x is TILE SIZE (64x64 here vs
+the 256x256 / 8-subgroup cooperative-staging pattern Khronos measures 21.8 TFLOPS with), not subgroup width.
+NEW OPEN ITEM: the 64x64-tile variants (W4/V5/V6) are WRONG at M=16 and M=32 (2/5 and 3/5 correct) while NV/SMEM
+(16x16 tile) pass. That is an out-of-bounds/masked-tile bug when M is smaller than the 64-row tile - not yet fixed.
