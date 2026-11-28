@@ -154,6 +154,8 @@ double in2_hires_now(void) { return in2_now(); }
 int    in2_ty_depth = 0;
 /* full-attention layer sections: state/mix, q, kv+conv, attention, gate+wo, mlp+moe */
 double in2_fph[8];
+/* per-call cost bisection for in2_matvec_nt: read vs kernel vs residual */
+double in2_nt_read_sec, in2_nt_kern_sec; long in2_nt_calls, in2_nt_unmapped;
 double in2_kvproj_sec, in2_kvconv_sec;
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
@@ -917,7 +919,10 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
         }
         const unsigned char *mapped = wubu_inkling2_map_ptr(ctx, t);
         if (act && (mapped || whole)) {
+            const double _r0 = in2_now();
             const int have = mapped ? 1 : (wubu_inkling2_read(ctx, t, whole, rb * n_out) == WUBU_INKLING2_OK);
+            in2_nt_read_sec += in2_now() - _r0;
+            in2_nt_calls++; if (!mapped) in2_nt_unmapped++;
             if (have) {
                 const unsigned char *base = mapped ? mapped : whole;
                 for (int i = 0; i < nt; ++i) {

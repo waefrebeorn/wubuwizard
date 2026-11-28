@@ -1306,3 +1306,20 @@ emits nothing is worse than none, and the tree stays exactly as the gate verifie
 NEXT STEP, corrected: put the dump in tools/inkling_gen.c beside the PHASE/TIMETY exit dump (that block demonstrably
 runs) rather than in model.c's per-forward block, and report three numbers per shape: read seconds, kernel seconds, and
 the residual. That bisects the 89% into I/O, kernel and dispatch in one run.
+
+## BISECTION RESULT: the weight read is FREE, and only 24 of ~168 dense matvecs reach that branch
+NTREAD instrumentation (counters in in2_matvec_nt, dump beside the PHASE block that provably runs):
+  NTREAD 0.0000 s read over 24 in2_matvec_nt calls (0.0 us/call), unmapped=0
+Two hard facts, both eliminating a suspect:
+1. THE READ COSTS NOTHING. unmapped=0 means the mapping is in use, so no copy is made, and 24 calls accumulated 0.0000 s
+   of read time. Weight I/O is not the ~89%.
+2. ONLY 24 CALLS PER FORWARD REACH THAT BRANCH. A full layer issues ~7 dense matvecs (q, k, v, gate, wo, wrel, sink)
+   over 24 layers = ~168 per forward, but the kernel branch saw 24. So roughly 85% of dense matvecs take a DIFFERENT
+   path - the f16/GPU lane, the float fallback, or another entry point entirely. My mental model of the call graph was
+   wrong, and every "per-call overhead" estimate that assumed one entry point was measuring the wrong population.
+CONSEQUENCE: the 89% cannot be attributed from inside in2_matvec_nt, because most of the work does not pass through it.
+The next instrument must sit ONE LEVEL UP and count entries by function and shape - every dense matvec entry point, not
+just nt's kernel branch.
+This is the fourth suspect eliminated for the 89% (after arithmetic, bandwidth/kernel choice, and thread count), and the
+first that also invalidates the scope of the previous measurements rather than just a candidate.
+GATE: 15/15.

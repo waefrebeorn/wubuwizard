@@ -412,6 +412,11 @@ int main(int argc, char **argv)
          * FP2(0) loads, FP2(1) mix+gates, FP2(2) q, FP2(3) kv+conv, FP2(4) attention, FP2(5) gate+after,
          * FP2(6) mlp+moe+postconv. The previous array was shifted by one and had no name for slot 6, which
          * made slot 6 - the largest span - print as "?" and made every other row name the slot before it. */
+        { extern double in2_nt_read_sec; extern long in2_nt_calls, in2_nt_unmapped;
+          fprintf(stderr, "NTREAD %.4f s read over %ld in2_matvec_nt calls (%.1f us/call), unmapped=%ld\n",
+                  in2_nt_read_sec, in2_nt_calls,
+                  in2_nt_calls ? in2_nt_read_sec / in2_nt_calls * 1e6 : 0.0, in2_nt_unmapped);
+          in2_nt_read_sec = 0; in2_nt_calls = 0; in2_nt_unmapped = 0; }
         const char *pn[8] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe","unused"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);
