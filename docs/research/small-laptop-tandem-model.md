@@ -577,3 +577,19 @@ thrashes ~11x (re-uploads ~(3070-budget)MB/token over PCIe at ~4 GB/s). The dens
 (3069 MB, leaves 1.89 GB VRAM free, 38.6 ms/token). The WuBuHIVE ring's real home is a SUBSET working set - the
 MoE experts, where only 8 of 48 are active per token, so a bounded ring holds the hot experts without re-uploading
 the world. The ring code is correct (ups/reuse/evict all scale with budget); it is simply the wrong tier to bound.
+
+## WHERE THE TOKEN GOES (measured per-type) - and why the GPU ties: DRAM-bound, low arithmetic intensity
+IN2_TIMETY per-type over a 3-token prefill (types 16/17/19/22/40/42 are the expert/dense low-bit formats):
+  TY16 0.227s 21.4% 9.5 GOPS | TY42 0.213s 20.0% | TY17 0.192s 18.1% | TY40 0.156s 14.7%
+  TY22 0.148s 13.9% | TY19 0.125s 11.8%   -> experts dominate, all at 6-10 GOPS (DRAM-bound)
+  PHASE: q 34.2% | gate+wo 19.4% | moe 18.4% | k+v 8.3% | attn 1.2% | mix 0.2%
+  HEAD = 0.006 s/token (6 ms!) - the head is NOT the bottleneck (my earlier guess was wrong; measured).
+  dequant cache: 524 entries, 157 MB, 0 uncached dequants.
+So the token cost is ~2.3 GB of low-bit weights read per token from DRAM at 6-10 GOPS.
+GPU results: IN2_GPU_F16 dense lane 3.97 s vs CPU 3.1 s (SLOWER - per-call cudaDeviceSynchronize+H2D/D2H on
+~2000 tiny attention matvecs outweighs the VRAM saving); IN2_GPU_MOE 3.92 s vs CPU 3.93 s (tie, 0.5%).
+All variants 15/15 identical. CONCLUSION: on this 6 GB laptop the engine is DRAM-bandwidth-bound and the GPU
+does not win because these low-bit matvecs lack arithmetic intensity to amortize the transfer; per-call sync also
+hurts. The remaining lever is arithmetic intensity - batched multi-token / multi-expert GEMMs that reuse each
+transfer - not more residency tricks. Added the IN2_GPU_F16 whole-vocab head call (correct, neutral here since the
+head is already 6 ms; it pays off only once the head is batched).

@@ -443,11 +443,19 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
             const int CHUNK = 8192;
             head_done = 1;
             const clock_t _h0 = clock();
-            for (int r = 0; r < cfg->vocab_size; r += CHUNK) {
-                const int n = (r + CHUNK <= cfg->vocab_size) ? CHUNK : (cfg->vocab_size - r);
-                if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits_out + r) != WUBU_INKLING2_OK) {
+            if (getenv("IN2_GPU_F16")) {
+                /* whole-vocab in ONE call: the f16 lane already holds output.weight resident (it is part of the
+                 * 646-tensor dense set), so this is one cuBLAS GEMM instead of 25 chunked CPU row-block matvecs.
+                 * If the f16 file/dispatch is unavailable in2_matvec_quant falls back to its CPU path unchanged. */
+                if (in2_matvec_quant(ctx, &ot, 0, fin, cfg->vocab_size, d, logits_out) != WUBU_INKLING2_OK)
                     head_done = 0;
-                    break;
+            } else {
+                for (int r = 0; r < cfg->vocab_size; r += CHUNK) {
+                    const int n = (r + CHUNK <= cfg->vocab_size) ? CHUNK : (cfg->vocab_size - r);
+                    if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits_out + r) != WUBU_INKLING2_OK) {
+                        head_done = 0;
+                        break;
+                    }
                 }
             }
             if (!_hp && getenv("IN2_TIMETY")) {
