@@ -4255,6 +4255,8 @@ WUBU_EXPORT int wubu_cuda_resident_f16_gemm(int64_t ident, const void *h_w_f16, 
  * This is the round-trip fix: {wq,wk,wv} (and {wgate,wrel}) all consume the same input, so 3 round trips become 1.
  * h_out is n_ops contiguous blocks, block i being M*n_cols[i] floats in row-major [M][n_cols[i]]. */
 static float *g_f16_gout = NULL; static long long g_f16_gout_cap = 0;
+/* one device output region per op (see the per-op comment in wubu_cuda_f16_group) */
+static float *g_pb[16]; static long long g_pb_cap[16];
 WUBU_EXPORT int wubu_cuda_f16_group(const long long *idents, const void *const *ws, const unsigned long long *wbytes,
     const int *n_cols, int n_ops, const float *h_act, int M, int K, float *h_out)
 {
@@ -4277,27 +4279,37 @@ WUBU_EXPORT int wubu_cuda_f16_group(const long long *idents, const void *const *
         g_hy_pin_cap = nout;
     }
     if (nact > (long long) g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)nact * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = (int) nact; }
-    if (nout > g_f16_gout_cap) { if (g_f16_gout) cudaFree(g_f16_gout); if (cudaMalloc(&g_f16_gout, (size_t)nout * 4) != cudaSuccess) { g_f16_gout = NULL; g_f16_gout_cap = 0; return -7; } g_f16_gout_cap = nout; }
     for (long long i = 0; i < nact; ++i) g_hx_pin[i] = __float2half_rn(h_act[i]);
     if (cudaMemcpyAsync(g_f16_sx, g_hx_pin, (size_t) nact * 2, cudaMemcpyHostToDevice, g_f16_stream) != cudaSuccess) return -9;
     float one = 1.0f, zero = 0.0f;
-    long long off = 0;
+    long long offs[16], off = 0;
+    for (int i = 0; i < n_ops && i < 16; ++i) { offs[i] = off; off += (long long) n_cols[i] * M; }
     for (int i = 0; i < n_ops; ++i) {
         int slot = f16_slot_get(idents[i], ws[i], (size_t) wbytes[i]);
         if (slot < 0) return slot;
+        /* One device region PER OP. Writing several different-width ops into ONE buffer (changing ldc at a non-zero
+         * offset) silently dropped the tail of the narrower op on this driver: test_f16_group reported op2
+         * (n_cols=1536) cos=0.953 with the last ~150 elements wrong, non-deterministically, while compute-sanitizer
+         * found no memory error - cuBLAS just did not write them. Separate allocations remove that hazard. */
+        const long long bytes_i = (long long) n_cols[i] * M * 4;
+        if (i >= 16) return -1;
+        if (bytes_i > g_pb_cap[i]) {
+            if (g_pb[i]) { cudaStreamSynchronize(g_f16_stream); cudaFree(g_pb[i]); }
+            if (cudaMalloc(&g_pb[i], (size_t) bytes_i) != cudaSuccess) { g_pb[i] = NULL; g_pb_cap[i] = 0; return -7; }
+            g_pb_cap[i] = bytes_i;
+        }
         cublasStatus_t st = cublasGemmEx(g_f16_h, CUBLAS_OP_T, CUBLAS_OP_N, n_cols[i], M, K,
             &one, g_f16_d[slot], CUDA_R_16F, K, g_f16_sx, CUDA_R_16F, K,
-            &zero, g_f16_gout + off, CUDA_R_32F, n_cols[i], CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+            &zero, g_pb[i], CUDA_R_32F, n_cols[i], CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
         if (st != CUBLAS_STATUS_SUCCESS) return -10;
-        off += (long long) n_cols[i] * M;
     }
-    /* Correctness first: drain ALL work before the result copy. An async D2H on the compute stream was leaving the
-     * tail of the last op uncopied in test_f16_group (op2: 145/1536 columns wrong, all at the end) - i.e. the copy
-     * raced the final GEMM. A device sync per GROUP is still one sync per group, not per op, so the round-trip win
-     * stands. */
+    /* Drain ALL work, then copy each op's region straight into the caller's buffer. One sync per GROUP (not per op),
+     * so the round-trip win stands. */
     if (cudaDeviceSynchronize() != cudaSuccess) return -11;
-    if (cudaMemcpy(g_hy_pin, g_f16_gout, (size_t) nout * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
-    memcpy(h_out, g_hy_pin, (size_t) nout * 4);
+    for (int i = 0; i < n_ops; ++i) {
+        const size_t nb = (size_t) n_cols[i] * M * 4;
+        if (cudaMemcpy(h_out + offs[i], g_pb[i], nb, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
+    }
     return 0;
 }
 

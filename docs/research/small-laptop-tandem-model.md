@@ -836,3 +836,20 @@ fails, and the tail of the whole output device buffer is what comes back wrong. 
 cache-miss uploads and cudaDeviceSynchronize before the D2H did NOT fix it, so it is not simple stream ordering;
 compute-sanitizer memcheck is running to locate the write. The grouped entry is NOT wired into the engine, so the
 gate is unaffected.
+
+## CLOSED: grouped GEMM tail bug was cuBLAS not writing a narrower op at a non-zero offset
+Root cause found by bisection with the harness, not by guessing:
+  - 1 op PASS, 2 ops PASS, single 1536-wide PASS
+  - 3 ops at the SAME width (uniform ldc, offsets 0/3072/6144) PASS
+  - 3 ops where the LAST is narrower (ldc changes 3072 -> 1536 at offset 6144) FAIL on that op
+  - compute-sanitizer memcheck: 0 errors => no OOB, the elements were simply never written by cuBLAS
+  - the failing count MOVED between runs (145 then 143) => silent, non-deterministic underwrite
+FIX: one device output region PER OP (g_pb[i] sized n_cols[i]*M), each GEMM writing at offset 0 with its own ldc,
+then a single cudaDeviceSynchronize and one blocking D2H per op straight into the caller's buffer. Still ONE H2D and
+ONE sync per group, so the round-trip win is intact.
+RESULT: tools/test_f16_group.exe -> VERDICT: 22/22 cases PASS (bounds sweep M=1..65 plus engine shapes, K=32/64/2304,
+N=16/32/1536/3072, mixed-width groups), and the engine holds 15/15 identical x3 reps with the rebuilt DLL.
+TWO BUGS CLOSED BY TESTS THIS ROUND (neither was visible from cos-on-one-shape):
+ 1. my harness keyed the resident cache wrong (fixed ident, fresh weights) -> false 15/18 FAIL
+ 2. cuBLAS underwrite on varying-ldc into one buffer -> real, silent, non-deterministic wrong numbers
+LESSON: keep the per-shape + poison + double-reference harness; single-shape cos checks miss exactly this class.

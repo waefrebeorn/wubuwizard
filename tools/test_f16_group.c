@@ -42,6 +42,7 @@ static float rndf(void) { return ((float)(rng() % 2001) - 1000.0f) / 1000.0f; } 
 
 #define POISON 12345.0f
 
+static int g_no_halve = 0;
 static int run_case(grp_t grp, one_t one, int M, int K, int N, int n_ops, const char *tag) {
     /* Weights: n_ops slabs of [n_cols][K] f16, plus exact-f32 twins for the reference.
      * IMPORTANT (this bit me): the resident cache is keyed by (ident, wbytes) and assumes ident <-> immutable weight
@@ -49,7 +50,7 @@ static int run_case(grp_t grp, one_t one, int M, int K, int N, int n_ops, const 
      * ident: the same ident always yields the same weights, which makes cache hits legitimate and the comparison valid. */
     int n_cols[4]; unsigned short *wh[4]; float *wf[4]; long long idents[4];
     for (int i = 0; i < n_ops; ++i) {
-        n_cols[i] = (i == n_ops - 1 && n_ops > 1) ? (N / 2 > 0 ? N / 2 : 1) : N;
+        n_cols[i] = g_no_halve ? N : ((i == n_ops - 1 && n_ops > 1) ? (N / 2 > 0 ? N / 2 : 1) : N);
         idents[i] = 1000000 + (long long) n_cols[i] * 7919 + (long long) K;
         rng_state = (unsigned) (idents[i] * 2654435761u + 12345u);
         wh[i] = (unsigned short *) malloc((size_t) n_cols[i] * K * 2);
@@ -160,6 +161,7 @@ int main(int argc, char **argv) {
     printf("== engine shapes ==\n");
     total++; ok += run_case(grp, one, 1, 2304, 3072, 3, "decode M=1");
     /* discriminators for the op2(n_cols=N/2) failure: is it position, the halved width, or accumulation? */
+    g_no_halve = 1; total++; ok += run_case(grp, one, 1, 2304, 3072, 3, "decode 3 ops SAME width"); g_no_halve = 0;
     total++; ok += run_case(grp, one, 1, 2304, 3072, 1, "decode 1 op (no halve)");
     total++; ok += run_case(grp, one, 1, 2304, 3072, 2, "decode 2 ops (2nd halved)");
     total++; ok += run_case(grp, one, 1, 2304, 1536, 1, "decode single 1536 wide");
