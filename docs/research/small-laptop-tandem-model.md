@@ -3671,3 +3671,29 @@ collectively carry more MACs (5770+5606+5436 M for 16/42/17 alone) but in far fe
 DQ traffic for the same forward: f32 produced 161.5 MB, copied 116.4 MB, borrow hit 2515 / miss 215, to_f32 calls 4325 - i.e. the
 dequantise-cache copies well over a hundred megabytes per forward even on hits, by design (every caller owns a fresh buffer).
 STATE: 127 commits, gate 15/15, identity exact, kernel coverage 192/192, decode step 0.172-0.188 s = 5.3-5.8 tok/s.
+
+## THE TARGET THE RECONCILED MAP POINTS AT: Q8_0 IS THE LEAST EFFICIENT KERNEL AND THE MOST CALLED
+From the reconciled per-forward type table:
+    type          calls   cpu-s   macs(M)   GOPS
+    ty=8  Q8_0     1286   0.190    6915     36.7
+    ty=16 IQ2_XXS   103   0.052    5770    114.2
+    ty=42           236   0.042    5606    132.9
+    ty=17            96   0.038    5436    143.7
+Q8_0 carries 39% of all matvec CPU time, is called 12.5x more often than IQ2_XXS, and runs at 36.7 GOPS - 3.1x less efficient per MAC
+than IQ2_XXS and 3.6x less than ty=42, even though int8 x int8 is the cheapest arithmetic in the set. Something in the Q8_0 path is
+costing about three times what the MAC count justifies.
+Three candidate causes, each already measured somewhere in this document:
+  (a) CALL OVERHEAD. 1286 calls per forward. At the ENTRYTIME figure of 11.9 us of activation quantisation per call, that is 15.3 ms
+      of the 172 ms step (9%) spent re-quantising activations - and the same x vector is quantised again for every tensor that consumes it.
+  (b) SMALL ROW COUNTS. Many of those calls are narrow (kdim=1024, qdim=3072), so per-call fixed cost is amortised over few rows, which
+      is exactly the regime where GOPS collapses.
+  (c) PARALLELISM. Overall matvec concurrency is 0.480 CPU-s / 0.172 s wall = 2.8x of 8 threads. Q8_0's 1286 tiny calls are the least
+      likely to fill 8 threads, because each is short.
+WHY THIS IS THE RIGHT NEXT TARGET AND THE EXPERT PATH IS NOT: the expert path is 98% kernel, 5.4x parallel, at 114-144 GOPS - close to
+what this hardware does. Q8_0 at 36.7 GOPS with 1286 calls has the largest gap between measured and achievable, and it is 39% of matvec
+time. It has also never been examined in this arc, because twelve hypotheses were all aimed at experts.
+NEXT CONCRETE STEP: count what fraction of the 1286 calls are (a) the head, (b) q/k/v, (c) gate/wo, and for the dominant class, hoist the
+activation quantisation out of the per-call path so one q8_0 conversion serves every tensor in that group. That is instrumentation plus a
+narrow change, identity-neutral because the conversion is the same value either way, and it is bounded at ~15 ms/step (9%) before any
+kernel work at all.
+STATE: 128 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 0.172-0.188 s.
