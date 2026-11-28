@@ -3482,3 +3482,32 @@ per-expert pointer/offset arithmetic) and only a fraction of the iteration is th
 time even though it is parallel by iteration count. The measurement that decides this is the same split already used once: time inside
 in2_matvec_quant versus time in the rest of the expert-loop body, per iteration, under an env gate.
 STATE: 119 commits, gate 15/15 (fresh binary), identity exact, kernel coverage 192/192, 4.49-4.68 tok/s hot.
+
+## MOE_SPLIT ANSWERS IT: the expert loop is 98% kernel and runs at 5.4x, so experts are 26% of the WALL - and 58 ms/token of scalar work is the real remainder
+IN2_MOE_SPLIT=1, 8 tokens:
+    MOESPLIT  gu=0.725 act=0.017 down=0.384 gather=0.001 scatter=0.002 route=0.027  (62.5% gu, 33.2% down, 1.5% act)
+    TOKENWALL route=0.064 zero=0.001 region=0.462  | cpu-spans gu=1.793 act=0.039 down=0.652
+    TOKENSPLIT gu=1.793 act=0.039 down=0.652  sum=2.486  (72.1% gu, 26.3% down, 1.6% act)
+Read correctly:
+    expert region wall      0.462 s / 8 tokens = 57.8 ms/token   = 26% of the 219 ms token
+    cpu spans sum           2.486 s / 0.462 s   = 5.4x concurrency on 8 threads
+    matvec share of spans   98.4%  (gu + down); activation, gather, scatter, route together are 1.6%
+So the expert loop is ALREADY well parallelised (5.4x of a possible 8x) and ALREADY almost entirely kernel time. There is no serial prologue
+to hoist - the hypothesis this document ended the last section on is now measured and false. And the "experts are 72%" figure was a
+SUM-OF-CPU-TIME figure: 72.3% of the census sum, which at 5.4x concurrency is only 26% of the wall. Summed time and wall time had been
+used interchangeably for four sections.
+WHAT THE TOKEN ACTUALLY IS, in wall:
+    experts (matvec, 5.4x parallel)     57.8 ms   26%
+    non-expert matvec (attn/output/qkv) ~103 ms summed, and since the whole-engine concurrency is 1.7x this is ~90-100 ms wall
+    everything else                     ~58-60 ms  26%   <- NOT accounted for by any matvec call site
+That last row is the finding: roughly 58 ms/token of work happens outside every quantised matvec - the norms, the mix, softmax, RoPE,
+the two short convolutions, the loop gate/forget/gain arithmetic and the per-layer buffers. It is scalar, it is serial, and it is a
+quarter of the token. It is also the only block in the engine that has never been instrumented at all.
+ATTN PATCH, RETRIED PROPERLY AND STILL NULL: re-applied wq/wk/wv -> in2_matvec_quant_mt, rebuilt with the REAL script
+(tools/build_gen_fast.sh, binary 12:17:34), gate PASS 15/15, timings 4.63 / 4.63 / 4.66 against a 4.65 baseline. So the null result is
+real this time, not a stale binary: those three projections are ~32 ms summed and mostly parallel by other means, so moving them to the
+mt entry buys nothing measurable. Reverted again.
+NEXT MEASUREMENT, and it is the first one aimed at the un-instrumented quarter: wrap the per-layer scalar section - everything between
+the attention matvecs and the MoE call - with the existing TKPH/phase counters (in2_phase[8] already exists and is never printed) and
+gate the print on IN2_PERF. If that quarter is norms and softmax, it is SIMD-able; if it is buffer copies, it is avoidable entirely.
+STATE: 120 commits, gate 15/15 (rebuilt), identity exact, kernel coverage 192/192, 4.63-4.66 tok/s hot.
