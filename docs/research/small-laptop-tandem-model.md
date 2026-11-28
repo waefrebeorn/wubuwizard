@@ -816,3 +816,23 @@ token = 161 H2D + 161 D2H + 161 submissions), which pinning does not remove. Con
 copies, it is FEWER round trips - keep activations resident on the device across a whole group of matvecs and only
 move the concatenated result once (group by shared input: {wq,wk,wv} share one activation; {wgate,wrel} share one),
 or chain the whole dense block device-side. That is the remaining correct architecture for GPU acceleration here.
+
+## Test harness the WuBuMM way (per-shape PASS/FAIL + poison), and what it caught
+tools/test_f16_group.c: 21 cases. Per case it computes a DOUBLE-precision reference, then reports cos, max|abs diff|,
+and a POISON count for BOTH the grouped path and the per-op path, plus a final VERDICT. Bounds are explicit on
+purpose: M in {1,2,3,7,8,15,16,17,31,32,33,63,64,65}, K in {32,64,2304}, N in {16,32,1536,3072}, and a group whose
+n_cols differ (N, N, N/2) so per-op offsets are exercised. tools/test_gemm_m_probe.c is a minimal reproducer that
+uses W=identity so expected Y[m][o] == X[m][o] exactly, printing both matrices so a failure MODE is visible.
+CAUGHT #1 (test bug, important lesson): the resident cache is keyed by (ident, wbytes) and assumes ident <-> immutable
+weights (true for the engine, which keys on file_offset). My first harness reused fixed idents with fresh random
+weights per case, so it got legitimate stale-cache hits and reported 15/18 FAIL. Fixed by deriving ident from
+(n_cols,K) and seeding the RNG from that same ident. With that fix: 20/21 PASS. A caller that reuses an ident with
+different bytes WILL get silent wrong numbers - that is the cache contract.
+CAUGHT #2 (real DLL bug, still open): grouped call with n_ops=3 at M=1, K=2304, N=3072 gives op2 (n_cols=1536)
+cos=0.953 with max|diff|=51, while the same op called alone is cos=0.999999983. The bad elements are the LAST ~143 of
+1536 and the count MOVES between runs (145 then 143) => non-deterministic, so an OOB write or race, not a logic error.
+Discriminators: 1 op PASS, 2 ops PASS, single 1536-wide PASS - only 3 ops (where op0/op1 share one cached slab)
+fails, and the tail of the whole output device buffer is what comes back wrong. Adding cudaStreamSynchronize before
+cache-miss uploads and cudaDeviceSynchronize before the D2H did NOT fix it, so it is not simple stream ordering;
+compute-sanitizer memcheck is running to locate the write. The grouped entry is NOT wired into the engine, so the
+gate is unaffected.

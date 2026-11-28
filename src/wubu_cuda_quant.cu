@@ -4155,12 +4155,10 @@ static float  *g_f16_sy = NULL; static int g_f16_sy_cap = 0;
 static __half *g_hx_pin = NULL; static long long g_hx_pin_cap = 0;
 static float  *g_hy_pin = NULL; static long long g_hy_pin_cap = 0;
 static cudaStream_t g_f16_stream = NULL;
-/* Core: Y[M][n_cols] = X[M][K] * W[n_cols][K]^T with f16 weights resident. M==1 is the decode GEMV; M>1 is a
- * whole-prompt prefill GEMM in ONE cuBLAS call (the caller passes the full batch instead of looping tokens). */
-static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
-    const float *h_act, int M, int K, float *h_y, int n_cols)
+/* Fetch (or upload) the resident f16 slab for ident, applying the bounded LRU ring. Returns slot >= 0 or a negative
+ * error code. Shared by the single matvec, the batched GEMM and the grouped GEMM so a group uploads each weight once. */
+static int f16_slot_get(int64_t ident, const void *h_w_f16, size_t wbytes)
 {
-    if (!h_w_f16 || !h_act || !h_y || wbytes == 0 || K <= 0 || n_cols <= 0 || M <= 0) return -1;
     if (!g_f16_h) { if (cublasCreate(&g_f16_h) != CUBLAS_STATUS_SUCCESS) { g_f16_h = NULL; return -2; } }
     int slot = -1;
     for (int i = 0; i < g_f16_n; ++i) if (g_f16_id[i] == ident && g_f16_b[i] == wbytes && g_f16_d[i]) { slot = i; break; }
@@ -4182,6 +4180,11 @@ static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
         /* reuse a freed slot if one exists, else append */
         for (int i = 0; i < g_f16_n; ++i) if (!g_f16_d[i]) { slot = i; break; }
         if (slot < 0) { if (g_f16_n >= 4096) return -3; slot = g_f16_n++; }
+        /* Ordering hazard (found by test_f16_group): the GEMMs run on g_f16_stream (non-blocking) but this upload
+         * uses the default stream. A blocking memcpy there does NOT order against a non-blocking stream, so a
+         * mid-group cache miss could overlap pending GEMMs (measured: the 3rd op of a group came back cos 0.95 with
+         * its first element correct). Drain the compute stream before touching memory on the default stream. */
+        if (g_f16_stream) cudaStreamSynchronize(g_f16_stream);
         if (cudaMalloc(&g_f16_d[slot], wbytes) != cudaSuccess) { g_f16_d[slot] = NULL; return -4; }
         if (cudaMemcpy(g_f16_d[slot], h_w_f16, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
             cudaFree(g_f16_d[slot]); g_f16_d[slot] = NULL; return -5;
@@ -4189,6 +4192,17 @@ static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
         g_f16_id[slot] = ident; g_f16_b[slot] = wbytes; g_f16_use[slot] = ++g_f16_clock;
         g_f16_used += wbytes; g_f16_ups++;
     }
+    return slot;
+}
+
+/* Core: Y[M][n_cols] = X[M][K] * W[n_cols][K]^T with f16 weights resident. M==1 is the decode GEMV; M>1 is a
+ * whole-prompt prefill GEMM in ONE cuBLAS call (the caller passes the full batch instead of looping tokens). */
+static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
+    const float *h_act, int M, int K, float *h_y, int n_cols)
+{
+    if (!h_w_f16 || !h_act || !h_y || wbytes == 0 || K <= 0 || n_cols <= 0 || M <= 0) return -1;
+    int slot = f16_slot_get(ident, h_w_f16, wbytes);
+    if (slot < 0) return slot;
     const long long nact = (long long) M * (long long) K;      /* activation elements (f16 on device) */
     const long long nout = (long long) n_cols * (long long) M; /* output elements (f32) */
     if (nact > (long long) g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)nact * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = (int) nact; }
@@ -4236,6 +4250,56 @@ WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16
 WUBU_EXPORT int wubu_cuda_resident_f16_gemm(int64_t ident, const void *h_w_f16, size_t wbytes,
     const float *h_acts, int M, int K, float *h_y, int n_cols)
 { return f16_gemm_core(ident, h_w_f16, wbytes, h_acts, M, K, h_y, n_cols); }
+
+/* GROUPED entry: n_ops matvecs that share ONE activation, with a SINGLE H2D, n_ops GEMMs on device and a SINGLE D2H.
+ * This is the round-trip fix: {wq,wk,wv} (and {wgate,wrel}) all consume the same input, so 3 round trips become 1.
+ * h_out is n_ops contiguous blocks, block i being M*n_cols[i] floats in row-major [M][n_cols[i]]. */
+static float *g_f16_gout = NULL; static long long g_f16_gout_cap = 0;
+WUBU_EXPORT int wubu_cuda_f16_group(const long long *idents, const void *const *ws, const unsigned long long *wbytes,
+    const int *n_cols, int n_ops, const float *h_act, int M, int K, float *h_out)
+{
+    if (!idents || !ws || !wbytes || !n_cols || !h_act || !h_out || n_ops <= 0 || M <= 0 || K <= 0) return -1;
+    if (!g_f16_h) { if (cublasCreate(&g_f16_h) != CUBLAS_STATUS_SUCCESS) { g_f16_h = NULL; return -2; } }
+    if (!g_f16_stream) { if (cudaStreamCreateWithFlags(&g_f16_stream, cudaStreamNonBlocking) != cudaSuccess) return -8;
+                         cublasSetStream(g_f16_h, g_f16_stream); }
+    const long long nact = (long long) M * (long long) K;
+    long long nout = 0;
+    for (int i = 0; i < n_ops; ++i) { if (n_cols[i] <= 0) return -1; nout += (long long) n_cols[i] * M; }
+    /* pinned staging, sized for both directions */
+    if (nact > g_hx_pin_cap) {
+        if (g_hx_pin) cudaFreeHost(g_hx_pin);
+        if (cudaHostAlloc((void **) &g_hx_pin, (size_t) nact * 2, cudaHostAllocDefault) != cudaSuccess) { g_hx_pin = NULL; g_hx_pin_cap = 0; return -8; }
+        g_hx_pin_cap = nact;
+    }
+    if (nout > g_hy_pin_cap) {
+        if (g_hy_pin) cudaFreeHost(g_hy_pin);
+        if (cudaHostAlloc((void **) &g_hy_pin, (size_t) nout * 4, cudaHostAllocDefault) != cudaSuccess) { g_hy_pin = NULL; g_hy_pin_cap = 0; return -8; }
+        g_hy_pin_cap = nout;
+    }
+    if (nact > (long long) g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)nact * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = (int) nact; }
+    if (nout > g_f16_gout_cap) { if (g_f16_gout) cudaFree(g_f16_gout); if (cudaMalloc(&g_f16_gout, (size_t)nout * 4) != cudaSuccess) { g_f16_gout = NULL; g_f16_gout_cap = 0; return -7; } g_f16_gout_cap = nout; }
+    for (long long i = 0; i < nact; ++i) g_hx_pin[i] = __float2half_rn(h_act[i]);
+    if (cudaMemcpyAsync(g_f16_sx, g_hx_pin, (size_t) nact * 2, cudaMemcpyHostToDevice, g_f16_stream) != cudaSuccess) return -9;
+    float one = 1.0f, zero = 0.0f;
+    long long off = 0;
+    for (int i = 0; i < n_ops; ++i) {
+        int slot = f16_slot_get(idents[i], ws[i], (size_t) wbytes[i]);
+        if (slot < 0) return slot;
+        cublasStatus_t st = cublasGemmEx(g_f16_h, CUBLAS_OP_T, CUBLAS_OP_N, n_cols[i], M, K,
+            &one, g_f16_d[slot], CUDA_R_16F, K, g_f16_sx, CUDA_R_16F, K,
+            &zero, g_f16_gout + off, CUDA_R_32F, n_cols[i], CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+        if (st != CUBLAS_STATUS_SUCCESS) return -10;
+        off += (long long) n_cols[i] * M;
+    }
+    /* Correctness first: drain ALL work before the result copy. An async D2H on the compute stream was leaving the
+     * tail of the last op uncopied in test_f16_group (op2: 145/1536 columns wrong, all at the end) - i.e. the copy
+     * raced the final GEMM. A device sync per GROUP is still one sync per group, not per op, so the round-trip win
+     * stands. */
+    if (cudaDeviceSynchronize() != cudaSuccess) return -11;
+    if (cudaMemcpy(g_hy_pin, g_f16_gout, (size_t) nout * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
+    memcpy(h_out, g_hy_pin, (size_t) nout * 4);
+    return 0;
+}
 
 /* Stats for the bounded f16 VRAM ring + a VRAM probe, so the engine/tests can report residency and thrash. */
 WUBU_EXPORT int wubu_cuda_f16_stats(long long *ups, long long *reuse, long long *evict, long long *used_mb, int *slabs)
