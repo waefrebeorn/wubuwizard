@@ -3597,3 +3597,23 @@ between the numbers in this document and admissibility under the reconciliation 
 RECORDED SO IT IS NOT REPEATED: IN2_TIMETY is the gate for in2_lay_sec, IN2_MOE_SPLIT for the MoE split, IN2_PERF for the stats block, and
 IN2_CS_ALL for the full census. Printing a counter without knowing its charge-gate produced a false "all zeros" reading twice in this arc.
 STATE: 124 commits, gate 15/15 (binary 12:24:28), identity exact, kernel coverage 192/192, 4.27-4.68 tok/s hot.
+
+## THE BRACKETED LOOP IS NOT THE ONE THAT RUNS - a diagnostic placed inside it never fires
+Instrumented the `while (produced < n_gen)` loop at tools/inkling_gen.c:320 (the only place in the file that produces tokens from
+in2_forward_at with a KV cache, and the site that increments n_forward) with a QPC bracket AND a one-shot `BRACKET first=...`
+diagnostic placed immediately after it. On a clean build (12:29:53, gate 15/15):
+    TIMING: 16 tokens in 3.3s = 4.81 tok/s (KV cache)     <- generation definitely happened
+    (no BRACKET line)                                      <- that loop never executed
+    FWDMEAS forward=0.000 ... vs-wall=-100.0%             <- and neither did its accumulator
+So the tokens printed by TIMING are NOT produced by the loop I bracketed. There is a second generation path in this program - reached
+before line 320, since the function returns from it - and it is the one that actually runs. Every "probe", "batched" and "warm" branch
+examined so far is in the code that DOESN'T run for this invocation.
+THIS IS THE ROOT OF THE FOUR-INSTRUMENT DISAGREEMENT, found by exhaustion rather than by theory: the instrumented code and the executing
+code are different code. Phases, census, TY table and entry timer are all charged from library functions that the mystery path calls, so
+they measure real work - but the control flow around them, and therefore every wall-time attribution, has been guessed from a loop that
+never runs.
+NEXT STEP, exact: find what executes between argument parsing (line 145) and the first forward, i.e. the branch taken when this binary is
+called as `gen_fast 16 371 151451 149879`. The cheapest identification is a one-line `fprintf(stderr, "PATH %s\n", __func__)` inside
+in2_forward_at itself - that names the caller-independent fact of whether the library entry is even used, and if it is used, the BRACKET
+question becomes "which call site" rather than "which loop".
+STATE: 125 commits, gate 15/15 (binary 12:29:53), identity exact, kernel coverage 192/192, 4.74-4.81 tok/s hot.

@@ -319,7 +319,12 @@ int main(int argc, char **argv)
         }
         while (produced < n_gen) {
             /* prime: one ordinary step. Processes position n-1 and yields the token for position n. */
+            LARGE_INTEGER _ga, _gb; QueryPerformanceCounter(&_ga);
             int rc = in2_forward_at(ctx, &m, &cfg, &toks[n - 1], 1, n - 1, h, logits);
+            QueryPerformanceCounter(&_gb);
+            { static LARGE_INTEGER _fq3; if (!_fq3.QuadPart) QueryPerformanceFrequency(&_fq3);
+              g_fwd_meas += (double)(_gb.QuadPart - _ga.QuadPart) / (double)_fq3.QuadPart; }
+            { static int _dbg = 0; if (_dbg++ == 0) fprintf(stderr, "BRACKET first=%.4f n_forward=%d\n", g_fwd_meas, n_forward); }
             ++n_forward;
             if (rc != WUBU_INKLING2_OK) { free(la); return rc; }
             used_cache = 1;
