@@ -2099,3 +2099,24 @@ GPU f16 head lane (25% NEGATIVE, off by default), kernels when warm (fast), row/
 speculation (0% acceptance). What remains is bytes: ~186 MB per forward of expert weights crossing the bus, and the only way
 to amortise them needs a drafter this project does not have.
 GATE: 15/15, 59 commits, tree clean.
+
+## KV CACHE VERIFIED BEYOND THE GATE, AND SPECULATION LOSES EVEN AT 45.7% ACCEPTANCE
+The gate only covers 12 tokens, so two properties it does not check were measured directly:
+1. n=32 with the KV cache vs n=32 with IN2_NO_KV (full recompute): IDS LINES BYTE-IDENTICAL. The incremental path is exact,
+   not merely gate-passing, at 2.7x the gate's length.
+2. The 12-token IDS line is an exact PREFIX of the 32-token line - so extending a run does not perturb the tokens already
+   emitted, which is the property that makes streaming output safe.
+   (Both of my first attempts at this check reported NO. Both were comparison bugs in the shell - first an off-by-3 because
+   IDS includes the 3 prompt tokens, then a cut that included the "IDS" label as field 1. Recorded because a fabricated
+   failure is as damaging as a fabricated success, and I nearly committed one.)
+SPECULATION, SECOND REGIME - the model loops back to its prompt around token 20, so acceptance should not be zero:
+  n=32 baseline        4.65 / 4.63 tok/s
+  n=32 lookup K=8      3.57 / 3.59 tok/s  ("24 forwards for 32 tokens (0.75 fwd/token), drafted 35, accepted 16 = 45.7%")
+  n=12 baseline        4.44 tok/s
+  n=12 lookup K=8      3.34 tok/s  ("12 forwards for 12 tokens, drafted 9, accepted 0 = 0.0%")
+SO ACCEPTANCE IS REAL (45.7%) AND SPECULATION IS STILL 23% SLOWER. The mechanism is now closed on data rather than on one
+unlucky prompt: a verify forward costs ~K+1 positions of compute to save at most K sequential steps, and at this model's
+ratio of batched-to-single position cost (167 vs 275 ms) it cannot win even when nearly half the drafts land.
+USEFUL SIDE RESULT: n=32 baseline (4.64 tok/s) is FASTER than n=12 baseline (4.44) because the fixed load cost amortises
+over more tokens. Long generations are already the efficient regime on this engine.
+GATE: 15/15, 60 commits, tree clean.
