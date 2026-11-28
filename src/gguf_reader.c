@@ -1635,6 +1635,38 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
     }
 }
 
+/* Windows read-ahead. The madvise() path below is inside #if defined(__linux__) and has therefore never been compiled
+ * on this platform, so before this function existed the engine ran on pure demand paging: a 5.8 MB tensor arriving cold
+ * cost 187 ms (31 MB/s) while the same tensor warm cost 147 us (39.5 GB/s), a 1273x spread, and pre-warming the page
+ * cache by hand was worth +25% decode. PrefetchVirtualMemory is resolved at runtime from kernel32 rather than declared
+ * against a SDK version macro, so it links anywhere; if the OS refuses it the call returns 0 and we are no worse off. */
+int wubu_gguf_prefetch(gguf_ctx *ctx, long long off, long long len)
+{
+    if (!ctx || !ctx->data_blob_is_mmap || !ctx->data_blob || len <= 0 || off < 0) return 0;
+    if (off >= (long long) ctx->data_blob_size) return 0;
+    if (off + len > (long long) ctx->data_blob_size) len = (long long) ctx->data_blob_size - off;
+    if (len <= 0) return 0;
+#if defined(_WIN32)
+    {
+        typedef struct { void *VirtualAddress; size_t NumberOfBytes; } wubu_pvm_entry_t;
+        typedef int (__stdcall *wubu_pvm_fn)(void *, unsigned long long, wubu_pvm_entry_t *, unsigned long);
+        static wubu_pvm_fn s_fn; static int s_tried;
+        if (!s_tried) {
+            HMODULE k = GetModuleHandleA("kernel32.dll");
+            s_fn = k ? (wubu_pvm_fn) (void *) GetProcAddress(k, "PrefetchVirtualMemory") : NULL;
+            s_tried = 1;
+        }
+        if (!s_fn) return 0;
+        wubu_pvm_entry_t e;
+        e.VirtualAddress = (void *) ((uint8_t *) ctx->data_blob + off);
+        e.NumberOfBytes = (size_t) len;
+        return s_fn((void *) -1, 1, &e, 0) ? 1 : 0;   /* (HANDLE)-1 = current process */
+    }
+#else
+    return 0;
+#endif
+}
+
 // Map the entire GGUF data blob for random access. Uses mmap (lazy, shared
 // with the page cache — the "raw mmap'd blob" the weight law demands), with
 // a malloc+fread fallback when mmap is unavailable.

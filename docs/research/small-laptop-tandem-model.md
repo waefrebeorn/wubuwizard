@@ -1601,3 +1601,23 @@ also avoids depending on per-tensor offsets or the model struct field names.
 ACCEPTANCE: cold-start tok/s approaches the 4.49 warm figure WITHOUT a manual pre-read, and per-shape max/min stays near
 15x or better.
 GATE: 15/15, tree clean, 35 commits.
+
+## FIRST PREFETCH ATTEMPT MEASURED AND REJECTED: -1.4%, the window was 7x too big
+Implemented wubu_gguf_prefetch() in gguf_reader.c (PrefetchVirtualMemory resolved from kernel32 at runtime, so it links
+without an SDK gate) and hooked it in the layer dispatch macro one layer ahead, window = data_blob_size / n_layer_phys.
+Measured, two reps each, 12 tokens, 8 threads, cache state identical between arms:
+  PF ON : 3.43 and 3.44 tok/s
+  PF OFF: 3.48 and 3.48 tok/s
+A consistent -1.4%. REJECTED and the hook reverted; the primitive stays in the reader as a utility.
+WHY, and the number that explains it: blob/n_layer_phys = 7.9 GB / 24 = 337 MB per layer. A layer's dense weights are
+~50 MB and the expert tensors dominate the rest, so asking the OS to prefetch 337 MB while the current layer is being
+computed saturates the read path and evicts the pages the current layer needs. Prefetching "one layer" in blob bytes is
+prefetching roughly seven layers' worth of what the compute actually consumes next.
+THE CORRECTION FOR THE NEXT ATTEMPT: size the window to the next layer's TENSOR span, not to blob/n_layer - i.e. from
+layers[IL+1]'s first tensor file_offset to the last one's end, which is the real working set. Only then does the paging
+overlap the compute instead of displacing it. A cheap version of the same idea: prefetch only the dense tensors of the
+next layer (5-50 MB each), leaving the experts to demand paging as they are touched.
+ALSO CONFIRMED INCIDENTALLY: the warm-page-cache result (4.49 tok/s) is transient - after a few minutes of other work the
+cache no longer held the file and both arms fell back to ~3.45. So the +25% is real but is not a resting state; it is the
+size of the prize that a correct, properly sized read-ahead should recover.
+GATE: 15/15, tree clean.
