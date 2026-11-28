@@ -2760,3 +2760,16 @@ EXPERT PATH COVERAGE, COMPLETE:
 ATTENTION PATH: Q8_0 (85) and Q6_K (26) verified; Q4_K (14), Q5_K (16) and IQ3_XXS (3) not yet.
 EIGHT reference checks wired in tools/ref_check.sh, all passing, each printing its binary identity first.
 STATE: 90 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## Q4_K VERIFIED (ggml_type 12, 14 ATTENTION tensors, 4.5 bpw) - first attention K-quant
+  Q4_K reference check: 8 rows x 4096 elements (16 superblocks), blocksize=144
+    rel err min 1.272e-08  median 1.569e-07  max 7.793e-07    PASS (8x noise floor 6.035e-05)
+    ref[0]=-52.761787 got[0]=-52.761787
+The hazard in this format is entirely in get_scale_min_k4: scale/min are 6-bit values, and for j >= 4 the low nibble comes from
+q[j+4] while the high 2 bits come from the TOP BITS OF OTHER ENTRIES (q[j-4] and q[j]). That is not something to reconstruct
+from memory; it was copied verbatim, which is the fourth time this session that copying instead of recalling turned a
+would-be multi-hour misdiagnosis into a first-try pass.
+Layout asserted at 144 bytes: d(2) + dmin(2) + scales(12) + qs(128). Activations are block_q8_K (K-quant group).
+Also note: the sub-block order is LOW nibbles = elements 0..31 then HIGH nibbles = 32..63 within each 64-element group, and
+the scale index advances is += 2 per 64 elements - a shape that differs from Q4_0 and from the IQ family.
+STATE: 90 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. NINE reference checks wired and passing.
