@@ -671,3 +671,15 @@ the cause" - pinning 32 changed nothing. HONEST STATE: the shipped WuBuMM shader
 give 0.45-0.95 TFLOPS vs cuBLAS 9.2-17.9; the best-tiling variant (v10) does not build here for an unfound
 shader reason; a correctly-built 256x256/8-subgroup coopmat GEMM has NOT been measured on this box, so the
 Vulkan-vs-CUDA throughput question is OPEN, not settled.
+
+## A/B after removing the redundant cudaDeviceSynchronize: decode lane now TIES the CPU (interleaved x3)
+The DLL f16 matvec did gemm + explicit cudaDeviceSynchronize + blocking D2H memcpy. cublas and cudaMemcpy
+already share the default stream, so the barrier was redundant; removed. Interleaved 3x (12 tok, prompt
+371 151451 149879, 15/15 identical every run):
+  CPU : 4238 4150 4131  mean 4173 ms
+  GPU : 4187 4178 4172  mean 4179 ms   (0.15% apart - a tie)
+Earlier the lane lost 3.97s vs 3.1s (~7% slower); that deficit was the full-device barrier, now gone. But a tie
+is not a win: at M=1 these 161 attention GEMVs are overhead/memory bound, and a 12-thread CPU is competitive with
+per-call GPU dispatch+H2D/D2H. CONCLUSION: the decode (M=1) GPU lane is honest-neutral and NOT the lever. The
+lever remains batched M>=16 (prefill / speculative / expert-grouped), where cuBLAS hits 9-18 TFLOPS; this engine's
+per-token loop never reaches M>=16 on decode, so the dense lane cannot beat the CPU on tokens/sec here.
