@@ -67,5 +67,37 @@ int main(void)
     run("engine geom x4 rows", 2304, 9, 1536, 5);
     run("fat rows", 4096, 16, 216, 20);           /* same elements, 2.7x fewer rows */
     run("skinny rows", 256, 1, 3456, 3);          /* same elements, 16x more rows */
+    /* DRAM-resident: 200k rows x 594 B = 113 MB, walked ONCE. This is the only case whose bytes cannot sit in L2/L3, so it is
+     * the only one comparable to what the engine does per token. */
+    run("DRAM 113 MB, one pass", 2304, 9, 200000, 1);
+
+    /* UNFAULTED anonymous memory: VirtualAlloc reserves but nothing touches it, so every 4 KB page the kernel walks is a
+     * first-touch fault. This isolates fault cost from pattern, residency and row size - the only variable left that
+     * differs between this probe and the engine, which reads a file-backed mapping. */
+    {
+        const int rows = 200000;
+        const size_t rb2 = 9 * sizeof(blk16);
+        const size_t bytes = rb2 * (size_t) rows;
+        unsigned char *v = (unsigned char *) VirtualAlloc(NULL, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (v) {
+            float *x2 = (float *) malloc(sizeof(float) * 2304);
+            in2_q8k_blk *aq2 = (in2_q8k_blk *) malloc(sizeof(in2_q8k_blk) * 9);
+            float *o2 = (float *) malloc(sizeof(float) * 64);
+            for (int i = 0; i < 2304; ++i) x2[i] = ((i * 37) % 199 - 99) / 99.0f;
+            in2_q8k_quantise(x2, 9, aq2);
+            const void *ap[1] = { aq2 };
+            double t0 = in2_hires_now(); size_t done = 0;
+            for (int r = 0; r < rows; ++r) {
+                float *op[1] = { o2 };
+                wubu_iq_rows(16, v + (size_t) r * rb2, rb2, 2304, ap, 1, op, 0, 1);
+                done += 2304;
+            }
+            double dt = in2_hires_now() - t0;
+            printf("  UNFAULTED 113 MB       rows=%4d rb=%4zu bytes=%8.2f MB  %6.2f ns/elem  %5.2f GB/s  %6.3f us/row\n",
+                   rows, rb2, (double) bytes / 1048576.0,
+                   dt * 1e9 / (double) done, (double) done * 4.0 / dt / 1e9, dt * 1e6 / (double) rows);
+            free(x2); free(aq2); free(o2); VirtualFree(v, 0, MEM_RELEASE);
+        }
+    }
     return 0;
 }

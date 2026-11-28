@@ -3171,3 +3171,21 @@ NEXT MEASUREMENT, chosen to separate those three without another synthetic: time
 quantisation hoisted out of the per-call path, (b) one tensor type only, by running a layer where every expert shares ty. Those are
 two builds of instrumentation, not of arithmetic, and the gate stays authoritative.
 STATE: 105 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## ROW COST DECOMPOSED: residency 1.0x, first-touch faults 1.6x, and 4.5x still lives INSIDE the engine
+Same kernel, same geometry (ty=16, n=2304, rb=594), varying only what the memory is:
+    L2-resident (0.22 MB, pre-filled)      0.173 us/row   53.3 GB/s
+    113 MB, pre-filled, one pass           0.175 us/row   52.6 GB/s     <- residency costs NOTHING
+    113 MB, UNFAULTED (first touch)        0.275 us/row   33.5 GB/s     <- faults cost 1.6x
+    IN ENGINE (from WJ: 479.2 us / 384)    1.250 us/row   ~0.5 GB/s     <- 4.5x above the unfaulted probe
+Three explanations have now been priced and are all too small: memory residency (1.0x), stream count (<=2.5x and it plateaus),
+and page-fault first touch (1.6x). Together they account for maybe 4x of a 7.2x gap, and each was measured in isolation rather
+than ar34gued. What the isolated probe CANNOT reproduce is the engine's actual call environment, and that is where the rest lives:
+a file-backed mapping rather than anonymous pages, EIGHT different scattered expert bases per layer rather than one contiguous
+buffer, a per-call activation array, and a different quant type per tensor along the same loop.
+THE NEXT MEASUREMENT HAS TO GO INSIDE THE ENGINE, because five synthetic probes have now each removed one suspect and none has
+reproduced the observed cost. The instrumentation needed is small and identity-neutral: inside the worker, split the timed span into
+(time entering wubu_iq_rows) and (time after it returns), accumulated per thread, printed under an env gate. That separates "the
+kernel is slow on this data" from "the engine spends the time around the kernel", which is the one distinction every probe so far
+has been unable to make.
+STATE: 106 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
