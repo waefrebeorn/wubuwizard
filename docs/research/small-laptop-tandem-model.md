@@ -891,3 +891,22 @@ MAC COUNTER IS BOGUS: it charges n_out*n_in per call regardless of how many expe
 42.8 GMAC, which against the measured 0.087 s of moe would imply ~984 GFLOPS - about 90% of this CPU's peak, which
 per WuBuMM doctrine means the numerator is wrong, not that the kernel is 90% of peak. Real per-token expert work is
 TOPK * (2*DFF*d + d*DFF) ~ 85 MMAC, i.e. ~2 GFLOPS effective. That is a BANDWIDTH signature, not an ALU one.
+
+## DECODE EXPERT SPLIT (measured, 1 thread = exact): unpack/dot bound, not bandwidth bound
+Config: d=2304 NE=128 TOPK=8 DFF=1152 L=24, model 7.90 GB.
+Expert unit = 2*DFF*d + d*DFF = 7.96 M params (gate_up 5.31 M + down 2.65 M).
+Per token: 24 layers x 8 experts = 1.53 G params = 394 MB of weight bytes at 2.06 bpw.
+SPLIT (fixed attn note: serial fused path, IN2_THREADS=1, 12 tokens):
+  gu 1.741 s (65.9%), down 0.851 s (32.2%), act 0.049 s (1.9%), accum 0.001 s (0.1%)
+  gu:down = 2.05:1 against a MAC ratio of 2.00:1 -> both matvecs cost the same per weight. No format asymmetry.
+  Activation is 1.9%. The expert matvec is the whole phase.
+RATE: 216 ms/token serial = 7.08 G weights/s single thread = 1.8 GB/s effective.
+That is ~8x BELOW the single-thread DRAM ceiling (~10-15 GB/s), and threading gives 5.1x (2.592 s -> ~0.511 s
+wall, 43 ms/token). A bandwidth-bound phase cannot gain 5x from threads, so decode is UNPACK+DOT BOUND, not I/O
+bound. More cores help; a faster disk would not.
+THE LEVER THIS IDENTIFIES: the CUDA f16 lane served 161 slab uploads for 2304 expert matvecs in this run, i.e. the
+GPU idles during exactly the phase that costs 45% of decode. Moving expert matvecs onto the resident-f16 lane
+(394 MB/token over PCIe at ~12 GB/s is 33 ms, against 216 ms on CPU) is the available win, and it is the same
+tandem pattern the goal calls for.
+RETRACTED AGAIN: + the mac counter must not be used for GFLOPS at all (it charges n_out*n_in per call regardless of
+how many experts run); the trustworthy rates are the ones above, computed from real param counts.

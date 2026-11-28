@@ -27,7 +27,9 @@ long   in2_ty_calls[256];
 int    in2_ty_par = 0;
 /* moe-phase split (run with IN2_THREADS=1 for exact attribution: the expert loop is OMP-parallel) */
 double in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_acc;
-double in2_ms_setup, in2_ms_free, in2_ms_route;            /* >0 while a parallel row region is running: leaf timers must not accumulate */
+double in2_ms_setup, in2_ms_free, in2_ms_route;
+/* decode (per-token) expert split */
+double in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc;            /* >0 while a parallel row region is running: leaf timers must not accumulate */
 double in2_hires_now(void);
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
@@ -2297,13 +2299,17 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                 float *gk = g  + (size_t)k * 2 * DFF;
                 float *ak = act + (size_t)k * DFF;
                 float *ok = eo + (size_t)k * d;
+                double _kt = in2_now();
                 if (in2_matvec_quant(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
                                      x + (size_t)t * d, 2 * DFF, d, gk) != WUBU_INKLING2_OK) { bad = 1; continue; }
+                in2_tk_gu += in2_now() - _kt; _kt = in2_now();
                 for (int i = 0; i < 2 * DFF; ++i) gk[i] *= gsc;
                 in2_expert_act(gk, gk + DFF, DFF, ak);
+                in2_tk_act += in2_now() - _kt; _kt = in2_now();
                 if (in2_matvec_quant(ctx, &L->down, (int64_t)e * d * DFF, ak, d, DFF, ok) != WUBU_INKLING2_OK) {
                     bad = 1; continue;
                 }
+                in2_tk_dn += in2_now() - _kt;
             }
             if (bad) { rc = WUBU_INKLING2_ERR_IO; break; }
             for (int k = 0; k < got; ++k) {
@@ -2324,18 +2330,23 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
              * did not materialise because element count was never the binding cost. Kept unconditional, since
              * the measurement beat the reasoning. */
             if (!getenv("IN2_STAGE")) {
+                const double _kt = in2_now();
                 const int ra = in2_matvec_quant_mt(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
                                                    x + (size_t)t * d, 2 * DFF, d, g);
                 if (ra != WUBU_INKLING2_OK) {
                     if (getenv("IN2_DEBUG")) fprintf(stderr, "[moe L%d] fused gate_up e%d rc=%d\n", il, e, ra);
                     rc = WUBU_INKLING2_ERR_IO; break;
                 }
+                in2_tk_gu += in2_now() - _kt; const double _at = in2_now();
                 for (int i = 0; i < 2 * DFF; ++i) g[i] *= gsc;
                 in2_expert_act(g, g + DFF, DFF, act);
+                in2_tk_act += in2_now() - _at; const double _dt = in2_now();
                 if (in2_matvec_quant_mt(ctx, &L->down, (int64_t)e * d * DFF, act, d, DFF, eo) != WUBU_INKLING2_OK) {
                     rc = WUBU_INKLING2_ERR_IO; break;
                 }
+                in2_tk_dn += in2_now() - _dt; const double _st = in2_now();
                 for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * eo[i] * dsc;
+                in2_tk_acc += in2_now() - _st;
                 continue;
             }
             if (!gu) {

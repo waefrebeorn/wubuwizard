@@ -392,12 +392,18 @@ int main(int argc, char **argv)
         if (getenv("IN2_MOE_SPLIT")) {
             extern double in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_acc;
             extern double in2_ms_setup, in2_ms_free, in2_ms_route;
+            extern double in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc;
             double tot = in2_ms_gath + in2_ms_gu + in2_ms_act + in2_ms_dn + in2_ms_scat + in2_ms_setup + in2_ms_free + in2_ms_route;
             fprintf(stderr, "MOESPLIT setup=%.3f gather=%.3f gu=%.3f act=%.3f down=%.3f scatter=%.3f free=%.3f route=%.3f | accum=%.3f  sum=%.3f (%.1f%% gu, %.1f%% down, %.1f%% act, %.1f%% gather, %.1f%% scatter)\n",
                     in2_ms_setup, in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_free, in2_ms_route, in2_ms_acc, tot,
                     tot > 0 ? 100.0 * in2_ms_gu / tot : 0, tot > 0 ? 100.0 * in2_ms_dn / tot : 0,
                     tot > 0 ? 100.0 * in2_ms_act / tot : 0, tot > 0 ? 100.0 * in2_ms_gath / tot : 0,
                     tot > 0 ? 100.0 * in2_ms_scat / tot : 0);
+            double kt = in2_tk_gu + in2_tk_act + in2_tk_dn + in2_tk_acc;
+            fprintf(stderr, "TOKENSPLIT gu=%.3f act=%.3f down=%.3f accum=%.3f | sum=%.3f (%.1f%% gu, %.1f%% down, %.1f%% act, %.1f%% accum)\n",
+                    in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc, kt,
+                    kt > 0 ? 100.0 * in2_tk_gu / kt : 0, kt > 0 ? 100.0 * in2_tk_dn / kt : 0,
+                    kt > 0 ? 100.0 * in2_tk_act / kt : 0, kt > 0 ? 100.0 * in2_tk_acc / kt : 0);
         }
         const char *pn[8] = {"state/mix","q","kv+conv","attention","gate+wo","mlp+moe","?","?"};
         for (int i = 0; i < 8; ++i)
