@@ -1323,3 +1323,20 @@ just nt's kernel branch.
 This is the fourth suspect eliminated for the 89% (after arithmetic, bandwidth/kernel choice, and thread count), and the
 first that also invalidates the scope of the previous measurements rather than just a candidate.
 GATE: 15/15.
+
+## STRUCTURAL CORRECTION: only 2 dense-kernel calls per layer, not 7 - so every per-call cost was unsound
+Adding up the traced calls for one forward: ty=12 3 + ty=14 3 + ty=8 18 + ty=30 24 = 48 calls over 24 layers = exactly
+2.0 per layer. I had been assuming ~7 per layer (q, k, v, gate, wo, wrel, sink = ~168 per forward), a factor of 3.5.
+The trace print sits after the f16-lane block but before any early return, and IN2_GPU_F16 was unset for those runs, so
+every call that enters in2_matvec_nt does print. The 48 is therefore the true population for the layers that ran.
+WHAT THIS INVALIDATES: every "per-call" figure in this document. "q = 1.5 ms/call (36 ms / 24 calls)" divides a phase
+wall time by an assumed call count; if the phase actually issues 1 call, that call is ~36 ms and is the single most
+expensive operation in the model. The 0.88 MMAC and 36 MMAC/s numbers assumed 384 outputs x 2304 inputs per call and are
+only valid if the shape belongs to that call - which now has to be verified per shape rather than assumed.
+ALSO UNRESOLVED: q, k, v, gate and wo are not visible as separate in2_matvec_nt calls. They are either fused into one
+tensor, or they run through in2_layer_sliding (which has its own path and does not emit FP2 phases), or through an entry
+point the trace does not cover. The 24 traced kernel calls are 2304x384 and the 24 fallback calls are 2304x24 (sink),
+which is 2 tensors per layer - consistent with a fused projection, not with seven separate ones.
+RULE ADOPTED: no per-call cost is quoted again until entries are counted across EVERY dense entry point (in2_matvec_nt,
+in2_matvec_quant, in2_matvec_float, in2_matvec_rows*, and the sliding-layer path) with shape attribution. Dividing phase
+time by a guessed denominator is how the last three estimates went wrong.
