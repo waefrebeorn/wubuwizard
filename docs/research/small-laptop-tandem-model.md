@@ -3029,3 +3029,30 @@ how often the workers are woken. Two independent levers, either of which attacks
 Either would move the ceiling from 5.35 tok/s toward the 8.2 tok/s that removing the serial term implies
 (1/((0.187-0.170)+0.229/8) ~ 8.2). Nothing here changes a single token: the gate is the arbiter.
 STATE: 100 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## DIRECT MEASUREMENT: CONCURRENCY IS 2.5x ON 8 THREADS - the pool is not the problem, the FAULTS are
+The existing IN2_WJ instrument reports, for one real 3072-row expert region:
+    WJ(n_out=3072) region wall=0.0015 s | jobs=8 rows=3072 | sum(job)=0.0038 s -> conc=2.5x | avg job 479.2 us for 384 rows
+Eight jobs, 3.8 ms of summed job time, 1.5 ms of wall: concurrency 2.5x, not 8x. So the workers are NOT running concurrently, and
+the per-call "fixed cost" of 545 us derived from the thread sweep is NOT wake/join latency - it is threads blocking against each
+other. That retires lever (1) (spin-and-defer) before any code was written: workers that are already awake cannot be helped by
+staying awake.
+WHAT SERIALISES THEM - the arithmetic excludes the usual suspects:
+  bandwidth? 162 MB/token delivered in ~0.2 s is ~810 MB/s. DDR5 in this laptop sustains tens of GB/s. Not bandwidth.
+  SMT? 8 threads on 6 physical cores would allow ~6x, not 2.5x. Not SMT alone.
+  the workload? each thread streams a DISJOINT slab of an mmap. Nothing shared but the counters.
+  WHICH LEAVES THE MMAP ITSELF: every page a worker touches is a fault, and Windows takes address-space/page-table faults
+  under a per-process lock, so N threads fanning out over a fresh mmap region serialise on that lock. This reconciles every
+  earlier measurement that looked contradictory:
+    - removing the disk (hot page cache) bought only 5%, because resident pages still fault (soft faults) and still take the lock
+    - adding threads stopped helping past 8, because more threads = more concurrent faults = more contention, not more work done
+    - 343 regions x ~545 us of apparent fixed cost is really 40,600 faults/token divided across threads and serialised
+    - prefetching at three sites returned zero, because PrefetchVirtualMemory does not remove the fault, only the I/O behind it
+THE ENGINE HAS NO ALTERNATIVE PATH: src/gguf_reader.c maps the blob via CreateFileMapping unconditionally (data_blob_is_mmap is
+always 1) and there is no read() path to fall back to (no ReadFile anywhere in the reader). So every weight byte the engine ever
+touches arrives through a page fault, and that single fact explains the ceiling.
+NEXT EXPERIMENT, now unambiguous: give the expert path a NON-FAULTING source - read the needed slab with ReadFile into a
+per-thread reused buffer (or MapViewOfFile with a small window reused per layer) - and re-measure both tok/s and the fault count.
+If concurrency rises toward the core count, the mechanism is confirmed and the same 7.9 GB becomes reachable at several times the
+current rate. Identity is untouched either way: the same bytes in the same order, only delivered by read() instead of a trap.
+STATE: 101 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
