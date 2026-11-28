@@ -1144,3 +1144,13 @@ and needs checking before assuming the budget is the gate.
 VERIFICATION PLAN: after the change, F16STAT ups for a 12-token run must be 161 + 1 (the head uploaded once), not
 unchanged-with-the-head-absent, and HEAD must fall from ~0.29 s toward ~1-5 ms. Token identity must stay 15/15 because
 the same f16 bytes and the same GEMM are used - only the delivery mechanism changes.
+
+### Budget hypothesis ALSO RULED OUT
+IN2_F16_BUDGET_MB=4096 (double the default) gives HEAD 0.280 s against 0.297 s at 2048 - noise, not a fix, and the
+resident stats still do not move. So a simple residency cap is NOT the reason the head is served uncached.
+in2_f16_dispatch already calls the resident entry point wubu_cuda_resident_f16_matvec(ident, w, wbytes, x, K, y,
+n_out) with ident = t->file_offset, so the plumbing is right and the decision is inside the DLL.
+NEXT: read wubu_cuda_resident_f16_matvec in src/wubu_cuda_quant.cu for its admission rule (per-slab size limit, an
+alignment or shape condition, or a fallback branch that uploads without caching). Three hypotheses on this head have
+now been ruled out by measurement - size gate, clock granularity, budget cap - so the next one must come from the
+code, not from guessing at the numbers.
