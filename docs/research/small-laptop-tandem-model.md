@@ -3056,3 +3056,31 @@ per-thread reused buffer (or MapViewOfFile with a small window reused per layer)
 If concurrency rises toward the core count, the mechanism is confirmed and the same 7.9 GB becomes reachable at several times the
 current rate. Identity is untouched either way: the same bytes in the same order, only delivered by read() instead of a trap.
 STATE: 101 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## CONCURRENCY SCALES AT ~0.33x PER THREAD AND NEVER PLATEAUS - so it is NOT a fault lock, it is per-thread slowdown
+Same region, same instrument, only the thread count changed:
+    threads=2  conc=1.2x        threads=6  conc=2.1x
+    threads=4  conc=1.7x        threads=8  conc=2.6x
+Concurrency rises by ~0.33x per added thread - it does not saturate and it does not plateau. That is decisive against the
+address-space-lock reading of the previous section: a lock serialising page faults would hold concurrency near 1 no matter how
+many threads joined, because only one thread could fault at a time. Instead each ADDED thread contributes about a third of a
+thread's worth of throughput, which means every job runs about THREE TIMES SLOWER when it runs alongside others than it does
+alone.
+WHAT SLOWS EACH THREAD BY A FIXED ~3x REGARDLESS OF HOW MANY PEERS THERE ARE: not bandwidth (810 MB/s of 162 MB/token is far
+under DRAM capability), not a lock (it scales), not SMT (2 threads already show 1.2x, before SMT saturates anything). The
+remaining shared resource that a streaming mmap reader exhausts is the TLB: 40,600 distinct pages touched per token against an
+L2 TLB of a few thousand entries means nearly every access is a TLB miss and a multi-level page walk, and that cost is
+per-access and additive rather than a queue, which is exactly why it slows each thread by a constant factor and why adding
+threads still adds throughput linearly at a poor slope.
+WHY THIS ALSO EXPLAINS THE 5% RESIDENCY RESULT: making the pages resident removes the I/O behind a fault but not the fault, and
+not the page walk. Same TLB pressure, same 3x per-thread penalty.
+THE FIX THIS IMPLIES IS PAGE SIZE, NOT CONCURRENCY: 40,600 4 KB pages become ~80 2 MB pages. Two routes, both identity-safe
+because they change only how bytes are addressed, not which bytes or in what order:
+  (a) LARGE-PAGE BUFFER: VirtualAlloc(MEM_LARGE_PAGES) a per-thread staging buffer, ReadFile the needed expert slab into it,
+      and run the kernel over it. This also removes the fault entirely - the buffer is touched once and reused.
+  (b) LARGE-PAGE FILE MAPPING: CreateFileMapping with SEC_LARGE_PAGES on the GGUF (needs SeLockMemoryPrivilege and specific
+      alignment), then the existing mmap code keeps working unchanged.
+(a) is the safer first step because it needs no privilege and no change to the reader's mapping logic, and it kills both the
+fault and the TLB pressure at once. Its cost is an extra memcpy of 162 MB/token, which at ~10 GB/s of copy bandwidth is ~16 ms
+against the 187 ms it would remove.
+STATE: 102 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
