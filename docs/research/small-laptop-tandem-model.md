@@ -2165,3 +2165,28 @@ EXPECTED PAYOFF: expert traffic is the dominant term and is currently multiplied
 one slab across even 2 tokens halves it; across 8, cuts it to an eighth. This is the same lever speculation failed to
 exploit, applied where the weights actually are.
 STATE: 62 commits, gate 15/15, identity exact, default ~4.45-4.65 tok/s.
+
+## CORRECTION BEFORE BUILDING: permute-and-group is worth 3-9%, not "halves" or "an eighth"
+The previous section claimed that sharing an expert slab across a batch "halves" the traffic at 2 tokens and "cuts it to an
+eighth" at 8. That assumed the same experts are chosen by every token in the batch. They are not: TOPK=8 of NE=128 means
+p(expert selected) = 0.0625, so distinct experts in a batch of n tokens is NE*(1-(1-p)^n), and the saving against n*TOPK
+separate streams is:
+  n=1    8.00 vs   8   ->  0.0%
+  n=2   15.50 vs  16   ->  3.1%
+  n=3   22.53 vs  24   ->  6.1%
+  n=4   29.12 vs  32   ->  9.0%
+  n=8   51.62 vs  64   -> 19.3%
+  n=16  82.42 vs 128   -> 35.6%
+SO AT THE BATCH SIZES THIS ENGINE CAN ACTUALLY REACH, the permute-and-group fix is worth 3.1% (n=2, the K=1 verify that already
+ties baseline) and 9.0% (n=4). The 19-36% figures need batch 8-16, which only exists inside a prefill-like forward - and prefill
+already uses the batched dense path for its own tensors while the expert side would still need the rewrite.
+JUDGEMENT: a ~200-line restructuring of identity-critical MoE code for a 3-9% gain is a bad trade at this point in the
+project, and it would be the fifth mechanism this session justified by a mechanism-guess rather than a measured bound. The
+spec stays in the record; it does not get built on the strength of a number I had not computed.
+WHAT THIS LEAVES, and it is now a genuinely short and honest list:
+  - the engine is I/O bound on expert weight bytes, ~186 MB per forward, and expert overlap between tokens is only 6.25% each,
+    so no batching scheme at reachable batch sizes recovers more than single-digit percent;
+  - every overhead lever is measured: prefetch 0 (3 sites, 3 instruments), threads 8 optimal, dequant cache 0, GPU f16 head
+    lane -25%, speculation 0/45.7% acceptance and slower at every K, row/op split dead code;
+  - identity is exact and verified beyond the gate (KV vs no-KV byte-identical at 32 tokens; prefix property holds).
+STATE: 63 commits, gate 15/15, default 4.45-4.65 tok/s depending on run length.
