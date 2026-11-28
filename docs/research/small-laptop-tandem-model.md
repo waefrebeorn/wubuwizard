@@ -2977,3 +2977,27 @@ block so it is touched once. That is precisely the "improvements go inside the q
 project already holds, and this measurement is the first to point AT it with a mechanism rather than a guess: thread count has
 been exhausted (saturation at 8, flat at 12), residency has been exhausted (5%), and prefetch at three sites returned zero.
 STATE: 98 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, default 4.63-4.65 tok/s hot.
+
+## AMDAHL ON THE SWEEP: 45% OF EVERY TOKEN IS SERIAL - the ceiling is 5.35 tok/s, and we are at 87% of it
+The thread sweep is not evidence of a latency-bound kernel; it is a two-parameter fit that decomposes the token. Solving
+T(n) = S + P/n from the two cleanest points (1 thread 2.405 tok/s, 8 threads 4.640 tok/s):
+    T(1) = 415.8 ms      T(8) = 215.5 ms
+    S (serial)      = 186.9 ms   = 45.0% of the token
+    P (parallel)    = 228.9 ms   = 55.0%
+    infinite-thread ceiling = 1/S = 5.35 tok/s      (4.64 is 87% of that ceiling)
+Predicted by the same fit: n=6 4.44 (measured 4.43), n=8 4.64 (measured 4.63-4.65), n=12 4.85 (measured 4.63 - so beyond 8 the
+model itself fails, most likely SMT contention or a shared-queue limit, which is why 12 is flat rather than better).
+WHY THIS IS A BETTER EXPLANATION THAN "LATENCY BOUND": 1.93x from 8 threads never needed a stalled inner loop to explain it.
+With 45% of the work on one thread, 8 threads CANNOT exceed 1/(0.45 + 0.55/8) = 2.18x, and we measure 1.93x - i.e. 88% of what
+the serial fraction permits. The engine is not leaving 8x on the table; it is running close to the limit imposed by its own
+serial half. The earlier "latency-bound inner loop" reading was an inference from the scaling number alone and this arithmetic
+replaces it.
+THE ACTIONABLE CONCLUSION CHANGES WITH IT: improving ILP inside in2_matvec_quant addresses the 55% that is already 88% efficient.
+The lever that matters is the 186.9 ms of serial work per token - whatever runs on one thread while seven idle. Candidates,
+in the order worth measuring rather than assuming: the output head (census previously showed output.weight at 31 ms/token
+single-shot), the activation quantiser (in2_q8k_quantise is serial by construction), expert routing/top-k, per-layer norms and
+the residual adds, sampling, and any barrier where the pool drains between phases.
+NEXT STEP IS A PHASE BREAKDOWN, not a kernel rewrite: the engine already carries PHASE[] instrumentation, so the question
+"which of these 186.9 ms is the head, which is the quantiser, which is a barrier?" is a measurement, not a guess. Parallelising
+the wrong 30 ms would move throughput by 1.5%.
+STATE: 99 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
