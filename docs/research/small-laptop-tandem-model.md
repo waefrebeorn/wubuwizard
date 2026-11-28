@@ -1479,3 +1479,31 @@ NEXT CHECK (one line per call): record the exit branch id in the wrapper (the im
 path byte set at each return) and print the path histogram grouped by shape. That converts "which branch" from inference
 into a count, and given the last three turns, inference is exactly what keeps being wrong.
 GATE: 15/15.
+
+## THE ANOMALY IS A QUANT TYPE: Q6_K (ty=14) runs 4.5x slower per byte than Q8_0 (ty=8) on the SAME shape
+Shape table keyed by (ty, n_in, n_out), one full-recompute run, 17 shapes, 0.7338 s:
+  ty=14  2304 -> 3072 : 0.2727 s   44 calls   6196.8 us/call   37.2%
+  ty=8   2304 -> 3072 : 0.1130 s   64 calls   1766.1 us/call   15.4%
+  ty=8   3072 -> 2304 : 0.0981 s   56 calls   1751.1 us/call   13.4%
+  ty=8   2304 -> 1024 : 0.0767 s  106 calls    723.6 us/call   10.5%
+  ty=12  2304 -> 3072 : 0.0414 s   12 calls   3450.8 us/call    5.6%
+  ty=13  3072 -> 2304 : 0.0256 s    7 calls   3655.6 us/call    3.5%
+  ty=8   2304 ->  384 : 0.0231 s   45 calls    513.3 us/call    3.1%
+  ty=13  2304 -> 3072 : 0.0157 s    5 calls   3148.7 us/call    2.1%
+  ty=18  2304 -> 3072 : 0.0152 s    3 calls   5078.9 us/call    2.1%
+The same shape at the same row count, differing only in quant type:
+  Q8_0 (ty=8)  : 1766.1 us for 7.08 MMAC, 7.52 MB -> 4.26 GB/s, 8.02 GFLOP/s
+  Q6_K (ty=14) : 6196.8 us for 7.08 MMAC, 5.81 MB -> 0.94 GB/s, 2.28 GFLOP/s
+Q6_K carries FEWER bytes and costs 3.5x MORE time, so per byte it is ~4.5x slower than Q8_0. That is a dequant/kernel
+defect in the Q6_K unpack path (wubu_iq_c11.c), not a memory bandwidth or ALU limit: the same machine reaches 4.26 GB/s
+on Q8_0 with the same shape, the same threads and the same split. ty=14 alone is 37.2% of nt time; all 2304->3072 types
+together are 60.3%.
+WHY THIS EXPLAINS THE WHOLE SESSION: the "overhead bound" and "flat thread scaling" readings were aggregates over 17
+shape/type combinations whose per-byte costs differ by 4.5x. Averaging them produced numbers that belonged to no actual
+kernel, so every mechanism inferred from those averages was chasing a mixture. The variance is between TYPES, not
+between threads.
+NEXT STEP, now specific: read the Q6_K unpack in wubu_iq_c11.c and compare its inner loop against the Q8_0 one for the
+same block count - super-scale/min handling, per-16 groups, byte shuffling, and whether it dequantises to a scratch
+buffer per call. Q8_0 at 4.26 GB/s is the existence proof that the surrounding machinery (split, threading, mapping) is
+fine, so the defect is inside the Q6_K block decode.
+GATE: 15/15.

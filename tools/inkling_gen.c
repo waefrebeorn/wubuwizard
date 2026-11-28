@@ -435,7 +435,7 @@ int main(int argc, char **argv)
           }
           for (int _e = 0; _e < 8; ++_e) { in2_ent_calls[_e] = 0; in2_ent_sec[_e] = 0; }
           in2_nt_read_sec = 0; in2_nt_calls = 0; in2_nt_unmapped = 0; }
-        { extern struct in2_shp_rec { int ni, no; double sec; long n; } in2_shp[96];
+        { extern struct in2_shp_rec { int ni, no, ty; double sec; long n; } in2_shp[96];
           extern int in2_shp_n;
           if (in2_shp_n > 0) {
               double tot = 0; for (int i = 0; i < in2_shp_n; ++i) tot += in2_shp[i].sec;
@@ -447,8 +447,8 @@ int main(int argc, char **argv)
                       if (!used[i2] && (best < 0 || in2_shp[i2].sec > in2_shp[best].sec)) best = i2;
                   if (best < 0) break;
                   used[best] = 1;
-                  fprintf(stderr, "  %5d -> %6d : %8.4f s  %5ld calls  %8.1f us/call  %5.1f%% of nt\n",
-                          in2_shp[best].ni, in2_shp[best].no, in2_shp[best].sec, in2_shp[best].n,
+                  fprintf(stderr, "  ty=%-3d %5d -> %6d : %8.4f s  %5ld calls  %8.1f us/call  %5.1f%% of nt\n",
+                          in2_shp[best].ty, in2_shp[best].ni, in2_shp[best].no, in2_shp[best].sec, in2_shp[best].n,
                           in2_shp[best].sec / (double) in2_shp[best].n * 1e6,
                           tot > 0 ? in2_shp[best].sec / tot * 100 : 0.0);
               }
