@@ -2481,3 +2481,31 @@ bytes" from "wrong decode", and it is the right thing to check before touching e
 STATE: 76 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Committed reference tests: Q8_0, Q2_0, Q6_K (PASS,
 wired into tools/ref_check.sh). IQ2_XXS synthetic + real-data tests committed but NOT wired, because they disagree and the
 disagreement is not yet explained on either side.
+
+## IQ2_XXS CONTRADICTION RESOLVED: I WAS READING THE WRONG BYTES, THE KERNEL IS NOT IMPLICATED
+The cheap discriminator was decisive. Reading the fp16 scale at the start of each 66-byte block from the computed absolute
+offset 2003207584 gives:
+  block 0: d=+0.000000e+00   block 1: d=+1.116211e+00   block 2: d=+0.000000e+00   block 3: d=-1.190430e+00
+  block 4: d=+0.000000e+00   block 5: d=-1.190430e+00   block 6: d=+0.000000e+00   block 7: d=+9.692383e-01
+  block 8: d=+0.000000e+00
+ZEROS IN EVERY OTHER BLOCK, and the non-zero values are ~1.0 in magnitude. Two independent problems with that:
+  - a real IQ2_XXS scale is a small positive number (the format is ~2 bits per weight, so d is typically 1e-3..1e-2, and it is
+    never zero for a block that carries values);
+  - an alternating zero pattern is the signature of a MISALIGNED or WRONG stride, i.e. half the reads are landing in a region
+    that happens to be zero, not on block headers.
+Trying alternative strides confirms the offset itself is suspect rather than the stride alone: stride 36, 40 and 68 all give
+four consecutive zeros, and stride 34/66 give the same alternating pattern. So my computed absolute offset (data_start =
+11931808 plus the tensor offset from the header) does not point at the start of that tensor's data.
+CONCLUSION, and it is the one that keeps the gate and the kernel consistent: the O(1) mismatch was READING THE WRONG BYTES,
+exactly candidate (a)/(b) from the previous section, NOT a kernel defect. This is consistent with fact 2 of the contradiction
+(gate 15/15 against the llama.cpp oracle) which was always the strongest evidence available. The kernel was never implicated
+by that test - my address arithmetic was.
+THE USEFUL LESSON, stated so it generalises: a numeric comparison against real file bytes is only as good as the file offset,
+and a wrong offset does not fail loudly - it produces plausible-magnitude nonsense (282.57, -117.79) that looks exactly like a
+decode disagreement. The scale-magnitude probe cost one command and separated "wrong bytes" from "wrong decode", which is the
+single most valuable diagnostic pattern found in this whole verification effort: BEFORE comparing a kernel to a reference on
+real data, print the scales of the first few blocks and check they have the format's characteristic magnitude.
+STATE: 77 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Wired and passing: Q8_0, Q2_0, Q6_K. IQ2_XXS remains
+unverified against upstream - not because the kernel is wrong, but because the real-data harness still needs a correct
+file offset (the GGUF data-section origin must be recomputed properly, including the alignment rule actually used by the
+writer, rather than assumed as 32).
