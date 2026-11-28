@@ -2313,3 +2313,24 @@ tensor by census is blk.N.ffn_gate_up_exps. If those blocks are not Q8_0, this t
 NEXT STEP is therefore to print the ggml type of the expert tensors from the GGUF header, and only then decide which
 formats the reference test must cover to be relevant to the 39% of entry time spent in expert gate_up.
 STATE: 69 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## THE RELEVANCE ANSWER: the experts are NOT Q8_0, so the reference test was verifying the wrong path
+Parsed the GGUF header directly (734 tensors, GGUF v3) and grouped by tensor role:
+  attn  BF16 x32   F32 x235   IQ3_XXS x3   Q4_K x14   Q5_K x16   Q6_K x26   Q8_0 x85
+  exp   F32 x40    IQ1_S x6   IQ2_S x5     IQ2_XS x6  IQ2_XXS x7  NVFP4 x7   Q2_0 x17
+  head  IQ4_XS x1        other  F32 x233   IQ4_XS x1
+SO: Q8_0 (ty=8) appears ONLY in attention tensors. The EXPERT weights - the tensors the census attributes 39% of dense
+entry time to, blk.N.ffn_gate_up_exps - are Q2_0 (ty=42, 17 tensors, the most common), NVFP4 (ty=40, 7), IQ2_XXS (16, 7),
+IQ2_XS (17, 6), IQ1_S (19, 6) and IQ2_S (22, 5). The reference test just built and passing at 1.9e-6 verifies the Q8_0
+row kernel, which is an ATTENTION path, not the hot expert path.
+THIS IS THE SAME MISTAKE CLASS AS THE REST OF THE SESSION, caught this time by asking "is this even the hot path" rather
+than by a failed measurement: the test is correct, its subject is cold, and without this check the project would have
+recorded "quant kernels verified against a specification" while the 39% path remained unexamined.
+CORRECTED PRIORITY for the reference test, in order of traffic: ty=42 (Q2_0, 17 expert tensors), ty=40 (NVFP4, 7),
+ty=16 (IQ2_XXS, 7), ty=17 (IQ2_XS, 6), ty=19 (IQ1_S, 6), ty=22 (IQ2_S, 5). Each needs valid synthetic blocks; the layouts
+are block_q2_0 (QK2_0), block_nvfp4, block_iq2_xxs/xs/s, block_iq1_s in llama/ggml-common.h and the kernel consumes them
+through DEFINE_NEW_ROWS_80 (Q2_0, NVFP4) and DEFINE_NEW_ROWS_8K (iq1_s) plus the IQ_CASE generic dot_rows_nt_* path for
+16/17/22. Q2_0 first, because it is the most common expert type and already has a dedicated rows implementation.
+WHAT REMAINS TRUE from the passing test: the Q8_0 kernel is correct against a double-precision spec (1.9e-6) and the
+activation quantiser is format-correct (3.8e-3). Both statements are about attention-path formats.
+STATE: 70 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
