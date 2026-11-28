@@ -2725,3 +2725,18 @@ COVERAGE: Q8_0 (85 attn), Q2_0 (17 EXPERT), Q6_K (26 attn), IQ2_XXS (7 EXPERT), 
 = 36 of 48 expert tensors verified, four of the five expert types present in this model.
 REMAINING: NVFP4 (7), IQ2_S (5) experts - 12 tensors - plus attention K-quants.
 STATE: 88 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Six reference checks wired and passing.
+
+## IQ2_S VERIFIED (ggml_type 22, 5 EXPERT tensors) - only NVFP4 remains among the expert types
+  IQ2_S reference check: 8 rows x 4096 elements (16 superblocks), blocksize=82
+    rel err min 5.711e-09  median 6.986e-08  max 4.459e-07    PASS (8x noise floor 1.882e-05)
+    ref[0]=18.250304 got[0]=18.250305
+Layout asserted at 82 bytes: d(2) + qs[64] + qh[8] + scales[8], where qs holds 32 grid bytes followed by 32 sign bytes
+(upstream takes signs = qs + QK_K/8 and advances qs and signs each by 4 per 32-element group - that detail is the whole
+difference between correct and silently-wrong for this format, and it came from upstream source, not memory).
+ALSO FIXED: the stale "needs rewrite" comment on GGML_TYPE_IQ2_XS in gguf_raw_size now reads "dequantize_iq2_xs_row implements
+this layout", since the code had already been rewritten.
+EXPERT COVERAGE, final state: Q2_0 (17), IQ2_XXS (7), IQ1_S (6), IQ2_XS (6), IQ2_S (5) = 41 of 48 expert tensors verified.
+The remaining 7 are NVFP4, which is this project's own format and therefore needs a different oracle than upstream ggml.
+ATTENTION COVERAGE: Q8_0 (85) and Q6_K (26) verified; the K-quants (Q4_K 14, Q5_K 16) and IQ3_XXS (3) are not.
+TOTAL: 7 reference checks wired and passing, each printing its binary identity first.
+STATE: 89 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.

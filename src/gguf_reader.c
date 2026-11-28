@@ -1618,7 +1618,7 @@ int64_t gguf_raw_size(int ggml_type, int64_t n_elems) {
         case GGML_TYPE_IQ1_S: return n_blocks * 50;   // d[2] + qs[32] + qh[16]
         case GGML_TYPE_IQ1_M: return n_blocks * 56;   // d[2] + qs[32] + qh[16] + scales[6]
         case GGML_TYPE_IQ2_XXS: return n_blocks * 66; // d[2] + qs[64] = 66 (NOT 72 — verified empirically)
-        case GGML_TYPE_IQ2_XS: return n_blocks * 74;  // d[2] + qs[32]*u16 + scales[8] (canonical; NOTE: dequantize_iq2_xs_row still assumes the old 108B layout -- needs rewrite)
+        case GGML_TYPE_IQ2_XS: return n_blocks * 74;  // d[2] + qs[32]*u16 + scales[8] (canonical; dequantize_iq2_xs_row implements this layout)
         case GGML_TYPE_IQ2_S: return n_blocks * 82;    // d[2] + qs[64] + qh[8] + scales[8]
         case GGML_TYPE_IQ3_S: return n_blocks * 110;   // d[2] + qs[64] + qh[8] + signs[32] + scales[4]
         case GGML_TYPE_IQ3_XXS: return n_blocks * 98;   // d[2] + qs[96] = 98 bytes (verified vs llama.cpp struct)
