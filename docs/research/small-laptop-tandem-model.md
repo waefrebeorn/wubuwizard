@@ -683,3 +683,26 @@ is not a win: at M=1 these 161 attention GEMVs are overhead/memory bound, and a 
 per-call GPU dispatch+H2D/D2H. CONCLUSION: the decode (M=1) GPU lane is honest-neutral and NOT the lever. The
 lever remains batched M>=16 (prefill / speculative / expert-grouped), where cuBLAS hits 9-18 TFLOPS; this engine's
 per-token loop never reaches M>=16 on decode, so the dense lane cannot beat the CPU on tokens/sec here.
+
+## ROOT-CAUSED "shader 38 failed pipeline creation" - it was a wrong buffer count, not a mystery
+Method that produced the answer (repeat this instead of writing "unknown reason"):
+1. VkResult(3): VK_ERROR_INVALID_SHADER_NV = "one or more shaders failed to compile or link; more details are
+   reported via VK_EXT_debug_report if enabled" -> the reason ALWAYS exists, it just needs a callback.
+2. A messenger passed via VkInstanceCreateInfo.pNext only fires during vkCreateInstance/vkDestroyInstance.
+   Pipeline failures are invisible until you call vkCreateDebugUtilsMessengerEXT and KEEP the messenger.
+3. The loader ignores VK_LAYER_PATH when elevated; register the layer manifest under
+   HKLM\SOFTWARE\Khronos\Vulkan\ExplicitLayers (REG_DWORD 0) so the layer is visible to every process.
+4. Reproduce ONE blob standalone (tools/debug_pipe_fp16tc.c) with configurable push-constant bytes, buffer
+   count, device extensions and apiVersion; bisect there, not in the engine.
+FINDING: shader 38 is gemm_i8_tiled_shader (5688 B). It declares FOUR storage buffers (binding 3 = "C") and a
+32-byte push block, but wubumm_vk2.c registered it (3 buffers, 6 words). Validation:
+  "SPIR-V uses descriptor [Set 0, Binding 3, variable C] but the binding was not declared in pSetLayouts[0]"
+  VUID-VkComputePipelineCreateInfo-layout-07988  ->  NVIDIA returns VK_ERROR_INVALID_SHADER_NV.
+FIX: register 4 buffers / 8 words -> "shader 38 pipeline OK". Committed WuBuMM f4e5bdd.
+Two more real bugs found on the way: (a) VkDeviceCreateInfo pNext chain had tail=&v12 instead of &st16, so
+appending the coopmat feature OVERWROTE v12.pNext and dropped VkPhysicalDevice16BitStorageFeatures entirely -
+uniformAndStorageBuffer16BitAccess was never enabled despite querying as supported (VUID-RuntimeSpirv-
+uniformAndStorageBuffer16BitAccess-06332); (b) no persistent debug messenger, so nothing could ever be seen.
+STATUS: coopmat perf unchanged (i8 shader, not the f16 path): NV 0.85, SMEM 0.46 TFLOPS at M=64. Separately,
+the W4/V5/V6 variants still FAIL correctness (cos 0.32-0.35, max|diff| 1.18e2) at M=64 while NV/SMEM pass at
+cos 0.999999993 - that is a shader-math bug in those variants, still open, with the same debugging method ready.

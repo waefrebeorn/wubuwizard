@@ -4148,10 +4148,12 @@ static long long g_f16_ups = 0, g_f16_reuse = 0, g_f16_evict = 0;
 static cublasHandle_t g_f16_h = NULL;
 static __half *g_f16_sx = NULL; static int g_f16_sx_cap = 0;
 static float  *g_f16_sy = NULL; static int g_f16_sy_cap = 0;
-WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16, size_t wbytes,
-    const float *h_act, int K, float *h_y, int n_cols)
+/* Core: Y[M][n_cols] = X[M][K] * W[n_cols][K]^T with f16 weights resident. M==1 is the decode GEMV; M>1 is a
+ * whole-prompt prefill GEMM in ONE cuBLAS call (the caller passes the full batch instead of looping tokens). */
+static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
+    const float *h_act, int M, int K, float *h_y, int n_cols)
 {
-    if (!h_w_f16 || !h_act || !h_y || wbytes == 0 || K <= 0 || n_cols <= 0) return -1;
+    if (!h_w_f16 || !h_act || !h_y || wbytes == 0 || K <= 0 || n_cols <= 0 || M <= 0) return -1;
     if (!g_f16_h) { if (cublasCreate(&g_f16_h) != CUBLAS_STATUS_SUCCESS) { g_f16_h = NULL; return -2; } }
     int slot = -1;
     for (int i = 0; i < g_f16_n; ++i) if (g_f16_id[i] == ident && g_f16_b[i] == wbytes && g_f16_d[i]) { slot = i; break; }
@@ -4180,27 +4182,39 @@ WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16
         g_f16_id[slot] = ident; g_f16_b[slot] = wbytes; g_f16_use[slot] = ++g_f16_clock;
         g_f16_used += wbytes; g_f16_ups++;
     }
-    if (K > g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)K * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = K; }
-    if (n_cols > g_f16_sy_cap) { if (g_f16_sy) cudaFree(g_f16_sy); if (cudaMalloc(&g_f16_sy, (size_t)n_cols * 4) != cudaSuccess) { g_f16_sy = NULL; g_f16_sy_cap = 0; return -7; } g_f16_sy_cap = n_cols; }
-    /* convert the f32 activation to f16 (small: K elements) and upload */
-    static __half *hx = NULL; static int hx_cap = 0;
-    if (K > hx_cap) { free(hx); hx = (__half *) malloc((size_t)K * 2); hx_cap = K; }
+    const long long nact = (long long) M * (long long) K;      /* activation elements (f16 on device) */
+    const long long nout = (long long) n_cols * (long long) M; /* output elements (f32) */
+    if (nact > (long long) g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)nact * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = (int) nact; }
+    if (nout > (long long) g_f16_sy_cap) { if (g_f16_sy) cudaFree(g_f16_sy); if (cudaMalloc(&g_f16_sy, (size_t)nout * 4) != cudaSuccess) { g_f16_sy = NULL; g_f16_sy_cap = 0; return -7; } g_f16_sy_cap = (int) nout; }
+    /* convert the f32 activations to f16 (M*K elements) and upload once per call */
+    static __half *hx = NULL; static long long hx_cap = 0;
+    if (nact > hx_cap) { free(hx); hx = (__half *) malloc((size_t)nact * 2); hx_cap = nact; }
     if (!hx) return -8;
-    for (int i = 0; i < K; ++i) hx[i] = __float2half_rn(h_act[i]);
-    if (cudaMemcpy(g_f16_sx, hx, (size_t)K * 2, cudaMemcpyHostToDevice) != cudaSuccess) return -9;
+    for (long long i = 0; i < nact; ++i) hx[i] = __float2half_rn(h_act[i]);
+    if (cudaMemcpy(g_f16_sx, hx, (size_t)nact * 2, cudaMemcpyHostToDevice) != cudaSuccess) return -9;
     /* CUBLAS_COMPUTE_32F requires alpha/beta as FLOAT pointers, not half - a half* here reads 4 bytes from 2
      * and yields NaN (caught by the standalone DLL test, y came back all-NaN). */
     float one = 1.0f, zero = 0.0f;
-    /* W is [out][in] row-major (= col-major K x n_cols, lda=K); OP_T -> C = W * x. */
-    cublasStatus_t st = cublasGemmEx(g_f16_h, CUBLAS_OP_T, CUBLAS_OP_N, n_cols, 1, K,
+    /* W is [out][in] row-major (= col-major K x n_cols, lda=K); OP_T -> C(n_cols x M) = W * X^T, which read
+     * row-major is Y[M][n_cols] = X * W^T. CUBLAS_OP_N on X (col-major K x M, lda=K) folds the batch in. */
+    cublasStatus_t st = cublasGemmEx(g_f16_h, CUBLAS_OP_T, CUBLAS_OP_N, n_cols, M, K,
         &one, g_f16_d[slot], CUDA_R_16F, K, g_f16_sx, CUDA_R_16F, K,
         &zero, g_f16_sy, CUDA_R_32F, n_cols, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
     if (st != CUBLAS_STATUS_SUCCESS) return -10;
     /* No explicit cudaDeviceSynchronize: cublas and this cudaMemcpy share the default stream, so the D2H copy
      * is already ordered after the GEMM. The old full-device barrier here was redundant and measured ~2x/call. */
-    if (cudaMemcpy(h_y, g_f16_sy, (size_t)n_cols * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
+    if (cudaMemcpy(h_y, g_f16_sy, (size_t)nout * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
     return 0;
 }
+
+WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16, size_t wbytes,
+    const float *h_act, int K, float *h_y, int n_cols)
+{ return f16_gemm_core(ident, h_w_f16, wbytes, h_act, 1, K, h_y, n_cols); }
+
+/* Batched entry: one GEMM for M tokens (prefill). x is [M][K] row-major, y is [M][n_cols] row-major. */
+WUBU_EXPORT int wubu_cuda_resident_f16_gemm(int64_t ident, const void *h_w_f16, size_t wbytes,
+    const float *h_acts, int M, int K, float *h_y, int n_cols)
+{ return f16_gemm_core(ident, h_w_f16, wbytes, h_acts, M, K, h_y, n_cols); }
 
 /* Stats for the bounded f16 VRAM ring + a VRAM probe, so the engine/tests can report residency and thrash. */
 WUBU_EXPORT int wubu_cuda_f16_stats(long long *ups, long long *reuse, long long *evict, long long *used_mb, int *slabs)

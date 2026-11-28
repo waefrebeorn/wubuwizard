@@ -397,6 +397,7 @@ static void *g_f16_buf[IN2_F16_MAX];
 static long long g_f16_len[IN2_F16_MAX];
 static int   g_f16_cnt = -1;      /* -1 = not scanned */
 static void *g_f16_fn  = NULL;    /* wubu_cuda_resident_f16_matvec */
+static void *g_f16_m_fn = NULL;   /* wubu_cuda_resident_f16_gemm (batched, M tokens) */
 static int   g_f16_fn_tried = 0;
 
 static void in2_f16_scan(void)
@@ -488,6 +489,43 @@ static int in2_try_f16(const wubu_in2_tensor_t *t, int64_t elem_off, const float
       else if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16 miss %s rc=%d\n", t->info->name, rc); }
     return rc == 0;
 }
+/* Batched sibling of in2_f16_dispatch: one cuBLAS GEMM at M tokens instead of M serial GEMVs. */
+static int in2_f16_dispatch_m(long long ident, const void *w, long long wbytes,
+                              const float *x, int M, int K, float *y, int n_out)
+{
+    if (!g_f16_m_fn) {
+        const char *nm = getenv("IN2_CUDA_DLL");
+        HMODULE h = LoadLibraryA(nm && nm[0] ? nm : "wubu_cuda.dll");
+        if (h) g_f16_m_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_f16_gemm");
+        if (!g_f16_m_fn) return -1;
+    }
+    typedef int (*sig_t)(long long, const void *, unsigned long long, const float *, int, int, float *, int);
+    return ((sig_t) g_f16_m_fn)(ident, w, (unsigned long long) wbytes, x, M, K, y, n_out);
+}
+
+/* Batched f16 dense GEMM: the whole prompt in one call. Returns 1 if it computed Y[nt][n_out]. */
+static int in2_try_f16_m(const wubu_in2_tensor_t *t, const float *x, int nt, int n_out, int n_in, float *y)
+{
+    if (nt < 2 || !getenv("IN2_GPU_F16")) return 0;
+    if (!t || !t->info || !t->info->name[0]) return 0;
+    if (strstr(t->info->name, "exps")) return 0;
+#ifdef _OPENMP
+    if (omp_in_parallel()) return 0;
+#endif
+    void *fb; long long fby;
+    if (in2_f16_lookup(t->info->name, &fb, &fby) != 0) return 0;
+    long long need = (long long) n_in * (long long) n_out * 2;
+    if (fby != need) {
+        if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16M size mismatch %s need=%lld got=%lld\n", t->info->name, need, fby);
+        return 0;
+    }
+    int rc = in2_f16_dispatch_m((long long) t->file_offset, fb, fby, x, nt, n_in, y, n_out);
+    { static long long mhits = 0;
+      if (rc == 0) { mhits++; if (mhits == 1) fprintf(stderr, "F16 GEMM-M first: %s M=%d K=%d n_out=%d\n", t->info->name, nt, n_in, n_out); }
+      else if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16 GEMM-M miss %s rc=%d\n", t->info->name, rc); }
+    return rc == 0;
+}
+
 static void in2_gpu_init(void)
 {
     if (in2_gpu_state) return;
@@ -791,10 +829,12 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
      * Do each token's N=1 cuBLAS matvec serially here (single-threaded entry, before this function's own OpenMP),
      * and only if every token succeeds; otherwise fall through to the CPU path untouched. */
     if (getenv("IN2_GPU_F16") && t && t->info && t->info->name[0] && strstr(t->info->name, "exps") == NULL) {
-        int all = 1;
-        for (int i = 0; i < nt; ++i)
+        /* One GEMM at M=nt (prefill passes the whole prompt here) instead of nt serial GEMVs. */
+        if (in2_try_f16_m(t, X, nt, n_out, n_in, Y)) return WUBU_INKLING2_OK;
+        { int all = 1;
+          for (int i = 0; i < nt; ++i)
             if (!in2_try_f16(t, 0, X + (size_t) i * n_in, n_out, n_in, Y + (size_t) i * n_out)) { all = 0; break; }
-        if (all) return WUBU_INKLING2_OK;
+          if (all) return WUBU_INKLING2_OK; }
     }
     const int ty = (t && t->info) ? t->info->ggml_type : -1;
     const int q8_0_act = (ty == 8 || ty == 40 || ty == 42);
