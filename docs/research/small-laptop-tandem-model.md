@@ -3697,3 +3697,22 @@ activation quantisation out of the per-call path so one q8_0 conversion serves e
 narrow change, identity-neutral because the conversion is the same value either way, and it is bounded at ~15 ms/step (9%) before any
 kernel work at all.
 STATE: 128 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 0.172-0.188 s.
+
+## CALL COUNTS BY CATEGORY (full census, 4 tokens) - and the 208 unnamed calls/token
+    category       calls   sec/4tok   % time   us/call
+    experts         2302    1.0449    73.3%     454
+    attn_other       832    0.1381     9.7%     166
+    head             100    0.1289     9.0%    1289
+    attn_qkv         624    0.1148     8.1%     184
+Two things this settles and one it exposes:
+  - the head is the most EXPENSIVE call in the engine at 1,289 us each (201,024 rows in chunks) but only 25 calls/token;
+  - attn_qkv averages 184 us across 156 calls/token, which is where the Q8_0 count comes from - many mid-sized calls, none dominant.
+EXPOSED: attn_other is 832 calls (208/token) at 166 us each and 9.7% of matvec time, and unlike q/k/v or the head it has never been
+named in this document. 208 calls/token across 24 physical layers is ~8.7 per layer, which is more than one per projection, so these are
+the per-visit small matvecs - the relative/sink and loop gate/forget/gain tensors - each paying full per-call overhead for a small amount
+of work.
+NEXT STEP, chosen because it is the only remaining unnamed block: print the per-site names in the attn_other bucket (they are truncated
+to 28 chars in the census but distinct) and rank by us/call. If they are the loop gates at ~50-150 us each, the win is to fuse the four
+gate/forget/gain projections of a visit into one call, because they share the same activation vector - four 184 us calls become one at
+roughly the cost of one plus three cheap row blocks.
+STATE: 129 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 0.172-0.188 s.
