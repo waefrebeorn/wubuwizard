@@ -853,3 +853,17 @@ TWO BUGS CLOSED BY TESTS THIS ROUND (neither was visible from cos-on-one-shape):
  1. my harness keyed the resident cache wrong (fixed ident, fresh weights) -> false 15/18 FAIL
  2. cuBLAS underwrite on varying-ldc into one buffer -> real, silent, non-deterministic wrong numbers
 LESSON: keep the per-shape + poison + double-reference harness; single-shape cos checks miss exactly this class.
+
+## CORRECTION: experts are 32% of wall time, not "4.44 s" - and the non-expert half is the same size
+The per-layer expert timer (IN2_TIME, "moe L## ...s", measured at the SINGLE call site, so no thread double-count):
+  576 lines, total 1.104 s, avg 1.92 ms per layer-moe
+  3.4 s wall -> experts = 1.104 s = 32% of TOTAL time (~41% of layer time)
+RETRACT the earlier "six expert types = 4.44 s of the run, ~19 GFLOPS". 4.44 s cannot fit in a 3.4 s run: that
+number was clock() accumulated INSIDE parallel workers, so it sums concurrent thread time. Effective GFLOPS computed
+from it (19) is also wrong; from wall time it is ~40 (42.8 GMAC x2 / 2.16 s of layer time).
+CONSEQUENCE (this is the important bit): experts do 99.8% of the MACs but only ~32% of the wall time, so the
+remaining ~1.0-1.6 s is spent on the small non-expert layer ops (qkv, attention, rmsnorm, shortconv, residual, router)
+which carry only 0.2% of the MACs. Those are latency/overhead bound, and they are as large a lever as the experts.
+So "the expert kernel is the only lever" was wrong too - it is HALF the lever.
+Also confirmed by background job: compute-sanitizer memcheck on the grouped test = "ERROR SUMMARY: 0 errors", which is
+why the tail bug had to be found by bisection + poison rather than by a memory checker.
