@@ -321,3 +321,17 @@ replaces ~30-60 ms/token of dense DRAM work with ~13 ms of f32-accumulate GEMM a
 dense+head set ~1084 MB-IQ2 -> ~3.9 GB f16 is tight against 6 GB VRAM + KV + activations, so the part that
 fits wins and the rest either streams (PCIe ~10 GB/s < DRAM) or stays CPU. The f16 lane is worth building: the
 tensor-core rate is confirmed on the exact shapes.
+
+## RESIDENCY GATE for the f16 dense lane: FITS (tight) — the non-expert tier is ~3.9 GB in f16
+Using the authoritative per-tier split (tools/tandem_budget.py on this GGUF): non-expert = 1084 MiB
+(attention 587 + head+embed 469 + norms 21 + router 7); experts = 11360 MiB (~91%). The f16 lane's candidate
+set is the NON-EXPERT tier: 1084 MiB IQ2 x 3.6 = ~3900 MiB (3.8 GB) in two-f16. Against the free-VRAM budget
+(~5.0 GB on this 6.1 GB card) that fits once KV (~0.6 GB @ 1k ctx) + activations (~0.3 GB) are subtracted:
+~3.9 + 0.6 + 0.3 = 4.8 GB total, under 5.0 - TIGHT but resident. The experts (11.3 GB, 91% of the model) stay
+CPU/streamed and are unaffected. So the f16 resident lane for the dense+head tier is residency-VIABLE, and it
+targets roughly half the per-token DRAM working set (dense+head ~1084 MiB of the ~2.0 GB non-KV working set).
+The next concrete build: dequantize the 1084 MiB non-expert tier to two-f16 hi/lo (separate buffers, endian-
+free), upload resident once, route that tier through the tensor-core GEMM at the measured ~20-27 TFLOPS
+(f32-accum), f32 residual/norms - and measure gen_fast per-token vs the CPU baseline. If the dense+head
+DRAM reads (~1.0+ GB/token) move to VRAM and the GEMM lands ~13 ms/token, the decode's DRAM bound should
+drop by up to ~half.
