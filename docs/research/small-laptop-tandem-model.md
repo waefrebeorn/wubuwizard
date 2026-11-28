@@ -2050,3 +2050,26 @@ does not protect against a variable that was set before the experiment began. An
 relevant env state in the same output as the result.
 STATE: gate 15/15, tree clean, default throughput 4.44-4.52 tok/s, 57 commits. The identity clause is unchanged: the oracle
 tokens are identical with the lane off, which is the default.
+
+## POST-CONTAMINATION RE-MEASUREMENT: clean environment baseline and thread sweep
+Environment audit first, because a stale export had already invalidated one result. Currently exported during long stretches of
+this session: IN2_CUDA_DLL, IN2_F16_DIR, IN2_F16_STATS, IN2_GPU_TRACE, and earlier IN2_GPU_F16 and IN2_PF_EXP. Everything
+below was run with env -u on the path-changing ones and only IN2_PERF=1 added for output.
+TRUE BASELINE, no path flags, 3 runs: 4.52, 4.27, 4.46 tok/s (mean 4.42).
+THREAD SWEEP, two runs each, GPU_F16 unset:
+  threads=1   2.29 / 2.27
+  threads=2   3.13 / 3.10
+  threads=4   4.22 / 4.22
+  threads=6   4.36 / 4.31
+  threads=8   4.46 / 4.49   <- best
+  threads=12  4.42 / 4.44
+RESULTS:
+1. Threads DO scale on the real path: 2.28 -> 4.47 tok/s from 1 to 8 threads = 1.96x. This does NOT contradict the earlier
+   "flat thread scaling" finding, which was specifically about in2_matvec_nt's internal kernel (1633/1605/1588/1634 us/call
+   at 1/2/4/8); the scaling lives in the rest of the forward, and the two statements describe different things. Recording
+   both so the record is not ambiguous.
+2. 8 threads is the optimum; 12 is marginally worse (4.43 vs 4.47) on a 12-thread CPU, and the default already lands at 8
+   (clean baseline 4.42 vs threads=8 4.47, inside noise). No change worth making.
+3. The default configuration is therefore already the best one measured: ~4.45 tok/s, gate 15/15, no flags.
+FINAL NUMBERS FOR THE RECORD: ~4.45 tok/s default (not 3.45 - that was the poisoned env), 8 threads optimal, identity exact.
+GATE: 15/15, 58 commits, tree clean.
