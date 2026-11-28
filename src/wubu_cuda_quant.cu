@@ -4142,6 +4142,9 @@ static void   *g_f16_d[4096];
 static int64_t g_f16_id[4096];
 static size_t  g_f16_b[4096];
 static int     g_f16_n = 0;
+static size_t  g_f16_budget = 0, g_f16_used = 0;          /* bytes; 0 = unbounded */
+static unsigned long long g_f16_clock = 0, g_f16_use[4096];
+static long long g_f16_ups = 0, g_f16_reuse = 0, g_f16_evict = 0;
 static cublasHandle_t g_f16_h = NULL;
 static __half *g_f16_sx = NULL; static int g_f16_sx_cap = 0;
 static float  *g_f16_sy = NULL; static int g_f16_sy_cap = 0;
@@ -4151,15 +4154,31 @@ WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16
     if (!h_w_f16 || !h_act || !h_y || wbytes == 0 || K <= 0 || n_cols <= 0) return -1;
     if (!g_f16_h) { if (cublasCreate(&g_f16_h) != CUBLAS_STATUS_SUCCESS) { g_f16_h = NULL; return -2; } }
     int slot = -1;
-    for (int i = 0; i < g_f16_n; ++i) if (g_f16_id[i] == ident && g_f16_b[i] == wbytes) { slot = i; break; }
+    for (int i = 0; i < g_f16_n; ++i) if (g_f16_id[i] == ident && g_f16_b[i] == wbytes && g_f16_d[i]) { slot = i; break; }
+    if (slot >= 0) { g_f16_use[slot] = ++g_f16_clock; g_f16_reuse++; }
     if (slot < 0) {
-        if (g_f16_n >= 4096) return -3;
-        slot = g_f16_n;
+        if (!g_f16_budget) { const char *bg = getenv("IN2_F16_BUDGET_MB"); g_f16_budget = (bg && bg[0]) ? (size_t)(atof(bg)*1048576.0) : 0; }
+        /* bounded VRAM ring: evict the least-recently-used slab until this one fits */
+        if (g_f16_budget) {
+            int guard = 0;
+            while (g_f16_used + wbytes > g_f16_budget && guard++ < 4096) {
+                int victim = -1; unsigned long long oldest = ~0ull;
+                for (int i = 0; i < g_f16_n; ++i) if (g_f16_d[i] && g_f16_use[i] < oldest) { oldest = g_f16_use[i]; victim = i; }
+                if (victim < 0) break;
+                cudaDeviceSynchronize();
+                cudaFree(g_f16_d[victim]); g_f16_d[victim] = NULL;
+                g_f16_used -= g_f16_b[victim]; g_f16_b[victim] = 0; g_f16_id[victim] = 0; g_f16_evict++;
+            }
+        }
+        /* reuse a freed slot if one exists, else append */
+        for (int i = 0; i < g_f16_n; ++i) if (!g_f16_d[i]) { slot = i; break; }
+        if (slot < 0) { if (g_f16_n >= 4096) return -3; slot = g_f16_n++; }
         if (cudaMalloc(&g_f16_d[slot], wbytes) != cudaSuccess) { g_f16_d[slot] = NULL; return -4; }
         if (cudaMemcpy(g_f16_d[slot], h_w_f16, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
             cudaFree(g_f16_d[slot]); g_f16_d[slot] = NULL; return -5;
         }
-        g_f16_id[slot] = ident; g_f16_b[slot] = wbytes; g_f16_n++;
+        g_f16_id[slot] = ident; g_f16_b[slot] = wbytes; g_f16_use[slot] = ++g_f16_clock;
+        g_f16_used += wbytes; g_f16_ups++;
     }
     if (K > g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)K * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = K; }
     if (n_cols > g_f16_sy_cap) { if (g_f16_sy) cudaFree(g_f16_sy); if (cudaMalloc(&g_f16_sy, (size_t)n_cols * 4) != cudaSuccess) { g_f16_sy = NULL; g_f16_sy_cap = 0; return -7; } g_f16_sy_cap = n_cols; }
@@ -4180,4 +4199,16 @@ WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16
     cudaDeviceSynchronize();  /* cublas may run on its own stream; order the copy back explicitly */
     if (cudaMemcpy(h_y, g_f16_sy, (size_t)n_cols * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
     return 0;
+}
+
+/* Stats for the bounded f16 VRAM ring + a VRAM probe, so the engine/tests can report residency and thrash. */
+WUBU_EXPORT int wubu_cuda_f16_stats(long long *ups, long long *reuse, long long *evict, long long *used_mb, int *slabs)
+{
+    if (ups) *ups = g_f16_ups; if (reuse) *reuse = g_f16_reuse; if (evict) *evict = g_f16_evict;
+    if (used_mb) *used_mb = (long long)(g_f16_used / 1048576); if (slabs) *slabs = g_f16_n;
+    return 0;
+}
+WUBU_EXPORT int wubu_cuda_vram_free_mb(void)
+{
+    size_t fr, tot; if (cudaMemGetInfo(&fr, &tot) != cudaSuccess) return -1; return (int)(fr / 1048576);
 }

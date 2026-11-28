@@ -563,3 +563,17 @@ tools/f16_hive_stream.c (built -static) packs ALL 646 tensors to u32 hi/lo over 
 KEY: the hive ring holds a 16 MB working set instead of 3.22 GB resident - the weights stream through it in FIFO
 order. This is the substrate to replace the 3.22 GB permanent VRAM residency with a bounded ring that beds each
 slab to VRAM as the decode walks the tensor order (next wiring step).
+
+## bounded f16 VRAM ring measured: dense must be FULLY resident; the ring is for SUBSET streams (experts)
+The DLL f16 cache now has a byte budget (IN2_F16_BUDGET_MB) with LRU eviction + slot reuse, plus
+wubu_cuda_f16_stats / wubu_cuda_vram_free_mb exports. Driving all 646 tensors through a full pass per "token"
+(tools/f16_ring_test.c), budgets in MB:
+  budget=0 (full) : pass0 580 ms (cold upload), pass1 38.6 ms, used 3069 MB, vram_free 1886 MB, evict 0
+  budget=2048     : pass1 ~430 ms, used 1302 MB, vram_free 3654 MB, evict ~650/pass
+  budget=1024     : pass1 ~433 ms, used 1010 MB, vram_free 3972 MB, evict ~750/pass
+  budget=512      : pass1 ~427 ms, used  506 MB, vram_free 4506 MB, evict ~843/pass
+CONCLUSION: the dense (non-expert) tier is touched IN FULL every token, so any ring smaller than the 3.07 GB set
+thrashes ~11x (re-uploads ~(3070-budget)MB/token over PCIe at ~4 GB/s). The dense lane must be fully resident
+(3069 MB, leaves 1.89 GB VRAM free, 38.6 ms/token). The WuBuHIVE ring's real home is a SUBSET working set - the
+MoE experts, where only 8 of 48 are active per token, so a bounded ring holds the hot experts without re-uploading
+the world. The ring code is correct (ups/reuse/evict all scale with budget); it is simply the wrong tier to bound.
