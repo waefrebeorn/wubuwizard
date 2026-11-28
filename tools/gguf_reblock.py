@@ -106,6 +106,17 @@ def main():
     for c in changed:
         print(f"  {c[0]}: {c[1]} -> {c[2]}")
 
+    # optional: inject the loop hyperparameters the inkling2_loop variant requires. The file itself does not carry them, so
+    # they are RECONSTRUCTED from the tensors: loop tensors exist only in layers 6..17 (start/end), and the gate dims are
+    # [4608,64]/[64,2304] giving gate_rank 64. `count` is NOT derivable from the file and is supplied by the caller.
+    if len(sys.argv) > 5 and sys.argv[5]:
+        st, en, cnt, gr = (int(x) for x in sys.argv[5].split(","))
+        for k, v in (("loop.start", st), ("loop.end", en), ("loop.count", cnt),
+                     ("loop.gate_rank", gr), ("loop.varying", 0)):
+            key = f"inkling2_loop.{k}"
+            out.append((key, 4, struct.pack("<I", v)))
+            print(f"  + {key} = {v}   (injected)")
+
     # ---- serialise
     with open(dst, "wb") as g:
         g.write(b"GGUF")

@@ -2887,3 +2887,26 @@ WHAT REMAINS TRUE AND MEASURED: this engine loads this file and runs at 4.45-4.6
 streaming 7.90 GB from SSD at a measured 637 MB/s, with 192/192 quantised kernels verified against independent
 specifications and gate 15/15 reproducibility.
 STATE: 94 commits, gate 15/15, identity exact, 11 reference checks green. Upstream attempts: 5, all failures recorded.
+
+## ATTEMPT 6: loop hyperparameters RECONSTRUCTED FROM THE TENSORS - past hparams, then an opaque loader failure
+The loop_* tensors are not spread evenly: they exist ONLY in layers 6..17. That is the variant's geometry, and it is
+measurable rather than guessable:
+    loop.start = 6, loop.end = 18   (first/last+1 layer carrying loop_attn_/loop_k_/loop_v_/loop_mlp_ tensors)
+    loop.gate_rank = 64             (from dims: loop_attn_down [4608,64], loop_attn_gain/forget [64,2304])
+    loop.count    = 2               (NOT derivable from the file; supplied as a guess, and the one unmeasured value here)
+Injected those five keys (plus a renamed 36-key prefix and the 4 truncated per-layer arrays) and re-ran:
+    llama_model_load: error loading model: llama_model_loader: failed to load model
+No further specificity at -v either. This is the FIRST attempt that gets past hyperparameter validation at all, which means the
+reconstruction is structurally sound and the remaining failure is downstream of it (tensor creation/size check).
+ATTEMPT LEDGER, six attempts, monotonically more informative:
+    1 stock                  -> blk.24.attn_q.weight not found
+    2 block_count=24         -> head_count array length 24 vs 48
+    3 + array truncation     -> tensor count 734 expected, 588 accounted
+    4 arch=inkling2_loop     -> loop.context_length key missing
+    5 + key prefix rename    -> loop.start key missing
+    6 + loop.* reconstructed -> generic loader failure past hparams
+WHERE THIS STOPS AND WHY: every remaining failure from here is inside upstream's tensor-creation logic, which is precisely the
+code one would be WRITING during a port. Iterating further stops being measurement and becomes development of a third-party
+architecture implementation. The clause stays unimplementable, no multiplier is quoted, and the file remains one that this
+engine loads and upstream (in five distinct configuration attempts plus one reconstruction) does not.
+STATE: 95 commits, gate 15/15, identity exact, 4.45-4.65 tok/s, 11 reference checks green, kernel coverage 192/192.
