@@ -1100,3 +1100,26 @@ comment, and it measures 0.282 s against the CPU chunked path's 0.281 s, with 12
 missing), or the one-GEMM path is not faster here. Unresolved, and it is the single highest-value thing left to
 resolve because the head is a quarter of decode.
 GATE: 15/15 after the instrument change.
+
+## LM HEAD, GPU LANE: TWO HYPOTHESES TESTED AND BOTH WRONG - WHAT IS ACTUALLY ESTABLISHED
+The head is 201024 x 2304 = 463 M weights and costs 0.281-0.290 s. It is the largest single matvec in the model and
+close to a quarter of a decode token. Both the CPU chunked path (25 x 8192-row calls) and the "whole-vocab in ONE
+call" path taken when IN2_GPU_F16 is set measure the SAME time, and 12-token throughput is 3.64 tok/s either way.
+HYPOTHESIS 1 (WRONG): "the f16 files carry a 16-byte header, so the size gate `fby != need` rejects the head."
+  Disproved by reading in2_f16_lookup: it reads two int64 dimensions from the header and returns d0*d1*2 as the length,
+  i.e. it already strips the header. For the head the file is 926318608 bytes, the header says [2304, 201024], and the
+  returned length is 926318592 = need exactly. The gate passes. (The header IS real - od shows 0x900 and 0x31140 - and
+  every f16 file has it; the loader handles it correctly.)
+HYPOTHESIS 2 (WRONG): "clock() sums CPU time across threads, so 0.281 s is really ~40 ms wall."
+  Disproved by replacing clock() with in2_wall_now() and measuring again: 0.283 s. Same number. On this runtime clock()
+  IS wall time. The head genuinely costs ~0.28 s.
+WHAT IS ACTUALLY ESTABLISHED:
+  - F16STAT reports 161 resident slabs totalling 2107 MB, mean 13 MB. output.weight alone is 926 MB. A 926 MB slab
+    cannot be hiding inside a 2107 MB total made of 161 slabs averaging 13 MB, so THE HEAD IS NOT RESIDENT.
+  - With IN2_GPU_TRACE=1 the trace prints hits for blk.* tensors and ZERO "F16 miss" lines, and never mentions
+    output.weight at all. (The hit print is once-only, so silence is not proof of a miss.)
+  - Therefore the head either never reaches in2_try_f16, or reaches it and declines without tracing.
+OPEN QUESTION, stated plainly: the head's f16 copy exists on disk (926 MB), the loader would accept it, and the GPU
+would run the GEMM in about a millisecond - yet the head runs at 0.28 s on both paths. Locating WHERE the head call
+diverges from the traced blk.* path is the highest-value open item in this document, because it is ~25% of decode.
+NOT CLAIMED: any mechanism for the divergence. Two guesses already failed here and a third would be noise.
