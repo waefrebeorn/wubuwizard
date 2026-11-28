@@ -1580,3 +1580,24 @@ NEXT FIX (specific, one place): replace the whole-blob WILLNEED with per-layer p
 paging overlaps compute. Acceptance: cold-start tok/s approaches the 4.49 warm figure without a manual pre-read, and the
 per-shape max/min ratio stays near 15x or better.
 GATE: 15/15.
+
+## CORRECTION: there is NO prefetch on Windows at all - the madvise is inside #if defined(__linux__)
+src/gguf_reader.c:1674-1677 reads:
+    #if defined(__linux__)
+                madvise(base, ctx->data_blob_mmap_len, MADV_WILLNEED);
+                madvise(base, ctx->data_blob_mmap_len, MADV_HUGEPAGE);
+    #endif
+This build is Windows (_WIN32), so NEITHER call has ever been compiled here. My previous entry claimed the loader
+"issues MADV_WILLNEED over the entire mapped blob at open" and that this prefetch was self-defeating on a 16 GB box.
+That was wrong: on this platform there is no prefetch of any kind, which is precisely why pure demand paging shows up as
+a 187 ms page-in outlier and why a manual pre-read is worth +25%.
+There is also no madvise in src/wubu_win.h (checked), so the Windows path has no read-ahead equivalent wired at all.
+THE FIX IS THEREFORE AN ADDITION, NOT A REPLACEMENT: implement a Windows prefetch primitive once (PrefetchVirtualMemory
+declared locally rather than relying on _WIN32_WINNT, so it links on any Win8+ without SDK version gates), then issue it
+one layer ahead of use from the layer dispatch macro in src/wubu_inkling2_model.c:179-182, where (IL) is already in scope:
+  before the in2_layer_full_seq / in2_layer_sliding dispatch, prefetch the window that belongs to layer (IL)+1.
+Window sizing: one layer's worth of the blob, i.e. data_blob_size / n_layer, because GGUF stores layers in order - which
+also avoids depending on per-tensor offsets or the model struct field names.
+ACCEPTANCE: cold-start tok/s approaches the 4.49 warm figure WITHOUT a manual pre-read, and per-shape max/min stays near
+15x or better.
+GATE: 15/15, tree clean, 35 commits.
