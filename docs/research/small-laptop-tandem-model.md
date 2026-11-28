@@ -922,3 +922,27 @@ Consequence: the expert matvec cost is CPU unpack+dot, so the wins are (i) fewer
 (ii) a kernel that unpacks faster. Not PCIe, not sync count, not this lane as it stands.
 CURRENT RUNNING NUMBERS (12 tokens, 8 threads): 3.64 tok/s, moe phase 1.093 s of 3.4 s = 32%, of which the matvec
 is ~0.51 s of CPU-seconds/8 ~ 0.51 s, so ~0.58 s of the moe phase is router + top-k + accumulation, not matvec.
+
+## WHY THE GPU CANNOT TAKE THE EXPERTS ON THIS CARD (measured, not assumed)
+1. THREE HARD GUARDS in in2_try_f16 refuse expert matvecs before any work happens:
+     elem_off != 0 -> return 0        (experts are per-slab offsets, never 0)
+     name contains "exps" -> return 0 (explicit refusal)
+     omp_in_parallel() -> return 0    (the expert k-loop is OMP)
+   So the 161 resident slabs / 3771 reuses are DENSE tensors only. That is why IN2_GPU_F16 and IN2_GPU_MOE change
+   nothing for experts, and why the A/B was 3.64 vs 3.66 tok/s.
+2. f16 EXPERT RESIDENCY DOES NOT FIT. Routing is diffuse, not concentrated:
+     64 tokens: 1984 of 3072 expert slabs touched (65%), min count 1, max 151, mean 12.2
+     f16 slab = 15.9 MB; 2846 MB free VRAM holds 178 slabs = 9% of the pool
+     the best 178 slabs cover 44.9% of picks; 90% of picks needs 1009 slabs = 16.1 GB
+   A single token alone needs 24 layers x 8 = 192 distinct slabs = 3.1 GB, which exceeds the 2.85 GB free.
+   Conclusion: no hot set exists that fits. f16 residency on a 6 GB card is not viable at this expert count.
+3. REMAINING ROUTE, if the GPU is to touch experts at all: keep the weights COMPRESSED on the device and dequantise
+   on the GPU. That streams IQ2 bytes (394 MB/token) rather than f16 bytes, and it needs a device-side IQ2 kernel
+   that does not exist yet. Estimated upside from PCIe alone is ~2x on the moe phase, i.e. ~15% end to end.
+EFFECTIVE RATES, same 12-token run, measured twice so they are not mixed:
+   8 threads: moe region wall 0.809 s = 67 ms/token, 394 MB/token -> 5.9 GB/s
+   1 thread : moe 2.592 s = 216 ms/token -> 1.8 GB/s, 7.08 G weights/s
+   Ceilings: single-thread DRAM ~10-15 GB/s, 8-thread aggregate ~30-40 GB/s. Even the 8-thread figure is ~5x below
+   the aggregate ceiling, so decode is UNPACK+DOT bound at both thread counts. Faster storage does not help.
+TOOLING DEFECT FOUND: IN2_MOE_IDS emits nothing (0 lines with IN2_MOE_HIST=1 + IN2_MOE_IDS=1 in a 1-token run), so
+the per-token routing trace that the header comment promises does not work. The aggregate histogram works.

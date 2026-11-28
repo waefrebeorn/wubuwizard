@@ -29,7 +29,8 @@ int    in2_ty_par = 0;
 double in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_acc;
 double in2_ms_setup, in2_ms_free, in2_ms_route;
 /* decode (per-token) expert split */
-double in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc;            /* >0 while a parallel row region is running: leaf timers must not accumulate */
+double in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc;
+double in2_tk_route, in2_tk_region, in2_tk_zero;            /* >0 while a parallel row region is running: leaf timers must not accumulate */
 double in2_hires_now(void);
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
@@ -2200,7 +2201,9 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
     }
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
         int idx[256]; float w[256];
+        const double _rt = in2_now();
         const int got = in2_router(x + (size_t)t * d, Wr, cb, NE, d, TOPK, cfg->expert_weights_scale, idx, w);
+        in2_tk_route += in2_now() - _rt; const double _zt = in2_now();
         /* IN2_MOE_HIST: routing histogram keyed by (layer, expert). Answers the only question that decides whether a
          * hot-expert cache is worth building - how concentrated the router actually is - before any cache exists. */
         if (getenv("IN2_MOE_HIST")) {
@@ -2218,6 +2221,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
             }
         }
         for (int i = 0; i < d; ++i) out[(size_t)t * d + i] = 0.0f;
+        in2_tk_zero += in2_now() - _zt;
         /* Experts are independent, so the k loop is the natural parallel axis: with n_tok == 1 it is the only one
          * that gives a thread a whole contiguous expert block to stream, which is what this phase is bound by.
          * Each k writes its own g/act/eo slice, so nothing races, and the weighted sum stays a SERIAL loop in k
@@ -2289,6 +2293,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
             }
         }
         if (!getenv("IN2_STAGE") && got > 1 && in2_threads() > 1) {
+            const double _rg0 = in2_now();
             int bad = 0;
 #ifdef _OPENMP
             #pragma omp parallel for num_threads(in2_threads()) schedule(dynamic) reduction(|:bad)
@@ -2311,13 +2316,16 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                 }
                 in2_tk_dn += in2_now() - _kt;
             }
+            in2_tk_region += in2_now() - _rg0;
             if (bad) { rc = WUBU_INKLING2_ERR_IO; break; }
+            const double _ac0 = in2_now();
             for (int k = 0; k < got; ++k) {
                 const int e = idx[k];
                 const float dsc = ds ? ds[e] : 1.0f;
                 const float *ok = eo + (size_t)k * d;
                 for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * ok[i] * dsc;
             }
+            in2_tk_acc += in2_now() - _ac0;
             continue;
         }
         for (int k = 0; k < got; ++k) {

@@ -393,6 +393,7 @@ int main(int argc, char **argv)
             extern double in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_acc;
             extern double in2_ms_setup, in2_ms_free, in2_ms_route;
             extern double in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc;
+            extern double in2_tk_route, in2_tk_region, in2_tk_zero;
             double tot = in2_ms_gath + in2_ms_gu + in2_ms_act + in2_ms_dn + in2_ms_scat + in2_ms_setup + in2_ms_free + in2_ms_route;
             fprintf(stderr, "MOESPLIT setup=%.3f gather=%.3f gu=%.3f act=%.3f down=%.3f scatter=%.3f free=%.3f route=%.3f | accum=%.3f  sum=%.3f (%.1f%% gu, %.1f%% down, %.1f%% act, %.1f%% gather, %.1f%% scatter)\n",
                     in2_ms_setup, in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_free, in2_ms_route, in2_ms_acc, tot,
@@ -400,6 +401,8 @@ int main(int argc, char **argv)
                     tot > 0 ? 100.0 * in2_ms_act / tot : 0, tot > 0 ? 100.0 * in2_ms_gath / tot : 0,
                     tot > 0 ? 100.0 * in2_ms_scat / tot : 0);
             double kt = in2_tk_gu + in2_tk_act + in2_tk_dn + in2_tk_acc;
+            fprintf(stderr, "TOKENWALL route=%.3f zero=%.3f region=%.3f accum=%.3f | (cpu-spans: gu=%.3f act=%.3f down=%.3f)\n",
+                    in2_tk_route, in2_tk_zero, in2_tk_region, in2_tk_acc, in2_tk_gu, in2_tk_act, in2_tk_dn);
             fprintf(stderr, "TOKENSPLIT gu=%.3f act=%.3f down=%.3f accum=%.3f | sum=%.3f (%.1f%% gu, %.1f%% down, %.1f%% act, %.1f%% accum)\n",
                     in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc, kt,
                     kt > 0 ? 100.0 * in2_tk_gu / kt : 0, kt > 0 ? 100.0 * in2_tk_dn / kt : 0,
