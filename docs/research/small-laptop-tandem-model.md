@@ -2334,3 +2334,26 @@ through DEFINE_NEW_ROWS_80 (Q2_0, NVFP4) and DEFINE_NEW_ROWS_8K (iq1_s) plus the
 WHAT REMAINS TRUE from the passing test: the Q8_0 kernel is correct against a double-precision spec (1.9e-6) and the
 activation quantiser is format-correct (3.8e-3). Both statements are about attention-path formats.
 STATE: 70 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## TWO DIFFERENT "Q2_0" FORMATS IN THIS TREE - do not confuse them when extending the reference test
+Reading the kernel and the turboquant header side by side:
+  KERNEL (src/wubu_iq_c11.c, ggml block_q2_0, ggml_type 42 - what the GGUF experts actually use):
+    64 elements per block, qs[16], one fp16 d.
+    q2_0_dot_32(qs, y) computes maddubs(unpack32(qs), y) - maddubs(1, y), i.e. the EFFECTIVE weight is d*(q - 1)
+    for q in 0..3, giving the range [-1, +2]*d. The "subtract one" is done inside the dot with the maddubs trick, so
+    there is NO explicit dequantise step to read.
+    Block halves: qs+0 feeds the first 32 activations (y[0]), qs+8 the second 32 (y[1]).
+  TURBOQUANT HEADER (include/wubu_turboquant.h, block_q2_0_t - a V-cache format, NOT the GGUF type):
+    32 elements per block, qs[8], one fp16 d, and the value is d*(q - 2) for q in 0..3, giving [-2, +1]*d.
+DIFFERENT BLOCK SIZE (64 vs 32), DIFFERENT qs LENGTH (16 vs 8), DIFFERENT BIAS (1 vs 2), and the encoder in the turboquant
+header writes the q-2 convention while the kernel decodes the q-1 convention. A reference test built on
+dequantize_q2_0_block() would compare against the WRONG specification for the GGUF experts, and would fail - or worse, be
+"fixed" by changing the kernel to match a V-cache format.
+So the Q2_0 reference must be written from the kernel's own convention (64 elems, qs[16], value = d*(q-1), first half from
+qs+0 paired with y[0], second half from qs+8 paired with y[1]), and the turboquant header must not be used as the oracle.
+REMAINING UNKNOWN, stated precisely: the LANE ORDER inside q2_0_unpack_32 - which of the four 2-bit fields in a byte maps
+to which of the 32 activation indices. The dot is commutative so a whole-row sum cannot reveal it; determining it needs
+either the shuffle constant in q2_0_unpack_32 or a per-element probe (set one q field non-zero, read which output index
+changes). A reference test that pairs weights with activations in the wrong order would report a real mismatch that is not
+a kernel bug, which is exactly the kind of fabricated failure already caught twice this session.
+STATE: 71 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
