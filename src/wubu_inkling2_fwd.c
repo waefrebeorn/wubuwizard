@@ -904,7 +904,7 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                      * Experts are excluded by name: 48x128 slabs is far more than the resident tier can hold. */
                     int gpu_took = 0;
                     if (nn == 1 && getenv("IN2_GPU_DENSE") && t && t->info && t->info->name[0] &&
-                        strstr(t->info->name, "exps") == NULL) {
+                        (strstr(t->info->name, "exps") == NULL || getenv("IN2_GPU_EXPS"))) {
                         in2_gpu_init();
                         const int g_rc2 = (in2_gpu_state == 1)
                             ? in2_gpu_resident(ty, base, (size_t) rb * (size_t) n_out, ap[0],

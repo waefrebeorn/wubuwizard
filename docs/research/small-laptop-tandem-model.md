@@ -789,3 +789,16 @@ Amdahl: 6655/4011 = 1.66x at 8 threads -> serial fraction ~0.55. PHASE compariso
 So the expert matvec work IS the parallel part but achieves only 1.77x of 8x on 12 hardware threads, i.e. ~19 GFLOPS
 effective. Phases 0-5 are ~0.30 s total and completely flat in thread count - they are not the target. The lever is
 expert-kernel parallel efficiency (per-call work too small / dequant traffic), not the head, not the dense lane.
+
+## RIGOROUS A/B: every GPU lane together is only -1.3% on decode (noise). RETRACT the single-run 5.3%.
+Method: 5 interleaved reps, medians (single runs drift ~5%, so single-run comparisons are worthless here).
+  CPU            median 3969 ms  mean 3955   (raw: 3913 3969 3906 4015 3972)
+  F16+DENSE+EXPS median 3918 ms  mean 3930   (raw: 3946 3907 3918 3966 3914)   -> -1.3% median
+  ALL+MOE        WORSE (4112/4214) - the MoE batch path costs more than it saves
+All runs kept 15/15 identical, so this is purely a speed statement.
+SELF-CORRECTION: an earlier single run showed GPU_DENSE 3885 vs CPU 4102 (-5.3%) and I nearly reported it as a win;
+interleaved reps show the CPU baseline itself wanders 3903-4102 ms, so that was drift, not speedup. RULE: never report
+a decode speed claim from fewer than 5 interleaved reps, and use the median.
+STATE OF THE ART ON THIS BOX (measured): dense f16 lane ~1%, M-token prefill batch 1-4.6%, GPU MoE batch NEUTRAL to
+worse, resident quant tier (ty=8 only) ~0, all lanes together -1.3%. Therefore GPU offload is NOT the lever for decode
+here. The lever is the CPU expert kernel: 19 GFLOPS effective, 1.77x of 8x thread scaling, 4.44 s of the run.
