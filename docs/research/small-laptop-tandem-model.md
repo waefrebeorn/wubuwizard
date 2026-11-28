@@ -1794,3 +1794,28 @@ this is one bounded read at a known address, not a speculative stream. Acceptanc
 NEXT MEASUREMENT after that: raise the census cap to 512 and re-run so the expert tensors are included; until then the
 population is still partly unobserved and no share below the top ten can be trusted.
 GATE: 15/15, 44 commits.
+
+## THE 96-SLOT CAP INVALIDATED BOTH PREVIOUS CENSUS CLAIMS - full census at 512 slots
+Cap raised to 512 (shape now printed per line). 217 sites, total 6.2375 s instead of the truncated 0.8045 s:
+  output.weight              quant  2304>201024    12 calls   0.3759 s   6.0%   31325 us
+  blk.16.ffn_gate_up_exps    quant  2304> 2304    264 calls   0.2584 s   4.1%     979 us
+  blk.7.ffn_gate_up_exps     quant  2304> 2304    263 calls   0.2185 s   3.5%     831 us
+  blk.12/13/14/8/6/17/11/10/15/9 ffn_gate_up_exps   ~264 calls each, 0.177-0.219 s each
+  blk.0.attn_q.weight        nt     2304> 3072     12 calls   0.1943 s   3.1%   16196 us
+TWO RETRACTIONS, both caused by the table cap rather than by a wrong theory:
+  1. "the LM head is not on any dense entry point" - FALSE. output.weight IS there: 1 call per token, 31.3 ms each,
+     6.0% of entry time. It had been dropped by the 96-slot cap, and I reported its absence as a finding.
+  2. "blk.0.attn_q is 24.4% of entry-point time" - actually 3.1%. The 24.4% divided by a truncated sum (0.80 s of 6.24 s).
+WHAT IS ACTUALLY TRUE, and it matches the traffic arithmetic:
+  expert gate_up across the 12 traced layers: 2.451 s = 39% of entry time from ~3,168 calls (264 per layer, so ~22 expert
+  matvecs per token per layer - TOPK=8 with gate_up and down, and the counter shows the gate_up half).
+  head: 6.0%.  blk.0 cold page-in: 3.1%.  Everything else is spread thin.
+SO THE ORDER OF ATTACK IS SETTLED BY MEASUREMENT: experts (39%+ from gate_up alone, plus their matching down projections
+which do not appear in this top-14) >> head (6%) > cold first-layer (3%).
+BOTH cheap fixes I proposed are still worth ~9% combined (head residency + warming blk.0) but neither is the main term: the
+MoE expert matvecs are, and they are inherent to streaming expert weights one token at a time - which is why batching is the
+only lever that changes the physics rather than the overhead.
+LESSON, and it is the third time this session: an instrument that silently truncates is worse than no instrument, because it
+converts "not observed" into "does not exist" and both of the last two turns were that exact error. Every counter in this
+engine now needs a printed cap-hit warning.
+GATE: 15/15, 45 commits, tree clean.

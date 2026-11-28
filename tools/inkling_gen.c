@@ -487,7 +487,7 @@ int main(int argc, char **argv)
           if (in2_shp_n > 0) {
               double tot = 0; for (int i = 0; i < in2_shp_n; ++i) tot += in2_shp[i].sec;
               fprintf(stderr, "SHAPE TABLE (run-wide, %d shapes, %.4f s total)\n", in2_shp_n, tot);
-              unsigned char used[96] = {0};
+              unsigned char used[512] = {0};
               for (int k = 0; k < 12 && k < in2_shp_n; ++k) {
                   int best = -1;
                   for (int i2 = 0; i2 < in2_shp_n; ++i2)
@@ -509,20 +509,21 @@ int main(int argc, char **argv)
               fprintf(stderr, "READIO ops=%llu bytes=%llu (%.1f MB) | writes=%llu (%.1f MB)\n",
                       io.rd_ops, io.rd_bytes, (double) io.rd_bytes / 1048576.0,
                       io.wr_bytes, (double) io.wr_bytes / 1048576.0); }
-        { extern struct in2_cs_rec { char name[28]; int entry; double sec; long n; } in2_cs[96];
+        { extern struct in2_cs_rec { char name[28]; int entry, ni, no; double sec; long n; } in2_cs[512];
           extern int in2_cs_n;
           if (in2_cs_n > 0) {
               double tot = 0; for (int i = 0; i < in2_cs_n; ++i) tot += in2_cs[i].sec;
               fprintf(stderr, "CALLSITE CENSUS (%d sites, %.4f s)\n", in2_cs_n, tot);
               unsigned char used[96] = {0};
-              for (int k = 0; k < 10 && k < in2_cs_n; ++k) {
+              for (int k = 0; k < 14 && k < in2_cs_n; ++k) {
                   int best = -1;
                   for (int i = 0; i < in2_cs_n; ++i)
                       if (!used[i] && (best < 0 || in2_cs[i].sec > in2_cs[best].sec)) best = i;
                   if (best < 0) break;
                   used[best] = 1;
-                  fprintf(stderr, "  %-28s %s %6ld calls %8.4f s %5.1f%% %8.1f us/call\n",
+                  fprintf(stderr, "  %-26s %s %5d>%-6d %5ld calls %8.4f s %5.1f%% %8.1f us\n",
                           in2_cs[best].name, in2_cs[best].entry ? "quant" : "nt   ",
+                          in2_cs[best].ni, in2_cs[best].no,
                           in2_cs[best].n, in2_cs[best].sec,
                           tot > 0 ? in2_cs[best].sec / tot * 100 : 0.0,
                           in2_cs[best].sec / (double) in2_cs[best].n * 1e6);
