@@ -1035,3 +1035,30 @@ the per-visit calloc/free set, and the dequant cache lookups.
 NEXT: make those materialisations lazy exactly like the gu/dn fix - they are dead work on the kernel path - then A/B
 interleaved through one binary. FP2 covers 0.185 s of a ~0.285 s token, so ~35% is still outside the layer (head +
 embed + sampling) and is the other unmeasured block.
+
+## DECODE IS SINGLE-THREADED, AND THE OBVIOUS FIX IS INADMISSIBLE (measured both ways)
+CAUSE, measured from the corrected phase table without any new build: the same op costs 7x more per token alone
+than batched.
+  f_q       batched (n_tok=12) 5.1 ms/token   single (n_tok=1) 37.0 ms/token   7.3x
+  f_kv+conv batched 4.3                        single 23.0                    5.3x
+  f_gate+wo batched 7.0                        single 49.0                    7.0x
+The ratios match the thread count, so at n_tok == 1 the kernel is handed ONE row, row parallelism cannot engage, and
+every dense projection runs on a single core. That is the whole reason decode is dense-bound while prefill is
+expert-bound - not a format difference, not a cache problem, just no parallelism at n=1.
+ATTEMPTED FIX: split the OUTPUT ROWS of the dense matvec across threads (a pure partition - each block writes its own
+slice, no reduction), reusing the exact call pattern that already exists at wubu_inkling2_fwd.c:1879
+`in2_matvec_quant(ctx, t, elem_off + (int64_t)r * n_in, x, n, n_in, y + r)`. Built, gate-clean at default, and
+env-gated as IN2_ROWPAR so both arms ran through one binary.
+RESULT: IN2_ROWPAR=1 CHANGES THE TOKENS. Default was IDENTICAL to the oracle, ROWPAR=1 was MISMATCH. The split is
+mathematically a partition, so the divergence is floating point: a different number of rows per call changes the
+kernel's blocking, which changes the SUMMATION ORDER inside each dot product. Microseconds of reassociation are
+enough to flip a later argmax.
+VERDICT: rejected and reverted. Token-for-token identity is a hard clause and outranks any speedup, so row-splitting
+behind this kernel is not a candidate at all. This is the useful kind of failure: the diagnosis (no parallelism at
+n=1) is now proven, and one implementation is now excluded by measurement rather than by argument.
+THE ADMISSIBLE ROUTE: parallelise across the INDEPENDENT OPS instead of within one. Inside a layer q, k and v are
+mutually independent, while gate -> wo is a dependency chain. Running q/k/v concurrently in one region leaves each
+kernel call byte-identical - same arguments, same row count, same blocking, same summation order - so identity is
+preserved by construction rather than hoped for. Expected saving is min(q, kv) ~ 23 ms of a 285 ms token (~8%), and
+it composes with the same trick over the three rmsnorms.
+GATE: 15/15 after reverting.
