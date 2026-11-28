@@ -9,6 +9,14 @@
 static const int8_t kvalues_iq4nl[16] = {-127,-104,-83,-65,-49,-35,-22,-10,1,13,25,38,53,69,89,113};
 #define f16h gguf_f16_to_f32
 #include "iq3_xxs_tables.inc"
+/* dequant ONE non-expert tensor to single-f16 at out path; returns 0 ok. Reuses the verified dispatch. */
+static int dequant_one(gguf_ctx*c, gguf_tensor_info*t, const char*outpath){
+    long long ne=1; for(int d=0;d<t->n_dims;d++) ne*=t->dims[d];
+    const unsigned char*blob=(const unsigned char*)c->data_blob;
+    if(!blob){ fprintf(stderr,"no data blob\n"); return 5; }
+    const unsigned char*raw=blob+(size_t)t->data_offset;
+    float*f=(float*)malloc((size_t)ne*sizeof(float));
+    long rawsz=0;
 int main(int argc,char**argv){
     if(argc<4){fprintf(stderr,"usage: head_hf16 <model.gguf> <tensor> <out.f16>\n");return 2;}
     gguf_ctx*c=gguf_open(argv[1]); if(!c){fprintf(stderr,"open fail\n");return 3;}

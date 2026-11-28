@@ -473,3 +473,13 @@ complete single-f16 lane dequant layer. Engine-dot-verified to ~1e-6: 23/12/13/1
 0/8/30. All 646 non-expert tensors (3.22 GB f16) are now dequantizable. NEXT: run the tool over every
 non-expert tensor to materialize the full 3.22 GB f16 resident weight set, then resident upload + cuBLAS + the
 gen_fast dense-decode rewiring + the end-to-end gate.
+
+## FULL RESIDENT F16 WEIGHT SET MATERIALIZED (646/646, 0 failures, 3.22 GB)
+tools/dequant_all.c opens the model once and dequants every non-expert tensor to single-f16 (per-type
+dispatch copied from the verified head_hf16.c). Result:
+  DONE 646 non-expert tensors, 1,609,204,224 elements = 3.22 GB f16 @ scratch/f16set  (rc=0 on all 646)
+This is the complete dequant layer + resident weight set for the f16 dense lane: all non-expert types
+(0 F32, 8 Q8_0, 12 Q4_K, 13 Q5_K, 14 Q6_K, 18 IQ3_XXS, 23 IQ4_XS, 30 BF16) engine-matched (IQ4_XS/Q4_K/Q5_K/
+Q6_K/IQ3_XXS dot-verified ~1e-6; F32/Q8_0/BF16 structural. NEXT: resident upload the 3.22 GB to VRAM, then
+rewire gen_fast's dense decode to cuBLAS f16 (per-tensor calls fine - cuBLAS batches M=1, cost = bytes/VRAM-BW
+~20 ms/token predicted vs CPU ~80-100 ms dense), then the end-to-end per-token gate.
