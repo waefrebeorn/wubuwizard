@@ -364,3 +364,19 @@ Expected effect on the 226 ms/token decode: the dense+head read+dequant cost (up
 replaced by ~15-20 ms/token of resident VRAM GEMM, i.e. up to ~1.5-1.7x faster - IF the resident-f16 footprint
 (3.9 GB) fits alongside KV/activations (already shown: 4.8 GB < 5 GB). This is the coherent, evidence-backed
 target: build the f16 resident dense+head lane. The experts (24% of reads, 91% of weight bytes) stay CPU/stream.
+
+## DECISIVE RESIDENCY (measured from the actual model): single-f16 fits, two-f16 does NOT
+Element counts from the real Inkling GGUF: non-expert tier = 1,609,204,224 elements (646 tensors), expert
+tier = 24,461,186,048 (88 tensors, ~91% of the model). Resident footprints of the NON-EXPERT tier:
+  single-f16 (2 B/el) = 3.22 GB   -> fits (3.22 + KV 0.6 + act 0.3 = 3.97 GB < 5.08 GB free, ~1 GB headroom)
+  two-f16     (4 B/el) = 6.44 GB   -> DOES NOT fit in the ~5 GB budget
+  f32         (4 B/el) = 6.44 GB
+Experts = 24.5 B el (single-f16 47.6 GB) never resident; stay CPU/streamed. CORRECTION: the two-f16 split
+(hi+lo = 4 B/el, same as f32) is NOT residency-viable for this tier; the lane must use SINGLE f16 (2 B/el,
+3.2 GB) with f32 accumulation, which loses ~3.4e-4 on GEMM inputs vs f32 - acceptable for the opt-in lane
+under its cos>=0.999 f16 gate (bit-identity is impossible by construction anyway). The WuBuMM endianness
+warning (hi/lo in separate buffers) becomes moot for single-f16. BUILD SPEC (final): dequantize the 646
+non-expert tensors to single-f16 (2 B/el, ~3.2 GB), upload resident once, run the dense+head matmuls as
+cuBLAS FP16 GEMM with f32 accumulation (~13 ms/token measured), f32 residual/norms, cos>=0.999 gate vs the
+CPU f32 path on identical inputs. Experts untouched on CPU. Expected: the ~100 ms/token dense+head DRAM
+read+dequant is replaced by ~15-20 ms/token resident VRAM GEMM.
