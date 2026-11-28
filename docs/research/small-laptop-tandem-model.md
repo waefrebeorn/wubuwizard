@@ -2952,3 +2952,28 @@ The clean discriminator is a THREAD SWEEP ON THE HOT CACHE: the earlier sweep (1
 tok/s) was taken cold. If the hot curve flattens earlier or rises higher, (a); if it is unchanged, (b) and the 168 us/call is
 arithmetic plus latency that more threads cannot hide.
 STATE: 97 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192.
+
+## THREAD SWEEP ON THE HOT CACHE: the curve is UNCHANGED, so the bound is memory-latency, not starvation
+Two runs per point, 16 tokens, model fully resident in page cache:
+    threads=1   2.40 / 2.41 tok/s
+    threads=2   3.13 / 3.12
+    threads=4   4.23 / 4.25
+    threads=6   4.43 / 4.43
+    threads=8   4.65 / 4.63
+    threads=12  4.63 / 4.63
+Compare the earlier COLD sweep: 1 2.29 | 2 3.13 | 4 4.22 | 6 4.36 | 8 4.46 | 12 4.42.
+The SHAPE IS IDENTICAL. Residency lifts every point by only 2-5% (8 threads: 4.64 hot vs 4.46 cold) while the scaling law is
+untouched: 1->8 threads yields 1.93x hot versus 1.95x cold. Saturation is at 8 threads in both cases, and 12 is flat-to-slightly
+worse in both.
+VERDICT ON THE TWO HYPOTHESES: (b), not (a). The pool is NOT starved on fault-resolved pages - if it were, residency would have
+changed the curve's shape, and it did not. What holds the engine at ~4.6 tok/s is per-call memory latency plus arithmetic that
+additional threads cannot hide.
+THE REAL NUMBER THIS EXPOSES: 1.93x from 8 threads is the signature of a LATENCY-bound inner loop, not a bandwidth-bound one.
+Eight hardware threads on a 16-thread CPU should scale far better on bandwidth-limited work; scaling that collapses to ~2x means
+each thread spends most of its time stalled on dependent loads inside the kernel, so the pool is waiting, not computing.
+WHERE THE HEADROOM THEREFORE IS, if any remains: inside the kernel, not around it. The lever is ILP - issuing independent
+loads for a second block or a second expert while the first is outstanding, unrolling across rows, or hoisting the activation
+block so it is touched once. That is precisely the "improvements go inside the quant kernels, not around them" doctrine the
+project already holds, and this measurement is the first to point AT it with a mechanism rather than a guess: thread count has
+been exhausted (saturation at 8, flat at 12), residency has been exhausted (5%), and prefetch at three sites returned zero.
+STATE: 98 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, default 4.63-4.65 tok/s hot.
