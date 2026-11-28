@@ -1902,3 +1902,24 @@ NEXT STEP, precise: locate the three in2_forward_at calls that execute per gener
 IN2_LOOKUP block, the IN2_BATCH_PROBE block and the warm loop are all separate and can be excluded by inspection) and
 attribute each; then delete or fold the redundant one and re-gate.
 GATE: 15/15, 49 commits, tree clean.
+
+## RETRACTED WITHIN THE HOUR: "3 forwards per generated token" is wrong - it is ONE forward per token
+Read of the plain generation loop (tools/inkling_gen.c:396-397):
+    const int rc = incremental
+        ? in2_forward_at(ctx, &m, &cfg, &toks[n-1], 1, n-1, h, logits)
+        : in2_forward_at(ctx, &m, &cfg, toks, n, 0, h, logits);
+Exactly ONE forward per step, on both the incremental and the full-recompute branch. So the 336 nt calls per generated
+token are 336 calls inside ONE forward - about 14 per layer across 24 layers - not 3 forwards of 112.
+WHERE THE ERROR CAME FROM: I divided 336 by "112 nt calls per forward", a figure derived from the 1-token run's 448 calls
+over an assumed 4 forwards. That 4-forward assumption was itself never verified; 448 is prefill + first step, so the divisor
+was fabricated and every ratio built on it inherited the error. This is the fourth retraction of the session and the second
+caused by an unverified denominator rather than by a wrong measurement.
+WHAT SURVIVES, MEASURED: nt = 448 + 336*(n-1) and quant = 25 + 793*(n-1), both exactly linear, both verified across four run
+lengths. Those are facts about call counts per token; only my interpretation of them was wrong.
+CORRECTED PICTURE: one forward per generated token, containing ~336 dense matvec calls and ~793 quantised matvec calls, and
+the per-token disk traffic of ~186 MB is therefore the traffic of a SINGLE forward - the original accounting was right after
+all, and the 3.7x inflation I attributed to extra forwards does not exist.
+CONSEQUENCE: there is no 3x control-flow win sitting there. The remaining real levers are the ones measured earlier - expert
+weight volume (batching), the ~9% of head/cold-start residency, and the unexplained ratio between expert calls per token per
+layer (~29 on the KV path) and the router's TOPK=8, which is now the ONLY anomaly in the record without an explanation.
+GATE: 15/15.
