@@ -1640,3 +1640,23 @@ TWO BUILD BUGS WORTH REMEMBERING (both cost a failed build each, and one produce
      Both showed up as 'IL undeclared' / '_bs undeclared', which looks like a scope problem and is actually a
      continuation-break problem.
 GATE: 15/15.
+
+## COLD-START PREFETCH IS UNVERIFIABLE ON THIS BOX - three attempts, all inconclusive
+Attempt 1 (two fresh copies): abandoned on reasoning - a freshly WRITTEN copy has its pages in the page cache (dirty,
+then clean), so it is warm by construction and the test would measure nothing.
+Attempt 2 (ABBA, IN2_PF vs default): 4.49/4.47 vs 4.46/4.49 - neutral, but both arms read the WARM level, so it tested
+nothing about cold start.
+Attempt 3 (evict by streaming the 9 GB f16set through cache, then one arm at a time):
+  IN2_PF=1 : 4.52 tok/s      default (no PF): 4.49 tok/s
+Both still read the warm level (~4.5, against ~3.45 genuinely cold). 9 GB of unrelated reads did not displace the model's
+pages; Windows offers no drop_caches equivalent, and its cache will not release a hot file on demand.
+CONCLUSION: the cold-start benefit of layer-ahead prefetch CANNOT be measured on this machine with the tools available.
+It is not disproven - it is unmeasured. The hook stays opt-in (IN2_PF) and the shipped default stays gate-verified.
+THE RIGHT INSTRUMENT, and the next step: stop measuring tok/s and count PAGE FAULTS. GetProcessMemoryInfo's PageFaultCount
+before and after a fixed run distinguishes genuine cold execution from warm regardless of what the cache happens to hold,
+and it is the quantity prefetch is supposed to reduce. If the prefetch is working, the hard-fault count per token must
+fall even when wall-clock time does not (because a warm run has no faults to save). That measurement is also cheaper than
+any of the three attempts above.
+LESSON: tok/s is the wrong dependent variable for a caching experiment. It conflates cache state with everything else,
+and on a box where cache state cannot be controlled it produces numbers that look like results.
+GATE: 15/15, tree clean, 38 commits.
