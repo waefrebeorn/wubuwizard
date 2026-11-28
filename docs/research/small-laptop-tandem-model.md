@@ -1621,3 +1621,22 @@ ALSO CONFIRMED INCIDENTALLY: the warm-page-cache result (4.49 tok/s) is transien
 cache no longer held the file and both arms fell back to ~3.45. So the +25% is real but is not a resting state; it is the
 size of the prize that a correct, properly sized read-ahead should recover.
 GATE: 15/15, tree clean.
+
+## CORRECTED-WINDOW PREFETCH: neutral when warm, cold case still unverified
+Hook re-sized to the next layer's own dense front: prefetch m->layer[IL+1].wq.file_offset for 64 MB (not blob/24=337 MB).
+ABBA over 12-token runs, 8 threads, gate green:
+  PF_ON  4.49, 4.47   PF_OFF 4.46, 4.49   -> neutral
+BUT both arms read 4.46-4.49, i.e. the WARM level, so this run proves only that the hook does not regress the warm case.
+It CANNOT show a cold-start benefit, because the page cache was already warm and Windows offers no drop_caches equivalent.
+Kept as OPT-IN (IN2_PF) so the shipped default is byte-for-byte the gate-verified behaviour.
+REMAINING TEST, and it needs disk, not code: copy the GGUF to a path that has never been read (genuinely cold), run one
+arm; delete the copy; copy again and run the other arm. Two fresh copies, because the first run warms whatever file it
+touches. Only that isolates cold-start.
+TWO BUILD BUGS WORTH REMEMBERING (both cost a failed build each, and one produced a stale-binary reading):
+  1. A multi-line /* ... */ comment placed INSIDE a backslash-continued macro terminates the continuation: comment
+     lines need their own trailing backslashes, or the comment must live outside the macro.
+  2. Inserting text after a macro line that ends in a backslash, separated by a blank line, silently ends the macro -
+     the following lines then compile at file scope and report "IL undeclared".
+     Both showed up as 'IL undeclared' / '_bs undeclared', which looks like a scope problem and is actually a
+     continuation-break problem.
+GATE: 15/15.
