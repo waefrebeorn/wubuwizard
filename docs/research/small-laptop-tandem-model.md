@@ -3142,3 +3142,32 @@ consumed per region (e.g. 1 expert x 1.37 MB vs 8 experts interleaved vs one ful
 length rather than total bytes, the fix is to make each thread walk a slab contiguously to completion - a scheduling change,
 identity-safe, and independent of the batching arithmetic that was retired.
 STATE: 104 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## STREAM COUNT IS NOT THE ANSWER EITHER (2.5x at most), AND AN INTERNAL CONSISTENCY CHECK ON MY OWN NUMBERS
+stream_probe, same 256 MB, same 1.5 MB slab, only the number of interleaved streams varied:
+    1 stream   (one slab reused)    89.88 GB/s
+    8 streams  (round-robin)        35.54 GB/s
+    24 streams (round-robin)        35.27 GB/s
+So stream fan-out costs 2.5x and then PLATEAUS - going from 8 to 24 streams costs nothing further. 35 GB/s is still ~43x above the
+engine's effective 0.5-0.8 GB/s of weight traffic, so stream count cannot be the explanation. Hypothesis 7 is dead as the primary
+cause. (Caveat kept honest: this probe's working set is 8 x 1.5 MB = 12 MB, which fits L3, so it measures prefetcher behaviour
+rather than DRAM. The plateau result is still valid because it compares patterns at equal footprint.)
+SELF-CONSISTENCY CHECK, because two of my own figures disagreed:
+    IQ2_XXS carries 3,276,800 elements per MB.
+    162 MB/token x 3.28 M elem/MB = 530.8 M elements/token.
+    at the in-engine rate of 0.609 ns/elem that is 0.323 s/token - but the wall is 0.219 s.
+    inverted: 0.219 s at 0.609 ns/elem admits 359.6 M elements = 109.7 MB/token, not 162.
+So the fault-derived "162 MB/token" is an OVERESTIMATE by ~1.5x (4 KB x 40,625 faults is an upper bound; faults are not distinct
+pages). The two figures are consistent within 1.5x, which means the engine really is running at roughly its measured in-engine
+kernel rate over ~110-160 MB/token - the traffic estimate was loose, not the timing. Corrected figure to quote: ~110 MB/token.
+WHAT REMAINS GENUINELY UNEXPLAINED, stated as the open question rather than as a conclusion: the SAME kernel geometry costs
+0.080 ns/elem when its bytes are L2-resident and 0.609 ns/elem inside the engine, and the synthetic pattern probe shows a DRAM-shaped
+access at 35 GB/s while the engine achieves ~0.5-0.8 GB/s. Neither stream count (2.5x, plateaued) nor TLB (flat sweep) nor locks
+(concurrency scales) nor the disk (5%) accounts for a 7.6x. The remaining candidates are the ones no probe has yet isolated: the
+expert gather choosing a NEW scattered base address every ~1.4 MB so the prefetcher never sees more than one slab of continuity per
+stream, the per-call activation quantisation sitting inside the timed region, and the mixed quant types forcing a different kernel
+path per tensor.
+NEXT MEASUREMENT, chosen to separate those three without another synthetic: time the SAME engine region with (a) the activation
+quantisation hoisted out of the per-call path, (b) one tensor type only, by running a layer where every expert shares ty. Those are
+two builds of instrumentation, not of arithmetic, and the gate stays authoritative.
+STATE: 105 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
