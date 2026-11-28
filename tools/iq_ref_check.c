@@ -91,6 +91,15 @@ int main(void)
         err[j + 1] = v;
     }
     printf("Q8_0 reference check: %d rows x %d elements (%d blocks)\n", NROW, NIN, NB);
+    printf("  diag: supported=%d rows1_supported=%d sizeof(blk)=%zu expect 34 row_bytes=%zu\n",
+           wubu_iq_supported(8), wubu_iq_rows1_supported(8), sizeof(in2_q8_0_blk), rb);
+    {   /* single-row entry: if this writes a value while rows() writes zeros, the r0/r1 form is what I got wrong */
+        float one = 0.0f; float *op1[1] = { &one };
+        wubu_iq_rows1(8, (const void *) w, rb, 1, actp, 1, op1, 0, 1);
+        float lot = 0.0f; float *op2[1] = { &lot };
+        wubu_iq_rows(8, (const void *) w, rb, 1, actp, 1, op2, 0, 1);
+        printf("  diag: rows1[0]=%.6f  rows[0]=%.6f  ref[0]=%.6f\n", one, lot, (double) ref[0]);
+    }
     printf("  rel err min %.3e  median %.3e  max %.3e\n", err[0], err[NROW / 2], err[NROW - 1]);
     printf("  sample  ref[0]=%.6f got[0]=%.6f | ref[1]=%.6f got[1]=%.6f\n", ref[0], got[0], ref[1], got[1]);
     const int pass = (err[NROW - 1] < 1e-5);

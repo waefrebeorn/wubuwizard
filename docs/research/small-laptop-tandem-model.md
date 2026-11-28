@@ -2256,3 +2256,20 @@ THIS IS RECORDED AS AN UNFINISHED TEST, NOT A KERNEL VERDICT. The distinction ma
 declared broken or fixed on weaker evidence than this and had to be retracted. The test harness is unverified until it can
 reproduce a known-good value; until then its output is not evidence about the kernel.
 STATE: 66 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. The test binary is not committed to the build.
+
+## REFERENCE TEST DIAGNOSTIC: two hypotheses eliminated, failure isolated to rows_q8_0 with these arguments
+Diagnostic output:
+  supported=1   rows1_supported=0   sizeof(in2_q8_0_blk)=34 (expected 34)   row_bytes=2176
+  rows1[0]=0.000000   rows[0]=0.000000   ref[0]=-5.224327
+ELIMINATED:
+  - block size/stride: sizeof(in2_q8_0_blk) == 34, exactly ggml's block_q8_0. Not an alignment problem.
+  - CPU feature gating: wubu_iq_supported(8) computes iq_type_ok(8) && iq_cpu_ok(), and it returned 1, so iq_cpu_ok() is
+    TRUE and the "!iq_cpu_ok() -> iq_zero_out()" early return is NOT what zeroed the output.
+  - the single-row path is simply unavailable here (rows1_supported=0), so its zeros mean nothing.
+WHAT REMAINS: wubu_iq_rows_impl dispatches case 8 -> rows_q8_0(nt, wp, row_bytes, n, act, out, r0, r1), and that function
+produced zeros for this call. Either rows_q8_0's index convention differs from (nt=1, n=1, r0=0, r1=1), or it requires
+something about act[] this harness does not provide.
+NEXT STEP, narrow and cheap: read rows_q8_0 and dot1_q8_0 in src/wubu_iq_c11.c and check (a) whether it writes out[t][r] or
+out[r][t] and (b) whether it indexes act[t] or act[r]. A one-line harness change will follow from that reading - no kernel
+edit should be made until the harness can produce a known-good value.
+STATE: 67 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
