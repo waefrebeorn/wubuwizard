@@ -2692,3 +2692,19 @@ That satisfies the rule with zero new C, and it is strictly better than a __DATE
 binary it did not just build. The failure it guards against is exactly the one that produced the sixth retraction: a FAIL line
 from a pre-patch executable being read as a live result.
 STATE: 86 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified: Q8_0, Q2_0, Q6_K, IQ2_XXS (+ activations).
+
+## IQ1_S VERIFIED FIRST TRY (ggml_type 19, 6 EXPERT tensors, 1.5625 bpw)
+Reference copied verbatim from upstream dequantize_row_iq1_s, with the grid and IQ1S_DELTA taken from ggml-common.h. The
+block layout was ASSERTED rather than assumed this time:
+    static_assert(sizeof(blk19) == 50, "d(2) + qs(32) + qh(16)");
+which is the guard that was missing when a wrong IQ2_XXS block size produced NaN and a wasted investigation.
+  IQ1_S reference check: 8 rows x 4096 elements (16 superblocks), blocksize=50
+    rel err min 1.489e-08  median 9.303e-08  max 9.635e-07   PASS (8x noise floor 1.158e-04)
+    ref[0]=-3.840469 got[0]=-3.840470
+FIRST CLEAN PASS OF THE SESSION - no retraction, no misdiagnosis, because the two lessons that cost the most earlier were
+applied up front: take the dequantiser from upstream source rather than memory, and assert the block size in code so a layout
+mistake cannot silently become a decode disagreement.
+COVERAGE NOW: Q8_0 (85 attn), Q2_0 (17 EXPERT), Q6_K (26 attn), IQ2_XXS (7 EXPERT), IQ1_S (6 EXPERT) + activation quantiser.
+That is 30 of the 48 expert tensors by count and every one of the three most common expert types.
+REMAINING: NVFP4 (7), IQ2_XS (6), IQ2_S (5) experts - 18 tensors - plus the attention K-quants.
+STATE: 87 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Five reference checks wired and passing.
