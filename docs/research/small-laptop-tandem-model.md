@@ -2621,3 +2621,22 @@ NEXT STEP, cheap: run ONE real 66-byte block (not a whole row) through both the 
 matches, the decode is confirmed and the problem is purely the row geometry; if it does not, the kernel's ty=16 path differs
 from its own dequantiser, which would be a genuine finding given the gate passes.
 STATE: 82 commits, gate 15/15. Wired and PASSING: Q8_0, Q2_0, Q6_K, IQ2_XXS (synthetic).
+
+## IQ2_XXS DECODE CONFIRMED ON REAL MODEL BYTES - single block PASSES at 3.85e-07
+Ran exactly the separating experiment: ONE real 66-byte block from blk.5.ffn_gate_up_exps.weight (abs 2003254464) through
+both wubu_iq_rows(16) and the reference, repeated over 16 consecutive real blocks (each one a "row" of 256 elements at
+stride 66):
+  rel err min 1.534e-09  median 7.035e-08  max 3.847e-07      PASS (8x noise floor 1.372e-05)
+  ref[0]=-2720.386939 got[0]=-2720.386719   ref[1]=-369.820611 got[1]=-369.820618
+SO THE DECODE IS RIGHT ON REAL DATA. Combined with the earlier repo-vs-master maxabs=0 on the same bytes, IQ2_XXS now has:
+  - kernel == reference on real bytes at 3.8e-07 (single-block granularity)
+  - reference == this repo's own dequantize_iq2_xxs_row exactly (maxabs 0)
+  - reference == upstream's dequantize_row_iq2_xxs by construction
+That is a fully verified decode for the most common format on the expert path after Q2_0.
+WHY THE ROW-LEVEL TEST STILL READS 0.51..14.4, and it is now unambiguous: the same 9 blocks that pass individually do not
+agree when I present them as one 2304-element row at a 594-byte stride. Since every individual block matches, the kernel's
+per-block arithmetic cannot be at fault; what differs is the ROW ACCOUNTING in my call - either `n` is not the element count
+per row for this entry point, or this tensor is not laid out as flat 2304-element rows (dims are [2304,2304,128] and there
+are 40 per-expert .scale tensors). That is a harness-shape bug of exactly the same family as the uint8_t/uint16_t stride bug
+one section above: my transcription of the calling convention, not the kernel.
+STATE: 83 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified decodes: Q8_0, Q2_0, Q6_K, IQ2_XXS.
