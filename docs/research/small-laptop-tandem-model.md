@@ -593,3 +593,27 @@ does not win because these low-bit matvecs lack arithmetic intensity to amortize
 hurts. The remaining lever is arithmetic intensity - batched multi-token / multi-expert GEMMs that reuse each
 transfer - not more residency tricks. Added the IN2_GPU_F16 whole-vocab head call (correct, neutral here since the
 head is already 6 ms; it pays off only once the head is batched).
+
+## WHAT I DID WRONG (devil's advocate, DMA) - project-wide, not just this lane
+Measured on this host (tools/dma_test.cu):
+  H2D 64MB: pageable 12.0 GB/s | pinned 13.4 GB/s (1.1x - laptop WDDM, NOT the desktop 2x)
+  2000 small GEMMs 2304x3072 N=1: per-call cudaDeviceSynchronize 64.5 us/call | enqueue-only 30.7 us/call
+    | CUDA graph 52.4 us/call  -> per-call sync costs 2.1x (~65 ms/token over ~2000 calls)
+1. DMA SIN: every GPU path I wrote round-trips host<->device with a blocking memcpy + cudaDeviceSynchronize
+   PER CALL, on pageable malloc buffers, one op at a time. That is the anti-pattern: the copy engine is idle
+   while the CPU waits, and the device barrier destroys overlap. 2.1x measured penalty -> this is WHY the GPU
+   lanes tied or lost despite 150 GB/s VRAM. Fix: one submission + one sync per stage, resident buffers,
+   events; the CUDA form of Vulkan's one vkQueueSubmit per layer.
+2. BACKEND SIN: cuBLAS at N=1 is a GEMV - no 16x16 tensor-core tile, memory-bound by construction, so it
+   ties the CPU DRAM read no matter how clean the DMA. The optimal already exists in the project: WuBuMM's
+   Vulkan coopmat GEMM (shaders/gemm_coopmat_f16.comp, src/wubumm_vk2.c:wubumm_vk_gemm_coopmat_v6), 5.57-6.11
+   TFLOPS. Its key lesson: load the A tile ONCE per K-step and reuse it across 4 N sub-tiles (naive reload =
+   1.96 TFLOPS; reuse = 5.57-6.11, ~3x). Tile law: weight re-reads ~ M/tile_M (v6 128x64/4warps = 17% tensor
+   + 44% DRAM; v9 8warps halves re-reads, 2.23 s faster, bit-identical; v7 drops shared staging = -10,752
+   instr + 336 barriers/32 MMAs; v8 pads staging 32->36 to kill 8-way bank conflicts). One vkCmdDispatch/GEMM,
+   weights persistent in device-local memory.
+3. LEVER: single-token decode (M=1) is fundamentally memory-bound; a better GEMM cannot fix it. The real lever
+   is BATCHING to raise M (speculative/multi-token draft, prompt batching, expert-grouped GEMM) so each weight
+   read serves M>=16 rows and the coopmat tensor core engages. Project-wide: do not write new CUDA for this
+   engine - the GPU stack is Vulkan (WuBuOS wubu_vulkan*, WuBuMM shaders), and nvcc objects cannot link MinGW ld.
+Recorded in the wubuwizard-windows-gpu skill as a project-wide doctrine.
