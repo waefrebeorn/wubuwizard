@@ -2427,3 +2427,30 @@ FINAL COVERAGE (bash tools/ref_check.sh runs all three, all PASS):
   activations           -          3.751e-03 L2 (format-correct) VERIFIED
   NVFP4(40) x7, IQ2_XXS(16) x7, IQ2_XS(17) x6, IQ1_S(19) x6, IQ2_S(22) x5   NOT COVERED
 STATE: 74 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## IQ2_XXS: SYNTHETIC REFERENCE MISMATCHES BY O(1) - AND WHY THAT DOES NOT YET MEAN THE KERNEL IS WRONG
+Two bugs in my harness were found and fixed on the way, both by probing rather than guessing:
+  1. including ggml-common.h without GGML_COMMON_DECL_C / GGML_COMMON_IMPL_C leaves iq2xxs_grid, ksigns_iq2xs and kmask_iq2xs
+     undeclared - the tables are behind that guard.
+  2. my block was 130 bytes because I declared qs as uint16_t[64]. sizeof(block_iq2_xxs) is 66: qs is 64 BYTES. With the
+     wrong stride the kernel read past the row and produced NaN on one row and -1.4e6 on another.
+After both fixes the comparison is stable but wrong by O(1): rel err min 1.154, median 2.254, max 4.750, against a float32
+noise floor of 1.35e-05. That is a factor of ~10^5, i.e. a different decode, not accumulation.
+CRITICAL COUNTER-EVIDENCE, which is why this is NOT being called a kernel bug: the gate passes 15/15 against the real
+llama.cpp oracle on this very model, and this model's expert tensors include 7 IQ2_XXS tensors. If the kernel decoded those
+blocks differently from upstream, token identity could not survive 15 tokens across 24 layers. So the most probable
+explanation is that MY SYNTHETIC REFERENCE is misaligned, not the kernel. Candidate causes, in order:
+  a) the engine may expect these blocks in its own layout (the kernel block is 66 bytes in ggml terms, but this repo has its
+     own IQ2_XXS encoder path - wubu_enc_h3.c - and the two may disagree on qs ordering);
+  b) the kernel has an internal grid permutation folded into its SIMD shuffle that a plain upstream-order reference cannot
+     reproduce (the source mentions MAYA_IQ2_VAR, "IQ2_XXS rows1 decode variant 0/1/2", which implies more than one decode
+     convention exists in this codebase);
+  c) my aux32 extraction (memcpy of 2 uint32 at qs + 4*ib32) may not match how the kernel splits the 8 bytes of a 32-element
+     group between indices and that group's scale nibble.
+THE DECISIVE NEXT EXPERIMENT, which removes every synthetic assumption: read ONE real IQ2_XXS block out of the model file,
+dequantise it with the upstream loop, run the same block through the kernel, and compare. Real bytes cannot be misaligned by
+my struct choices, so a mismatch there would be a genuine kernel finding, and a match would confine the problem to the
+synthetic harness. That requires the tensor's file offset and ggml type from the GGUF index (already parsed once for the
+type census), so it is a small step, not new infrastructure.
+STATE: 75 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Reference tests committed: Q8_0, Q2_0, Q6_K (all
+PASS). IQ2_XXS test exists in tools/ but is NOT wired into tools/ref_check.sh because it does not yet agree.
