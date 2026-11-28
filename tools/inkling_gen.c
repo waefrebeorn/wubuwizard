@@ -389,6 +389,16 @@ int main(int argc, char **argv)
                 n_gen, t_total, (double)n_gen / t_total, used_cache ? "KV cache" : "full recompute");
     if (getenv("IN2_PERF")) {
         extern double in2_fph[8], in2_kvproj_sec, in2_kvconv_sec;
+        if (getenv("IN2_MOE_SPLIT")) {
+            extern double in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_acc;
+            extern double in2_ms_setup, in2_ms_free, in2_ms_route;
+            double tot = in2_ms_gath + in2_ms_gu + in2_ms_act + in2_ms_dn + in2_ms_scat + in2_ms_setup + in2_ms_free + in2_ms_route;
+            fprintf(stderr, "MOESPLIT setup=%.3f gather=%.3f gu=%.3f act=%.3f down=%.3f scatter=%.3f free=%.3f route=%.3f | accum=%.3f  sum=%.3f (%.1f%% gu, %.1f%% down, %.1f%% act, %.1f%% gather, %.1f%% scatter)\n",
+                    in2_ms_setup, in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_free, in2_ms_route, in2_ms_acc, tot,
+                    tot > 0 ? 100.0 * in2_ms_gu / tot : 0, tot > 0 ? 100.0 * in2_ms_dn / tot : 0,
+                    tot > 0 ? 100.0 * in2_ms_act / tot : 0, tot > 0 ? 100.0 * in2_ms_gath / tot : 0,
+                    tot > 0 ? 100.0 * in2_ms_scat / tot : 0);
+        }
         const char *pn[8] = {"state/mix","q","kv+conv","attention","gate+wo","mlp+moe","?","?"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);

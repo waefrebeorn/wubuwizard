@@ -24,6 +24,11 @@
 /* per-type cost accounting, read out by IN2_TIMETY. Defined at file scope because both matvec paths feed it. */
 double in2_ty_sec[256];
 long   in2_ty_calls[256];
+int    in2_ty_par = 0;
+/* moe-phase split (run with IN2_THREADS=1 for exact attribution: the expert loop is OMP-parallel) */
+double in2_ms_gath, in2_ms_gu, in2_ms_act, in2_ms_dn, in2_ms_scat, in2_ms_acc;
+double in2_ms_setup, in2_ms_free, in2_ms_route;            /* >0 while a parallel row region is running: leaf timers must not accumulate */
+double in2_hires_now(void);
 double in2_ty_macs[256];
 double in2_lay_sec, in2_moe_sec;
 
@@ -87,6 +92,11 @@ static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
     }
     /* Persistent pool, not CreateThread per call: the range work is identical, so the split cannot change results,
      * but 270 calls per decode step x a thread spawn each was pure overhead. */
+    /* One span for the whole region, attributed to the type; leaf timers are suppressed while workers run
+     * (in2_ty_par) because summing concurrent per-thread spans is what made the per-type total read 4.2 s inside a
+     * 3.5 s run. */
+    in2_ty_par++;
+    const double _p0 = in2_hires_now();
 #ifdef _OPENMP
     #pragma omp parallel for num_threads(NT) schedule(static)
     for (int i = 0; i < NT; ++i)
@@ -95,6 +105,8 @@ static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
     for (int i = 0; i < NT; ++i)
         if (jobs[i].r0 < jobs[i].r1) in2_rows_worker(&jobs[i]);
 #endif
+    in2_ty_par--;
+    if (ty >= 0 && ty < 256) { in2_ty_sec[ty] += in2_hires_now() - _p0; in2_ty_calls[ty] += 1; }
     return 1;
 }
 #endif
@@ -135,6 +147,8 @@ static double in2_now(void)
 static double _tkh;    /* high-res companion to _tk */
 #define TKPH(i) do { const double _n = in2_now(); in2_phase[i] += _n - _tkh; _tkh = _n; } while (0)
 double in2_wall_now(void) { return in2_now(); }
+double in2_hires_now(void) { return in2_now(); }
+int    in2_ty_depth = 0;
 /* full-attention layer sections: state/mix, q, kv+conv, attention, gate+wo, mlp+moe */
 double in2_fph[8];
 double in2_kvproj_sec, in2_kvconv_sec;
@@ -658,7 +672,7 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                             const int act_bytes = q8_0_act
                                 ? (n_in / 32) * (int) sizeof(in2_q8_0_blk)
                                 : (n_in / 256) * (int) sizeof(in2_q8k_blk);
-                            const clock_t _g0 = clock();
+                            const double _g0 = in2_now();
                             const int g_rc = in2_gpu_resident_id(ty_mv, t->file_offset + boff, src,
                                                                  (size_t) rb * (size_t) n_out, actbuf,
                                                                  act_bytes, y, n_in, n_out, (int64_t) rb);
@@ -696,7 +710,7 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                             }
                             if (g_rc == 0) {
                                 gpu_done = 1;
-                                in2_gpu_sec += (double) (clock() - _g0) / (double) CLOCKS_PER_SEC;
+                                in2_gpu_sec += (in2_now() - _g0);
                                 if (in2_gpu_calls == 0)
                                     fprintf(stderr, "GPU tier: resident dense matvec engaged (%s)\n",
                                             t->info->name);
@@ -704,11 +718,9 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                             }
                         }
                     }
-                    if (!gpu_done) { const clock_t _q0 = clock();
+                    if (!gpu_done) { const double _q0 = in2_now();
                     wubu_iq_rows(ty_mv, src, (size_t)rb, n_in, ap, 1, op, 0, n_out);
                     if (ty_mv >= 0 && ty_mv < 256) {
-                        in2_ty_sec[ty_mv] += (double)(clock() - _q0) / (double)CLOCKS_PER_SEC;
-                        in2_ty_calls[ty_mv] += 1;
                         in2_ty_macs[ty_mv] += (double)n_out * (double)n_in;
                     } }
                     /* Does the kernel agree with THIS engine's own dequantiser on REAL bytes from THIS file?
@@ -896,7 +908,7 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                         ap[i] = (unsigned char *)act + ablk * (size_t)nab * (size_t)(g + i);
                         op[i] = Y + (size_t)(g + i) * n_out;
                     }
-                    const clock_t _k0 = clock();
+                    const double _k0 = in2_now();
                     /* LP-22: the resident tier gets first refusal. Same weights, different address space - the card
                      * receives the quantised activation (2.4 KB at n_in=2304 for q8_0) instead of the matrix (5.6 MB),
                      * which is where a decode step actually spends its time. Only nn==1 is taken because the resident
@@ -939,8 +951,6 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                         wubu_iq_rows(ty, base, (size_t)rb, n_in, ap, nn, op, 0, n_out);
                     }
                     if (ty >= 0 && ty < 256) {
-                        in2_ty_sec[ty] += (double)(clock() - _k0) / (double)CLOCKS_PER_SEC;
-                        in2_ty_calls[ty] += 1;
                         in2_ty_macs[ty] += (double)nn * (double)n_out * (double)n_in;
                     }
                 }
@@ -1293,18 +1303,18 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     /* 0. attention_input: the depth mix that runs on every layer above 0 (blk.0 has no attn_res_query).
      *    The layer was previously norming the raw hidden state and skipping this entirely, which is why
      *    the sliding and full layers disagreed about what they were looking at. */
-    const clock_t _al0 = clock();
+    const double _al0 = in2_now();
     float *mixh = (float *)calloc((size_t)n_tok * d, sizeof(float));
-    in2_alloc_sec += (double)(clock() - _al0) / (double)CLOCKS_PER_SEC;
+    in2_alloc_sec += (in2_now() - _al0);
     if (!mixh) { free(an); return WUBU_INKLING2_ERR_IO; }
-    const clock_t _a0 = clock();
+    const double _a0 = in2_now();
     /* Borrowed rather than copied: in2_mix takes const float*, so the dequant cache's own buffer is usable
      * directly and the pointer must not be freed here. MEASURED SIZE: this tensor is 2304 floats (9 KB), not
      * the 2304x2304 matrix an earlier comment claimed - reading the GGUF header shows dims=[2304] type=0 for
      * blk.N.attn_res_query.weight. The change is therefore neutral in time (~3.00 vs 3.03 tok/s); it is kept
      * only because it removes the per-visit allocation. */
     const float *arq = in2_tensor_borrow(ctx, &L->attn_res_q);
-    in2_arq_sec += (double)(clock() - _a0) / (double)CLOCKS_PER_SEC; in2_arq_calls++;
+    in2_arq_sec += (in2_now() - _a0); in2_arq_calls++;
     if (arq && il > 0) {
         /* At a boundary the reference banks this layer's input between the two mixes, so the
          * attention_input mix must exclude the entry the caller has already appended, while the
@@ -1312,10 +1322,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
         const int n_attn = (cfg->attn_res_block > 0 && il % cfg->attn_res_block == 0)
                          ? n_blocks - 1 : n_blocks;
         for (int t = 0; t < n_tok; ++t) {
-            const clock_t _m0 = clock();
+            const double _m0 = in2_now();
             in2_mix(blocks, n_attn, n_tok * d, t * d, h + (size_t)t * d, arq, 1, d, eps,
                     mixh + (size_t)t * d);
-            in2_mixfn_sec += (double)(clock() - _m0) / (double)CLOCKS_PER_SEC;
+            in2_mixfn_sec += (in2_now() - _m0);
         }
     } else {
         memcpy(mixh, h, sizeof(float) * (size_t)n_tok * d);
@@ -1820,10 +1830,10 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
     float *pm = in2_tensor_to_f32(ctx, &L->ffn_post_conv, NULL);
     float *mo = (float *)calloc((size_t)n_tok * d, sizeof(float));
     if (pm && mo && rc == WUBU_INKLING2_OK) {
-        const clock_t _tl0 = clock();
+        const double _tl0 = in2_now();
         in2_conv_stream(g_kv2, vvis, 1, moeout, n_tok, d, pm, 4, mo);
         for (size_t i = 0; i < (size_t)n_tok * d; ++i) h[i] = res[i] + mo[i];
-        in2_tail_sec += (double)(clock() - _tl0) / (double)CLOCKS_PER_SEC;
+        in2_tail_sec += (in2_now() - _tl0);
     } else rc = WUBU_INKLING2_ERR_IO;
 
     free(an); free(xn); free(qcl); free(q);
@@ -1918,7 +1928,7 @@ int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
                         if (q8_0_act) in2_q8_0_quantise(X + (size_t) i * n_in, nab, (in2_q8_0_blk *) a);
                         else          in2_q8k_quantise(X + (size_t) i * n_in, nab, (in2_q8k_blk *) a);
                     }
-                    const clock_t _q0 = clock();
+                    const double _q0 = in2_now();
                     for (int g = 0; g < nt; g += 8) {
                         const int nn = (nt - g < 8) ? (nt - g) : 8;
                         const void *ap[8];
@@ -1950,8 +1960,6 @@ int in2_matvec_quant_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_
                         if (!gpu_took) wubu_iq_rows(ty, src, (size_t) rb, n_in, ap, nn, op, 0, n_out);
                     }
                     if (ty >= 0 && ty < 256) {
-                        in2_ty_sec[ty] += (double) (clock() - _q0) / (double) CLOCKS_PER_SEC;
-                        in2_ty_calls[ty] += 1;
                         in2_ty_macs[ty] += (double) nt * (double) n_out * (double) n_in;
                     }
                     free(act);
@@ -2003,6 +2011,7 @@ static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wu
     for (int t0 = 0; t0 < n_tok; t0 += CH) {
         const int nt_ = (n_tok - t0 < CH) ? (n_tok - t0) : CH;
 
+        const double _rt0 = in2_now();
         for (int t = 0; t < nt_; ++t) {
             int *ip = idx + (size_t) t * TOPK;
             float *wp = wt + (size_t) t * TOPK;
@@ -2029,6 +2038,7 @@ static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wu
                 bk[at] = k;
             }
 
+        in2_ms_route += in2_now() - _rt0;
         /* Expert-major: one slab read per expert for its whole bucket, instead of once per token. */
         int bad = 0;
 #ifdef _OPENMP
@@ -2037,24 +2047,30 @@ static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wu
         for (int e = 0; e < NE; ++e) {
             const int nb = cnt[e];
             if (nb <= 0) continue;
+            double _mt = in2_now();
             float *Xe = (float *) malloc((size_t) nb * d * sizeof(float));
             float *Ge = (float *) malloc((size_t) nb * 2 * DFF * sizeof(float));
             float *Ae = (float *) malloc((size_t) nb * DFF * sizeof(float));
             float *Oe = (float *) malloc((size_t) nb * d * sizeof(float));
+            in2_ms_setup += in2_now() - _mt; _mt = in2_now();
             if (!Xe || !Ge || !Ae || !Oe) { free(Xe); free(Ge); free(Ae); free(Oe); bad = 1; continue; }
             for (int i = 0; i < nb; ++i)
                 memcpy(Xe + (size_t) i * d, x + (size_t) (t0 + bt[start[e] + i]) * d, sizeof(float) * (size_t) d);
+            in2_ms_gath += in2_now() - _mt; _mt = in2_now();
             if (in2_matvec_quant_nt(ctx, &L->gate_up, (int64_t) e * 2 * DFF * d, Xe, nb, 2 * DFF, d, Ge)
                 != WUBU_INKLING2_OK) {
                 bad = 1;
             } else {
+                in2_ms_gu += in2_now() - _mt; _mt = in2_now();
                 const float gsc = gs ? gs[e] : 1.0f;
                 for (int i = 0; i < nb * 2 * DFF; ++i) Ge[i] *= gsc;
                 for (int i = 0; i < nb; ++i)
                     in2_expert_act(Ge + (size_t) i * 2 * DFF, Ge + (size_t) i * 2 * DFF + DFF, DFF,
                                    Ae + (size_t) i * DFF);
+                in2_ms_act += in2_now() - _mt; _mt = in2_now();
                 if (in2_matvec_quant_nt(ctx, &L->down, (int64_t) e * d * DFF, Ae, nb, d, DFF, Oe)
                     != WUBU_INKLING2_OK) bad = 1;
+                in2_ms_dn += in2_now() - _mt; _mt = in2_now();
             }
             if (!bad)
                 for (int i = 0; i < nb; ++i) {
@@ -2062,12 +2078,15 @@ static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wu
                     memcpy(ok + ((size_t) t * TOPK + (size_t) k) * d, Oe + (size_t) i * d,
                            sizeof(float) * (size_t) d);
                 }
+            in2_ms_scat += in2_now() - _mt; _mt = in2_now();
             free(Xe); free(Ge); free(Ae); free(Oe);
+            in2_ms_free += in2_now() - _mt;
         }
         if (bad) { rc = WUBU_INKLING2_ERR_IO; break; }
 
         /* Serial k-order accumulation - the same expression in the same order as the per-token path, so the bits
          * are unchanged. This is the constraint that makes the restructure more than a loop swap. */
+        const double _at0 = in2_now();
         for (int t = 0; t < nt_; ++t) {
             float *o = out + (size_t) (t0 + t) * d;
             for (int k = 0; k < TOPK; ++k) {
@@ -2079,6 +2098,7 @@ static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wu
                 for (int i = 0; i < d; ++i) o[i] += wv * op[i] * dsc;
             }
         }
+        in2_ms_acc += in2_now() - _at0;
     }
 
 done:
@@ -2149,19 +2169,21 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
     float *ds = in2_tensor_to_f32(ctx, &L->down_scale, NULL);
     if (!Wr) return WUBU_INKLING2_ERR_IO;
 
-    float *gu = (float *)malloc((size_t)2 * DFF * d * sizeof(float));
-    float *dn = (float *)malloc((size_t)d * DFF * sizeof(float));
+    /* gu/dn are ONLY used by the opt-in IN2_STAGE branch. Allocating them up front cost two mallocs and two frees
+     * of 42 MB per layer visit (2*DFF*d + d*DFF floats) on the default fused path, where they are never touched -
+     * 456 visits in a 12-token run. Lazy now. */
+    float *gu = NULL, *dn = NULL;
     float *g  = (float *)malloc((size_t)TOPK * 2 * DFF * sizeof(float));
     float *act = (float *)malloc((size_t)TOPK * DFF * sizeof(float));
     float *eo = (float *)malloc((size_t)TOPK * d * sizeof(float));
-    int rc = (gu && dn && g && act && eo) ? WUBU_INKLING2_OK : WUBU_INKLING2_ERR_IO;
+    int rc = (g && act && eo) ? WUBU_INKLING2_OK : WUBU_INKLING2_ERR_IO;
     if (getenv("IN2_DEBUG"))
         fprintf(stderr, "[moe L%d] d=%d NE=%d TOPK=%d DFF=%d scale=%.3f bufs=%p/%p/%p/%p/%p rc=%d\n",
                 il, d, NE, TOPK, DFF, (double)cfg->expert_weights_scale, (void*)gu, (void*)dn, (void*)g,
                 (void*)act, (void*)eo, rc);
     if (rc != WUBU_INKLING2_OK) { free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo); return rc; }
 
-    const clock_t moe_t0 = clock();
+    const double moe_t0 = in2_now();
     /* Multi-token forwards go expert-major (IN2_MOE_1T=1 restores the per-token path for A/B). The per-token loop
      * below streams each selected expert's slab once per token, so prefill re-reads ~1.5 GB of weights for every
      * position - measured as TY16 calls scaling exactly with token count at a flat 8.7 GOPS, and as prefill gaining
@@ -2171,7 +2193,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
         free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
         if (getenv("IN2_TIME"))
             fprintf(stderr, "  moe L%-2d %.3fs [expert-major]\n", il,
-                    (double) (clock() - moe_t0) / (double) CLOCKS_PER_SEC);
+                    (in2_now() - moe_t0));
         return rc;
     }
     for (int t = 0; t < n_tok && rc == WUBU_INKLING2_OK; ++t) {
@@ -2316,6 +2338,11 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                 for (int i = 0; i < d; ++i) out[(size_t)t * d + i] += w[k] * eo[i] * dsc;
                 continue;
             }
+            if (!gu) {
+                gu = (float *)malloc((size_t)2 * DFF * d * sizeof(float));
+                dn = (float *)malloc((size_t)d * DFF * sizeof(float));
+                if (!gu || !dn) { rc = WUBU_INKLING2_ERR_IO; break; }
+            }
             const int r1 = in2_dequant_slice(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d, (int64_t)2 * DFF * d, gu);
             const int r2 = in2_dequant_slice(ctx, &L->down,    (int64_t)e * d * DFF,    (int64_t)d * DFF,    dn);
             if (r1 != WUBU_INKLING2_OK || r2 != WUBU_INKLING2_OK) {
@@ -2332,7 +2359,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
     }
     free(cb); free(gs); free(ds); free(gu); free(dn); free(g); free(act); free(eo);
     if (getenv("IN2_TIME"))
-        fprintf(stderr, "  moe L%-2d %.3fs%s\n", il, (double)(clock() - moe_t0) / (double)CLOCKS_PER_SEC,
+        fprintf(stderr, "  moe L%-2d %.3fs%s\n", il, (in2_now() - moe_t0),
                 getenv("IN2_STAGE") ? " [staged]" : " [fused]");
     return rc;
 }

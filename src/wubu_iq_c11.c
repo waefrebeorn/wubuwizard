@@ -1849,7 +1849,71 @@ void wubu_iq_set_q5k_fused(int fused)
     atomic_store_explicit(&q5k_fused, fused != 0, memory_order_seq_cst);
 }
 
+
+/* forward decls for the static impls the timed wrappers below call */
+static void wubu_iq_rows_impl(int ggml_type, const void *w, size_t row_bytes, int n,
+                              const void *const *act, int nt, float *const *out, int r0, int r1);
+static void wubu_iq_rows1_impl(int ggml_type, const void *w, size_t row_bytes, int n,
+                               const void *const *act, int nt, float *const *out, int r0, int r1);
+static void wubu_iq_gu_rows_impl(int ggml_type, const void *blob, size_t gu_row, size_t up_off,
+                                 int n, const void *const *act, int nt, float *const *ff,
+                                 int r0, int r1);
+
+/* ---- leaf timing (per ggml_type), guarded so nested calls cannot double count ----
+ * The per-type profile used to be accumulated at THREE call sites in wubu_inkling2_fwd.c; those spans nest
+ * (a batch entry calls the per-row entry), so their sum read 4.20 s inside a 3.50 s run. Timing the LEAF with a
+ * depth guard gives one non-overlapping span per kernel invocation. clock() was also replaced by QPC: on Windows
+ * clock() quantises to ~15.6 ms, which made short kernels read as 0.000 s. */
+extern double in2_hires_now(void);
+extern double in2_ty_sec[256];
+extern long   in2_ty_calls[256];
+extern int    in2_ty_depth;
+
+static void iq_time_begin(int t, double *t0, int *leaf)
+{
+    extern int in2_ty_par;
+    *leaf = 0; *t0 = 0.0;
+    if (in2_ty_par > 0) return;                 /* the parallel region is timed as one span; workers must not add */
+    if (t >= 0 && t < 256 && in2_ty_depth == 0) { *t0 = in2_hires_now(); *leaf = 1; }
+    in2_ty_depth++;
+}
+static void iq_time_end(int t, double t0, int leaf)
+{
+    extern int in2_ty_par;
+    if (in2_ty_par > 0 && !leaf) return;         /* nothing was counted on the way in */
+    in2_ty_depth--;
+    if (leaf) { in2_ty_sec[t] += in2_hires_now() - t0; in2_ty_calls[t] += 1; }
+}
+
 void wubu_iq_rows(int ggml_type, const void *w, size_t row_bytes, int n,
+                  const void *const *act, int nt, float *const *out, int r0, int r1)
+{
+    double t0; int leaf;
+    iq_time_begin(ggml_type, &t0, &leaf);
+    wubu_iq_rows_impl(ggml_type, w, row_bytes, n, act, nt, out, r0, r1);
+    iq_time_end(ggml_type, t0, leaf);
+}
+
+void wubu_iq_rows1(int ggml_type, const void *w, size_t row_bytes, int n,
+                   const void *const *act, int nt, float *const *out, int r0, int r1)
+{
+    double t0; int leaf;
+    iq_time_begin(ggml_type, &t0, &leaf);
+    wubu_iq_rows1_impl(ggml_type, w, row_bytes, n, act, nt, out, r0, r1);
+    iq_time_end(ggml_type, t0, leaf);
+}
+
+void wubu_iq_gu_rows(int ggml_type, const void *blob, size_t gu_row, size_t up_off,
+                     int n, const void *const *act, int nt, float *const *ff,
+                     int r0, int r1)
+{
+    double t0; int leaf;
+    iq_time_begin(ggml_type, &t0, &leaf);
+    wubu_iq_gu_rows_impl(ggml_type, blob, gu_row, up_off, n, act, nt, ff, r0, r1);
+    iq_time_end(ggml_type, t0, leaf);
+}
+
+static void wubu_iq_rows_impl(int ggml_type, const void *w, size_t row_bytes, int n,
                   const void *const *act, int nt, float *const *out, int r0, int r1)
 {
     if (!iq_cpu_ok()) { iq_zero_out(nt, out, r0, r1); return; }
@@ -1870,7 +1934,7 @@ void wubu_iq_rows(int ggml_type, const void *w, size_t row_bytes, int n,
     }
 }
 
-void wubu_iq_gu_rows(int ggml_type, const void *blob, size_t gu_row, size_t up_off,
+static void wubu_iq_gu_rows_impl(int ggml_type, const void *blob, size_t gu_row, size_t up_off,
                      int n, const void *const *act, int nt, float *const *ff,
                      int r0, int r1)
 {
@@ -1885,7 +1949,7 @@ void wubu_iq_gu_rows(int ggml_type, const void *blob, size_t gu_row, size_t up_o
     }
 }
 
-void wubu_iq_rows1(int ggml_type, const void *w, size_t row_bytes, int n,
+static void wubu_iq_rows1_impl(int ggml_type, const void *w, size_t row_bytes, int n,
                    const void *const *act, int nt, float *const *out, int r0, int r1)
 {
     if (!iq_cpu_ok()) { iq_zero_out(nt, out, r0, r1); return; }

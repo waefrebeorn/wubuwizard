@@ -867,3 +867,27 @@ which carry only 0.2% of the MACs. Those are latency/overhead bound, and they ar
 So "the expert kernel is the only lever" was wrong too - it is HALF the lever.
 Also confirmed by background job: compute-sanitizer memcheck on the grouped test = "ERROR SUMMARY: 0 errors", which is
 why the tail bug had to be found by bisection + poison rather than by a memory checker.
+
+## WALL-CLOCK INSTRUMENTATION FIXED + 42 MB PER LAYER VISIT REMOVED
+Three instrumentation faults found and fixed, each of which had been feeding a wrong conclusion:
+1. clock() -> QueryPerformanceCounter everywhere. On Windows clock() quantises to ~15.6 ms, so every sub-16 ms kernel
+   read as 0.000 s and the per-type profile was mostly aliasing. in2_now() already used QPC; the per-type, gpu and
+   alloc accumulators did not.
+2. Per-type timing moved from three CALL SITES to the LEAF kernel with a depth guard. The three spans nest (a batch
+   entry calls the per-row entry), so their sum read 4.20 s inside a 3.50 s run.
+3. Parallel regions are timed as ONE span with leaf timers suppressed (in2_ty_par), because summing concurrent
+   per-thread spans is what inflated it. A global depth counter is also not thread safe - that is why the first
+   attempt still read 2.4x over.
+REMOVED WASTE: in2_moe_wrap allocated gu (2*DFF*d floats) and dn (d*DFF floats) = 42 MB up front on EVERY layer
+visit, but the default fused path never touches them - only the opt-in IN2_STAGE branch does. 456 visits in a
+12-token run. Now allocated lazily.
+MEASURED: 3.43-3.46 -> 3.64 tok/s, 5/5 reps IDENTICAL to the oracle, gate 15/15.
+MOE PHASE SPLIT (expert-major batch path, IN2_THREADS=1 so attribution is exact):
+  gu 0.493 s (59%), down 0.297 s (36%), act 0.012 s (1.4%), route 0.026 s (3%), gather/scatter/free/setup ~0.003 s
+  => the expert MATVEC is 95% of the expert compute; activation, gather and scatter are noise.
+CAVEAT: the batch path only runs for prefill (n_tok >= 2). Decode takes the per-token fused path, which is NOT yet
+split, so the above is the prefill split, not the decode split.
+MAC COUNTER IS BOGUS: it charges n_out*n_in per call regardless of how many experts run, and for one token it reports
+42.8 GMAC, which against the measured 0.087 s of moe would imply ~984 GFLOPS - about 90% of this CPU's peak, which
+per WuBuMM doctrine means the numerator is wrong, not that the kernel is 90% of peak. Real per-token expert work is
+TOPK * (2*DFF*d + d*DFF) ~ 85 MMAC, i.e. ~2 GFLOPS effective. That is a BANDWIDTH signature, not an ALU one.
