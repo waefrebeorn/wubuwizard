@@ -380,3 +380,15 @@ non-expert tensors to single-f16 (2 B/el, ~3.2 GB), upload resident once, run th
 cuBLAS FP16 GEMM with f32 accumulation (~13 ms/token measured), f32 residual/norms, cos>=0.999 gate vs the
 CPU f32 path on identical inputs. Experts untouched on CPU. Expected: the ~100 ms/token dense+head DRAM
 read+dequant is replaced by ~15-20 ms/token resident VRAM GEMM.
+
+## BUILD NOTE (obstacle): the reader cannot dequant the f16-lane tier; it must reuse the engine's slice
+The f16 lane build needs to dequant the 646 non-expert tensors to single-f16. `gguf_read_tensor_f32` FAILS on
+type 23 (IQ4_XS/NVFP4) - the known "unsupported type 23" gap - and type 23 is exactly the two biggest dense
+reads (output.weight and token_embd.weight, 2304x201024, 463M el each, ~145 MB read each per token). The
+engine dequantizes type 23 fine on the CPU decode (via in2_dequant_slice / wubu_dequant_fp4.c, the nvfp4
+dequant). So the lane's host-side dequant MUST route through the engine's own per-type dequant (in2_dequant_
+slice or the wubu_dequant_fp4 nvfp4 row path), feeding an f16 conversion - not through gguf_read_tensor_f32.
+tools/head_hf16.c documents the intended dequant->f16 pipeline (f32->f16 IEEE round-to-nearest-even) but is
+entrywise blocked on that reader gap; the working version will call the engine dequant. The head resident is
+still the core target: output.weight+token_embd ~290 MB/token combined reads, ~1.9 GFLOP (trivial), collapsing
+to sub-ms as a resident f16 matvec.
