@@ -405,3 +405,14 @@ output.weight -> single-f16 = 883.4 MiB (IQ4_XS is 136/256 = 0.53125 B/el, so 46
 This unblocks the f16 lane's dequant step for the two biggest dense reads (output.weight + token_embd.weight,
 both type 23, ~1.77 GiB f16 combined). Next: dequant token_embd (dims same), then the per-layer attention types
 (8/14/12/13/16/17/18) via their own CPU row_dot references, then the resident cuBLAS head matvec timer.
+
+## MEASURED REFUTATION: per-tensor cuBLAS at M=1 is launch-bound (~5.6 ms/call) - the lane NEEDS fusion
+tools/head_gemm.cu uploads the dequantized single-f16 head (883 MiB resident, VRAM ok) and times a cuBLAS
+FP16 f32-accum matvec at single-token M: resident head matvec = 5.66 ms (0.93 GFLOP -> 163 GFLOP/s). That is
+LAUNCH-bound, not TFLOPS-bound: 5.6 GFLOP/s-class overhead per call because N=1. CONSEQUENCE: doing the dense
+tier as per-tensor cuBLAS calls at decode M=1 would cost ~5.6 ms x ~20+ matmuls = ~100+ ms/token, WORSE than
+the CPU dense tier. So the f16 lane cannot be "dequant -> upload -> per-tensor cuBLAS"; it must FUSE the dense
+tier into ONE (or a few) batched GEMM launches per token to amortize the M=1 overhead (the same lesson as the
+Gemma qkv3/ffn3 fused lane and WuBuMM's ONE vkQueueSubmit). Only then does the measured 20-27 TFLOPS tensor-core
+rate become reachable. The dequant + resident + verification pieces (head_hf16.c: engine-matched to ~1e-6) are
+correct and stay; the compute path must be the fused batched GEMM, not per-tensor calls.
