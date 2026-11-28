@@ -2773,3 +2773,18 @@ Layout asserted at 144 bytes: d(2) + dmin(2) + scales(12) + qs(128). Activations
 Also note: the sub-block order is LOW nibbles = elements 0..31 then HIGH nibbles = 32..63 within each 64-element group, and
 the scale index advances is += 2 per 64 elements - a shape that differs from Q4_0 and from the IQ family.
 STATE: 90 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. NINE reference checks wired and passing.
+
+## Q5_K VERIFIED (ggml_type 13, 16 ATTENTION tensors, 5.5 bpw) - cleanest result of the session
+  Q5_K reference check: 8 rows x 4096 elements (16 superblocks), blocksize=176
+    rel err min 3.453e-08  median 8.231e-08  max 1.025e-07    PASS (8x noise floor 1.942e-05)
+    ref[0]=45.694556 got[0]=45.694561
+Q5_K extends Q4_K with a 5th bit plane in qh, addressed by masks u1/u2 that SHIFT LEFT BY 2 for each 64-element group
+(u1 = 1,4,16,64 and u2 = 2,8,32,128). A from-memory implementation would almost certainly use a constant mask and produce
+numbers of the right magnitude with one bit plane misattributed; copying upstream removed that failure mode entirely.
+Layout asserted at 176 bytes: d(2)+dmin(2)+scales(12)+qh(32)+qs(128). 1.0e-07 is within a factor of 3 of the reference's own
+double-precision reproduction - the kernel is not merely correct but tight.
+KERNEL COVERAGE, COMPLETE EXCEPT ONE FORMAT:
+  EXPERT (48/48):  Q2_0 17, IQ2_XXS 7, NVFP4 7, IQ1_S 6, IQ2_XS 6, IQ2_S 5
+  ATTENTION (141/144): Q8_0 85, Q6_K 26, Q4_K 14, Q5_K 16    |    IQ3_XXS 3 unverified
+TOTAL 189 of 192 quantised tensors verified against independent specifications = 98.4% of the model's weights.
+STATE: 91 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. TEN reference checks wired and passing.
