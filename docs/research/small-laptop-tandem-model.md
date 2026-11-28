@@ -2935,3 +2935,20 @@ NOTE ON INSTRUMENT LIMITS: bash `time` is unusable for this decomposition on thi
 sys 0.000 s - Windows child CPU is not attributed through MSYS), so kernel-vs-user split cannot be read from the shell. The
 fault count is the usable signal, and it is already instrumented.
 STATE: 96 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192.
+
+## DECOMPOSITION ON A HOT CACHE: disk 5%, faults bounded, and CPU-time in the census is only ~1.9x the wall
+Pre-faulting is ALREADY the hot-cache case - a full read of the file before generation is exactly what PrefetchVirtualMemory
+would achieve for this purpose, and it bought 5% (4.70 vs 4.45-4.65). So the expensive part of a page fault (waiting on the
+device) is NOT what the 0.2 s/token consists of. Instrumented decomposition of 16 tokens on the hot cache:
+    TIMING                 16 tokens in 3.4 s = 4.68 tok/s
+    ENTRYTIME (nt path)    5488 calls, 0.9231 s total = 168.2 us/call  (act-quant 11.8 us, kernel 156.4 us)
+    CALLSITE CENSUS        219 sites, 6.5747 s summed
+The census sum (6.57 s) EXCEEDS the 3.4 s wall, which means it accumulates per-thread CPU time across the pool. That puts
+effective parallelism at only ~1.9x across 8 threads for this workload - far below the 1.96x-per-8-threads figure that was
+measured on the COLD path earlier. Two readings are possible and this measurement does not yet distinguish them:
+  (a) the pool is starved - threads idle waiting on fault-resolved pages, so wall time is padded without CPU time, or
+  (b) the work is genuinely memory-latency-bound once it is resident, and extra threads contend rather than scale.
+The clean discriminator is a THREAD SWEEP ON THE HOT CACHE: the earlier sweep (1 2.29 | 2 3.13 | 4 4.22 | 6 4.36 | 8 4.46 | 12 4.42
+tok/s) was taken cold. If the hot curve flattens earlier or rises higher, (a); if it is unchanged, (b) and the 168 us/call is
+arithmetic plus latency that more threads cannot hide.
+STATE: 97 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192.
