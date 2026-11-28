@@ -392,3 +392,16 @@ tools/head_hf16.c documents the intended dequant->f16 pipeline (f32->f16 IEEE ro
 entrywise blocked on that reader gap; the working version will call the engine dequant. The head resident is
 still the core target: output.weight+token_embd ~290 MB/token combined reads, ~1.9 GFLOP (trivial), collapsing
 to sub-ms as a resident f16 matvec.
+
+## BUILD PIECE 1 (verified): type-23 IQ4_XS dequant -> single-f16 is CORRECT
+tools/head_hf16.c transcribes the type-23 (IQ4_XS) dequant from the engine's real reference
+(wubu_vecdot_iq4xs.c): block = fp16 d | scales_h u16 | scales_l[4] | qs[128], 136 B / 256 el;
+weight[i] = f16(d)*(ls-32)*kvalues_iq4nl[nibble] with ls from the scales_l pair + scales_h, and
+kvalues_iq4nl={-127,-104,-83,-65,-49,-35,-22,-10,1,13,25,38,53,69,89,113}. Reads raw bytes directly from
+the mmap data blob at t->data_offset (bypassing the reader's type-23 gap). VERIFIED against the engine's own
+wubu_vec_dot_iq4_xs_q8_k on identical 9 blocks + a q8_K-quantized random activation:
+  eng=-24.809090  mine=-24.809072  (eng-mine)/eng = -6.9e-7  => the dequant reproduces the engine decode.
+output.weight -> single-f16 = 883.4 MiB (IQ4_XS is 136/256 = 0.53125 B/el, so 463M el = 246 MB raw -> 883 MB f16).
+This unblocks the f16 lane's dequant step for the two biggest dense reads (output.weight + token_embd.weight,
+both type 23, ~1.77 GiB f16 combined). Next: dequant token_embd (dims same), then the per-layer attention types
+(8/14/12/13/16/17/18) via their own CPU row_dot references, then the resident cuBLAS head matvec timer.
