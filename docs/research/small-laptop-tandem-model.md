@@ -3280,3 +3280,29 @@ stride at which the engine's row loop touches its slab versus the probe's straig
 are not in fact contiguous because elem_off/row addressing interleaves experts. Each is testable with the real_slab_probe by
 changing ONE loop parameter at a time, with no engine change and no identity risk.
 STATE: 111 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## THE KERNEL IS ONLY 25% OF THE TOKEN - every row-rate comparison in this document was measuring the minority
+IN2_PERF on the same 16-token run:
+    ENTRYTIME nt total 0.9300 s / 5488 calls = 169.5 us/call | act-quant 11.9 us | kernel 157.6 us
+    TIMING   16 tokens in 3.5 s = 4.61 tok/s
+    MOEPATH  nt_batched_slab=836  quant_single=5760
+Per token that is:
+    wall                218.8 ms
+    kernel (all calls)   54.0 ms   = 25%
+    entry total          58.1 ms   = 27%
+    OUTSIDE the timed entry  160.7 ms  = 75%
+So the quantised matvec kernel - the thing I have spent this entire arc measuring, probing, and comparing against synthetic baselines - accounts
+for a QUARTER of the token. Three quarters of every token is spent somewhere the ENTRYTIME instrument does not cover at all, and every
+"engine achieves 0.55 GB/s" or "7.1x slower than the probe" statement in this document was computed by dividing TOTAL TOKEN TIME by weight
+bytes, which silently attributes the other 75% to the kernel. Corrected: the kernel moves ~110 MB in 54 ms = ~2.0 GB/s, which is 26x below
+the warm probe rather than 7x, and the kernel is not where the token goes in the first place.
+THIS INVALIDATES THE FRAMING OF THE LAST TEN HYPOTHESES, not their measurements. Residency, streams, TLB, locks, faults and page source were
+each correctly priced as costs inside the kernel, and each is small relative to a budget where the kernel is 25%. The reason none of them
+"explained" the token time is that they were never supposed to: they explain the kernel's share, and the kernel's share is a quarter.
+WHERE THE TIME ACTUALLY GOES - and this is now the only question worth asking. 160.7 ms/token sits outside in2_matvec_quant entirely. The
+candidates, in the order the code suggests: attention (24 physical layers of QKV/out projections plus softmax and RoPE), the router's top-8
+selection and its per-expert gather bookkeeping, the 48-layer loop machinery with its gate/forget/gain projections, and the 201,024-row output
+projection which is a single enormous matvec whose cost scales with vocab rather than with the expert path.
+NEXT MEASUREMENT: a phase timer inside the layer loop, one env gate, accumulating per phase (attn / router / experts / loop-gate / final-proj).
+Instrumentation only, no arithmetic, gate stays authoritative. Until that exists, any further speed work is aimed at 25% of the problem.
+STATE: 112 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
