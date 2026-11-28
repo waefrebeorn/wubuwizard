@@ -1923,3 +1923,23 @@ CONSEQUENCE: there is no 3x control-flow win sitting there. The remaining real l
 weight volume (batching), the ~9% of head/cold-start residency, and the unexplained ratio between expert calls per token per
 layer (~29 on the KV path) and the router's TOPK=8, which is now the ONLY anomaly in the record without an explanation.
 GATE: 15/15.
+
+## THE 22-vs-8 ANOMALY: not explained, but its CAUSE is now visible, and it is structural
+Attempted explanations and what killed each:
+  - "gate_up is issued as two halves per expert": WRONG. fwd.c:2386 shows ids[k] = file_offset + gguf_raw_size(ty, eo), which
+    is an ELEMENT-offset -> BYTE-offset conversion, not a second half. One call per expert, 2*DFF rows.
+  - "3 forwards per token": retracted last turn, the loop calls one forward per step.
+What IS true: grep counts 23 references to expert matvec entry points in fwd.c alone, spanning at least four distinct kernels -
+in2_matvec_quant, in2_matvec_quant_nt, in2_matvec_quant_mt, in2_dequant_slice - plus GPU batch paths (in2_gpu_moe_batch,
+in2_gpu_moe_batch_res), selected by environment flags (IN2_MOE_*, IN2_GPU_F16 and others). The MoE expert matvec has FIVE-PLUS
+implementations of the same arithmetic, and which one executes depends on runtime configuration.
+THAT is why the call ratio does not match TOPK=8 and why it was not predictable from the router config: I have been counting
+calls into a dispatcher with more branches than my model of it. It is also, precisely, why this session's row-split, op-split
+and prefetch work all measured as no-ops - they were written against ONE entry point while five were in play.
+HONEST STATUS: the 22-vs-8 ratio remains unexplained and I have now produced three wrong explanations for it in a row, each
+killed by reading the actual code. The next step is NOT another hypothesis: it is to log WHICH implementation handles each
+expert call (a single byte tag per branch) and count by tag. Until that exists, any statement about expert cost per token is
+resting on a dispatcher I cannot see through.
+SESSION TOTALS: 51 commits, gate 15/15 at every one, identity byte-identical throughout, throughput ~3.45 tok/s cold and
+unchanged. Four retractions, all of them from unverified denominators or unread call sites rather than bad measurements. The
+instrument that finally worked was counting by NAME, and its first version lied by truncating.
