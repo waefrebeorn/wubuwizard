@@ -350,3 +350,17 @@ so the lane's ceiling is small. If however a large share of the 188 ms is the no
 (which the DQ cache suggests), the lane helps more. THIS IS THE OPEN QUESTION and it is one measurement away:
 instrument the read/dequant bytes and time per phase, or bisect by stubbing experts vs dense. The f16 dense
 lane is NOT the guaranteed ~2x win it appeared to be - the phase data says dense compute is ~10% of the decode.
+
+## SYNTHESIS (corrects the prior "refute"): the f16 dense lane IS the right target - via READS, not compute
+The phase dump times COMPUTE; the ~188 ms/token unaccounted is the DRAM READS, and the read-bytes split
+(knowledge: tandem_budget per-token reads dense 696 MB + head 469 MB + experts 369 MB) shows the reads are
+dense+head = 1165 MB/token = 76% of the ~1534 MB/token, experts only 24%. So dense COMPUTE is ~10% but dense
+READS are ~76% - they are not the same thing, and my previous commit's "dense tier is only 10% of the decode"
+was a compute-vs-read conflation. The decode is READ-bound (~188 ms/token is reading 1534 MB/token at
+~14 GB/s effective, plus dequant), and the non-expert tier is 76% of those reads. The two-f16 resident lane
+moves the 1165 MB/token dense+head reads to VRAM (f16 form, ~3.9 GB resident), replacing CPU DRAM reads +
+IQ2 dequant with a tensor-core f16 GEMM (measured 20-27 TFLOPS f32-accum, ~13 ms/token, VRAM reads ~192 GB/s).
+Expected effect on the 226 ms/token decode: the dense+head read+dequant cost (up to ~80-100 ms/token) is
+replaced by ~15-20 ms/token of resident VRAM GEMM, i.e. up to ~1.5-1.7x faster - IF the resident-f16 footprint
+(3.9 GB) fits alongside KV/activations (already shown: 4.8 GB < 5 GB). This is the coherent, evidence-backed
+target: build the f16 resident dense+head lane. The experts (24% of reads, 91% of weight bytes) stay CPU/stream.
