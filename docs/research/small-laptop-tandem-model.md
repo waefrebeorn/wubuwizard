@@ -1819,3 +1819,25 @@ LESSON, and it is the third time this session: an instrument that silently trunc
 converts "not observed" into "does not exist" and both of the last two turns were that exact error. Every counter in this
 engine now needs a printed cap-hit warning.
 GATE: 15/15, 45 commits, tree clean.
+
+## THE HEAD IS A ONE-TIME 312 ms PCIe UPLOAD, NOT A PER-TOKEN COST
+One-token run, full census at 512 slots:
+  output.weight  quant  2304>201024   1 call   0.3122 s   30.0%   312249 us
+  and HEADTRY confirms: fby=926318592 need=926318592 n_out=201024, rc=0 (GPU TOOK IT)
+Twelve-token run, same tensor: 0.3759 s over 12 calls = 31.3 ms mean. So call 1 costs 312 ms and the other 11 average
+5.8 ms. 926,318,592 bytes / 0.3122 s = 2.97 GB/s - that is PCIe, and it matches the 3.12 GB/s figure measured much earlier
+in this session for the same tensor. The head goes to the GPU f16 lane even without IN2_GPU_F16 set, and it uploads the
+whole 926 MB once.
+CONSEQUENCE: the "6.0% head" share measured over 12 tokens is almost entirely this ONE-TIME upload amortised across the run.
+In steady state the head is ~2% and the MoE experts are effectively everything - which is exactly what the 39% gate_up
+figure and the 186 MB/token of disk traffic both said.
+PRACTICAL READING:
+  - for short runs (1-3 tokens) the head upload dominates everything and is worth attacking (a 926 MB f16 upload to compute
+    463 MMAC is absurd; the CPU path would read 119 MB of 2.06-bit weights instead of 926 MB of f16).
+  - for steady-state decode the head is a rounding error and the expert stream is the whole story.
+  - the earlier "keep the head resident" idea was aimed at the right tensor for the wrong reason: it is not re-read from
+    DISK per token, it is uploaded over PCIE once. Residency would help only the first call.
+THIS CLOSES THE HEAD QUESTION. Remaining, in order: expert weight volume (batching is the only lever that changes it), then
+the 2.75x gap between 22 expert gate_up calls per token per layer and the TOPK=8 the router reports - which is still
+unexplained and is the one remaining anomaly worth a measurement.
+GATE: 15/15, 46 commits.
