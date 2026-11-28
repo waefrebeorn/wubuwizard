@@ -528,3 +528,23 @@ BUG CAUGHT by the standalone test: alpha/beta passed as __half* under CUBLAS_COM
 (cuBLAS reads 4 bytes from a 2-byte half); fixed to float one=1.0f,zero=0.0f. Also fixed the same latent bug in
 lane_check. The GPU f16 resident matvec is now proven correct from the DLL - the remaining step is the fwd hook
 (load each tensor's f16 file from IN2_F16_DIR once, call this fn at the dense seam under IN2_GPU_F16) + oracle.
+
+## f16 DENSE LANE WIRED INTO gen_fast - and it is 1:1 END TO END (chase complete)
+Wired behind IN2_GPU_F16=1 + IN2_F16_DIR=<dir> + IN2_CUDA_DLL=<dll>. The decode's dense path is the BATCHED
+in2_matvec_nt (wq/wk/wv/wo/wgate/wrel...), which parallelises tokens and calls in2_matvec_quant inside an OpenMP
+region - so the hook lives at in2_matvec_nt's top: it serial-dispatches each token's N=1 cuBLAS f16 matvec to
+wubu_cuda_resident_f16_matvec, and only if EVERY token succeeds (else falls through to the CPU path untouched).
+in2_matvec_quant is hooked too (omp-guarded) for the single-token full-kernel path. Experts ("exps") always CPU.
+
+RESULT (this is the answer to "chase 1:1, too much error accumulation could be missed"):
+  oracle gate WITH the lane active: PASS 15/15 tokens identical to the CPU oracle.
+  F16 HIT confirmed (blk.0.attn_q K=2304 n_out=3072 dispatched), stderr "F16: scanned 646 tensors".
+So the f16 attention-projection lane, with its ~3.0 absolute but common-mode logit error, is TOKEN-IDENTICAL
+end-to-end on the oracle. The common-mode finding (err@top1 ~ err@top2) was the mechanism; the oracle confirms it.
+
+Scope / honest limits:
+  - output.weight (the head) is matvec'd in 8192-row chunks (need=37,748,736 vs file 926,318,592) -> size
+    mismatch -> head stays CPU. Only the per-layer attention projections run on the GPU f16 lane.
+  - SPEED: ~2% (12 tok 4200 ms CPU -> 4120 ms lane). Bounded because this is a MoE model: the dense tier is
+    ~24 ms of a ~350 ms/token budget (~7%), so even a perfect dense lane cannot move the token much - the
+    expert (MoE) traffic dominates. The "~1.4x" earlier applied to the dense TIER, which is a small slice here.

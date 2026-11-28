@@ -386,6 +386,108 @@ static void in2_gpu_stats_dump(void)
             h, m, ev, sl, b, (h + m) ? 100.0 * (double) h / (double) (h + m) : 0.0, 10);
 }
 
+/* ---- f16 dense lane: host loader + DLL dispatch (IN2_GPU_F16). Loads each tensor's materialized f16 file
+ * (dir from IN2_F16_DIR, names like idxNNNN_<tensor>.f16) once and calls wubu_cuda_resident_f16_matvec, which
+ * keeps the weights resident on the card. Only whole dense tensors (elem_off==0, no "exps") take this path. */
+#define IN2_F16_MAX 2048
+#define IN2_F16_NLEN 96
+static char  g_f16_name[IN2_F16_MAX][IN2_F16_NLEN];
+static char  g_f16_path[IN2_F16_MAX][260];
+static void *g_f16_buf[IN2_F16_MAX];
+static long long g_f16_len[IN2_F16_MAX];
+static int   g_f16_cnt = -1;      /* -1 = not scanned */
+static void *g_f16_fn  = NULL;    /* wubu_cuda_resident_f16_matvec */
+static int   g_f16_fn_tried = 0;
+
+static void in2_f16_scan(void)
+{
+    if (g_f16_cnt >= 0) return;
+    g_f16_cnt = 0;
+    const char *dir = getenv("IN2_F16_DIR");
+    if (!dir || !dir[0]) return;
+    char pat[600]; snprintf(pat, sizeof pat, "%s\\*.f16", dir);
+    WIN32_FIND_DATAA fd; HANDLE hd = FindFirstFileA(pat, &fd);
+    if (hd == INVALID_HANDLE_VALUE) return;
+    do {
+        const char *cf = fd.cFileName;
+        if (cf[0] == '.' || strstr(cf, "_ref.f32")) continue;
+        /* idxNNNN_<name>.f16 -> <name> */
+        const char *us = strchr(cf, '_'); if (!us) continue;
+        const char *nm0 = us + 1; size_t nl = strlen(nm0);
+        if (nl <= 4 || strcmp(nm0 + nl - 4, ".f16") != 0) continue;
+        nl -= 4;
+        if (nl >= IN2_F16_NLEN || g_f16_cnt >= IN2_F16_MAX) continue;
+        memcpy(g_f16_name[g_f16_cnt], nm0, nl); g_f16_name[g_f16_cnt][nl] = 0;
+        snprintf(g_f16_path[g_f16_cnt], sizeof g_f16_path[0], "%s\\%s", dir, cf);
+        g_f16_buf[g_f16_cnt] = NULL; g_f16_len[g_f16_cnt] = 0;
+        g_f16_cnt++;
+    } while (FindNextFileA(hd, &fd));
+    FindClose(hd);
+    fprintf(stderr, "F16: scanned %d tensors from %s\n", g_f16_cnt, dir);
+}
+
+/* returns 0 and fills *buf/*len (cached host f16 bytes, header skipped) for a tensor name */
+static int in2_f16_lookup(const char *name, void **buf, long long *len)
+{
+    in2_f16_scan();
+    for (int i = 0; i < g_f16_cnt; ++i) {
+        if (strcmp(g_f16_name[i], name) != 0) continue;
+        if (!g_f16_buf[i]) {
+            FILE *f = fopen(g_f16_path[i], "rb");
+            if (!f) return -1;
+            long long d0, d1; if (fread(&d0, 8, 1, f) != 1 || fread(&d1, 8, 1, f) != 1) { fclose(f); return -1; }
+            long long nb = d0 * d1 * 2;
+            void *b = malloc((size_t) nb);
+            if (!b) { fclose(f); return -1; }
+            if (fread(b, 1, (size_t) nb, f) != (size_t) nb) { fclose(f); free(b); return -1; }
+            fclose(f);
+            g_f16_buf[i] = b; g_f16_len[i] = nb;
+        }
+        *buf = g_f16_buf[i]; *len = g_f16_len[i];
+        return 0;
+    }
+    return -1;
+}
+
+static int in2_f16_dispatch(long long ident, const void *w, long long wbytes,
+                            const float *x, int K, float *y, int n_out)
+{
+    if (!g_f16_fn_tried) {
+        g_f16_fn_tried = 1;
+        const char *nm = getenv("IN2_CUDA_DLL");
+        HMODULE h = LoadLibraryA(nm && nm[0] ? nm : "wubu_cuda.dll");
+        if (h) g_f16_fn = (void *) (size_t) GetProcAddress(h, "wubu_cuda_resident_f16_matvec");
+        if (!g_f16_fn) fprintf(stderr, "F16: DLL export wubu_cuda_resident_f16_matvec not found\n");
+    }
+    if (!g_f16_fn) return -1;
+    typedef int (*sig_t)(long long, const void *, unsigned long long, const float *, int, float *, int);
+    return ((sig_t) g_f16_fn)(ident, w, (unsigned long long) wbytes, x, K, y, n_out);
+}
+
+/* Try the whole-tensor f16 GPU matvec. Returns 1 if it computed y (caller returns OK), else 0. Dense tensors
+ * only (elem_off==0, no "exps"). Skips inside an OpenMP region: the DLL's shared activation scratch is not
+ * thread-safe, so only the single-threaded entry may call it. */
+static int in2_try_f16(const wubu_in2_tensor_t *t, int64_t elem_off, const float *x, int n_out, int n_in, float *y)
+{
+    if (!getenv("IN2_GPU_F16") || elem_off != 0) return 0;
+    if (!t || !t->info || !t->info->name[0]) return 0;
+    if (strstr(t->info->name, "exps")) return 0;
+#ifdef _OPENMP
+    if (omp_in_parallel()) return 0;
+#endif
+    void *fb; long long fby;
+    if (in2_f16_lookup(t->info->name, &fb, &fby) != 0) return 0;
+    long long need = (long long) n_in * (long long) n_out * 2;
+    if (fby != need) {
+        if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16 size mismatch %s need=%lld got=%lld\n", t->info->name, need, fby);
+        return 0;
+    }
+    int rc = in2_f16_dispatch((long long) t->file_offset, fb, fby, x, n_in, y, n_out);
+    { static long long hits = 0;
+      if (rc == 0) { hits++; if (hits == 1) fprintf(stderr, "F16 HIT first: %s K=%d n_out=%d\n", t->info->name, n_in, n_out); }
+      else if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16 miss %s rc=%d\n", t->info->name, rc); }
+    return rc == 0;
+}
 static void in2_gpu_init(void)
 {
     if (in2_gpu_state) return;
@@ -454,6 +556,7 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                      const float *x, int n_out, int n_in, float *y)
 {
     if (n_in <= 0 || n_out <= 0) return WUBU_INKLING2_ERR_IO;
+    if (in2_try_f16(t, elem_off, x, n_out, n_in, y)) return WUBU_INKLING2_OK;
     float *row = (float *)malloc((size_t)n_in * sizeof(float));
     if (!row) return WUBU_INKLING2_ERR_IO;
     /* Q2_0 (`down` experts) never becomes floats. dot_row_q2_0 unpacks the 2-bit fields straight into an AVX2
@@ -684,6 +787,15 @@ double in2_ty_macs[256];
 int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                   const float *X, int nt, int n_in, int n_out, float *Y)
 {
+    /* f16 dense lane: this is the batched dense path the decode actually uses (wq/wk/wv/wo/wgate/wrel/head...).
+     * Do each token's N=1 cuBLAS matvec serially here (single-threaded entry, before this function's own OpenMP),
+     * and only if every token succeeds; otherwise fall through to the CPU path untouched. */
+    if (getenv("IN2_GPU_F16") && t && t->info && t->info->name[0] && strstr(t->info->name, "exps") == NULL) {
+        int all = 1;
+        for (int i = 0; i < nt; ++i)
+            if (!in2_try_f16(t, 0, X + (size_t) i * n_in, n_out, n_in, Y + (size_t) i * n_out)) { all = 0; break; }
+        if (all) return WUBU_INKLING2_OK;
+    }
     const int ty = (t && t->info) ? t->info->ggml_type : -1;
     const int q8_0_act = (ty == 8 || ty == 40 || ty == 42);
     const int be = q8_0_act ? 32 : 256;
@@ -1694,6 +1806,7 @@ int in2_layer_sliding(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_
 int in2_matvec_quant_mt(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
                         const float *x, int n_out, int n_in, float *y)
 {
+    if (in2_try_f16(t, elem_off, x, n_out, n_in, y)) return WUBU_INKLING2_OK;
     int nt = 0;
 #ifdef _OPENMP
     nt = in2_threads();
