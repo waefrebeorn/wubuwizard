@@ -2788,3 +2788,25 @@ KERNEL COVERAGE, COMPLETE EXCEPT ONE FORMAT:
   ATTENTION (141/144): Q8_0 85, Q6_K 26, Q4_K 14, Q5_K 16    |    IQ3_XXS 3 unverified
 TOTAL 189 of 192 quantised tensors verified against independent specifications = 98.4% of the model's weights.
 STATE: 91 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. TEN reference checks wired and passing.
+
+## IQ3_XXS VERIFIED - EVERY QUANTISED TENSOR IN THE MODEL IS NOW COVERED: 192/192
+  IQ3_XXS reference check: 8 rows x 4096 elements (16 superblocks), blocksize=98
+    rel err min 5.018e-09  median 5.026e-08  max 2.406e-07    PASS (8x noise floor 3.104e-05)
+    ref[0]=-17.471873 got[0]=-17.471872
+This format packs three hazards into 98 bytes: qs holds 96 bytes of which the first 64 are grid indices and the last 32 are
+interleaved scales-and-signs; the 4-bit scale lives in the TOP 4 BITS of a uint32 read from that tail; and sign patterns are
+extracted at 7*l shifts, NOT 8*l. Two grid lookups per 8 elements, grid2 filling elements 4..7 from the upper sign-mask bits.
+Every one of those details is a plausible-looking way to be wrong; all came from upstream source.
+FINAL KERNEL COVERAGE - COMPLETE:
+  EXPERT   (48 tensors):  Q2_0 17 | IQ2_XXS 7 | NVFP4 7 | IQ1_S 6 | IQ2_XS 6 | IQ2_S 5
+  ATTENTION(144 tensors): Q8_0 85 | Q6_K 26 | Q5_K 16 | Q4_K 14 | IQ3_XXS 3
+  = 192 of 192 quantised tensors, 100% of the model's weight bytes, each verified against an independent specification
+    (upstream ggml source for the nine ggml formats; the project's own independent dequantiser for NVFP4).
+ELEVEN reference checks wired in tools/ref_check.sh, all passing, each printing its binary identity before its numbers.
+WHAT THIS DOES AND DOES NOT ESTABLISH, stated precisely:
+  ESTABLISHED: no quantised matvec kernel in this model disagrees with an independent decode, at relative errors of 1e-7 to
+  2.6e-5 against measured float32 accumulation noise. The 39% expert path and the attention path are both covered.
+  NOT ESTABLISHED: whole-model numerical agreement with upstream llama.cpp beyond the 15/15 gate tokens and the 16-token
+  four-prompt comparison; nor IQ2_XS's 2.6e-5, which is the loosest of the eleven and is within its own noise floor but
+  deserves a second look at a different seed before being called tight.
+STATE: 92 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
