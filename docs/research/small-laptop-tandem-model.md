@@ -735,3 +735,18 @@ So V6 tops out at 3.42 TFLOPS at M=512 vs cuBLAS 17.9 at M=128 - the remaining ~
 the 256x256 / 8-subgroup cooperative-staging pattern Khronos measures 21.8 TFLOPS with), not subgroup width.
 NEW OPEN ITEM: the 64x64-tile variants (W4/V5/V6) are WRONG at M=16 and M=32 (2/5 and 3/5 correct) while NV/SMEM
 (16x16 tile) pass. That is an out-of-bounds/masked-tile bug when M is smaller than the 64-row tile - not yet fixed.
+
+## Batched f16 GEMM (M = prompt length) is correct and LIVE, but only ~1% end-to-end
+Implemented a real M-token entry: wubu_cuda_resident_f16_gemm(ident,w,M,K,x,y,n_out) sharing f16_gemm_core with
+the M=1 matvec (CUBLAS_OP_T/OP_N, dims n_cols x M x K, output row-major M x n_cols). Engine: in2_try_f16_m +
+in2_f16_dispatch_m, called first in in2_matvec_nt when nt>1, falling back to the serial per-token loop.
+PROOF IT IS LIVE: "F16 GEMM-M first: blk.0.attn_q.weight M=30 K=2304 n_out=3072" for a 30-token prompt (M scales
+with prompt length); F16STAT ups=161 reuse=1641 evict=0 used=2107MB vram_free=2846MB.
+CORRECTNESS: 120-token prompt + 4 generated, CPU vs GPU IDS IDENTICAL.
+SPEED (120-token prompt, 4 gen, 2 interleaved runs): CPU 14119/13997 (mean 14058 ms); GPU(f16 M-batch)
+13927/13904 (mean 13916 ms) -> ~1.0% faster. Also note prefill is now ~113 ms/token vs ~267 ms/token decode,
+because the GEMMs amortise over the batch even though attention is O(M^2).
+WHY ONLY 1%: the lane covers 161 dense attention tensors (2107 MB). The MoE experts and the output head - the bulk
+of the bytes - are not on this path, so batching the dense GEMMs cannot move wall-clock much. Honest conclusion:
+the M-batch lane is correct and worth keeping, but it is NOT the lever. The remaining lever is the expert/head
+bytes, not more dense-lane work.
