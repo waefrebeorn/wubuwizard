@@ -2740,3 +2740,23 @@ The remaining 7 are NVFP4, which is this project's own format and therefore need
 ATTENTION COVERAGE: Q8_0 (85) and Q6_K (26) verified; the K-quants (Q4_K 14, Q5_K 16) and IQ3_XXS (3) are not.
 TOTAL: 7 reference checks wired and passing, each printing its binary identity first.
 STATE: 89 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## NVFP4 VERIFIED - EVERY EXPERT TYPE IN THIS MODEL IS NOW COVERED (48/48 expert tensors)
+  NVFP4 cross-check: 8 rows x 2048 elements (32 blocks of 64), row_bytes=1152
+    rel err min 2.252e-08  median 1.830e-07  max 1.587e-06    PASS (8x noise floor 1.666e-05)
+    ref[0]=-12405.171118 got[0]=-12405.171875
+This one is different in kind from the five before it: NVFP4 is THIS PROJECT'S OWN FORMAT, so there is no upstream oracle. The
+reference is dequantize_row_nvfp4() in src/wubu_dequant_fp4.c - different file, different implementation strategy (scalar
+table lookup) from the kernel's AVX2 nibble shuffle. Agreement between two independent implementations is genuine
+cross-validation, not self-consistency; what it CANNOT catch is a shared misreading of the 36-byte layout, which is why the
+layout is asserted (scales(4) + qs(32) = 36) rather than assumed.
+Layout detail that mattered: 4 UE4M3 scales, one per 16 elements; within each 16-element group the LOW nibbles are elements
+0..7 and the HIGH nibbles are 8..15. Getting that pairing wrong would produce plausible numbers with the right magnitude.
+EXPERT PATH COVERAGE, COMPLETE:
+  Q2_0    17 tensors  2.520e-06    IQ1_S   6 tensors  9.635e-07
+  IQ2_XXS  7 tensors  5.957e-07    IQ2_XS  6 tensors  2.625e-05
+  NVFP4    7 tensors  1.587e-06    IQ2_S   5 tensors  4.459e-07
+  = 48 of 48 expert tensors across all six formats the model uses.
+ATTENTION PATH: Q8_0 (85) and Q6_K (26) verified; Q4_K (14), Q5_K (16) and IQ3_XXS (3) not yet.
+EIGHT reference checks wired in tools/ref_check.sh, all passing, each printing its binary identity first.
+STATE: 90 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
