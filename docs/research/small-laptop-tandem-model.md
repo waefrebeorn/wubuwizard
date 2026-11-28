@@ -3360,3 +3360,31 @@ NEXT MEASUREMENT, now precisely aimed at 46%: pick one attention projection site
 compare its census us/call against real_slab_probe walking the SAME tensor from the SAME file with the same rb. They must agree
 within noise if the kernel is clean; any gap is the kernel's, and it applies to the largest block in the engine.
 STATE: 114 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
+
+## THE "7x UNEXPLAINED" WAS AN ARTEFACT: per-row cost is already within 15% of the probe, and the token is simply 1M ROWS
+Put the row count against the wall instead of the bytes:
+    rows/token = 8 experts x 2304 x 24 layers  (experts)     442,368
+               + 6 projections x 2304 x 24 layers (attn/loop) 331,776
+               + 201,024 (output projection)
+               = 975,168 rows/token
+    0.192 s of kernel wall / 975,168 rows = 0.197 us/row
+    isolated warm probe                   = 0.175 us/row
+    ratio                                 = 1.13x
+So the kernel in situ runs within THIRTEEN PERCENT of the same kernel on an isolated, contiguous, cache-warm array. There is no 7x
+left to find, and every section of this document that hunted one was chasing a number that came from dividing total token time by
+weight bytes and from a WJ ratio (479 us / 384 rows = 1.25 us/row) taken on a different subset than the one the probe measured.
+The per-row cost was never anomalous; the denominator was.
+WHAT THE TOKEN ACTUALLY COSTS, in the only units that turn out to be stable: ~975,000 rows of 2304-wide quantised dot product, i.e.
+2.25 G elements of weight touched per token, which is ~26% of the 8.5 GB model per token - an inescapable consequence of a 24-layer
+MoE with 8 active experts and a 201k vocabulary, not a defect in the walk.
+WHERE SPEED CAN ACTUALLY COME FROM, given the kernel is at 1.13x of probe:
+  (1) ROWS. The output projection alone is 20.6% of all rows (201,024 of 975,168) and is inherently the vocab dimension. Any
+      reduction there is a different algorithm (vocab pruning, hierarchical softmax), not an optimisation of this loop.
+  (2) PER-ROW ILP. The probe is the same code on ideal data, so the 13% is the entire margin available inside this kernel - it bounds
+      all kernel-level work at ~1.13x, and the measured Amdahl ceiling of 5.35 tok/s (already 87% reached) bounds the thread-level work.
+  (3) THE 1.9x PARALLEL EFFICIENCY. Census-summed kernel time is 1.9x the wall, meaning the machine is only half busy. Recovering that
+      factor is worth up to 2x - and it is the LARGEST remaining lever in the engine, larger than anything in the kernel proper.
+THAT LAST NUMBER IS THE NEXT TARGET, and it is measured, not hypothesised: 1.9x parallelism on a machine with 8 usable threads and a
+kernel that is already at probe speed means the workers are idle half the time - the same signature the earlier WJ concurrency probe
+showed (conc=2.5x, ~0.33x per thread, no plateau). The work is there to schedule; it is not being scheduled.
+STATE: 115 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
