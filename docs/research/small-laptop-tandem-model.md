@@ -3456,3 +3456,29 @@ remaining gap, it is inside the 72% block, and it is the first time it has been 
 2304x2304 slabs, 594-byte rows), the per-expert activation array and the 8-way interleave are the structural differences, which is
 precisely where this document started before it got lost in denominators.
 STATE: 118 commits, gate 15/15 (fresh binary 12:14:17), identity exact, kernel coverage 192/192, 4.49-4.63 tok/s hot.
+
+## THREE MORE NEGATIVES THAT NARROW THE 72% BLOCK: nesting is not the cause, threads stop paying above 4, and the block is not bandwidth-bound
+Measured on the fresh binary (12:14:17), 16 tokens each:
+    default              4.65 tok/s
+    OMP_NESTED=TRUE      4.57 tok/s   <- nesting is NOT serialising the expert parallel-for
+    IN2_THREADS=4        4.25 tok/s
+    IN2_THREADS=8        4.65 tok/s
+    IN2_THREADS=16       4.68 tok/s   <- flat above 8, exactly as the earlier sweep found
+And the expert block's own numbers rule out the other obvious ceiling:
+    expert traffic  442,368 rows x 594 B = 262 MB per token
+    expert time     269 ms summed
+    implied rate    262 MB / 0.269 s = 0.97 GB/s
+    measured DRAM streaming capability on this box: 33-53 GB/s
+So the expert path is running at ~2% of available memory bandwidth. It is NOT bandwidth-bound, NOT nesting-bound, NOT
+disk-bound (0.1 MB/s measured), NOT fault-bound (13%), and its kernel is at 1.13-1.95x of the isolated probe.
+WHAT IS LEFT IS SCHEDULING, and it is now the only candidate with both a mechanism and a measured size:
+    expert work summed     269 ms/token
+    expert wall            ~158 ms/token  (census sum / conc 1.7)
+    ideal at 8 threads      34 ms/token
+Eight threads exist, eight experts are selected per layer, the loop is an omp parallel-for over exactly those eight - and the machine
+still spends 1.7x the summed time instead of 0.125x. Something between the parallel-for and the kernel is not running concurrently:
+the leading suspect is that each iteration of the expert loop does a large serial prologue (the activation quantisation and the
+per-expert pointer/offset arithmetic) and only a fraction of the iteration is the matvec, so the parallel region is mostly serial by
+time even though it is parallel by iteration count. The measurement that decides this is the same split already used once: time inside
+in2_matvec_quant versus time in the rest of the expert-loop body, per iteration, under an env gate.
+STATE: 119 commits, gate 15/15 (fresh binary), identity exact, kernel coverage 192/192, 4.49-4.68 tok/s hot.
