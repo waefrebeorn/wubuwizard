@@ -1400,3 +1400,23 @@ out of the engine, call the rows kernel directly in a microbenchmark over the sa
 and time it in isolation. That separates "the kernel is slow" from "the kernel is slow when called 448 times per
 forward in this pattern" (allocator churn, false sharing, TLB/page-cache thrash, or nested parallel regions).
 GATE: 15/15.
+
+## ROOT CAUSE: THE DENSE ROWS KERNEL IS COMPLETELY SERIAL - it ignores thread count
+Per-call kernel time inside in2_matvec_nt, same shape (2304x384), only IN2_THREADS varied:
+  threads=1 1633.4 us/call | threads=2 1604.5 | threads=4 1587.5 | threads=8 1634.2
+Flat to within 3% from 1 to 8 threads. The dense rows kernel does NOT parallelise. At 0.88 MMAC in 1.63 ms it runs at
+~1.08 GFLOP/s, single core, for every call.
+THIS EXPLAINS THE WHOLE SESSION'S NEGATIVE RESULTS: the dominant cost (82% of layer time) never participated in any
+thread experiment. The 1.66x whole-run gain from 1 to 8 threads (6655 -> 4011 ms on a 12-token run) comes from mix,
+attention and other regions - not from the projections that hold the time. Every attempt I made to parallelise decode
+at the CALLER (row split, op split, block sizes) was competing for a resource the bottleneck had already left unused.
+It also explains why the kernel looked "overhead bound": 1.63 ms for 0.88 MMAC is neither ALU (1 GFLOPS) nor DRAM
+(135 MB/s) - it is one core doing serial work while seven idle.
+THE FIX, and it is now well specified: parallelise OUTPUT ROWS INSIDE the rows kernel (wubu_iq_c11.c), not at the nt
+level. Inside the kernel every block runs the same code on the same weights for its own row slice, so the earlier
+engine-routing failure cannot recur (nothing changes about which engine runs). Identity still has to be proven with the
+oracle gate, because a per-row result could in principle depend on the kernel's internal blocking - but this is the
+first parallelisation attempt aimed at the code that actually holds the time.
+ACCEPTANCE: kernel us/call must fall materially with thread count (that is the direct check, independent of tok/s),
+and the gate must stay 15/15.
+GATE: 15/15.
