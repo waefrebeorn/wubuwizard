@@ -3407,3 +3407,26 @@ introduce an error, because the type mix varies per tensor and I keep substituti
 would have prevented all three: never quote a byte figure derived from a row count without enumerating the per-tensor types, and
 prefer rows and seconds as the primary units in this document.
 STATE: 116 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
+
+## NEGATIVE RESULT, KEPT: PARALLELISING THE THREE DENSE ATTENTION PROJECTIONS CHANGES NOTHING
+The 46% block was the largest in the census and its q/k/v projections (L->wq at :2757, L->wk :2781, L->wv :2783) called
+in2_matvec_quant - the SINGLE-THREADED entry - while the expert path already used an omp parallel-for over experts. That looked like
+the clean 2x: 46% of the token running on one thread. So the three call sites were switched to in2_matvec_quant_mt (same kernel,
+same per-row arithmetic, rows independent) and measured:
+    gate                     PASS 15/15 oracle tokens identical   (identity preserved, as predicted)
+    before                   4.61-4.65 tok/s
+    after                    4.59 / 4.66 tok/s over two runs
+i.e. NO CHANGE outside noise. The patch was REVERTED rather than carried: a change that costs nothing and buys nothing is still a
+change to defend.
+WHY IT BOUGHT NOTHING, and this is the informative part. Three candidates, and the third is the one the numbers support:
+  (a) the mt wrapper falls back to serial whenever n_out < 2*nt, and qdim=3072 with nt=8 does not trip that - so it should have
+      parallelised;
+  (b) a nested parallel region would serialise the inner one (OMP nesting is off by default), which is plausible if the layer body is
+      already inside a parallel region;
+  (c) the three projections are simply NOT 46% of the token. The census attributes 52.7% to "the remaining 206 sites" and I assumed
+      that meant attention q/k/v; but the loop machinery, the router and the per-visit gates live in those 206 too, and q/k/v may be a
+      small slice of it.
+The measurement cannot distinguish (b) from (c), and the honest consequence is that the 46% attribution is a CATEGORY, not a
+profile - it says "not experts, not output" and nothing finer. Any further work on it needs the per-site census printed in full
+(it currently prints only its top thirteen) before another optimisation is aimed at it.
+STATE: 117 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
