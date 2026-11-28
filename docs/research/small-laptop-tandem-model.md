@@ -335,3 +335,18 @@ free), upload resident once, route that tier through the tensor-core GEMM at the
 (f32-accum), f32 residual/norms - and measure gen_fast per-token vs the CPU baseline. If the dense+head
 DRAM reads (~1.0+ GB/token) move to VRAM and the GEMM lands ~13 ms/token, the decode's DRAM bound should
 drop by up to ~half.
+
+## MEASURED PHASE SPLIT: the dense-tier compute is ~20 ms/token; ~188 ms/token is UNACCOUNTED weight/read work
+Added a gated phase dump to tools/inkling_gen.c (IN2_PERF=1 prints in2_fph[8]). Same run (64 tok, IN2_THREADS=8,
+14.5 s wall = 226 ms/token). ALL eight phases summed to 2.41 s over 64 tokens = 37.6 ms/token:
+  state/mix 0.01, q 0.21 (3.3 ms/tok), kv+conv 0.14, attention 0.22 (3.5), gate+wo 0.43 (6.7), mlp+moe 0.29 (4.6),
+  phase[6] 1.11 s (17.3 ms/tok - unlabelled), kvproj 0.73, kvconv 0.05.
+So the DENSE COMPUTE phases (q+attention+gate+wo+mlp+moe) are only ~21 ms/token combined. The remaining
+~188 ms/token is NOT inside any phase - it is the weight/dequant/streaming read work the TKPH section timers do
+not cover. CONSEQUENCE for the f16 dense lane: if the ~188 ms unaccounted is mostly DRAM weight reads +
+dequant for the whole model (experts 11.3 GB dominate), then moving the 1084 MiB NON-EXPERT tier to resident
+f16 (~3.9 GB VRAM) removes only that tier's DRAM reads - the experts still stream ~91% of the weight traffic,
+so the lane's ceiling is small. If however a large share of the 188 ms is the non-expert dequant/materialisation
+(which the DQ cache suggests), the lane helps more. THIS IS THE OPEN QUESTION and it is one measurement away:
+instrument the read/dequant bytes and time per phase, or bisect by stubbing experts vs dense. The f16 dense
+lane is NOT the guaranteed ~2x win it appeared to be - the phase data says dense compute is ~10% of the decode.

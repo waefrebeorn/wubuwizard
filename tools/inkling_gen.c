@@ -387,6 +387,13 @@ int main(int argc, char **argv)
     if (n_gen > 0 && t_total > 0)
         fprintf(stderr, "TIMING: %d tokens in %.1fs = %.2f tok/s (%s)\n",
                 n_gen, t_total, (double)n_gen / t_total, used_cache ? "KV cache" : "full recompute");
+    if (getenv("IN2_PERF")) {
+        extern double in2_fph[8], in2_kvproj_sec, in2_kvconv_sec;
+        const char *pn[8] = {"state/mix","q","kv+conv","attention","gate+wo","mlp+moe","?","?"};
+        for (int i = 0; i < 8; ++i)
+            fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);
+        fprintf(stderr, "PHASE kvproj %.3f kvconv %.3f\n", in2_kvproj_sec, in2_kvconv_sec);
+    }
     /* What the f32 materialisation path actually moved. `to_f32` copies on a cache hit and dequantises on a miss;
      * `borrow` hands out the table's own pointer. Bytes/token from the GGUF say nothing about this traffic, so it has
      * to be counted where it happens (counters live in wubu_inkling2_fwd.c). */
