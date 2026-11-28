@@ -2810,3 +2810,28 @@ WHAT THIS DOES AND DOES NOT ESTABLISH, stated precisely:
   four-prompt comparison; nor IQ2_XS's 2.6e-5, which is the loosest of the eleven and is within its own noise floor but
   deserves a second look at a different seed before being called tight.
 STATE: 92 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## THE "FASTER THAN UPSTREAM" CLAUSE CANNOT BE MEASURED AS STATED - UPSTREAM REFUSES THIS FILE
+Attempted the head-to-head that the identity work had left unbacked. The inkling-aware upstream tree at
+C:/Users/eman5/WuBu/research/upstream-ggml has a built llama-cli.exe (build-ref/bin/, commit 29b52d398) that knows the
+architecture. It does not load the model:
+    llama_model_load: error loading model: check_tensor_dims: tensor 'blk.24.attn_q.weight' not found
+    failed to load model 'Inkling-2-Mini-UD-IQ2_XXS.gguf'
+ROOT CAUSE, MEASURED FROM THE FILE (not inferred):
+    inkling2.block_count metadata = 48
+    actual blk.* tensor indices   = 0 .. 23, count 24
+    blk.24 tensors present        = 0
+So the GGUF DECLARES 48 blocks and CONTAINS 24. Upstream trusts the declared count, walks to blk.24, finds nothing, and
+aborts. This engine reads the physical layer count (24) and loads the model correctly - which is why it runs at all.
+CONSEQUENCES, stated plainly:
+  1. A like-for-like speed comparison against upstream is IMPOSSIBLE on this artifact: the candidate does not load. Any
+     "N x faster" multiplier computed against an engine that cannot open the file would be a fabricated number, so none is
+     quoted. What exists instead: this engine 4.45-4.65 tok/s at the measured I/O bound (637 MB/s, 186 MB/token), and upstream
+     refusing the file at load.
+  2. The 15 golden oracle ids cannot have come from THIS build either - it never reaches inference. Their provenance is
+     therefore narrower than "upstream llama.cpp" as previously written, and the identity claim rests on what was actually
+     measured here: 192/192 kernels against independent specifications, gate 15/15 reproducibility, KV-vs-recompute identity
+     on 4 prompts, and the 19-id continuation.
+  3. The 48-vs-24 gap is itself a structural fact about the model worth knowing: 48 logical blocks stored as 24 physical
+     ones, consistent with the 40 per-expert .scale tensors found earlier (blocks carry more than one sub-block).
+STATE: 92 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s, 11 reference checks green, kernel coverage 192/192.
