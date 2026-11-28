@@ -1880,3 +1880,25 @@ THE NEXT MEASUREMENT IS NOW UNAMBIGUOUS: count forwards per token directly, in t
 CORRECTION TO EARLIER SECTIONS: the ~186 MB/token figure assumed one forward per token. It is a per-forward figure, and the
 per-token figure is ~3.7x it. The I/O-bound conclusion is unaffected (indeed strengthened); the accounting was wrong.
 GATE: 15/15, 48 commits, tree clean.
+
+## SCALING LAW MEASURED: 3 FORWARDS PER GENERATED TOKEN (not a drafter artefact)
+Dense-entry counts against n_gen, no code changes:
+  n_gen=1  nt=448   quant=25
+  n_gen=2  nt=784   quant=818
+  n_gen=4  nt=1456  quant=2404
+  n_gen=12 nt=4144  quant=8748
+Both are exactly linear: nt = 448 + 336*(n-1) and quant = 25 + 793*(n-1). The per-token increments are 336 nt calls and
+793 quant calls, dead constant across 1, 2, 4 and 12 tokens - so this is structural, not a warm-up or a cache artefact.
+112 nt calls per forward (448/4 on the 1-token path) => 336/112 = 3 FORWARDS PER GENERATED TOKEN, plus one extra on the
+first. That reconciles the EXPOFF count exactly: 4 + 3*12 = 40 forwards, against 4224/(12 MoE layers x TOPK 8) = 44
+(the difference being prefill), so the two independent estimates now agree.
+AND IT IS NOT THE SPECULATIVE DRAFTER: the prompt-lookup loop is gated behind IN2_LOOKUP, which was never set on any run in
+this session. The 3 forwards come from the plain generation path.
+WHERE THE LEVER IS, now with a number: the plain path issues 3 single-token forwards per generated token, each streaming its
+own weights. If one of those three is redundant, that is up to a 3x improvement locked in the control flow rather than in
+any kernel - and it is the single largest identified opportunity in the entire session, larger than batching, larger than
+the ~9% of residency/cold-start fixes, and invisible until the census stopped truncating.
+NEXT STEP, precise: locate the three in2_forward_at calls that execute per generated token on the plain path (the
+IN2_LOOKUP block, the IN2_BATCH_PROBE block and the warm loop are all separate and can be excluded by inspection) and
+attribute each; then delete or fold the redundant one and re-gate.
+GATE: 15/15, 49 commits, tree clean.
