@@ -706,3 +706,20 @@ uniformAndStorageBuffer16BitAccess-06332); (b) no persistent debug messenger, so
 STATUS: coopmat perf unchanged (i8 shader, not the f16 path): NV 0.85, SMEM 0.46 TFLOPS at M=64. Separately,
 the W4/V5/V6 variants still FAIL correctness (cos 0.32-0.35, max|diff| 1.18e2) at M=64 while NV/SMEM pass at
 cos 0.999999993 - that is a shader-math bug in those variants, still open, with the same debugging method ready.
+
+## CLOSED: W4/V5/V6 correctness failure was subgroup width, not shader math
+Same binary, same inputs (M=64, N=3072, K=2304):
+  unpinned : W4 cos=0.351105747  V5 cos=0.351105747  V6 cos=0.322663722   max|diff|=1.176904e+02  FAIL
+  pinned 32: W4 cos=0.999999993  V5 cos=0.999999993  V6 cos=0.999999993   max|diff|=9.866714e-03  PASS
+Cause: those shaders assume warp==32, so local_size_x=128 is FOUR warps and they split a 64x64 tile four ways.
+This GPU reports default subgroupSize=64 (min 32, max 64), so 128 threads is only TWO subgroups - half of every
+tile is never written. Device facts: VkPhysicalDeviceSubgroupSizeControlFeatures.subgroupSizeControl=1,
+VkPhysicalDeviceSubgroupSizeControlProperties{min=32,max=64}.
+FIX (WuBuMM): query subgroup-size-control at init, enable the feature, and pin requiredSubgroupSize=32 whenever
+min<=32 && max>32 (env WUBUMM_PIN_SUBGROUP overrides, 0=off). Default now prints
+  VK: subgroup pin=32 (sscSupported=1 min=32 max=64)
+and ALL FIVE variants pass correctness at M=64 AND M=256 (VERDICT: PASS).
+Perf: M=64 V6 0.94 / NV 0.90 / V5 0.89 / W4 0.86 / SMEM 0.45 TFLOPS; M=256 V6 2.69 / V5 2.37 / W4 2.09 /
+SMEM 0.84 / NV 0.52 TFLOPS. No regression from the pin - it was correctness-only, as the earlier perf A/B said.
+NOTE the two-stage truth: subgroup width was NOT the cause of shader 38's pipeline failure (that was the wrong
+buffer count) and NOT a perf lever, but it WAS the cause of silent wrong results in the warp-assuming variants.
