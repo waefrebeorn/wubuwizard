@@ -156,6 +156,8 @@ int    in2_ty_depth = 0;
 double in2_fph[8];
 /* per-call cost bisection for in2_matvec_nt: read vs kernel vs residual */
 double in2_nt_read_sec, in2_nt_kern_sec; long in2_nt_calls, in2_nt_unmapped;
+/* dense entry-point population: who is actually called, and how often */
+long in2_ent_calls[8]; double in2_ent_sec[8]; int in2_ent_on;
 double in2_kvproj_sec, in2_kvconv_sec;
 #include "wubu_inkling2_kv.h"
 const unsigned char *wubu_inkling2_map_ptr(gguf_ctx *, const wubu_in2_tensor_t *);
@@ -636,6 +638,7 @@ long long in2_gpu_call_count(void) { return (long long) in2_gpu_calls; }
 int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
                      const float *x, int n_out, int n_in, float *y)
 {
+    in2_ent_calls[1]++;
     if (n_in <= 0 || n_out <= 0) return WUBU_INKLING2_ERR_IO;
     if (in2_try_f16(t, elem_off, x, n_out, n_in, y)) return WUBU_INKLING2_OK;
     float *row = (float *)malloc((size_t)n_in * sizeof(float));
@@ -866,6 +869,7 @@ double in2_ty_macs[256];
 int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                   const float *X, int nt, int n_in, int n_out, float *Y)
 {
+    const double _e0 = in2_now(); in2_ent_calls[0]++;
     /* f16 dense lane: this is the batched dense path the decode actually uses (wq/wk/wv/wo/wgate/wrel/head...).
      * Do each token's N=1 cuBLAS matvec serially here (single-threaded entry, before this function's own OpenMP),
      * and only if every token succeeds; otherwise fall through to the CPU path untouched. */

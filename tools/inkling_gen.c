@@ -417,6 +417,10 @@ int main(int argc, char **argv)
                   in2_nt_read_sec, in2_nt_calls,
                   in2_nt_calls ? in2_nt_read_sec / in2_nt_calls * 1e6 : 0.0, in2_nt_unmapped);
           in2_nt_read_sec = 0; in2_nt_calls = 0; in2_nt_unmapped = 0; }
+        { extern long in2_ent_calls[8];
+          fprintf(stderr, "ENTRY nt=%ld quant=%ld float=%ld other=%ld\n",
+                  in2_ent_calls[0], in2_ent_calls[1], in2_ent_calls[2], in2_ent_calls[3]);
+          for (int _e = 0; _e < 8; ++_e) in2_ent_calls[_e] = 0; }
         const char *pn[8] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe","unused"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);

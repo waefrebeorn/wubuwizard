@@ -1340,3 +1340,20 @@ which is 2 tensors per layer - consistent with a fused projection, not with seve
 RULE ADOPTED: no per-call cost is quoted again until entries are counted across EVERY dense entry point (in2_matvec_nt,
 in2_matvec_quant, in2_matvec_float, in2_matvec_rows*, and the sliding-layer path) with shape attribution. Dividing phase
 time by a guessed denominator is how the last three estimates went wrong.
+
+## RETRACTION: the call count is 448 per forward, not 48 - my "2 per layer" was a truncated grep
+ENTRY instrumentation on the three dense entry points, one-token forward:
+  ENTRY nt=448 quant=1 float=0 other=0
+So in2_matvec_nt is entered 448 times per forward = 18.7 per layer, which is consistent with the ~7 dense ops x 24
+layers I originally assumed. The previous entry claiming "only 2 dense-kernel calls per layer" is WRONG and is
+retracted: that 48 was produced by piping the grouped trace through `head -10`, which cut the shape list at ten rows.
+The lesson is the same one this document keeps relearning - a grouped count is only a count if nothing truncates it.
+INSTRUMENT NOW IN PLACE AND WORKING: ENTRY nt/quant/float counters, dumped beside the PHASE block that provably runs
+(this is the block that printed, unlike the model.c per-forward dump). IN2_TIMETY is confirmed not to be part of this
+run's output path; ENTRY is.
+CORRECTED PER-CALL ARITHMETIC, with the population actually known:
+  layer phases total 0.183 s over 448 nt calls -> mean 0.41 ms/call
+  q phase 36 ms over 24 calls -> 1.50 ms/call
+A 2304x384 quant matvec is 0.88 MMAC, so 1.5 ms mean ~0.6 GFLOPS, three orders of magnitude below this CPU.
+=> per-call OVERHEAD is the target, and the population is now measured rather than assumed.
+GATE: 15/15.
