@@ -227,3 +227,19 @@ is not a code problem; it is a memory-bandwidth ceiling. The only faster path me
 GPU fused lane (16 tok/s in the Gemma engine), which upstream llama.cpp itself documents as non-bit-identical.
 Two clauses, one box: identity is met and held at ~4.8 tok/s; speed beyond that requires the documented
 identity trade-off.
+
+## ROOT CAUSE (definitive): the resident path can't win at M=1 because of per-call overhead, not retention or coverage
+The resident cache retains correctly: budget=0 means NO eviction (permanent), 1536 slots, lookup by
+(bytes, file_offset-ident) for experts or (bytes, h_w pointer) for dense (the mmap pointer is stable, so dense
+hits every token), and RESSTAT measured 90.6% hit. Only the type gate {8,16,22,23} engages; enabling 17/18
+engaged more but STILL tied. The tie is therefore structural per-call overhead at single-token decode: every
+resident call, even on a hit, re-pays ResGuard lock + activation H2D + kernel launch + result D2H, and for
+M=1 the sum over ~193 matvecs/token equals the CPU's DRAM read of the same weights (~22 ms for the dense tier
+at ~32 GB/s vs ~0.1 ms/call x 193 overhead). This matches the Gemma engine's measured win exactly: it reaches
+16 tok/s because wubu_gpu_qkv3/ffn3/attn_half FUSE the per-layer chain into a handful of calls, collapsing the
+per-call fixed cost. Conclusion: no amount of residency, coverage, or thread tuning makes the per-tensor
+resident matvec beat the well-optimised CPU at M=1. The only faster path for gen_fast is the same per-layer
+FUSED lane the Gemma engine uses, ported to the Inkling-2 shapes, with the weights kept device-resident once
+(IN2_RES_GB / permanent) so the dense tier streams from VRAM at 192 GB/s with near-zero PCIe per token. That
+fused port is the remaining work; every short lever (threads, prefetch, DQ, gate-widening, per-tensor
+residency) has now been measured and ruled out.
