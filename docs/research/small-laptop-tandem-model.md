@@ -3716,3 +3716,20 @@ to 28 chars in the census but distinct) and rank by us/call. If they are the loo
 gate/forget/gain projections of a visit into one call, because they share the same activation vector - four 184 us calls become one at
 roughly the cost of one plus three cheap row blocks.
 STATE: 129 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 0.172-0.188 s.
+
+## Q8_0 IS NOT INEFFICIENT - IT IS AT THE MEMORY WALL, AND THE TWO PATHS ARE BOUND BY DIFFERENT THINGS
+The Q8_0 dot is already AVX2 (_mm256_maddubs_epi16, 211 __m256 uses in wubu_iq_c11.c), so 36.7 GOPS is not a vectorisation failure.
+Put bytes next to time instead:
+    dense  attn_output 3072x2304  = 7.1 MB of Q8_0 weights per call
+           at 300 us              = 23.6 GB/s      vs 33-53 GB/s measured streaming peak   -> AT THE MEMORY WALL
+    expert gate_up     2304x2304   = 1.36 MB of IQ2_XXS per call
+           at 454 us              = 3.0 GB/s       and 114 GOPS                              -> COMPUTE-BOUND, 7x below the wall
+So the two paths are bound by different resources and both are close to their own limit. The "3x less efficient per MAC" reading of the
+type table was comparing a bandwidth-bound kernel to a compute-bound one on a MAC-normalised axis, which is not a comparison at all. The
+AI-flops-per-second axis is meaningless across formats with 3x different bit widths.
+WHAT THIS MEANS FOR SPEED, and it is the first honest ceiling statement in this document: the dense matvecs are at ~24 GB/s of a ~40 GB/s
+achievable streaming rate, and the expert matvecs are at 114-144 GOPS with more parallel headroom. Neither has 2x of arithmetic to give.
+The engine's remaining lever is CONCURRENCY - 0.480 CPU-s of matvec over a 0.172 s step is 2.8x of 8 threads, so roughly 65% of the
+machine is idle during the step. That is where any remaining 1.5-2x lives, and it is the same conclusion the very first Amdahl fit reached
+(S=186.9 ms, ceiling 5.35 tok/s) before eleven hypotheses and six instrument repairs intervened to confirm it by a different route.
+STATE: 130 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 0.172-0.188 s.
