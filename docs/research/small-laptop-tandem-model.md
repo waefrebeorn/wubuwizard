@@ -305,3 +305,19 @@ optimised CPU IQ2 dot for the same K. Both are measurable and both are UNMEASURE
 f16 lane is: dequantize the dense tier to two-f16 hi/lo (separate buffers), upload resident once, measure the
 resident f16 GEMM time per token vs the CPU's ~22 ms/token dense cost; only if it wins do the lane's bytes
 matter. Do not assume f16 wins because it is "smaller" - it is not.
+
+## MEASURED: the f16 lane is hardware-viable on this RTX 4050 at the Inkling dense shapes
+cuBLAS FP16 tensor-core GEMM benchmark (tools/test_in2_f16_gemm.cu, copied from WuBuMM bench_gemm_tc and
+re-shaped to Inkling dense GEMMs), RTX 4050 Laptop, 20 SMs, 6.4 GB:
+  in2 attn 2304x2304x2304 : FP16/f32acc 20.41 TFLOPS | fp16acc 39.03 | bf16 20.44
+  in2 ffn  2304x2304x9216 : 21.29 | 43.18 | 26.18
+  in2 down 2304x9216x2304 : 27.14 | 49.50 | 26.30
+Per-token dense GEMM work at f32-accumulate (~13 ms): attn qkv+o = 4 x 1.20 ms, gate+up = 4.59+4.59 ms,
+down = 3.61 ms (each from 2*2304^3 etc / the TFLOPS). The CPU side reads the dense tier at ~22 ms just for
+the 696 MB/token DRAM (32 GB/s), and the 469 MB/token output head (nearly zero FLOPs, 0.92 GFLOP -> ~0.05 ms
+resident) is pure bandwidth on CPU. So IF the dense+head tier fits resident in two-f16 form, the f16 lane
+replaces ~30-60 ms/token of dense DRAM work with ~13 ms of f32-accumulate GEMM and the head read collapses to
+~0.05 ms. Caveats (from the earlier CLARIFICATION): f16 is 3.6x the IQ2 bytes, so residency is the gate - the
+dense+head set ~1084 MB-IQ2 -> ~3.9 GB f16 is tight against 6 GB VRAM + KV + activations, so the part that
+fits wins and the rest either streams (PCIe ~10 GB/s < DRAM) or stays CPU. The f16 lane is worth building: the
+tensor-core rate is confirmed on the exact shapes.
