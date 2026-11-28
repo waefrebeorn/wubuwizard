@@ -1458,3 +1458,24 @@ applied to the shapes that cost the time.
 NEXT CHECK: log (n_in, n_out, ns) for every nt call and aggregate by shape - that names the exit branch by elimination and
 gives the per-shape cost table the whole session has been missing.
 GATE: 15/15.
+
+## THE SHAPE TABLE - the table this project never had, and it names one shape holding 62.6%
+in2_matvec_nt aggregated by (n_in, n_out) over one full-recompute run (4 forwards), total 0.7385 s:
+  2304 -> 3072 : 0.4622 s   128 calls (32/fwd)   3611.3 us/call   62.6% of nt
+  3072 -> 2304 : 0.1295 s    64 calls (16/fwd)   2023.9 us/call   17.5%
+  2304 -> 1024 : 0.1055 s   128 calls (32/fwd)    824.3 us/call   14.3%
+  2304 ->  384 : 0.0334 s    64 calls (16/fwd)    522.4 us/call    4.5%
+  2304 ->   24 : 0.0077 s    64 calls (16/fwd)    120.9 us/call    1.0%
+ONE SHAPE CARRIES 62.6% OF ALL nt TIME: 2304 -> 3072, 32 calls per forward, 3.61 ms each.
+That shape is 7.08 MMAC, so 3.61 ms is ~1.96 GFLOPS - worse than the 8.7 GFLOPS I computed for the 3072-wide case
+earlier, because that figure divided by the wrong denominator. This is the number to attack.
+THE CONTRADICTION TO RESOLVE NEXT: n_out=3072 plainly satisfies in2_rows_parallel's gate (NT>=2 and n_out>=256), yet the
+WJ probe - gated on n_out>=2048 - never printed for any thread count. So those calls enter in2_matvec_nt (they are in the
+wrapper's table) and RETURN BEFORE the rows_parallel line. They are leaving through an earlier branch. That branch is the
+fix site, and it is now a single named question: which return does a 2304->3072 call take?
+Also note 2304->384 measures 522 us/call in the table while the WJ probe showed a 384-row split completing in ~28 us
+(8 jobs x 3.5 us). Those cannot both be the common path, so most 2304->384 calls are ALSO leaving early, not splitting.
+NEXT CHECK (one line per call): record the exit branch id in the wrapper (the impl returns a code for path taken, or add a
+path byte set at each return) and print the path histogram grouped by shape. That converts "which branch" from inference
+into a count, and given the last three turns, inference is exactly what keeps being wrong.
+GATE: 15/15.

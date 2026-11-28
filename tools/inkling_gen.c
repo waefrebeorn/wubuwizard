@@ -435,6 +435,25 @@ int main(int argc, char **argv)
           }
           for (int _e = 0; _e < 8; ++_e) { in2_ent_calls[_e] = 0; in2_ent_sec[_e] = 0; }
           in2_nt_read_sec = 0; in2_nt_calls = 0; in2_nt_unmapped = 0; }
+        { extern struct in2_shp_rec { int ni, no; double sec; long n; } in2_shp[96];
+          extern int in2_shp_n;
+          if (in2_shp_n > 0) {
+              double tot = 0; for (int i = 0; i < in2_shp_n; ++i) tot += in2_shp[i].sec;
+              fprintf(stderr, "SHAPE TABLE (run-wide, %d shapes, %.4f s total)\n", in2_shp_n, tot);
+              unsigned char used[96] = {0};
+              for (int k = 0; k < 12 && k < in2_shp_n; ++k) {
+                  int best = -1;
+                  for (int i2 = 0; i2 < in2_shp_n; ++i2)
+                      if (!used[i2] && (best < 0 || in2_shp[i2].sec > in2_shp[best].sec)) best = i2;
+                  if (best < 0) break;
+                  used[best] = 1;
+                  fprintf(stderr, "  %5d -> %6d : %8.4f s  %5ld calls  %8.1f us/call  %5.1f%% of nt\n",
+                          in2_shp[best].ni, in2_shp[best].no, in2_shp[best].sec, in2_shp[best].n,
+                          in2_shp[best].sec / (double) in2_shp[best].n * 1e6,
+                          tot > 0 ? in2_shp[best].sec / tot * 100 : 0.0);
+              }
+          }
+          in2_shp_n = 0; }
         const char *pn[8] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe","unused"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);

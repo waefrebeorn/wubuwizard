@@ -53,6 +53,18 @@ typedef struct {
 } in2_rows_job;
 
 double in2_wj_sec; long in2_wj_rows, in2_wj_n, in2_wj_printed;
+/* Per-shape cost table: the table this project never had. Aggregated in the in2_matvec_nt wrapper. */
+struct in2_shp_rec { int ni, no; double sec; long n; };
+struct in2_shp_rec in2_shp[96]; int in2_shp_n;
+static void in2_shp_add(int ni, int no, double sec)
+{
+    for (int i = 0; i < in2_shp_n; ++i)
+        if (in2_shp[i].ni == ni && in2_shp[i].no == no) {
+            in2_shp[i].sec += sec; in2_shp[i].n++; return;
+        }
+    if (in2_shp_n < 96) { in2_shp[in2_shp_n].ni = ni; in2_shp[in2_shp_n].no = no;
+                          in2_shp[in2_shp_n].sec = sec; in2_shp[in2_shp_n].n = 1; in2_shp_n++; }
+}
 static DWORD WINAPI in2_rows_worker(LPVOID p)
 {
     in2_rows_job *j = (in2_rows_job *)p;
@@ -1041,8 +1053,10 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                 in2_threads(), omp_in_parallel(), omp_get_max_threads(), n_out); } }
     const double _t0 = in2_now();
     const int rc = in2_matvec_nt_impl(ctx, t, X, nt, n_in, n_out, Y);
-    in2_ent_sec[0] += in2_now() - _t0;
+    const double _dt = in2_now() - _t0;
+    in2_ent_sec[0] += _dt;
     in2_ent_calls[0]++;
+    in2_shp_add(n_in, n_out, _dt);
     return rc;
 }
 
