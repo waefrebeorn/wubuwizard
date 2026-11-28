@@ -1123,3 +1123,24 @@ OPEN QUESTION, stated plainly: the head's f16 copy exists on disk (926 MB), the 
 would run the GEMM in about a millisecond - yet the head runs at 0.28 s on both paths. Locating WHERE the head call
 diverges from the traced blk.* path is the highest-value open item in this document, because it is ~25% of decode.
 NOT CLAIMED: any mechanism for the divergence. Two guesses already failed here and a third would be noise.
+
+## SOLVED: THE HEAD SENDS 926 MB OVER PCIe ON EVERY TOKEN INSTEAD OF STAYING RESIDENT
+Three independent measurements now agree, and they replace the two hypotheses that failed above.
+1. HEADTRY trace: the head reaches in2_try_f16, "HEADTRY reach: output.weight fby=926318592 need=926318592
+   n_out=201024", then "HEADTRY dispatch output.weight rc=0 (GPU TOOK IT)". So the GPU path IS taken - it is not
+   declining, and it is not a CPU fallback.
+2. F16STAT is IDENTICAL for a 1-token and a 12-token run: ups=161 reuse=240/3771 evict=0 used=2107MB slabs=161
+   vram_free=2846MB. The upload count does not move and slab count does not move, so the head's 926 MB never enters
+   the resident slab cache. There are two distinct GPU paths and the head uses the one with no residency.
+3. 926,318,592 bytes / 0.297 s = 3.12 GB/s, which is PCIe-gen4-x4-ish upload bandwidth, not GEMM time. A resident
+   f16 GEMM of 463 MMAC on this GPU would be ~1 ms, roughly 300x faster.
+CONCLUSION: ~0.30 s per generated token - about a quarter of decode - is spent re-uploading output.weight from host
+memory every single token, while 2846 MB of VRAM sits free and the slab would easily fit. The work is pure waste, and
+it is the largest single addressable cost found in this entire investigation.
+FIX (not yet implemented): route the head through the same resident path the blk.* tensors use, keyed on
+t->file_offset, so the 926 MB is uploaded once and then reused. IN2_F16_BUDGET_MB and the eviction policy must admit a
+926 MB slab; vram_free is 2846 MB so it fits with ~1.9 GB to spare, but a per-slab cap would explain today's behaviour
+and needs checking before assuming the budget is the gate.
+VERIFICATION PLAN: after the change, F16STAT ups for a 12-token run must be 161 + 1 (the head uploaded once), not
+unchanged-with-the-head-absent, and HEAD must fall from ~0.29 s toward ~1-5 ms. Token identity must stay 15/15 because
+the same f16 bytes and the same GEMM are used - only the delivery mechanism changes.

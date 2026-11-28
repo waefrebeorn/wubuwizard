@@ -485,17 +485,40 @@ static int in2_f16_dispatch(long long ident, const void *w, long long wbytes,
 /* Try the whole-tensor f16 GPU matvec. Returns 1 if it computed y (caller returns OK), else 0. Dense tensors
  * only (elem_off==0, no "exps"). Skips inside an OpenMP region: the DLL's shared activation scratch is not
  * thread-safe, so only the single-threaded entry may call it. */
+/* BIG-CALL TRACE. The head (n_out = vocab = 201024) is ~25% of decode and never appears in the f16 trace, but the
+ * existing HIT print is once-only, so silence proved nothing either way. Every gate below now reports WHY a large
+ * call was declined. If NO "HEADTRY" line appears at all, the head never reaches this function and the divergence is
+ * upstream in in2_matvec_quant or its caller - which is a definitive answer, not an inference. */
+#define IN2_BIG_OUT 100000
 static int in2_try_f16(const wubu_in2_tensor_t *t, int64_t elem_off, const float *x, int n_out, int n_in, float *y)
 {
-    if (!getenv("IN2_GPU_F16") || elem_off != 0) return 0;
-    if (!t || !t->info || !t->info->name[0]) return 0;
-    if (strstr(t->info->name, "exps")) return 0;
+    const int big = (n_out >= IN2_BIG_OUT) && getenv("IN2_GPU_TRACE");
+    if (!getenv("IN2_GPU_F16") || elem_off != 0) {
+        if (big) fprintf(stderr, "HEADTRY decline: no-gpu-env-or-offset (env=%d off=%lld n_out=%d)\n",
+                         getenv("IN2_GPU_F16") ? 1 : 0, (long long) elem_off, n_out);
+        return 0;
+    }
+    if (!t || !t->info || !t->info->name[0]) {
+        if (big) fprintf(stderr, "HEADTRY decline: nameless tensor (n_out=%d)\n", n_out);
+        return 0;
+    }
+    if (strstr(t->info->name, "exps")) {
+        if (big) fprintf(stderr, "HEADTRY decline: exps name %s\n", t->info->name);
+        return 0;
+    }
 #ifdef _OPENMP
-    if (omp_in_parallel()) return 0;
+    if (omp_in_parallel()) {
+        if (big) fprintf(stderr, "HEADTRY decline: inside parallel region %s\n", t->info->name);
+        return 0;
+    }
 #endif
     void *fb; long long fby;
-    if (in2_f16_lookup(t->info->name, &fb, &fby) != 0) return 0;
+    if (in2_f16_lookup(t->info->name, &fb, &fby) != 0) {
+        if (big) fprintf(stderr, "HEADTRY decline: lookup failed for %s (no f16 file or read error)\n", t->info->name);
+        return 0;
+    }
     long long need = (long long) n_in * (long long) n_out * 2;
+    if (big) fprintf(stderr, "HEADTRY reach: %s fby=%lld need=%lld n_out=%d\n", t->info->name, fby, need, n_out);
     if (fby != need) {
         if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16 size mismatch %s need=%lld got=%lld\n", t->info->name, need, fby);
         return 0;
@@ -504,6 +527,7 @@ static int in2_try_f16(const wubu_in2_tensor_t *t, int64_t elem_off, const float
     { static long long hits = 0;
       if (rc == 0) { hits++; if (hits == 1) fprintf(stderr, "F16 HIT first: %s K=%d n_out=%d\n", t->info->name, n_in, n_out); }
       else if (getenv("IN2_GPU_TRACE")) fprintf(stderr, "F16 miss %s rc=%d\n", t->info->name, rc); }
+    if (big) fprintf(stderr, "HEADTRY dispatch %s rc=%d (%s)\n", t->info->name, rc, rc == 0 ? "GPU TOOK IT" : "declined, CPU fallback");
     return rc == 0;
 }
 /* Batched sibling of in2_f16_dispatch: one cuBLAS GEMM at M tokens instead of M serial GEMVs. */
