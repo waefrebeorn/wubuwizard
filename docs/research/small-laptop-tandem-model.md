@@ -2678,3 +2678,17 @@ never applied to CORRECTNESS numbers, and it just cost a section of wrong conclu
 FINAL VERIFIED SET: Q8_0 (attention, 85 tensors), Q2_0 (EXPERT, 17), Q6_K (attention, 26), IQ2_XXS (EXPERT, 7), plus the
 activation quantiser. Unverified: NVFP4 x7, IQ2_XS x6, IQ1_S x6, IQ2_S x5, K-quants, Q4_K/Q5_K.
 STATE: 85 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## BUILD STAMP IMPLEMENTED AT THE SHELL LAYER, WHERE IT CANNOT BREAK
+After failing twice to add a compile-time stamp inside the C tests (a literal newline got embedded in a string literal, then
+the repair failed on CRLF and escape handling), the right place turned out to be the runner, not the test binaries:
+tools/ref_check.sh now compiles every binary immediately before running it - so staleness is impossible by construction - and
+prints each binary's size and mtime before its numbers:
+  --- iq_ref_check.exe     size=334574  mtime=2026-11-28 09:41:39        PASS
+  --- q2_ref_check.exe     size=332353  mtime=2026-11-28 09:41:43        PASS
+  --- q6k_ref_check.exe    size=333889  mtime=2026-11-28 09:41:47        PASS
+  --- iq2xxs_ref_check.exe size=336003  mtime=2026-11-28 09:41:50        PASS
+That satisfies the rule with zero new C, and it is strictly better than a __DATE__ stamp because the script cannot run a
+binary it did not just build. The failure it guards against is exactly the one that produced the sixth retraction: a FAIL line
+from a pre-patch executable being read as a live result.
+STATE: 86 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified: Q8_0, Q2_0, Q6_K, IQ2_XXS (+ activations).
