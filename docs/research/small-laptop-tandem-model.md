@@ -1154,3 +1154,21 @@ NEXT: read wubu_cuda_resident_f16_matvec in src/wubu_cuda_quant.cu for its admis
 alignment or shape condition, or a fallback branch that uploads without caching). Three hypotheses on this head have
 now been ruled out by measurement - size gate, clock granularity, budget cap - so the next one must come from the
 code, not from guessing at the numbers.
+
+## RETRACTION: the head is NOT re-uploaded per token, and it is NOT 25% of decode
+The section above ("the head sends 926 MB over PCIe on every token") is WRONG. Reading f16_slot_get in
+wubu_cuda_quant.cu settles it: slots are cached by (ident, wbytes) and g_f16_ups is incremented ONLY inside the miss
+branch, right after cudaMalloc+cudaMemcpy. Measured ups is 161 for a 1-token run AND 161 for a 12-token run, so the
+926 MB slab is uploaded ONCE and hits thereafter. The slab is resident; 2107 MB used = 926 MB for output.weight plus
+about 1181 MB across the other 160 slabs (mean 7.4 MB), which is exactly what the numbers allow.
+THE ARITHMETIC THAT SHOULD HAVE STOPPED ME: a 12-token run takes 3.3 s = 275 ms/token. If the head cost 0.297 s per
+token, twelve of them would need 3.56 s, more than the entire run. So HEAD 0.297 s in the one-token run is the
+one-time upload plus the first call, not a recurring per-token cost. I had already noticed this contradiction and
+explained it away with "once per position" instead of believing it - that was the error, not the measurement.
+CORRECTED PICTURE: per token, layers ~185 ms, head/embed/sampling ~90 ms, and the head's GEMM is small because
+output.weight is already in VRAM. There is no 300 ms/token of waste to reclaim. The largest remaining known cost
+is the layer work, and within that decode is dense-projection bound at 58.9% (q + gate+wo + kv+conv) with experts at
+25.4%, all of it single-threaded because a one-row matvec cannot engage row parallelism.
+FOUR hypotheses about this head were tested and all four were wrong: size gate, clock granularity, budget cap, and
+per-token re-upload. The instrument work was still worth it - it eliminated a quarter of decode as a target and the
+HEADTRY trace is now permanent, so the next person gets the answer in one run instead of four.
