@@ -2708,3 +2708,20 @@ COVERAGE NOW: Q8_0 (85 attn), Q2_0 (17 EXPERT), Q6_K (26 attn), IQ2_XXS (7 EXPER
 That is 30 of the 48 expert tensors by count and every one of the three most common expert types.
 REMAINING: NVFP4 (7), IQ2_XS (6), IQ2_S (5) experts - 18 tensors - plus the attention K-quants.
 STATE: 87 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Five reference checks wired and passing.
+
+## IQ2_XS VERIFIED (ggml_type 17, 6 EXPERT tensors, 2.3125 bpw) - and a stale comment retired
+  IQ2_XS reference check: 8 rows x 4096 elements (16 superblocks), blocksize=74
+    rel err min 9.084e-08  median 3.607e-07  max 2.625e-05   PASS (8x noise floor 7.694e-04)
+    ref[0]=-5.123855 got[0]=-5.123853
+Layout asserted in code: 74 bytes = d(2) + qs[32] uint16 (64) + scales[8]. Dequantiser copied verbatim from upstream
+dequantize_row_iq2_xs.
+A STALE COMMENT FOUND AND CORRECTED IN THE RECORD: gguf_raw_size's case for this type says "NOTE: dequantize_iq2_xs_row still
+assumes the old 108B layout -- needs rewrite". Reading the function shows it was ALREADY rewritten - it documents the
+canonical 74-byte layout, the low-9-bit grid index, the top-7-bit sign pattern and the per-group 4-bit sub-scales, and says
+"Replaces the old placeholder (wrong 108B layout, linear idx mapping)". So the CODE is current and only the COMMENT is stale.
+That is the inverse of the usual failure mode and worth noting: a stale comment had me expecting a defect that did not exist,
+which is exactly how a wrong prior gets built. The comment should be updated in gguf_raw_size.
+COVERAGE: Q8_0 (85 attn), Q2_0 (17 EXPERT), Q6_K (26 attn), IQ2_XXS (7 EXPERT), IQ1_S (6 EXPERT), IQ2_XS (6 EXPERT)
+= 36 of 48 expert tensors verified, four of the five expert types present in this model.
+REMAINING: NVFP4 (7), IQ2_S (5) experts - 12 tensors - plus attention K-quants.
+STATE: 88 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Six reference checks wired and passing.
