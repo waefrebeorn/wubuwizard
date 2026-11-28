@@ -1249,3 +1249,26 @@ REVISED SPEC for any future parallel dense path, and it is now much cheaper than
      the oracle.
 WHAT THIS ALSO MEANS: the float fallback is a latent correctness hazard, not just a slow path - it silently produces
 different tokens. That is worth its own fix regardless of performance.
+
+## ROUTING DIAGNOSED: THE BASELINE ITSELF MIXES ENGINES (and that reframes the last two entries)
+Per-call routing from IN2_TRACE_NT, counting the last field of each "NT ty=..." line, one-token run:
+  ROWPAR off : 24 kernel + 24 FLOAT-FALLBACK   <- the untouched, gate-passing build ALREADY runs half its calls on
+                                                  the float fallback
+  ROWPAR on  : 24 FLOAT-FALLBACK + 312 kernel  <- the blocked version routes wq's blocks to the kernel
+So the row split did not "reroute rows off the one correct path" as I wrote a moment ago. It did the OPPOSITE: for that
+op the full call uses the FLOAT FALLBACK, and blocking it forced the blocks onto the quant kernel. Different engine,
+different tokens.
+CORRECTED UNDERSTANDING, and this is simpler than everything before it: this engine deliberately mixes two numerics
+per operator - the baseline is already a mix and still matches the oracle. Identity therefore is not "always use the
+kernel"; it is "each operator must keep using exactly the engine the unblocked call used". A parallel dense path must
+reproduce the per-operator routing decision, not improve on it.
+THE CONDITION MISSING FROM EVERY ATTEMPT: the row helper gated on ty >= 0 and n_in % be == 0, which are NOT the
+conditions in2_matvec_nt uses. nt additionally requires wubu_iq_supported(ty) && in2_ty_verified(ty) before it will take
+the kernel, and falls back otherwise. Only ops that pass ALL of those may be blocked; blocking anything that the full
+call sends to the fallback flips tokens.
+BLOCKER on implementing that guard: wubu_iq_supported() and in2_ty_verified() are not externally linkable from
+wubu_inkling2_fullseq.c (link error), so the guard needs an accessor or a small exported predicate. That is the next
+concrete change, and it is a few lines rather than a kernel rewrite.
+ALSO: IN2_NOFAST=1 (force everything to the fallback) MISMATCHES the oracle, so the mix is load-bearing for correctness
+on at least one operator - the fallback cannot stand in for the kernel everywhere.
+GATE: 15/15, tree clean.
