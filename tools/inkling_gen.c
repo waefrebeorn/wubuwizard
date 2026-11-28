@@ -408,7 +408,11 @@ int main(int argc, char **argv)
                     kt > 0 ? 100.0 * in2_tk_gu / kt : 0, kt > 0 ? 100.0 * in2_tk_dn / kt : 0,
                     kt > 0 ? 100.0 * in2_tk_act / kt : 0, kt > 0 ? 100.0 * in2_tk_acc / kt : 0);
         }
-        const char *pn[8] = {"state/mix","q","kv+conv","attention","gate+wo","mlp+moe","?","?"};
+        /* Slot order MUST match the FP2(i) call sites in wubu_inkling2_fullseq.c:
+         * FP2(0) loads, FP2(1) mix+gates, FP2(2) q, FP2(3) kv+conv, FP2(4) attention, FP2(5) gate+after,
+         * FP2(6) mlp+moe+postconv. The previous array was shifted by one and had no name for slot 6, which
+         * made slot 6 - the largest span - print as "?" and made every other row name the slot before it. */
+        const char *pn[8] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe","unused"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);
         fprintf(stderr, "PHASE kvproj %.3f kvconv %.3f\n", in2_kvproj_sec, in2_kvconv_sec);

@@ -1012,3 +1012,26 @@ does not execute, or by call-site wrappers that do. Any further profiling MUST b
 in2_layer_full_seq in wubu_inkling2_model.c, not in wubu_inkling2_fwd.c's layer functions.
 This also retro-justifies distrusting PHASE outright and explains why its total covered 15% of wall.
 ACTION TAKEN: none yet to the code - recording the location first so the profiler is built in the right place.
+
+## FIRST TRUSTWORTHY PHASE TABLE - AND DECODE AND PREFILL HAVE OPPOSITE BOTTLENECKS
+The FP2 instrument in wubu_inkling2_fullseq.c IS live and correct (7 chained wall-clock spans, no nesting). The
+reason it read as garbage was a SECOND printer in tools/inkling_gen.c:411 whose names array was shifted by one and
+had no name for slot 6, so the largest span printed as "?" and every other row named the slot before it. Names fixed
+to match the FP2 call sites exactly (f_loads, f_mix+gate, f_q, f_kv+conv, f_attn, f_gate+wo, f_mlp+moe).
+DECODE, n_tok=1 (this is the phase that sets tok/s), FP2 total 0.185 s:
+  gate+wo 0.049 (26.5%) | mlp+moe 0.047 (25.4%) | q 0.037 (20.0%) | kv+conv 0.023 (12.4%) | mix+gate 0.015 (8.1%)
+  | attn 0.014 (7.6%)
+PREFILL forward, n_tok=12, FP2 total 0.565 s:
+  mlp+moe 0.230 (40.7%) | attn 0.089 (15.8%) | gate+wo 0.084 (14.9%) | q 0.061 (10.8%) | kv+conv 0.052 (9.2%)
+  | mix+gate 0.048 (8.5%)
+=> OPPOSITE BOTTLENECKS. In decode the dense projections (q + gate+wo + kv+conv) are 58.9% against experts at 25.4%.
+In prefill the experts lead at 40.7% against 34.9% dense. Every earlier "experts are the lever" statement was
+prefill-shaped and did not apply to the phase that determines tokens per second.
+THE SMOKING GUN: gate+wo is 24 layers x 2 matvecs = 48 calls in 0.049 s, i.e. ~1.0 ms per call, for ~5.3 MMAC each.
+That is ~216 MMAC/s, roughly a thousand times below this CPU's capability, so the dense decode projections are
+OVERHEAD bound, not compute bound. The overhead candidates in the live layer are the unconditional
+in2_tensor_to_f32() materialisations (Wq/Wk/Wv/Wrel/Wsk/Wg/Wo) that the *_nt quant-kernel branch never reads,
+the per-visit calloc/free set, and the dequant cache lookups.
+NEXT: make those materialisations lazy exactly like the gu/dn fix - they are dead work on the kernel path - then A/B
+interleaved through one binary. FP2 covers 0.185 s of a ~0.285 s token, so ~35% is still outside the layer (head +
+embed + sampling) and is the other unmeasured block.
