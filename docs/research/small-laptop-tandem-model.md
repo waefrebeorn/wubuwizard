@@ -3430,3 +3430,29 @@ The measurement cannot distinguish (b) from (c), and the honest consequence is t
 profile - it says "not experts, not output" and nothing finer. Any further work on it needs the per-site census printed in full
 (it currently prints only its top thirteen) before another optimisation is aimed at it.
 STATE: 117 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
+
+## STALE BINARY, SEVENTH TIME - and the real profile once the census prints all 220 sites: EXPERTS ARE 72%
+tools/build.sh DOES NOT EXIST. tools/build_gen_fast.sh is the real build, and oracle_gate.sh rebuilds only when gen_fast.exe is
+MISSING - so every "GATE PASS" in the last three turns was measured against a binary from 08:59 that predated all of it. The attn
+parallelisation was never actually exercised, and its null result is VOID as a measurement of that change. Rebuilt properly
+(12:14:17) and re-gated: PASS 15/15, so identity still holds, and three timings give 4.59 / 4.49 / 4.63.
+With IN2_CS_ALL the census now prints all 220 sites instead of its top 14, and the category split is nothing like the top-14 view:
+    TOTAL                                       1.4898 s over 4 tokens
+      experts            50 sites               1.0778 s   72.3%
+      attn_other         96 sites               0.1569 s   10.5%
+      output.weight       2 sites               0.1287 s    8.6%
+      attn_qkv           72 sites               0.1264 s    8.5%
+The earlier "experts 39%, attention 53%" split was an artefact of the 14-site print: 50 expert sites exist and only 13 were shown, so
+39% of the truth was visible and it read as a minority. Experts are 72% of the token - the largest block by far, exactly what eleven
+hypotheses were aimed at all along.
+AND THIS EXPLAINS THE NULL RESULT WITHOUT NEEDING OMP NESTING OR A CATEGORY ERROR: attn_qkv is 8.5% of the token. Parallelising a
+2.6x smaller-than-assumed block, with 72 tiny sites, could not have moved a 219 ms token even if it had been built.
+PER-ROW, WHICH IS THE NUMBER THAT MATTERS NOW:
+    expert rows/token   442,368   cost 269 ms summed   -> 0.609 us/row
+    dense  rows/token   532,800   cost 103 ms summed   -> 0.193 us/row
+    ratio 3.2x
+So the expert matvec costs 3.2x per row what the dense matvec costs on the same machine with the same kernel family. THAT is the
+remaining gap, it is inside the 72% block, and it is the first time it has been expressed in comparable units. The gather (8 scattered
+2304x2304 slabs, 594-byte rows), the per-expert activation array and the 8-way interleave are the structural differences, which is
+precisely where this document started before it got lost in denominators.
+STATE: 118 commits, gate 15/15 (fresh binary 12:14:17), identity exact, kernel coverage 192/192, 4.49-4.63 tok/s hot.

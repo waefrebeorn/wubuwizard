@@ -519,8 +519,10 @@ int main(int argc, char **argv)
           if (in2_cs_n > 0) {
               double tot = 0; for (int i = 0; i < in2_cs_n; ++i) tot += in2_cs[i].sec;
               fprintf(stderr, "CALLSITE CENSUS (%d sites, %.4f s)\n", in2_cs_n, tot);
-              unsigned char used[96] = {0};
-              for (int k = 0; k < 14 && k < in2_cs_n; ++k) {
+              static unsigned char used[512];
+              memset(used, 0, sizeof(used));
+              const int cs_all = getenv("IN2_CS_ALL") != NULL;   /* print every site, not just the top 14 */
+              for (int k = 0; k < (cs_all ? in2_cs_n : 14) && k < in2_cs_n; ++k) {
                   int best = -1;
                   for (int i = 0; i < in2_cs_n; ++i)
                       if (!used[i] && (best < 0 || in2_cs[i].sec > in2_cs[best].sec)) best = i;
