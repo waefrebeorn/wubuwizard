@@ -1678,3 +1678,29 @@ the layer being prefetched is one the OS had already brought in (the blob is onl
 warmed almost nothing faults). Prefetch only pays on the very first pass through a file, which is exactly the state that
 could not be reproduced for measurement. That is a coherent explanation and it is still an explanation, not a measurement.
 GATE: 15/15.
+
+## THE ANSWER, QUANTIFIED: decode is I/O BOUND at disk speed - 2.23 GB read per 12-token run
+GetProcessIoCounters around the run (a hard fault on a mapped file is served by a read the kernel charges to the process,
+so this separates hard from soft faults in a way PageFaultCount cannot):
+  run1: 3.43 tok/s, READIO ops=6330 bytes=2,230,110,370 (2126.8 MB)
+  run2: 3.44 tok/s, READIO ops=6330 bytes=2,230,110,370 (2126.8 MB)
+IDENTICAL bytes and ops across two runs: deterministic traffic, not cache luck.
+THE ARITHMETIC: 2.23 GB / 12 tokens = 186 MB per token. At ~637 MB/s that is 3.66 s of I/O against a 3.5 s wall time -
+i.e. the run is I/O bound and the compute hides inside the read time. Expected per token: ~102 MB of weights (448 calls x
+228 KB) plus ~119 MB for the LM head (201024 x 2304 at 2.06 bpw, re-read every token) = ~221 MB, against 186 MB measured,
+so the traffic is essentially "all the weights this token needs plus the head" and there is no large redundancy to remove -
+the volume is inherent to streaming a 7.9 GB model one token at a time.
+THIS EXPLAINS EVERY EARLIER DEAD END AT ONCE:
+  - prefetch changed nothing: the reads happen anyway, the OS was not the bottleneck, bandwidth was.
+  - thread count was flat: threads add compute, not disk bandwidth.
+  - warm-vs-cold was 25%: a warm page cache serves these reads from RAM instead of disk.
+  - the 1273x per-call spread in the cold shape table: individual calls either hit RAM or waited on the SSD.
+  - "1 GFLOPS" and "1.96 GFLOPS": dividing MACs by time that was mostly spent waiting for bytes.
+WHAT ACTUALLY MOVES THE NEEDLE NOW, in order:
+  1. KEEP THE LM HEAD RESIDENT. It is 119 MB of the 186 MB per token and it is re-read EVERY token - by far the worst
+     traffic-per-use in the model. Even a 6 GB-VRAM card can hold it; so can 16 GB of RAM. This alone is ~64% of the
+     per-token disk traffic.
+  2. Do not stream what is already in RAM: the 102 MB of layer weights per token is unavoidable for a 7.9 GB model, but
+     the head is not.
+  3. Only after that does kernel speed matter - and we already know the kernels run at 39.5 GB/s when the bytes are warm.
+GATE: 15/15. Instrument kept: READIO + PAGEFAULT lines in the PERF block.

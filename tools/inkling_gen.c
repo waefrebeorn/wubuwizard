@@ -56,6 +56,29 @@ static void emit_piece(const char *s)
 #ifdef _WIN32
 #include <psapi.h>
 
+/* Real disk traffic for this process. A hard fault on a mapped file is served by a read that the kernel attributes to the
+ * process, so ReadTransferCount separates HARD (disk) faults from SOFT (working-set) ones - which PageFaultCount cannot,
+ * since it sums both. This is the measurement that decides whether the cold/warm tok/s delta is really paging. */
+#if defined(_WIN32)
+typedef struct { unsigned long long rd_ops, wr_ops, oth_ops, rd_bytes, wr_bytes, oth_bytes; } in2_io_t;
+static int in2_io(in2_io_t *o)
+{
+    typedef int (__stdcall *in2_gpio_t)(void *, in2_io_t *);
+    static in2_gpio_t s_fn; static int s_tried;
+    if (!s_tried) {
+        HMODULE k = GetModuleHandleA("kernel32.dll");
+        s_fn = k ? (in2_gpio_t) (void *) GetProcAddress(k, "GetProcessIoCounters") : 0;
+        s_tried = 1;
+    }
+    if (!s_fn) return 0;
+    return s_fn((void *) -1, o) ? 1 : 0;
+}
+#else
+typedef struct { unsigned long long rd_ops, wr_ops, oth_ops, rd_bytes, wr_bytes, oth_bytes; } in2_io_t;
+static int in2_io(in2_io_t *o) { (void) o; return 0; }
+#endif
+
+
 /* Page-fault counter. tok/s conflates cache state with everything else, and on Windows the cache cannot be dropped on
  * demand, so the only honest way to test a read-ahead change is to count faults instead of seconds. Declared against
  * kernel32 directly (no windows.h, no psapi link) so this stays a zero-dependency diagnostic. */
@@ -481,6 +504,11 @@ int main(int argc, char **argv)
           in2_shp_n = 0; }
         fprintf(stderr, "PAGEFAULT total=%lu (per token: %.0f)\n", in2_faults(),
                 n_gen > 0 ? (double) in2_faults() / (double) n_gen : 0.0);
+        { in2_io_t io;
+          if (in2_io(&io))
+              fprintf(stderr, "READIO ops=%llu bytes=%llu (%.1f MB) | writes=%llu (%.1f MB)\n",
+                      io.rd_ops, io.rd_bytes, (double) io.rd_bytes / 1048576.0,
+                      io.wr_bytes, (double) io.wr_bytes / 1048576.0); }
         const char *pn[8] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe","unused"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);
