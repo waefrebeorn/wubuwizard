@@ -8,6 +8,7 @@
 #include <string.h>
 static const int8_t kvalues_iq4nl[16] = {-127,-104,-83,-65,-49,-35,-22,-10,1,13,25,38,53,69,89,113};
 #define f16h gguf_f16_to_f32
+#include "iq3_xxs_tables.inc"
 int main(int argc,char**argv){
     if(argc<4){fprintf(stderr,"usage: head_hf16 <model.gguf> <tensor> <out.f16>\n");return 2;}
     gguf_ctx*c=gguf_open(argv[1]); if(!c){fprintf(stderr,"open fail\n");return 3;}
@@ -88,6 +89,33 @@ int main(int argc,char**argv){
                 ql+=32; is+=2; u1<<=2; u2<<=2;
             }
         }
+    } else if(t->ggml_type==18){
+        /* IQ3_XXS: block = {d u16, qs[96]} = 98 B / 256 el. qs[0..63]=grid idx, qs[64..95]=scales+signs.
+         * Transcribed from upstream dequantize_row_iq3_xxs + engine tables (iq3_xxs_tables.inc). */
+        const long long nb=(ne+255)/256; rawsz=(long)nb*98;
+        for(long long b=0;b<nb;b++){
+            const unsigned char*blk=raw+(size_t)b*98;
+            float d=f16h((unsigned short)(blk[0]|(blk[1]<<8)));
+            const unsigned char*qs=blk+2; const unsigned char*ss=qs+64;
+            long long base=(long long)b*256; const float*out=&f[base];
+            const unsigned char*qsr=qs;
+            for(int ib32=0;ib32<8;++ib32){
+                unsigned aux32= ss[4*ib32+0]|(ss[4*ib32+1]<<8)|(ss[4*ib32+2]<<16)|((unsigned)ss[4*ib32+3]<<24);
+                float db=d*(0.5f+(float)(aux32>>28))*0.5f;
+                for(int l=0;l<4;++l){
+                    int signs=w_ksigns_iq2xs[(aux32>>(7*l))&127];
+                    const uint8_t*g1=(const uint8_t*)(&w_iq3xxs_grid[qsr[2*l+0]]);
+                    const uint8_t*g2=(const uint8_t*)(&w_iq3xxs_grid[qsr[2*l+1]]);
+                    int o8=(int)((out-(&f[0])))+0;
+                    for(int j=0;j<4;++j){
+                        f[(size_t)(base+ib32*32+l*8+j+0)]=db*(float)g1[j]*(signs&w_kmask_iq2xs[j+0]?-1.0f:1.0f);
+                        f[(size_t)(base+ib32*32+l*8+j+4)]=db*(float)g2[j]*(signs&w_kmask_iq2xs[j+4]?-1.0f:1.0f);
+                    }
+                    (void)o8;
+                }
+                qsr+=8;
+            }
+        }
     } else { fprintf(stderr,"unsupported type %d for dequant\n",t->ggml_type); return 6; }
     /* f32 -> f16 (IEEE round-to-nearest-even, the same cuBLAS/f16 uses) */
     unsigned short*hf=(unsigned short*)malloc((size_t)ne*2);
@@ -135,6 +163,20 @@ int main(int argc,char**argv){
             if(t->ggml_type==12) ggml_vec_dot_q4_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
             else if(t->ggml_type==13) ggml_vec_dot_q5_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
             else                      ggml_vec_dot_q6_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
+            float xr[2304]; for(int i=0;i<K;i++) xr[i]=q8[i/256].d*(float)q8[i/256].qs[i%256];
+            float mine=0; for(int i=0;i<K;i++) mine+=f[i]*xr[i];
+            double dnme=(double)(mine-eng), den=(double)eng;
+            fprintf(stderr,"VERIFY[ty%d]: eng=%.6f mine=%.6f rel=%.3e\n",t->ggml_type,(double)eng,(double)mine,den!=0?dnme/den:0.0);
+        } else fprintf(stderr,"VERIFY: skip\n");
+    }
+    } else if(t->ggml_type==18){
+    {
+        const long long nb=(ne+255)/256;
+        const int K=2304; if(K%256==0 && nb>=K/256){
+            extern void ggml_vec_dot_iq3_xxs_q8_K_generic(int,float*,size_t,const void*,size_t,const void*,size_t,int);
+            srand(17); float x[2304]; for(int i=0;i<K;i++) x[i]=0.11f*(float)(rand()%2001-1000);
+            block_q8_K q8[9]; quantize_row_q8_K(x,q8,K);
+            float eng; ggml_vec_dot_iq3_xxs_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
             float xr[2304]; for(int i=0;i<K;i++) xr[i]=q8[i/256].d*(float)q8[i/256].qs[i%256];
             float mine=0; for(int i=0;i<K;i++) mine+=f[i]*xr[i];
             double dnme=(double)(mine-eng), den=(double)eng;

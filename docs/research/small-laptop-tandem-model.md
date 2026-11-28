@@ -454,3 +454,12 @@ VERIFIED vs q5_K_vec_dot_generic on identical 9 blocks + q8_K: rel 8.9e-7.
 Verified types (bytes of tier): 23=1767(6.9e-7), 8=688, 12=127(6.6e-7), 13=141(8.9e-7), 14=232(4.6e-7),
 0=70 = 3250 MiB = 98.7%. Remaining: 18 (IQ3_XXS 40), 30 (IQ3_XXS_B 4) = 44 MiB (1.3%), the grid-based IQ
 tails (needs iq3_xxs dimension/bit dequant transcription from upstream dequantize_row_iq3_xxs).
+
+## IQ3_XXS done -> 7 of 8 non-expert types engine-verified, ~99.9% of the dense tier
+type 18 (IQ3_XXS) added: block = {d u16, qs[96]} = 98 B/256 el, grid idx in qs[0..63], scales+signs in
+qs[64..95]; transcribed from upstream dequantize_row_iq3_xxs with the engine's OWN tables
+(w_kmask_iq2xs/w_ksigns_iq2xs/w_iq3xxs_grid extracted into tools/iq3_xxs_tables.inc from
+quantized_dot_generic.c - byte-identical to what the engine uses). VERIFIED vs
+ggml_vec_dot_iq3_xxs_q8_K_generic: rel -1.9e-7.
+Verified types: 23,8,12,13,14,0,18 = 3290 of 3294 MiB = 99.9%. Only type 30 (IQ3_XXS_B, attn_sink, 4 MiB)
+remains (needs its own block layout, check whether the engine/vendor quantizer routes it as a distinct format).
