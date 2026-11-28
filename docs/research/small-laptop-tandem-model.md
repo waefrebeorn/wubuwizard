@@ -2579,3 +2579,22 @@ if the kernel agrees with THIS REPO's dequantiser, the engine is internally cons
 disagrees with both, the kernel is the outlier despite the gate passing, which would be a genuinely surprising finding and
 would need explaining. That comparison needs no new file-offset work - the block is now readable at a verified address.
 STATE: 80 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## STRUCTURAL FINDING: EVERY EXPERT WEIGHT HAS A COMPANION PER-EXPERT F32 SCALE TENSOR
+The fixed offset tool surfaced something the type-only census could not: the expert tensors are PAIRED.
+  blk.0.ffn_gate_up_exps.scale   type=0 (F32)  dims=[128]   <- one float per expert
+  blk.0.ffn_gate_up_exps.weight  type=19 (IQ1_S) dims=[2304,2304,128]
+  blk.1.ffn_gate_up_exps.scale   type=0 (F32)  dims=[128]
+Counts over the whole file: 40 `.scale` tensors (all F32, all dims [128] = n_experts) against 48 expert weight tensors.
+So this is a dynamic-quantisation layout: each expert's weights are stored once and multiplied by a per-expert scalar at use
+time. It also explains a number that looked wrong earlier - the IQ2_XXS block scales near 4.0, which are large for a 2-bit
+format only if you expect the weight magnitude in d; with an external per-expert scale doing part of the work, d does not
+have to carry it.
+CONSEQUENCES, and one of them matters for the reference work:
+  - ANY correct reference for an expert matvec must apply w = dequant(block) * scale[expert]. A reference that omits the
+    per-expert scale is wrong for the model even if it is right for the block format.
+  - This does NOT explain the IQ2_XXS kernel-vs-master disagreement, because BOTH sides of that comparison omitted the scale
+    equally. It remains a decode-semantics difference, still to be localised by the planned three-way comparison.
+  - It does mean the engine has a multiplication in the expert path that no instrument in this document has ever counted, and
+    that is worth knowing before anyone claims the expert path is fully understood.
+STATE: 81 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Reference tests verified: Q8_0, Q2_0, Q6_K.
