@@ -1229,3 +1229,23 @@ Multi-core decode would require rewriting the kernel so each output row is compu
 quantisation-kernel change with its own gate, not a wiring change. That is the honest boundary of what this codebase
 can do today, and it is now a fact rather than a series of failed guesses.
 GATE: 15/15 after reverting. Tree clean.
+
+## THE REAL MECHANISM: ONLY ONE PATH IS NUMERICALLY CORRECT, SO ANY REROUTING BREAKS IDENTITY
+Measured on the reverted, gate-passing binary:
+  default (quant kernel path)  -> IDENTICAL to the oracle
+  IN2_NOFAST=1 (float fallback) -> MISMATCH
+So the float fallback does NOT reproduce the oracle. The engine has exactly ONE numerically-correct path, the quant
+kernel, and in2_matvec_nt's own comment says this was already learned once: an unverified type was let through and the
+last token of a six-token greedy run moved from 220 to 167815.
+This explains all three row-parallelism failures better than "the arithmetic depends on n_out". A partial slab changes
+conditions the kernel path keys on - the read length rb*n_out, the size handed to in2_gpu_resident, and the
+supported/verified gate - so some blocks take the kernel and the rest take the fallback. Two engines, one output range,
+tokens flip. The row arithmetic may well be n_out-independent; what is not engine-independent is the ROUTING.
+REVISED SPEC for any future parallel dense path, and it is now much cheaper than "rewrite the kernel":
+  1. Every block must be provably routed to the SAME engine as the full call - assert it, do not assume it. IN2_TRACE_NT
+     already prints "-> KERNEL path" vs "-> FLOAT-FALLBACK" per call, so this is directly checkable.
+  2. The fallback must never run in a partial-block configuration, even when the full call would have used the kernel.
+  3. Verify with the gate before timing; IN2_NOFAST must NOT be treated as a safe reference, because it disagrees with
+     the oracle.
+WHAT THIS ALSO MEANS: the float fallback is a latent correctness hazard, not just a slow path - it silently produces
+different tokens. That is worth its own fix regardless of performance.
