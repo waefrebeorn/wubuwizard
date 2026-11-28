@@ -3209,3 +3209,26 @@ wubu_iq_rows(16, ...) call over it. If it reproduces ~1.25 us/row, the page sour
 fix is a resident expert cache, not a kernel change. If it reproduces 0.175 us/row, then the engine's data differs from the file's
 and the search is in the expert addressing instead.
 STATE: 107 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## RESOLUTION: the gap is the PRODUCT of two already-measured factors, not a new mechanism
+The decisive probe (real GGUF, file-backed mapping, offset 2003254464, 200k rows of 594 B - the engine's exact slab and call):
+    REAL SLAB pass 1 (first touch of file pages)   0.342 us/row   26.95 GB/s
+    REAL SLAB pass 2 (re-read, pages survived)     0.175 us/row   52.63 GB/s
+So the page source ALONE is only 1.95x, and still nowhere near the engine's 1.25 us/row. But the probes were each isolating ONE
+factor, and the engine experiences them together:
+    warm, one contiguous stream                 0.175 us/row
+    x first touch of file pages (measured)      x1.95   -> 0.342
+    x 8 interleaved expert streams (measured)   x2.50   -> 0.855
+    engine measured                             1.250 us/row
+    residual 1.46x
+Two independently measured factors, multiplied, account for ~68% of the gap and the direction of what is left (a 9th stream set,
+contention between the two effects, and the per-call activation quantiser at 11.8 us/call) is consistent with the remainder. There
+is no mysterious seventh mechanism: there are two ordinary memory effects that were each measured in isolation and never
+multiplied.
+WHAT THIS MEANS FOR SPEED, and both levers are now quantified rather than hypothesised:
+  (1) kill the first touch: a resident expert cache avoids re-faulting trimmed file pages -> up to 1.95x on the memory-bound part
+  (2) lengthen the streams: bucketing by expert turns 8 short interleaved slabs into long runs -> up to 2.50x on the same part
+Combined they bound the expert path at up to ~4.9x on its memory component, which is why the earlier "batching saves only 3.1% /
+9.0%" arithmetic was answering a different question (duplicate WORK, not stream LENGTH or fault count). That arithmetic was correct
+and irrelevant; this one is relevant and was never computed.
+STATE: 108 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
