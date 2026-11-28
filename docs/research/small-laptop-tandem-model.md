@@ -2297,3 +2297,19 @@ THE CANCELLATION IN (c) IS THE NEXT HOLE and it is cheap to close: quantise a ra
 compare against the original - that measures the quantiser alone with no kernel involved.
 Reproduce with: bash tools/ref_check.sh   (expects AVX2/FMA/F16C; prints min/median/max rel err)
 STATE: 68 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## QUANTISER MEASURED ALONE: 3.751e-3 relative L2, as expected
+The kernel test consumes in2_q8_0_quantise on BOTH sides, so a defective quantiser would cancel out of it. Added a
+round-trip: quantise the float vector, dequantise with the block scales, compare to the original.
+  quantiser round-trip: rel L2 err 3.751e-03   (Q8_0, 32-element blocks, expected ~4e-3)
+3.751e-3 is the correct order for symmetric int8 with one fp16 scale per 32 elements (step = d, quantisation noise
+RMS = d/sqrt(12), d ~ 2*maxabs/255). So the quantiser is behaving as its format dictates - neither better (which would
+mean it is not actually quantising) nor worse (which would mean a scale bug).
+BOTH CHECKS TOGETHER now cover: kernel block iteration, scale application, int8 accumulation (2e-6 vs double spec), and
+the activation quantiser independently (3.8e-3, format-correct).
+THE RELEVANCE QUESTION THESE NUMBERS CANNOT ANSWER, and it is the important one: is ty=8 even the dominant expert type in
+this model? The reference test proves the Q8_0 path is correct, but the engine streams a 7.9 GB IQ2_XXS MoE and the hot
+tensor by census is blk.N.ffn_gate_up_exps. If those blocks are not Q8_0, this test is verifying a path that may be cold.
+NEXT STEP is therefore to print the ggml type of the expert tensors from the GGUF header, and only then decide which
+formats the reference test must cover to be relevant to the 39% of entry time spent in expert gate_up.
+STATE: 69 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.

@@ -104,6 +104,23 @@ int main(void)
     printf("  sample  ref[0]=%.6f got[0]=%.6f | ref[1]=%.6f got[1]=%.6f\n", ref[0], got[0], ref[1], got[1]);
     const int pass = (err[NROW - 1] < 1e-5);
     printf("  %s (tolerance 1e-5)\n", pass ? "PASS" : "FAIL");
+    /* --- quantiser round-trip: measures in2_q8_0_quantise ALONE, no kernel involved.
+     * The kernel test above consumes the same quantiser on both sides, so a wrong quantiser cancels out of it entirely.
+     * Q8_0 is symmetric int8 with one fp16 scale per 32 elements, so the expected relative L2 error is ~4e-3. */
+    {
+        double num = 0.0, den = 0.0;
+        for (int b = 0; b < NB; ++b) {
+            const double d = (double) in2_f16_to_f32(aq[b].d);
+            for (int i = 0; i < 32; ++i) {
+                const double q = d * (double) aq[b].qs[i];
+                const double e = q - (double) x[b * 32 + i];
+                num += e * e; den += (double) x[b * 32 + i] * (double) x[b * 32 + i];
+            }
+        }
+        const double rel = sqrt(num / den);
+        printf("  quantiser round-trip: rel L2 err %.3e (Q8_0 32-elem blocks, expect ~4e-3)\n", rel);
+    }
+
     free(w); free(x); free(aq); free(ref); free(got);
     return pass ? 0 : 1;
 }
