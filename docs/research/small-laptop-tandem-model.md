@@ -2004,3 +2004,25 @@ WHAT IS LEFT, and it is now a short and honest list:
   2. ~9% from keeping the head's PCIe upload out of short runs and warming blk.0 once.
   3. in2_matvec_quant is now a NAMED target: any kernel-level work belongs there, validated with MOEPATH unchanged.
 GATE: 15/15, 54 commits, tree clean, throughput ~3.6 tok/s (this measurement), unchanged.
+
+## THE BATCHING CEILING, MEASURED BEFORE BUILDING IT: 1.65x, not 3x
+A forward that processes 12 positions at once already exists - it is the prefill path - so it bounds what batching decode
+could buy without writing any new kernel:
+  A: 12 positions in ONE forward   : 2.0 s for 12 positions = 167 ms per position
+  B: 12 tokens decoded one at a time: 3.3 s = 3.66 tok/s  = 275 ms per token
+  ratio 275/167 = 1.65x
+CAVEAT, stated in the same breath as the number: A pays quadratic attention over 12 positions and is the full-recompute
+path, so a real batched decode would sit somewhere at or below this ratio; and A's own tok/s display (0.50) is meaningless
+because it counts one generated token for twelve positions of work.
+SO THE HONEST CEILING FOR THE LAST BIG LEVER IS ~1.65x: ~3.66 tok/s today, ~6.0 tok/s if decode were batched with perfect
+acceptance and no added cost. That is worth having, and it is far short of the 3x that the retracted forward-count error
+implied. It also explains why no amount of kernel or prefetch work moved the number: those change how FAST a byte is
+consumed, while batching changes HOW MANY bytes are needed per token, and only the second moves the ceiling on a stream this
+large relative to RAM.
+FINAL SHAPE OF THE SEARCH, after 55 commits and three instruments:
+  measured zero      : prefetch (3 sites, 3 instruments), thread count (flat), dequant cache budget, kernels when warm
+  measured small     : head PCIe upload (6% of a 12-token run, one-time 312 ms), blk.0 cold page-in (3.1%)
+  measured ceiling   : batching ~1.65x (this section)
+  named but unbuilt  : in2_matvec_quant as the single hot expert kernel, 352 calls per token
+  unexplained        : nothing that affects throughput - the 22-vs-8 call anomaly was resolved by the path tags
+GATE: 15/15, 55 commits.
