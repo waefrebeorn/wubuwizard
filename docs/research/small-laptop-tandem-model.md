@@ -1704,3 +1704,30 @@ WHAT ACTUALLY MOVES THE NEEDLE NOW, in order:
      the head is not.
   3. Only after that does kernel speed matter - and we already know the kernels run at 39.5 GB/s when the bytes are warm.
 GATE: 15/15. Instrument kept: READIO + PAGEFAULT lines in the PERF block.
+
+## IN2_DQ_MB DOES NOT TOUCH THE DISK TRAFFIC - the existing dequant cache cannot hold the head
+  IN2_DQ_MB=256 : 3.43 tok/s, read 2126.7 MB
+  IN2_DQ_MB=1024: 3.43 tok/s, read 2126.8 MB
+Identical traffic at three orders of magnitude of cache budget, so the dequant cache never sees these reads. Whatever it
+caches is not the path the matvec takes for the head or the layer weights.
+(IN2_DQ_MB=0 printed nothing at all - it looks like a hard failure rather than "disabled", worth knowing before anyone
+tries to use 0 as an off switch.)
+THE HEAD-RESIDENT FIX, SPECIFIED BUT NOT YET BUILT (this is the next concrete change):
+  problem: ~186 MB of disk reads per token, of which ~119 MB is the LM head (201024 x 2304 at 2.06 bpw) re-read EVERY
+  token - about 64% of per-token traffic for a tensor that is used exactly once per token.
+  mechanism: the engine already has a raw-pointer quantised kernel - wubu_iq_rows(ty, w, row_bytes, n, act, nt, out, r0, r1)
+  in wubu_iq_c11.c - which takes the weight bytes as a void*. So the head does not need the ctx at all:
+    1. first use: malloc 119 MB, read output.weight's bytes ONCE into it (wubu_inkling2_read into a plain buffer), keep it
+       in a static; also cache ty and row_bytes from ot.info.
+    2. every token after: quantise the activation once (the q8/q8_K block quantiser already used by in2_matvec_nt), then
+       call wubu_iq_rows over row ranges against the resident buffer instead of re-reading through the mapping.
+  expected: per-token disk traffic falls from ~186 MB to ~67 MB (the layer weights only), i.e. up to ~2.7x on a purely
+  I/O bound path - and unlike every kernel experiment this session, that prediction follows directly from two measured
+  numbers (186 MB/token and 637 MB/s) rather than from a mechanism guess.
+  acceptance: READIO bytes per 12-token run falls by roughly 1.4 GB, tok/s rises proportionally to the traffic removed,
+  and the gate stays 15/15 (the bytes are identical, only their storage location changes - so identity should be exact).
+NOTE ON WHY THIS WATER IS UNTESTED: it is a ~100-line change touching the head path and the activation quantiser, and it
+needs a build-fix-verify loop; the session has already shown that unverified edits here cost more than they return (two
+stale-binary readings, one link error, four retractions). The specification above is deliberately complete enough to
+execute cold in a fresh context.
+GATE: 15/15, 41 commits, tree clean.
