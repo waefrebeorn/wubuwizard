@@ -1062,3 +1062,20 @@ kernel call byte-identical - same arguments, same row count, same blocking, same
 preserved by construction rather than hoped for. Expected saving is min(q, kv) ~ 23 ms of a 285 ms token (~8%), and
 it composes with the same trick over the three rmsnorms.
 GATE: 15/15 after reverting.
+
+## OP PARALLELISM IS A LOSS, AND PAIRWISE INTERLEAVING IS NOT ENOUGH (methodology correction)
+Took the admissible route from the rejected row-split: run the independent wk and wv projections of a decode step in
+two OpenMP sections. Nothing about either call changes - same arguments, row count, kernel, blocking, summation
+order - so the tokens stayed identical (verified: default IDENTICAL, OPPAR IDENTICAL).
+FIRST RESULT (5 pairwise interleaved, A then B every pair): 3.552 -> 3.600 tok/s = +1.4%, 5/5 wins. Encouraging.
+Then flipping the default to ON and re-running the loop the other way round (OPPAR first, opt-out second) gave the
+OPPOSITE: opt-out 3.64 three times running against OPPAR 3.56/3.62/3.61. The arm that runs SECOND in each pair wins
+regardless of which arm it is - an order effect from page cache and GPU warm-up, not from the change.
+ABBA x2 settled it (A=OPPAR, B=opt-out):
+  A 3.59 3.59 | B 3.62 3.59 | B 3.59 3.61 | A 3.59 3.57   -> A mean 3.585, B mean 3.610
+Verdict: op parallelism is -0.7%, a small LOSS. A parallel region per layer (24 per token) costs more than two
+concurrent matvecs save. Reverted; gate 15/15.
+METHODOLOGY CORRECTION, the important part: pairwise interleaving alone does not remove order bias, because one arm
+always runs first in every pair. The protocol must alternate (ABBA) so each arm occupies both positions equally.
+Both the "+0.7% lazy alloc" (measured pairwise) and this "+1.4%" (measured pairwise) are therefore suspect in
+magnitude; the lazy-alloc direction was corroborated by 5/5 wins but its size is not trustworthy either.
