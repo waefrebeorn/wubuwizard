@@ -1858,3 +1858,25 @@ THE 22-vs-8 ANOMALY IS STILL UNEXPLAINED. Possible readings, none verified:
 MEASUREMENT THAT WOULD SETTLE IT: print the distinct elem_off values per forward for one layer and count uniques against
 TOPK=8 - one more probe, and it is the next concrete step.
 STATE: tree clean, gate 15/15, 47 commits. Throughput unchanged at ~3.45 tok/s cold.
+
+## THE 22-vs-8 ANOMALY WAS A FORWARD-COUNT ANOMALY: ~3.7 forwards per generated token
+EXPOFF probe on the 12-token KV run: 4,224 ffn_gate_up calls, and only 127 DISTINCT elem_off values (< NE=128, so the
+offset is a per-tensor expert index and essentially every expert is selected at least once).
+THE ARITHMETIC IS FORCED: 4,224 / (12 MoE layers x TOPK 8) = 44 forwards for 12 tokens = 3.7 forwards per generated token.
+Independent corroboration: the 1-token run is known to do 4 forwards, i.e. 4 per token. So the "KV cache" path is doing the
+same ~4 forwards per token, and 4,224/127 = 33 calls per expert index follows directly.
+WHAT THIS MEANS, and it dwarfs everything else measured this session:
+  - each forward streams ~102 MB of layer weights plus the experts it touches; at 3.7 forwards/token the traffic is several
+    times the ~186 MB I derived from assuming ONE forward per token.
+  - the ~3.45 tok/s is therefore not "SSD speed for 186 MB/token", it is "SSD speed for ~3.7 forwards worth of traffic per
+    generated token". The single biggest lever is not batching, not kernels, not residency - it is WHY 3.7 forwards happen.
+  - the DSpark drafter referenced in model.c is the obvious explanation: a draft forward plus verification forwards per
+    token. If those extra forwards are not buying accepted tokens, removing them is up to ~3.7x.
+  - CONFIRMED CROSS-CHECK: ENTRY nt=4144 for the same run = 94.2 per forward at 44 forwards, vs 448/4 = 112 per forward on
+    the full-recompute path - the same order, which is what an extra-forwards reading predicts and a one-forward reading
+    does not.
+THE NEXT MEASUREMENT IS NOW UNAMBIGUOUS: count forwards per token directly, in the token loop, and attribute each one
+(draft / verify / main). Everything else in this session's backlog is secondary to that number.
+CORRECTION TO EARLIER SECTIONS: the ~186 MB/token figure assumed one forward per token. It is a per-forward figure, and the
+per-token figure is ~3.7x it. The I/O-bound conclusion is unaffected (indeed strengthened); the accounting was wrong.
+GATE: 15/15, 48 commits, tree clean.
