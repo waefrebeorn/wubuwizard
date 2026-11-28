@@ -1211,3 +1211,21 @@ row-range entry inside in2_matvec_nt itself so the f16 lane receives an ident-de
 CPU path uses nt's buffer/blocking rules - and (2) verify against the oracle before any timing. Reordering-based
 explanations are retired; this is an engine-consistency problem.
 STATUS: tree reverted and clean, gate 15/15. No timing claimed for row parallelism in either direction.
+
+## ANSWER: THIS KERNEL'S OUTPUT DEPENDS ON n_out, SO IDENTITY-PRESERVING ROW PARALLELISM DOES NOT EXIST HERE
+Third and cleanest implementation, and it closes the question. Instead of introducing a second kernel, this version
+advanced the tensor's file_offset by row_off * row_bytes and called the SAME in2_matvec_nt with a reduced n_out - so
+each block got nt's own buffer sizing, its own be (32/256) selection, its own supported/verified gate and its own
+fallback. Per-row code path identical to the full call by construction.
+RESULT, fresh build (the previous attempt's IDENTICAL readings were from a stale binary and are void):
+  blk=256  MISMATCH      blk=512  MISMATCH      blk=1152 MISMATCH      GPU+ROWPAR MISMATCH
+A block equal to the full n_out trivially reproduces the original call; ANY proper sub-range does not. Therefore the
+rows of this kernel are NOT independently computed - the arithmetic of a row depends on how many rows are requested in
+the same call. That is why every one of the three independent implementations failed, and it is a property of the
+kernel, not of the caller.
+CONSEQUENCE, stated plainly: there is no identity-preserving way to parallelise a single-row dense projection through
+this kernel. Row splitting, op splitting (measured -0.7%), and the GPU residency route (does not fit) are all excluded.
+Multi-core decode would require rewriting the kernel so each output row is computed independently of n_out - a
+quantisation-kernel change with its own gate, not a wiring change. That is the honest boundary of what this codebase
+can do today, and it is now a fact rather than a series of failed guesses.
+GATE: 15/15 after reverting. Tree clean.
