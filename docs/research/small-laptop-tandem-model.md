@@ -3388,3 +3388,22 @@ THAT LAST NUMBER IS THE NEXT TARGET, and it is measured, not hypothesised: 1.9x 
 kernel that is already at probe speed means the workers are idle half the time - the same signature the earlier WJ concurrency probe
 showed (conc=2.5x, ~0.33x per thread, no plateau). The work is there to schedule; it is not being scheduled.
 STATE: 115 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
+
+## CORRECTION TO THE SECTION ABOVE: "26% of the model per token" IS WRONG, and the traffic figures were low by ~6x
+The line I just wrote saying 2.25 G elements is ~26% of the model came from dividing by a byte figure that does not correspond to
+the 0.32 bytes/element I used in the same sentence. Done consistently:
+    975,168 rows x 2304 elements = 2.247 G elements/token
+    at IQ2_XXS 2.56 bits  ->  719 MB/token   8.5% of the model   ~3.7 GB/s at 0.192 s
+    at a mixed ~6 bits    -> 1685 MB/token  19.8% of the model   ~8.8 GB/s
+    at Q8_0 8.5 bits      -> 2387 MB/token  28.1% of the model  ~12.4 GB/s
+So the honest statement is: between 0.7 and 2.4 GB of weights are touched per token depending on the type mix, and the engine's
+effective kernel rate is 3.7-12.4 GB/s, not the 0.5-0.8 GB/s quoted repeatedly earlier. Those earlier numbers came from an
+over-tight traffic estimate (110-160 MB/token) that survived several sections because it was never recomputed from the row count.
+The per-row conclusion of the previous section stands unchanged, because it was computed from rows and seconds and never touched a
+byte figure: 0.197 us/row against a 0.175 us/row probe, 1.13x. It is the derived BYTE and PERCENT claims that were wrong, and they
+are corrected here rather than left standing.
+This is the third denominator correction in four turns, and the pattern is now unmistakable: every time I convert rows to bytes I
+introduce an error, because the type mix varies per tensor and I keep substituting a single representative value. The rule that
+would have prevented all three: never quote a byte figure derived from a row count without enumerating the per-tensor types, and
+prefer rows and seconds as the primary units in this document.
+STATE: 116 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
