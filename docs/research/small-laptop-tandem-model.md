@@ -3001,3 +3001,31 @@ NEXT STEP IS A PHASE BREAKDOWN, not a kernel rewrite: the engine already carries
 "which of these 186.9 ms is the head, which is the quantiser, which is a barrier?" is a measurement, not a guess. Parallelising
 the wrong 30 ms would move throughput by 1.5%.
 STATE: 99 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## THE 186.9 ms IS PER-CALL WAKE/JOIN OVERHEAD: 343 parallel regions per token x 0.545 ms
+Phase instrumentation (IN2_PERF, 16 tokens hot, 3.5 s wall = 218.8 ms/token):
+    PHASE[0] f_loads     0.002 s    PHASE[4] f_attn      0.091 s
+    PHASE[1] f_mix+gate  0.055 s    PHASE[5] f_gate+wo   0.076 s
+    PHASE[2] f_q         0.036 s    PHASE[6] f_mlp+moe   0.264 s
+    PHASE[3] f_kv+conv   0.056 s    PHASE[7] unused      0.000 s
+    sum = 0.580 s / 16 tokens = 36.3 ms/token = 17% OF THE WALL. Unaccounted: 182.5 ms/token.
+So 83% of the token happens in no phase at all - and 182.5 ms matches the Amdahl serial term (186.9 ms) to within measurement noise.
+Solving the per-call model with the known call count (ENTRYTIME reported 5488 calls over 16 tokens = 343 per token):
+    T(1) = 415.8 ms, T(8) = 215.5 ms, n = 343 calls/token
+    per-call work        w = 0.667 ms
+    per-call FIXED cost  c = 0.545 ms     ->  c x 343 = 187 ms/token = 45% of the single-thread token
+c and w are nearly EQUAL at one thread. That is why adding threads barely helps: the pool-amortised work falls (0.667 -> 0.083 ms)
+while the fixed cost does not move at all, so at 8 threads the fixed cost is 6.5x the work it is amortising.
+AND THE FIXED COST IS NOT THREAD CREATION: src/wubu_inkling2_fwd.c:144 already documents a persistent pool ("Persistent pool,
+not CreateThread per call: the range work is identical, so the split cannot change results"). So the 0.545 ms is WAKE + JOIN
+LATENCY per dispatch - semaphore/condition-variable handoff, cache-line bouncing on the shared counters, and the barrier at the
+end of each range - paid 343 times per token.
+THIS IS THE MOST ACTIONABLE FINDING OF THE ARC, and it is identity-safe by construction: the work split is unchanged, only
+how often the workers are woken. Two independent levers, either of which attacks the same 187 ms:
+  (1) SPIN-AND-DEFER: after finishing a range, workers spin (pause loop) for a bounded window before sleeping, so back-to-back
+      dispatches never pay a full wake. 343 wakeups/token become ~a handful.
+  (2) COALESCE DISPATCHES: one parallel region per LAYER (or per expert group) instead of per matvec, cutting 343 regions to
+      ~50, which divides the overhead by 7 without touching any arithmetic.
+Either would move the ceiling from 5.35 tok/s toward the 8.2 tok/s that removing the serial term implies
+(1/((0.187-0.170)+0.229/8) ~ 8.2). Nothing here changes a single token: the gate is the arbiter.
+STATE: 100 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
