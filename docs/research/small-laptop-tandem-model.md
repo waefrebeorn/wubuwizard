@@ -3232,3 +3232,23 @@ Combined they bound the expert path at up to ~4.9x on its memory component, whic
 9.0%" arithmetic was answering a different question (duplicate WORK, not stream LENGTH or fault count). That arithmetic was correct
 and irrelevant; this one is relevant and was never computed.
 STATE: 108 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## THE DEFAULT EXPERT PATH ALREADY PARALLELISES OVER k WITH A CONTIGUOUS SLAB PER THREAD - so lever (2) is partly built
+Reading the MoE loop in wubu_inkling2_fwd.c: "Experts are independent, so the k loop is the natural parallel axis: with n_tok == 1
+it is the only one that gives a thread a whole contiguous expert block to stream, which is what this phase is bound by." That is
+lever (2) - stream length - already implemented in the DEFAULT path, not behind the IN2_MOE_BATCH opt-in (which additionally needs
+a GPU batch function and is gated on ty in {16,22} and in2_gpu_state == 1).
+TWO CONSEQUENCES, and the second is the useful one:
+  - the 2.50x stream factor measured by stream_probe describes a pattern the engine does NOT have by default, so the arithmetic
+    "1.95 x 2.50 = 4.9x available" OVERSTATES what bucketing could buy; a chunk of it is already banked.
+  - by the same reading, the residual between the modelled 0.855 us/row and the measured 1.250 is not explained by interleaved
+    streams either, and the one factor in the model that is still fully unmitigated is the FIRST TOUCH of trimmed file pages
+    (measured 1.95x on the real slab). That is the lever with both a measured size and no existing implementation: the engine
+    explicitly EXCLUDES experts from its resident tier ("Experts are excluded by name: they are 48x128 distinct slabs, and 48x128
+    slabs is far more than the resident tier can hold").
+NEXT CONCRETE STEP, precisely scoped and identity-safe: make the resident tier admit SOME experts - a small LRU of the hottest
+few MB - and measure (a) tok/s and (b) the per-token fault count. The prediction from this document is that the fault count drops
+by the fraction of expert traffic served from the tier and throughput moves in proportion, up to the measured 1.95x on the
+memory-bound part. If the fault count does NOT drop, the first-touch factor is not being paid on expert bytes at all and the whole
+memory model here needs rebuilding before any cache work continues.
+STATE: 109 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
