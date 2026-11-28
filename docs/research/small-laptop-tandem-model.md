@@ -3770,3 +3770,25 @@ matvecs at 25 GB/s, each at the memory wall. The lever that worked (batched inde
 in the engine that had 25 of them. Recovering more now requires either fusing the dependency chain's independent halves (q and kv can
 share a region; they do not depend on each other) or a fundamentally faster dense kernel, not more threads.
 STATE: 133 commits, gate 15/15 (binary 12:42:48), identity exact, kernel coverage 192/192, 5.23-5.28 tok/s.
+
+## THE ARC REACHES ITS OWN MEASURED CEILING: 5.25 tok/s against an Amdahl ceiling of 5.35
+    measured now        5.22-5.28 tok/s
+    Amdahl ceiling      5.35 tok/s   (S = 186.9 ms serial, fitted earlier in this arc from the thread sweep)
+    fraction reached    98%
+The ceiling was computed from a measured serial fraction long before any of the twelve hypotheses, six instrument repairs or the
+per-step reconciliation. The engine has now been brought to within 2% of it, and the route was not the one the hypotheses predicted: the
+head's chunk loop, parallelised across 25 independent calls, was worth 10% end to end and closed most of the gap.
+WHY THE REMAINING 2% IS NOT WHERE TO LOOK NEXT, quantified:
+    traffic per token  head 201,024 x 2304 Q8_0 = 462 MB, experts ~262 MB, dense ~500 MB  => ~1.2 GB
+    at the measured 172 ms step      = 7.0 GB/s
+    at the ~40 GB/s streaming peak   = 30 ms/token = 33 tok/s
+So there is 5.7x of HEADROOM IN BANDWIDTH but only 2% of headroom in the current schedule. The two facts together say the bottleneck is
+neither bandwidth nor kernels: it is the dependency chain. A single decode step is 48 sequential layer visits, each a q -> kv -> attn ->
+gate+wo -> moe chain of one-call-per-tensor matvecs, and every attempt to parallelise INSIDE that chain loses to spawn cost (measured:
+IN2_NT1_MT 7% slower). The only parallelism that pays is across independent calls, and the head was the last place with 25 of them.
+THEREFORE the next 5x does not exist inside this loop shape. It requires one of: (a) processing multiple requests or multiple draft tokens
+per step so independent work exists to fill 8 threads (speculative decoding already exists in the tool and is the natural next lever),
+(b) moving the dense matvecs to the GPU lane (the f16 path exists and IN2_GPU_F16 is present but must stay unset until verified), or
+(c) a fundamentally faster dense kernel against the same bytes, which the 25 GB/s measurement says is not available - the kernel is already
+at the wall.
+STATE: 134 commits, gate 15/15, identity exact, kernel coverage 192/192, 5.22-5.28 tok/s = 98% of the measured ceiling.
