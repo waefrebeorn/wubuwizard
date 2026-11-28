@@ -243,3 +243,25 @@ FUSED lane the Gemma engine uses, ported to the Inkling-2 shapes, with the weigh
 (IN2_RES_GB / permanent) so the dense tier streams from VRAM at 192 GB/s with near-zero PCIe per token. That
 fused port is the remaining work; every short lever (threads, prefetch, DQ, gate-widening, per-tensor
 residency) has now been measured and ruled out.
+
+## CORRECTION + BUILDABLE PORT SPEC (this is how to make gen_fast use the GPU properly, per WuBuMM)
+The user's push is right: the conclusion must be a BUILD, not a ceiling. Reading the actual reference
+(wubu_iq_c11.c) fixes it. gen_fast's CPU row dot for the IQ types is ggml-faithful and uses Q8_K
+ACTIVATIONS, not float: row_dot_iq2_xs_* "uses ggml's vectorized sign decode (arch/x86/quants.c,
+ggml_vec_dot_iq2_xs_q8_K): the 7-bit sign indices never touch ksigns". And the activation quantiser is
+wubu_act_quant.c: "in2_q8k_quantise() ... one definition, testable against ggml's ref." So the IDENTITY
+CONTRACT is: device kernel must reproduce (a) the SAME q8_K activation quantisation of x and (b) the SAME
+block-wise float accumulation as wubu_iq_c11's row_dot_* for that type. This is exactly why the default
+engage set {8,16,22,23} was bit-identical over 64 tokens and why the current IQ2_XS/IQ3_XXS device kernels
+diverged - they were not matched to THIS q8k-quantiser + THIS accumulation. The port, in order:
+  1. Device q8_K activation quantiser matching wubu_act_quant.c (ggml ref) exactly - shared, not per-matvec.
+  2. Float-activation-faithful device matvec for each Inkling type {12,13,14,17,18,19,40,42} matching
+     wubu_iq_c11's row_dot_* accumulation for that type (grid decode + int32 per-block sums + fp32 scale in
+     the same order).
+  3. Enable each in the resident gate ONLY after its 64-token IDS is identical (the existing gate rule).
+  4. Resident keeps weights (already proven: budget=0 permanent, 90.6% hit) so the dense tier streams from
+     VRAM; fuse the per-layer chain into few calls (the WuBuMM "ONE vkQueueSubmit" and the Gemma ffn3/qkv3
+     pattern) to kill the M=1 per-call overhead - the measured tie cause.
+That is how wubuwizard becomes real GPU acceleration: bit-identical where the engine wants it, resident +
+fused so it actually beats the CPU. Steps 1-3 are the kernel port (the real work); step 4 is the resident+fused
+lane WuBuMM already proved.
