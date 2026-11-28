@@ -10,6 +10,9 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <math.h>
 #include <string.h>
 #include <math.h>
@@ -475,13 +478,19 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                 if (in2_matvec_quant(ctx, &ot, 0, fin, cfg->vocab_size, d, logits_out) != WUBU_INKLING2_OK)
                     head_done = 0;
             } else {
+                /* Chunks write disjoint slices of logits_out and each row is an independent dot, so this is
+                 * identity-safe. It was serial: 25 chunks x ~650 us = 16 ms of a 172 ms step on one thread. */
+                int _hbad = 0;
+#ifdef _OPENMP
+                #pragma omp parallel for schedule(dynamic) num_threads(omp_get_max_threads())
+#endif
                 for (int r = 0; r < cfg->vocab_size; r += CHUNK) {
                     const int n = (r + CHUNK <= cfg->vocab_size) ? CHUNK : (cfg->vocab_size - r);
                     if (in2_matvec_quant(ctx, &ot, (int64_t)r * d, fin, n, d, logits_out + r) != WUBU_INKLING2_OK) {
-                        head_done = 0;
-                        break;
+                        _hbad = 1;
                     }
                 }
+                if (_hbad) head_done = 0;
             }
             if (!_hp && getenv("IN2_TIMETY")) {
                 extern double in2_ty_sec[256]; extern long in2_ty_calls[256]; extern double in2_ty_macs[256];

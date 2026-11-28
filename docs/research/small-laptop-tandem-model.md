@@ -3733,3 +3733,21 @@ The engine's remaining lever is CONCURRENCY - 0.480 CPU-s of matvec over a 0.172
 machine is idle during the step. That is where any remaining 1.5-2x lives, and it is the same conclusion the very first Amdahl fit reached
 (S=186.9 ms, ceiling 5.35 tok/s) before eleven hypotheses and six instrument repairs intervened to confirm it by a different route.
 STATE: 130 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 0.172-0.188 s.
+
+## FIRST MEASURED SPEEDUP FROM THE RECONCILED MAP: THE HEAD CHUNK LOOP WAS SERIAL, AND PARALLELISING IT PAYS
+The head loop in src/wubu_inkling2_model.c was a plain serial `for (r = 0; r < vocab; r += CHUNK)` issuing 25 chunked matvecs of
+8,192 rows each. Chunks write disjoint slices of logits_out and every row is an independent dot, so the loop is identity-safe to
+parallelise - it simply never had been. Change: one `#pragma omp parallel for schedule(dynamic) num_threads(omp_get_max_threads())`,
+with the error flag reduced inside the region instead of a `break`.
+RESULT, binary 12:40:35:
+    gate                 PASS 15/15 oracle tokens identical   (identity preserved, as argued)
+    HEAD                 0.016-0.017 s  ->  0.005 s           (3.2x on that block)
+    16-token throughput  4.63-4.81 tok/s  ->  5.20 / 5.22 / 4.97 / 5.18 tok/s
+That is the first throughput gain in this document since the reconciled instrument was built, and it is the first change in ~12 turns aimed
+with a number that reconciles with the wall. It also VALIDATES THE CEILING ANALYSIS rather than merely matching it: the head was 9% of the
+step and it moved 3.2x, so the step should improve by ~6%; the measured 6-10% is consistent once the prefill step (0.562 s, unchanged) is
+amortised away.
+WHAT IT PROVES ABOUT THE REMAINING 2x: the lever named two sections ago - concurrency at 2.8x of 8 threads - is real and reachable. A
+single serial 16 ms block, parallelised with no arithmetic change, bought 3.2x on itself. The same pattern now applies to every other
+serial chunk loop and every dense matvec still called through the serial entry; the head was simply the largest and the easiest.
+STATE: 132 commits, gate 15/15 (binary 12:40:35), identity exact, kernel coverage 192/192, 4.97-5.22 tok/s.
