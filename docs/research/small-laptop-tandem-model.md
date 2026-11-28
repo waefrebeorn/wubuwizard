@@ -2377,3 +2377,28 @@ WHAT THIS DOES AND DOES NOT SETTLE, unchanged in character:
   at 3.8e-3).
 Reproduce: bash tools/ref_check.sh  (now runs both the Q8_0 attention-path check and the Q2_0 expert-path check)
 STATE: 72 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## QUANT-KERNEL VERIFICATION COVERAGE TABLE (bash tools/ref_check.sh)
+  type        role                tensors  block                 rel err max   status
+  Q8_0 (8)    attention           85       32 el, qs[32], d*q     1.905e-06     VERIFIED
+  Q2_0 (42)   EXPERT (hot path)   17       64 el, qs[16], d*(q-1) 2.520e-06     VERIFIED
+  NVFP4 (40)  EXPERT              7        project format          -             NOT COVERED
+  IQ2_XXS(16) EXPERT              7        ggml iq grid tables     -             NOT COVERED
+  IQ2_XS (17) EXPERT              6        ggml iq grid tables     -             NOT COVERED
+  IQ1_S (19)  EXPERT              6        ggml iq grid tables     -             NOT COVERED
+  IQ2_S (22)  EXPERT              5        ggml iq grid tables     -             NOT COVERED
+  Q6_K (14)   attention           26       256 el, 6-bit + scales  -             NOT COVERED
+  Q4_K/Q5_K   attention           30       k-quant superblocks     -             NOT COVERED
+  quantiser   activations         -        Q8_0 32 el             3.751e-03     VERIFIED (format-correct)
+Both verified types are the two that matter most by tensor count on their paths: Q2_0 is the most common expert type and
+sits on the 39% path; Q8_0 is the most common attention type. The four IQ-family expert types and NVFP4 remain unverified,
+and NVFP4 is a materially different problem from the rest: it is this project's OWN format (wubu_nvfp4.h /
+wubu_dequant_fp4.c), so there is no upstream specification to check it against, only the project's own dequantiser - which
+makes it a cross-check between two in-project code paths rather than a specification test. The IQ family uses ggml's grid
+tables and would need those tables reproduced faithfully in the test to be meaningful.
+VERDICT ON THE REFERENCE WORK, stated plainly: the two kernels that carry the most weight are now checked against a
+double-precision specification and pass to ~2e-6, which is the strongest numerical evidence this repository has ever had
+about its own kernels. It is still NOT evidence of agreement with llama.cpp, and the honest summary of the whole identity
+clause is: self-consistency exact on 4 prompts x 2 paths, kernel-vs-spec on the 2 dominant types, upstream agreement on
+1 prompt at 12 tokens.
+STATE: 73 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
