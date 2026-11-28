@@ -913,6 +913,8 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
                      const float *x, int n_out, int n_in, float *y)
 {
     const double _q0 = in2_now();
+    if (getenv("IN2_EXP_OFF") && t && t->info && strstr(t->info->name, "ffn_gate_up"))
+        fprintf(stderr, "EXPOFF off=%lld n_out=%d n_in=%d\n", (long long) elem_off, n_out, n_in);
     const int rc = in2_matvec_quant_impl(ctx, t, elem_off, x, n_out, n_in, y);
     in2_cs_add2(1, t, n_in, n_out, in2_now() - _q0);
     return rc;

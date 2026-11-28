@@ -1841,3 +1841,20 @@ THIS CLOSES THE HEAD QUESTION. Remaining, in order: expert weight volume (batchi
 the 2.75x gap between 22 expert gate_up calls per token per layer and the TOPK=8 the router reports - which is still
 unexplained and is the one remaining anomaly worth a measurement.
 GATE: 15/15, 46 commits.
+
+## THE EXPERTS TAKE A DIFFERENT ENTRY POINT DEPENDING ON THE PATH
+EXPOFF probe (prints elem_off for every ffn_gate_up call):
+  1-token run  (full-recompute path, 4 forwards): ZERO ffn_gate_up calls through in2_matvec_quant
+  12-token run (KV path):                         264 calls = 22 per token per layer of blk.16
+So the MoE expert matvecs do not go through in2_matvec_quant at all on the full-recompute path - they must be issued through
+a different entry (a batched MoE helper, or in2_matvec_nt, which the shape table would have shown as 2304>2304 and, on the KV
+run, did not). Two different dispatch paths for the same mathematical work is itself a finding: any optimisation written
+against one entry point will silently miss the other, which is exactly how the prefetch and row-split work in this session
+came to nothing.
+THE 22-vs-8 ANOMALY IS STILL UNEXPLAINED. Possible readings, none verified:
+  - gate_up is issued per row chunk, not per expert (2304 rows / ~1024 = 3 chunks x 8 experts = 24, close to but not 22);
+  - the router selects 8 experts but the loop also evaluates the shared/dense expert and re-runs some;
+  - the counter is double-counting a retry path.
+MEASUREMENT THAT WOULD SETTLE IT: print the distinct elem_off values per forward for one layer and count uniques against
+TOPK=8 - one more probe, and it is the next concrete step.
+STATE: tree clean, gate 15/15, 47 commits. Throughput unchanged at ~3.45 tok/s cold.
