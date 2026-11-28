@@ -3084,3 +3084,34 @@ because they change only how bytes are addressed, not which bytes or in what ord
 fault and the TLB pressure at once. Its cost is an extra memcpy of 162 MB/token, which at ~10 GB/s of copy bandwidth is ~16 ms
 against the 187 ms it would remove.
 STATE: 102 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## TLB HYPOTHESIS FALSIFIED BY MICROBENCHMARK - but the probe finds a 12x gap that is the real target
+Built tools/tlb_probe.c: run the Q8_0 row kernel over a working set swept from 0.53 MB to 136 MB at FIXED total work.
+    set=  1 slab =  0.53 MB   0.05 ns/elem  82.4 GB/s
+    set= 16 slabs = 8.50 MB   0.05 ns/elem  81.1 GB/s
+    set=256 slabs =136.00 MB  0.05 ns/elem  79.7 GB/s
+FLAT. Thirty-four thousand distinct pages, no knee at all. The TLB hypothesis from the previous section is FALSIFIED: if TLB
+reach were the limit, throughput would have collapsed once the working set exceeded a few thousand pages, and it did not move by
+1%. (A 512 MB first-touch pass also read 74 GB/s, though that point is SOFT - the probe's own warm-up loop touched one byte per
+page first, so it was not truly a cold mapping. Recorded as soft rather than quoted as evidence.)
+WHAT THE PROBE DOES ESTABLISH, AND IT IS MORE USEFUL THAN THE HYPOTHESIS IT KILLED: the kernel in isolation runs at
+~0.05 ns/element = ~80 GB/s effective on Q8_0 single-threaded. The engine's own parallel region reports 479.2 us for 384 rows
+of 2048 elements:
+    isolated kernel  : 0.050 ns/elem
+    in-engine region : 0.609 ns/elem   (479.2 us / 384 rows / 2048 elems)
+    ratio            : 12.2x slower inside the engine
+So the arithmetic is NOT the limiter - the same arithmetic costs 12x less when the bytes are already hot and the call is not
+gathered. Everything the engine does differently between those two cases is a candidate: the expert gather touching 8 scattered
+slabs per layer, the per-call activation quantisation, the different quant types per tensor (IQ2_XXS / NVFP4 / Q2_0 rather than
+Q8_0), and cold weight lines arriving from DRAM instead of L2.
+HYPOTHESIS LEDGER FOR THE SPEED CLAUSE, all six now measured rather than argued:
+  1 disk-bound            - killed by 5% residency gain
+  2 latency-bound loop    - killed by Amdahl (45% serial)
+  3 serial wake/join      - killed by conc=2.5x (workers already awake)
+  4 fault-lock            - killed by conc scaling 0.33x/thread without plateau
+  5 TLB pressure          - killed HERE by a flat 136 MB sweep
+  6 gather/hot-vs-cold gap - OPEN, and now quantified at 12.2x, which is the largest single discrepancy found anywhere in this arc
+The next experiment follows from #6 and needs no hypothesis about hardware: instrument the region that produced 479.2 us for 384
+rows and split it into (a) time inside the quant kernel and (b) time spent making the weights addressable, since a 12x gap is far
+too large to be arithmetic and must be dominated by whichever of those two the current counters do not separate.
+STATE: 103 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
