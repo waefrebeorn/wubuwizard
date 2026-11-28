@@ -548,3 +548,18 @@ Scope / honest limits:
   - SPEED: ~2% (12 tok 4200 ms CPU -> 4120 ms lane). Bounded because this is a MoE model: the dense tier is
     ~24 ms of a ~350 ms/token budget (~7%), so even a perfect dense lane cannot move the token much - the
     expert (MoE) traffic dominates. The "~1.4x" earlier applied to the dense TIER, which is a small slice here.
+
+## WuBuMM hi/lo f16 endian + WuBuHIVE ring FIFO: pack ALL, stream via hive (verified)
+Pulled WuBuMM (docs/H3_F16_ADAPTATION.md §6) and learned the hi/lo f16 endian trick: f16/bf16 is a 16-bit WORD
+(same bit layout everywhere; endianness only matters if the 2 bytes are read apart). bf16 is the HI 16 bits of an
+f32 -> decode is a BIT REINTERPRET, u=(uint32)bf16<<16; memcpy(&f,&u,4), never the numeric cast. Demonstrated:
+0x3F80 -> hi/lo = 1.000000, numeric cast = 1,065,353,216 (the exact 1.065e9 bug WuBuMM fixed). Packing two f16 into
+one u32 fills the 32-bit bus: on LE x86 u32 = w[2j+1]<<16 | w[2j].
+WuBuHIVE wb_hive (WuBuOS substrate) is built to REPLACE FIFO rings: stable contiguous slots + skipfield + freelist.
+tools/f16_hive_stream.c (built -static) packs ALL 646 tensors to u32 hi/lo over a bounded hive ring:
+  packed ALL: 646 tensors, 1,609,204,224 f16 words -> 804,602,112 u32 hi/lo words = 3.22 GB -> 3,564 slabs of 1 MB
+  bit-exact round-trip: PASS (mismatches=0)
+  hive ring: 16 slots live (16 MB working set), wb_hive_validate=0, 1232 slabs/s, 1.11 GB/s pack+verify
+KEY: the hive ring holds a 16 MB working set instead of 3.22 GB resident - the weights stream through it in FIFO
+order. This is the substrate to replace the 3.22 GB permanent VRAM residency with a bounded ring that beds each
+slab to VRAM as the decode walks the tensor order (next wiring step).
