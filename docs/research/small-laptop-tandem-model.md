@@ -1272,3 +1272,24 @@ concrete change, and it is a few lines rather than a kernel rewrite.
 ALSO: IN2_NOFAST=1 (force everything to the fallback) MISMATCHES the oracle, so the mix is load-bearing for correctness
 on at least one operator - the fallback cannot stand in for the kernel everywhere.
 GATE: 15/15, tree clean.
+
+## ROUTING MAP BY SHAPE (corrects the arithmetic used in every earlier cost estimate)
+IN2_TRACE_NT on a one-token run, grouped by shape (count, type, in, out, routing):
+   3  ty=12 n_in=2304 n_out=384  kernel
+   3  ty=14 n_in=2304 n_out=384  kernel
+  18  ty=8  n_in=2304 n_out=384  kernel
+  24  ty=30 n_in=2304 n_out=24   FLOAT-FALLBACK
+Two facts this settles:
+1. THE DENSE PROJECTIONS ARE 2304 -> 384, not 2304 -> 2304. qdim is 384 (24 heads x 16), so q, wgate and wo are each
+   ~0.88 MMAC, not 5.3 MMAC. My earlier "5.3 MMAC per call" figure was wrong by 6x and every rate derived from it was
+   wrong in the same direction. gate+wo at 49 ms/token for ~1.77 MMAC is ~36 MMAC/s - roughly 3-4 orders of magnitude
+   below this CPU. The phase is OVERHEAD bound beyond any doubt; the arithmetic is negligible.
+2. The 24 FLOAT-FALLBACK calls are ty=30 at n_out=24 - one per layer, the sink projection. That is the operator the
+   baseline deliberately runs on the fallback, and it is why IN2_NOFAST breaks the oracle: forcing the kernel onto a
+   type-30 tensor changes tokens. The blocked ops were NOT this one.
+UNRESOLVED: with the routing predicate exported and used as the block gate, the kernel-call count rose from 24 to 816
+while the fallback count stayed at 24, and tokens still mismatched - yet wq/wgate/wo are n_out=384 which is below the
+helper's 1024 threshold, so they should not have been blocked at all. Something other than my helper changed the call
+pattern, and that is unexplained rather than assumed. Reverted; gate 15/15; tree clean.
+NEXT DIAGNOSTIC (cheap): log the helper's entry ONCE (n_out, ty, predicate result, whether it blocked) into a single
+line per layer, so the 24->816 increase is attributed to a specific call site instead of inferred from aggregate counts.
