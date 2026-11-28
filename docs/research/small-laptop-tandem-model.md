@@ -1507,3 +1507,25 @@ same block count - super-scale/min handling, per-16 groups, byte shuffling, and 
 buffer per call. Q8_0 at 4.26 GB/s is the existence proof that the surrounding machinery (split, threading, mapping) is
 fine, so the defect is inside the Q6_K block decode.
 GATE: 15/15.
+
+## Q6_K IS NOT A MISSING-SIMD DEFECT - it is the canonical ggml AVX2 kernel
+Read, not assumed:
+  src/wubu_iq_c11.c:57   #define IQ_AVX2 __attribute__((target("avx2,fma,f16c")))
+  src/wubu_iq_c11.c:1536 IQ_AVX2 static float dot1_q6_K(...)  <- target attribute, so it is AVX2 codegen regardless of -march
+  src/wubu_iq_c11.c:1767 DEFINE_NEW_ROWS_8K(q6_K)             <- 8-row blocked rows kernel exists
+  src/wubu_iq_c11.c:1929 case 14: rows_q6_K(...)              <- and it IS the dispatch for ty=14
+The inner loop is the ggml_vec_dot_q6_K_q8_K AVX2 body verbatim: 4x q4bit unpack via maddubs, q4h_0..3 high-bit folding,
+and the -32 offset folded into q8sums x scales << 5. Nothing is left on the floor by inspection.
+So the 4.5x per-byte gap versus Q8_0 on the same shape is NOT a scalar fallback and NOT an arithmetic shortcut missed in
+the loop. What remains, in order of likelihood:
+  1. the ACTIVATION side: Q6_K requires q8_K (256-element blocks with 16 int16 bsums) while Q8_0 needs plain q8_0. The
+     act-quant span read 0.8 us/call, so the quantisation itself is not it - but a per-call scratch layout/size difference
+     for q8_K, or a bsums computation done per row instead of per call, would be.
+  2. the CALL MIX: the ty=14 2304->3072 calls may not all be the same tensor. 44 calls at 6197 us average can hide a few
+     very slow calls and many fast ones, and an average cannot distinguish them.
+  3. KB-per-row: Q6_K is 210 bytes per 256-weight block versus Q8_0's 272, so if the rows_8K path re-reads per row rather
+     than streaming, Q6_K's extra shuffle work per block dominates.
+NEXT CHECK, and it needs no new software: the same shape/type table, but printing min and max us/call per shape instead of
+only the mean. If ty=14's max is far above its mean, the 6197 us is a measurement of a bimodal mix and not of one kernel -
+which is the same trap that produced the last four wrong mechanisms, all of which were averages over mixtures.
+GATE: 15/15, tree clean, 32 commits, identity byte-identical.
