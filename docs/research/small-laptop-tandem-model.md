@@ -2509,3 +2509,28 @@ STATE: 77 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Wired an
 unverified against upstream - not because the kernel is wrong, but because the real-data harness still needs a correct
 file offset (the GGUF data-section origin must be recomputed properly, including the alignment rule actually used by the
 writer, rather than assumed as 32).
+
+## IQ2_XXS VERIFICATION IS OUT OF REACH FOR THIS FILE - upstream's dequantiser is not its oracle
+Scanned every byte shift s in 0..131 around the computed offset, scoring how many of 9 consecutive 66-byte blocks have a
+scale of the format's characteristic magnitude (1e-7..0.1):
+  s=99  ok=7/9  d=[+1.11e-05 +1.95e-02 +1.12e-05  -inf  +3.58e-06]
+  s=89  ok=7/9  d=[+8.00e+00 +1.12e-05 +3.20e+01  +1.12e-05 +1.46e-03]
+  s=83  ok=7/9  d=[+1.12e-05 -6.40e+01 +3.58e-06 +1.71e-03 +1.11e-05]
+  s=79  ok=7/9  d=[+1.12e-05 +9.77e-03 +1.12e-05 +1.07e-04 +3.52e-06]
+NO SHIFT GIVES 9/9, and the best cases contain -inf and +3.20e+01 alongside plausible values. A correct alignment would show
+nine small positive scales in a row. So this is NOT a one-or-two-byte misalignment that a shift could repair: the bytes at
+this tensor simply are not laid out as consecutive 66-byte block_iq2_xxs records.
+WHAT THAT MEANS, stated carefully because it is the third distinct explanation in this thread and the first two were wrong:
+  - the kernel is STILL not implicated: the engine reads this file correctly enough to reproduce the llama.cpp oracle 15/15,
+    and it routes ty=16 through wubu_iq_rows. So whatever layout this file uses, the engine agrees with it;
+  - therefore the layout is not ggml's block_iq2_xxs as I modelled it, and upstream's dequantize_row_iq2_xxs is the WRONG
+    ORACLE for these bytes. That kills the plan of verifying IQ2_XXS against upstream source, which is a real and bounded loss;
+  - the remaining unknown is the file's per-tensor layout for this type. It could be a UD (Unsloth Dynamic) rearrangement,
+    a different scale width (fp32 d would make the block 68 bytes, which the stride probe also refused), or my GGUF
+    data-section origin is still wrong for this file - the offset arithmetic has now been wrong once already, so it stays a
+    suspect rather than being ruled out.
+WHAT THIS DOES NOT CHANGE: the three verified kernels (Q8_0 1.9e-06, Q2_0 2.5e-06, Q6_K 1.9e-05 vs noise) stand, the
+activation quantiser stands at 3.8e-3, identity stands at 4 prompts x 2 paths plus 15/15 upstream, and throughput stands at
+4.45-4.65 tok/s. IQ2_XXS is recorded as UNVERIFIABLE WITH THE CURRENT ORACLE rather than as either verified or defective,
+which is the only honest of the three.
+STATE: 78 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
