@@ -657,3 +657,17 @@ vs low single digits naive). On this device that means pinning requiredSubgroupS
 supported) or tiling for 64-wide subgroups, then re-measuring v10-class kernels. Until that runs, the honest
 statement is: naive/fallback coopmat = 0.34-2.74 TFLOPS on this laptop; cuBLAS = up to 17.9 TFLOPS; the gap is
 TILING + subgroup width, not a Vulkan-vs-CUDA law.
+
+## HYPOTHESIS FALSIFIED: subgroup=64 is NOT why v10 fails (tested, pinned, no change)
+Enabled VkPhysicalDeviceSubgroupSizeControlFeatures{subgroupSizeControl,computeFullSubgroups} in the pNext chain
+and injected VkPipelineShaderStageRequiredSubgroupSizeCreateInfo{32} per pipeline (env WUBUMM_PIN_SUBGROUP=32).
+Result: the pin took effect (device accepted it), all working shaders still PASS cos 0.999999993, and
+  - shader 38 / v10 STILL fails pipeline creation (VK_ERROR_INVALID_SHADER_NV) - unchanged
+  - perf unchanged: V6 0.95, V5 0.89, W4 0.86, SMEM 0.45 TFLOPS at M=64 (vs cuBLAS 9.2 at the same shape)
+So subgroup width is RULED OUT as the cause. v10's failure is shader/resource-specific (VGPR pressure or a
+bad precompiled SPIR-V blob), not a device-config law. Two assumptions died by measurement this round:
+(1) "coopmat is inherently ~10x slower than cuBLAS" - measured on fallback variants only; (2) "subgroup=64 is
+the cause" - pinning 32 changed nothing. HONEST STATE: the shipped WuBuMM shaders at K=2304/N=3072 on this laptop
+give 0.45-0.95 TFLOPS vs cuBLAS 9.2-17.9; the best-tiling variant (v10) does not build here for an unfound
+shader reason; a correctly-built 256x256/8-subgroup coopmat GEMM has NOT been measured on this box, so the
+Vulkan-vs-CUDA throughput question is OPEN, not settled.
