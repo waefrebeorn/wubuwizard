@@ -20,6 +20,7 @@ int in2_forward_seq(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inklin
                     const int *, int, float *, float *);
 int in2_forward_at(gguf_ctx *, const wubu_inkling2_model_t *, const wubu_inkling2_cfg_t *,
                    const int *, int, int, float *, float *);
+static double g_fwd_meas;   /* wall time inside in2_forward_at, to reconcile against in2_lay_sec */
 void in2_set_logits_all(float *);
 int  in2_state_save(void);
 void in2_state_restore(void);
@@ -232,7 +233,11 @@ int main(int argc, char **argv)
         {
             int wbuf = 0;
             for (int w = 0; w < warm; ++w) {
+                LARGE_INTEGER _fa, _fb; QueryPerformanceCounter(&_fa);
                 const int rc = in2_forward_at(ctx, &m, &cfg, &tt[w % 2], 1, cur_p, h, logits);
+                QueryPerformanceCounter(&_fb);
+                { static LARGE_INTEGER _fq; if (!_fq.QuadPart) QueryPerformanceFrequency(&_fq);
+                  g_fwd_meas += (double)(_fb.QuadPart - _fa.QuadPart) / (double)_fq.QuadPart; }
                 if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe warm rc=%d\n", rc); return rc; }
                 int am = 0; for (int v = 1; v < cfg.vocab_size; ++v) if (logits[v] > logits[am]) am = v;
                 wbuf = am; (void)wbuf;   /* next fed token: use the argmax just computed, like real generation */
@@ -245,7 +250,11 @@ int main(int argc, char **argv)
             float *la = (float *)calloc((size_t)2 * cfg.vocab_size, sizeof(float));
             if (!la) { fprintf(stderr, "probe oom\n"); return 2; }
             in2_set_logits_all(la);
+            LARGE_INTEGER _da, _db; QueryPerformanceCounter(&_da);
             const int rc = in2_forward_at(ctx, &m, &cfg, tt, 2, p0, h, logits);
+            QueryPerformanceCounter(&_db);
+            { static LARGE_INTEGER _fq2; if (!_fq2.QuadPart) QueryPerformanceFrequency(&_fq2);
+              g_fwd_meas += (double)(_db.QuadPart - _da.QuadPart) / (double)_fq2.QuadPart; }
             in2_set_logits_all(NULL);
             if (rc != WUBU_INKLING2_OK) { fprintf(stderr, "probe batched rc=%d\n", rc); return rc; }
             memcpy(row0, la, sizeof(float) * cfg.vocab_size);
@@ -450,6 +459,12 @@ int main(int argc, char **argv)
             double kt = in2_tk_gu + in2_tk_act + in2_tk_dn + in2_tk_acc;
             fprintf(stderr, "TOKENWALL route=%.3f zero=%.3f region=%.3f accum=%.3f | (cpu-spans: gu=%.3f act=%.3f down=%.3f)\n",
                     in2_tk_route, in2_tk_zero, in2_tk_region, in2_tk_acc, in2_tk_gu, in2_tk_act, in2_tk_dn);
+            { extern double in2_lay_sec, in2_slide_sec, in2_full_sec;
+              const double lay = in2_lay_sec + in2_slide_sec + in2_full_sec;
+              fprintf(stderr, "FWDMEAS forward=%.3f s | layer-visits=%.3f s (%.1f%%) | outside-layers=%.3f s (%.1f%%) | vs-wall=%+.1f%%\n",
+                      g_fwd_meas, lay, g_fwd_meas > 0 ? 100.0 * lay / g_fwd_meas : 0.0,
+                      g_fwd_meas - lay, g_fwd_meas > 0 ? 100.0 * (g_fwd_meas - lay) / g_fwd_meas : 0.0,
+                      t_total > 0 ? 100.0 * (g_fwd_meas - t_total) / t_total : 0.0); }
             fprintf(stderr, "TOKENSPLIT gu=%.3f act=%.3f down=%.3f accum=%.3f | sum=%.3f (%.1f%% gu, %.1f%% down, %.1f%% act, %.1f%% accum)\n",
                     in2_tk_gu, in2_tk_act, in2_tk_dn, in2_tk_acc, kt,
                     kt > 0 ? 100.0 * in2_tk_gu / kt : 0, kt > 0 ? 100.0 * in2_tk_dn / kt : 0,

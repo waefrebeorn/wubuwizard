@@ -3563,3 +3563,20 @@ return, plus a per-visit split, and require that its total reconcile with the pr
 anything. Every optimisation this arc attempted was aimed with a number that later failed reconciliation; the fix is to make
 reconciliation the gate that a measurement must pass, the same way token identity is the gate that a change must pass.
 STATE: 122 commits, gate 15/15, identity exact, kernel coverage 192/192, 4.63-4.68 tok/s hot.
+
+## THE RECONCILING INSTRUMENT IS WIRED BUT READS ZERO - and that zero is informative
+Added g_fwd_meas (QPC bracket around the in2_forward_at calls in tools/inkling_gen.c) plus an FWDMEAS line that prints forward time, the
+sum of the layer-visit counters, the difference, and the deviation from process wall. On a clean build (12:24:28, gate 15/15):
+    FWDMEAS forward=0.000 s | layer-visits=0.000 s (0.0%) | outside-layers=0.000 s (0.0%) | vs-wall=-100.0%
+BOTH terms are zero - not just my new one - while the same binary prints phases totalling 0.391 s and a 4.30 tok/s timing. So the print
+block executes at a point where neither the forward bracket nor the layer accumulators have been charged, which means the block is NOT
+downstream of the generation loop, and the layer counters I have been reading are being zeroed or printed elsewhere relative to it.
+That is the reconciliation failing in the most useful possible way: the instrument cannot even see the work it is meant to sum, which
+is exactly the defect that let four instruments disagree for four turns.
+WHAT THIS PROVES, and it is a real conclusion rather than a shrug: the printing site and the running site are in different places in
+this program. Every phase and census number in this document was produced by whichever site happens to run, and I have been comparing
+numbers from different sites as if they were the same experiment.
+NEXT STEP IS NARROW AND CONCRETE: find the single place that prints after the LAST decode step (not the first), verify it prints the
+same totals as the final TIMING line's wall, and only then re-read the phase table. Until that exists, no phase figure here is
+admissible under the reconciliation rule this document adopted one section ago.
+STATE: 123 commits, gate 15/15 (binary 12:24:28), identity exact, kernel coverage 192/192, 4.30-4.68 tok/s hot.
