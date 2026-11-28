@@ -2454,3 +2454,30 @@ synthetic harness. That requires the tensor's file offset and ggml type from the
 type census), so it is a small step, not new infrastructure.
 STATE: 75 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Reference tests committed: Q8_0, Q2_0, Q6_K (all
 PASS). IQ2_XXS test exists in tools/ but is NOT wired into tools/ref_check.sh because it does not yet agree.
+
+## IQ2_XXS: A REAL CONTRADICTION, RECORDED AS SUCH
+Chain of facts, each independently measured:
+  1. in2_ty_verified(16) returns 1 (fwd.c:240), and the kernel path requires j->ty with wubu_iq_supported(16)=1 and
+     q8_0_act = false for 16, so the engine feeds IQ2_XXS experts through wubu_iq_rows(16) with 256-element block_q8_K
+     activations. So this is a LIVE path, not dead code.
+  2. The gate passes 15/15 against the real llama.cpp oracle on this model, whose experts include 7 IQ2_XXS tensors.
+  3. Yet reading REAL bytes from blk.5.ffn_gate_up_exps.weight (dims [2304,2304,128], abs offset 2003207584, row_bytes 594 =
+     9 x 66) and comparing wubu_iq_rows(16) against upstream dequantize_row_iq2_xxs copied verbatim gives
+     rel err min 7.787e-02, median 8.549e-01, max 1.719e+01, e.g. ref[0]=282.57 vs got[0]=-117.79.
+Facts 2 and 3 cannot both be true if the upstream dequantiser is the right specification for this file's bytes AND the kernel
+were decoding them wrongly. Something in my measurement is wrong, and the candidate list is now short and specific:
+  a) the engine's ty=16 block layout is NOT ggml's block_iq2_xxs. The 66-byte agreement could be coincidence - ggml's has
+     ggml_half d + 64 bytes of qs, and this repo also ships its own IQ2_XXS encoder (wubu_enc_h3.c / wubu_nvfp4.h family),
+     so a same-size different-convention block is entirely possible;
+  b) the row geometry is wrong: dims [2304, 2304, 128] may not mean a 2304-element row for this tensor (it could be
+     transposed for gate_up), so my 594-byte stride reads the wrong bytes entirely;
+  c) the kernel applies a grid/sign permutation to the ACTIVATION instead of the weight (a legitimate SIMD trick), which
+     would leave the dot product unchanged but make a per-element reference disagree - except it would only disagree if the
+     permutation were inconsistent, so this is the least likely of the three.
+CHEAPEST DISCRIMINATOR, and it needs no new code: print the first fp16 scale of a few blocks from the real file. For a
+correctly aligned IQ2_XXS row these are small positive values (~1e-3..1e-2); if they look like random bit patterns
+(negative, huge, or NaN) the stride/layout assumption is wrong and (a) or (b) holds. That single number separates "wrong
+bytes" from "wrong decode", and it is the right thing to check before touching either the kernel or the reference.
+STATE: 76 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Committed reference tests: Q8_0, Q2_0, Q6_K (PASS,
+wired into tools/ref_check.sh). IQ2_XXS synthetic + real-data tests committed but NOT wired, because they disagree and the
+disagreement is not yet explained on either side.
