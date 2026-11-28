@@ -999,3 +999,16 @@ CONCLUSION: stop editing these. Replace them with one profiler that is (a) leaf-
 construction (one span per parallel region, leaf timers suppressed inside), (c) run-total and forward-total separately,
 (d) silent unless asked, and (e) with every slot named. WuBuMM doctrine applies to instruments too: no claim without
 an artifact, and an instrument that cannot fail honestly is worse than none.
+
+## ROOT CAUSE OF THE BROKEN PROFILING: THE INSTRUMENTED LAYER IS DEAD CODE
+in2_phase[] is DECLARED at wubu_inkling2_fwd.c:132 and NEVER WRITTEN anywhere in the repository (grep for
+`in2_phase[N] =` returns 0 across all of src). That is why PHASE printed an unnamed slot as its largest value.
+Why: the timers live in in2_layer_full() (wubu_inkling2_fwd.c:2572, ~316 lines) whose own body says
+"superseded by in2_layer_full_seq, kept only for single-token reference". It is never called - grep for
+`in2_layer_full(` finds only its own declaration and definition. The live path is in2_layer_full_seq(),
+declared at wubu_inkling2_model.c:30 and invoked from the layer loop macro at wubu_inkling2_model.c:180.
+CONSEQUENCE: every phase/mac/mac-counter reading in this document was produced by instruments attached to code that
+does not execute, or by call-site wrappers that do. Any further profiling MUST be attached inside
+in2_layer_full_seq in wubu_inkling2_model.c, not in wubu_inkling2_fwd.c's layer functions.
+This also retro-justifies distrusting PHASE outright and explains why its total covered 15% of wall.
+ACTION TAKEN: none yet to the code - recording the location first so the profiler is built in the right place.
