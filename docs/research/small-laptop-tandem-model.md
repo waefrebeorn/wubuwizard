@@ -2142,3 +2142,26 @@ draft head - not in this repo), or a batched kernel whose per-position cost at n
 engineering target, addressable, measurable with the same K sweep).
 FINAL: 61 commits, gate 15/15 at every one, identity exact and now verified beyond the gate (KV vs no-KV byte-identical at 32
 tokens, prefix property holds). Default throughput ~4.45-4.65 tok/s depending on run length, all software levers measured.
+
+## WHY BATCHING NEVER PAYS HERE: THE MoE PATH IS PER-TOKEN BY CONSTRUCTION (fwd.c:2431-2444)
+The expert dispatch loop is:  for (k = 0; k < got; ++k)  with the activation pointer computed as  x + (size_t)t * d  - i.e.
+the routine handles ONE token (t) and iterates its selected EXPERTS inside. So when a forward carries nt tokens, the caller
+invokes this block nt times, and every expert's weight slab is streamed once PER TOKEN instead of once per batch.
+Corroborated by the counters at n=32 with lookup: quant_single=6528 (the per-token expert calls) against
+nt_batched_slab=7794 (dense tensors, which DO use in2_matvec_quant_nt and DO amortise). The dense path batches; the expert
+path does not.
+AND in2_matvec_quant_nt ITSELF IS ALREADY CORRECT - it reads the weight slab once (rb * n_out) and then runs wubu_iq_rows in
+groups of 8 activations against that one resident slab. Nothing needs writing in the kernel. The kernel was always capable;
+it is simply never called for experts with nt > 1.
+THE FIX, and this is the highest-value change identified in 62 commits:
+  1. In the MoE block, for nt > 1, first gather the union of selected (token, expert) pairs across the batch.
+  2. Group that list BY EXPERT: for each expert, collect the activations of all tokens routed to it into a contiguous buffer.
+  3. Call in2_matvec_quant_nt ONCE per expert with nt_k = number of tokens routed to it, instead of once per token.
+  4. Scatter the per-token outputs back through the same permutation.
+  This is the standard permute-and-group MoE form. It changes summation order only through token-to-expert association, which
+  is exact (each token's expert set is fixed by the router), so token identity should be preserved - but it MUST be gated,
+  because "should be" is how four earlier mechanisms were justified before measurement killed them.
+EXPECTED PAYOFF: expert traffic is the dominant term and is currently multiplied by the number of tokens in the batch. Sharing
+one slab across even 2 tokens halves it; across 8, cuts it to an eighth. This is the same lever speculation failed to
+exploit, applied where the weights actually are.
+STATE: 62 commits, gate 15/15, identity exact, default ~4.45-4.65 tok/s.
