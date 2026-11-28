@@ -2120,3 +2120,25 @@ ratio of batched-to-single position cost (167 vs 275 ms) it cannot win even when
 USEFUL SIDE RESULT: n=32 baseline (4.64 tok/s) is FASTER than n=12 baseline (4.44) because the fixed load cost amortises
 over more tokens. Long generations are already the efficient regime on this engine.
 GATE: 15/15, 60 commits, tree clean.
+
+## SPECULATION CLOSED ACROSS K AND TWO REGIMES: K=1 ties, every larger K loses
+The verify forward DOES use the batched expert kernel (MOEPATH nt_batched_slab=7794 at n=32 vs 834 for prefill-only), so the
+loss was not a dispatch bug. K sweep at n=32, baseline 4.64 tok/s:
+  K=1  50.0% accepted   4.65 tok/s   <- ties baseline
+  K=2  42.9%            4.55
+  K=3  45.0%            4.19
+  K=4  36.4%            4.28
+  K=6  41.4%            3.90
+  K=8  45.7%            3.57
+Monotone: the more positions a verify computes, the worse, and even the smallest possible batch (K=1, verify 2 positions to
+gain at most 1) exactly breaks even rather than winning.
+ROOT CAUSE, and it is a useful number: the batched path's cost per position is NOT uniform in nt. Measured prefill marginal
+cost is ~25-50 ms/position at nt=4..16, i.e. weights are genuinely shared across positions at large nt. But at nt=2 (K=1
+verify) the cost is ~half of a 275 ms decode step - the fixed overhead dominates and almost nothing is amortised. So batching
+only pays at LARGE nt, while acceptance is only high when drafts are SHORT. Those two requirements are opposed, and the
+product never crosses 1.0 for this draft source.
+WHAT WOULD REOPEN IT: either a drafter with acceptance high enough at K=4..8 to pay for the extra positions (needs a trained
+draft head - not in this repo), or a batched kernel whose per-position cost at nt=2..4 approaches its nt=16 behaviour (an
+engineering target, addressable, measurable with the same K sweep).
+FINAL: 61 commits, gate 15/15 at every one, identity exact and now verified beyond the gate (KV vs no-KV byte-identical at 32
+tokens, prefix property holds). Default throughput ~4.45-4.65 tok/s depending on run length, all software levers measured.
