@@ -1438,3 +1438,23 @@ NEXT CHECK (one line, decisive): count, per worker, how many rows it actually pr
 the min/max across workers for a single call. If max >> min the split is imbalanced; if all workers show ~1/N rows and
 full serial time each, the workers are each doing full-size work.
 GATE: 15/15.
+
+## THE SPLIT WORKS BUT ONLY COVERS THE SMALL CALLS - nothing with n_out>=2048 reaches it
+Per-job spans inside the worker (sum of job spans vs region wall):
+  threads=2: wall 0.0001 s, jobs=2, rows=384, avg job 18.6 us for 192 rows
+  threads=8: wall 0.0000 s, jobs=8, rows=384, avg job  3.5 us for  48 rows
+That is a clean 5.3x for 2->8 threads and near-perfect 1/N scaling: the row split is CORRECT and it WORKS, and the
+identity-safe claim (same kernel, disjoint row ranges) is borne out.
+But gating the same print on n_out >= 2048 produces NOTHING at any thread count:
+  threads=1: (no call with n_out>=2048 reached the parallel path)
+  threads=8: (no call with n_out>=2048 reached the parallel path)
+So the wide calls - the ones that carry 7.08 MMAC each - never enter in2_rows_parallel. They are handled before it, by a
+different branch in in2_matvec_nt (the f16/multi-row lane) or by another function entirely (moe batch / expert path), and
+that branch is serial. This is why per-call kernel time is flat across thread counts: the mega-calls that dominate the
+448-call total are not participating in the split at all, while the calls that do participate are already cheap (~4-19 us).
+CONSEQUENCE: parallelising harder is the wrong next move. The next move is to find WHERE the wide calls go and route them
+through the same row-parallel dispatch. The evidence says the split is proven correct and fast; it is simply not being
+applied to the shapes that cost the time.
+NEXT CHECK: log (n_in, n_out, ns) for every nt call and aggregate by shape - that names the exit branch by elimination and
+gives the per-shape cost table the whole session has been missing.
+GATE: 15/15.

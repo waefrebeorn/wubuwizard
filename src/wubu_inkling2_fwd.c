@@ -52,10 +52,22 @@ typedef struct {
     const void *const *act; int nt; float *const *out; int r0, r1;
 } in2_rows_job;
 
+double in2_wj_sec; long in2_wj_rows, in2_wj_n, in2_wj_printed;
 static DWORD WINAPI in2_rows_worker(LPVOID p)
 {
     in2_rows_job *j = (in2_rows_job *)p;
+    const double _w0 = in2_hires_now();
     wubu_iq_rows(j->ty, j->w, j->rb, j->n, j->act, j->nt, j->out, j->r0, j->r1);
+    const double _w1 = in2_hires_now();
+    /* Diagnostic: if the SUM of per-job spans is ~NT x the region wall, the workers really are concurrent and each
+     * is doing 1/N of the rows. If the sum is ~= the wall, they are serialised. If each span is ~the full-call time
+     * regardless of its row count, wubu_iq_rows has a large fixed cost that splitting only multiplies. */
+    #pragma omp atomic
+    in2_wj_sec += _w1 - _w0;
+    #pragma omp atomic
+    in2_wj_rows += (j->r1 - j->r0);
+    #pragma omp atomic
+    in2_wj_n += 1;
     return 0;
 }
 
@@ -110,6 +122,16 @@ static int in2_rows_parallel(int ty, const void *w, size_t rb, int n,
 #endif
     in2_ty_par--;
     if (ty >= 0 && ty < 256) { in2_ty_sec[ty] += in2_hires_now() - _p0; in2_ty_calls[ty] += 1; }
+    if (getenv("IN2_WJ") && n_out >= 2048 && !in2_wj_printed) {
+        in2_wj_printed = 1;
+        const double wall = in2_hires_now() - _p0;
+        fprintf(stderr, "WJ(n_out=%d) region wall=%.4f s | jobs=%ld rows=%ld | sum(job)=%.4f s -> conc=%.1fx | "
+                        "avg job %.1f us for %.0f rows\n",
+                n_out, wall, in2_wj_n, in2_wj_rows, in2_wj_sec,
+                wall > 0 ? in2_wj_sec / wall : 0.0,
+                in2_wj_n ? in2_wj_sec / in2_wj_n * 1e6 : 0.0,
+                in2_wj_n ? (double) in2_wj_rows / in2_wj_n : 0.0);
+    }
     return 1;
 }
 #endif
