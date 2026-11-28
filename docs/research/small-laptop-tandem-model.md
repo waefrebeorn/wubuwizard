@@ -3642,3 +3642,32 @@ The phase marks account for 23% of it and the output projection for a further ~8
 between and around the phase-marked layer sections - the 48-visit loop machinery, the embedding, the logits tail and the per-visit
 buffer setup.
 STATE: 126 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 5.3-5.8 tok/s, reported 4.6-4.8 including prefill.
+
+## FIRST FULLY RECONCILED DECODE DECOMPOSITION - layers 91%, head 9%, and it closes to the step wall
+IN2_TIME=1 IN2_TIMETY=1 on a 6-token run prints a per-forward line that closes the books:
+    FWD wall: embed+layers=0.163-0.172 s   head=0.016-0.017 s      (ntok=1 steps)
+    gen[n] wall 0.172-0.188 s (fwd 0.172-0.188 + 0.000 other)
+So embed+layers + head = step wall to within a millisecond. THE RECONCILIATION HOLDS, and this is the first decomposition in this
+document that does.
+INSIDE the 0.172 s decode step, from PHASE (last forward):
+    layers                 0.165 s   91%     (full=0.031, sliding=0.134)
+      moe                  0.072 s   43% of phases
+      q                    0.021 s   12.5%
+      gate+wo              0.017 s   10%
+      k+v+conv             0.010 s    6%
+      rel+sink             0.006 s    4%
+      attn                 0.005 s    3%
+      mix/resconv          0.001 s    1%
+      (phases cover 0.133 of 0.165 = 81% of layers; the rest is the full-layer f_* sections)
+    head (201,024 x 2304)  0.016 s    9%
+MoE is the largest single phase at 43% of layers - and the MOE_SPLIT from earlier showed that phase is 98% kernel and already
+running at 5.4x on 8 threads. q at 12.5% and gate+wo at 10% are dense Q8_0 matvecs over resident weights.
+AND THE TYPE TABLE NAMES THE REAL HEAVYWEIGHT, which no earlier section had read correctly:
+    ty=8  (Q8_0)  1286 calls  0.190 s  39% of matvec CPU   macs 6915 M
+    ty=16 (IQ2_XXS) 103 calls 0.052 s  11%                macs 5770 M
+    ty=14, 42, 17, 22, 40, 19, 13, 12 fill the remaining 50%
+Q8_0 is 39% of matvec time across 1286 calls in a single forward - the dense attention projections and the head. The expert formats
+collectively carry more MACs (5770+5606+5436 M for 16/42/17 alone) but in far fewer, larger calls.
+DQ traffic for the same forward: f32 produced 161.5 MB, copied 116.4 MB, borrow hit 2515 / miss 215, to_f32 calls 4325 - i.e. the
+dequantise-cache copies well over a hundred megabytes per forward even on hits, by design (every caller owns a fresh buffer).
+STATE: 127 commits, gate 15/15, identity exact, kernel coverage 192/192, decode step 0.172-0.188 s = 5.3-5.8 tok/s.
