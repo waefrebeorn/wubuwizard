@@ -617,3 +617,23 @@ Measured on this host (tools/dma_test.cu):
    read serves M>=16 rows and the coopmat tensor core engages. Project-wide: do not write new CUDA for this
    engine - the GPU stack is Vulkan (WuBuOS wubu_vulkan*, WuBuMM shaders), and nvcc objects cannot link MinGW ld.
 Recorded in the wubuwizard-windows-gpu skill as a project-wide doctrine.
+
+## DO BOTH: cuBLAS vs Vulkan coopmat measured at the engine's shapes (M-scaling law)
+Installed Vulkan SDK 1.4.363.0 (winget KhronosGroup.VulkanSDK) and built WuBuMM's coopmat GEMM test
+(tools/test_coopmat_gemm.c + src/wubumm_vk2.c; needs -include 'static int up_pipe_on(void);' fwd-decl).
+cuBLAS f16xf16->f32 (tensor cores), K=2304:
+  N=3072 (14.2 MB, fits L2):  M=1 455 GF/s 455 GB/s | M=16 7251 | M=32 12004 | M=64 9200 | M=128 17882
+  N=8192 (37.7 MB, > L2):     M=1 181 GF/s 181 GB/s | M=16 2478 | M=32 4612 | M=64 9102 | M=128 16407
+Vulkan coopmat (NV/SMEM/v6 shaders), K=2304 N=3072, cos=0.999999993 PASS:
+  M=16 0.34 | M=32 0.58 | M=64 0.94 | M=128 1.68 | M=256 2.74 TFLOPS
+  (shader 38 / v10 16-warp 128x128 FAILS pipeline creation here: VK_ERROR_INVALID_SHADER_NV, falls back)
+CONCLUSIONS (both are true):
+1. BATCHING M is the universal lever for BOTH backends: cuBLAS 455 -> 17,882 GF/s (M=1->128, ~39x);
+   Vulkan 0.34 -> 2.74 TFLOPS (M=16->256). Single-token M=1 is memory-bound on either.
+2. On THIS Ada laptop at these small shapes cuBLAS is ~6-10x faster than the portable coopmat shader
+   (17,882 vs 1,680 GF/s at M=128). Vulkan coopmat is the PORTABLE/learning path (runs on any GPU, correctness
+   PASS, and its A-tile-reuse technique is exactly what cuBLAS does internally); cuBLAS is the SPEED path here.
+   "Vulkan shows the way, CUDA delivers it on Ada."
+3. The GPU is NOT bandwidth-limited vs the CPU: M=1 N=8192 reads at 181 GB/s (full VRAM) = 14x the CPU's
+   ~13 GB/s DRAM read. So a properly-overlapped resident lane SHOULD win on the weight read; my per-call
+   cudaDeviceSynchronize (2.1x) plus host round trips were the entire blocker, not physics.
