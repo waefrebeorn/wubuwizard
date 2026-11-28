@@ -3115,3 +3115,30 @@ The next experiment follows from #6 and needs no hypothesis about hardware: inst
 rows and split it into (a) time inside the quant kernel and (b) time spent making the weights addressable, since a 12x gap is far
 too large to be arithmetic and must be dominated by whichever of those two the current counters do not separate.
 STATE: 103 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## THE PROBES WERE CACHE-RESIDENT - and correcting for that identifies the real limit: 0.81 GB/s on a scattered 162 MB/token
+Row-granularity probe (ty=16, IQ2_XXS), reproducing the engine's exact geometry:
+    engine geometry    rows=384  rb=594   bytes=0.22 MB   0.08 ns/elem  53.3 GB/s  0.173 us/row
+    engine geom x4     rows=1536 rb=594   bytes=0.87 MB   0.07 ns/elem  53.4 GB/s  0.172 us/row
+    fat rows           rows=216  rb=1056  bytes=0.22 MB   0.07 ns/elem  61.3 GB/s  0.267 us/row
+    skinny rows        rows=3456 rb=66    bytes=0.22 MB   0.25 ns/elem  15.8 GB/s  0.065 us/row
+The 0.22 MB working set is L2-RESIDENT, so this measures the kernel's compute rate, not the engine's memory behaviour. That
+invalidates the "12.2x gap" framing: comparing 0.05-0.08 ns/elem (L2) against 0.609 ns/elem (DRAM) is comparing two different
+questions. Correcting for it gives the number that actually matters:
+    isolated, cache-resident   : 0.080 ns/elem
+    in-engine, 162 MB/token    : 0.609 ns/elem   (7.6x, all of it memory)
+    engine effective streaming : 0.81 GB/s
+    sequential baseline        : 2.20 GB/s (1 MB blocks) to 8.0 GB/s (16 MB blocks), teammate page-cached
+So the engine sustains 0.81 GB/s where a plain sequential read sustains 2.2-8.0 GB/s on the SAME bytes on the SAME machine. That
+is the entire remaining gap, and it is a streaming-efficiency problem, not arithmetic, not TLB, not locks, not the disk.
+WHY 0.81 GB/s IS PLAUSIBLE AS A STREAM-COUNT PROBLEM: a decode step reads 8 selected experts per layer across 24 layers, each a
+~1.37 MB slab, so ~192 short streams per token. Hardware prefetchers track on the order of a dozen streams per core; with 8
+threads fanning across hundreds of short slabs, each stream restarts before the prefetcher has warmed, so most of each slab is
+fetched at exposed latency rather than streamed. The 1.37 MB slab length is the figure to attack, and the earlier dismissals were
+about something else: the "3.1% / 9.0% expert-overlap" arithmetic measured how much DUPLICATE WORK batching would save - it never
+measured STREAM LENGTH or prefetch efficiency, which is a different saving entirely.
+NEXT EXPERIMENT, and it is now purely about stream length: measure achieved GB/s while varying how much of one expert slab is
+consumed per region (e.g. 1 expert x 1.37 MB vs 8 experts interleaved vs one full slab walked contiguously). If GB/s tracks slab
+length rather than total bytes, the fix is to make each thread walk a slab contiguously to completion - a scheduling change,
+identity-safe, and independent of the batching arithmetic that was retired.
+STATE: 104 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
