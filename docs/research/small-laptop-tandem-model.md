@@ -2659,3 +2659,22 @@ equal before comparing any numbers - the same guard that would have caught the 9
 112-per-forward divisor earlier in this document.
 STATE: 84 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified decodes: Q8_0, Q2_0, Q6_K, IQ2_XXS
 (block granularity, synthetic + real bytes + repo dequantiser + upstream loop all agreeing).
+
+## RETRACTION: the IQ2_XXS "row-level disagreement" never existed - it was a STALE BINARY
+Re-running tools/iq2xxs_real_check.c after the pointer-stride fix, with no further code change:
+  8 real rows x 2304 elements (row_bytes=594, offset=2003254464)
+  rel err min 2.901e-09  median 7.143e-08  max 7.301e-07      PASS (8x noise floor 6.370e-05)
+  ref[0]=-10134.419624  got[0]=-10134.418945
+So the full 2304-element row test PASSES at 7.3e-07. The earlier 0.51..14.4 reading came from an executable built BEFORE the
+stride patch - the rebuild happened in the same shell invocation but the FAIL line was produced by the previous binary, and I
+read it as a live result. That is the sixth retraction this session, and it is the same failure mode as the fabricated divisor
+and the truncated census: A NUMBER WAS QUOTED FROM A STALE OR MISATTRIBUTED SOURCE.
+IQ2_XXS IS NOW FULLY VERIFIED at row granularity on real model bytes, in addition to block granularity, the synthetic test,
+this repo's own dequantiser (maxabs 0) and upstream's loop by construction. Four statements agree.
+RULE RECORDED, because this will happen again: after any patch, the FIRST line of the test output must be a build stamp
+(binary mtime or a printed __DATE__/__TIME__), so a stale binary cannot be mistaken for a fresh result. The whole session's
+identity methodology already says "never report a timing unless the build appears in the same command"; the same rule was
+never applied to CORRECTNESS numbers, and it just cost a section of wrong conclusions.
+FINAL VERIFIED SET: Q8_0 (attention, 85 tensors), Q2_0 (EXPERT, 17), Q6_K (attention, 26), IQ2_XXS (EXPERT, 7), plus the
+activation quantiser. Unverified: NVFP4 x7, IQ2_XS x6, IQ1_S x6, IQ2_S x5, K-quants, Q4_K/Q5_K.
+STATE: 85 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
