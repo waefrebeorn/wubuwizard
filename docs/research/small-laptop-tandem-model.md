@@ -2026,3 +2026,27 @@ FINAL SHAPE OF THE SEARCH, after 55 commits and three instruments:
   named but unbuilt  : in2_matvec_quant as the single hot expert kernel, 352 calls per token
   unexplained        : nothing that affects throughput - the 22-vs-8 call anomaly was resolved by the path tags
 GATE: 15/15, 55 commits.
+
+## THE GPU F16 HEAD LANE IS 25% SLOWER THAN NOT USING IT - and it explains the "page-cache warming" result
+ABBA, 12 tokens, 8 threads, identical binary, only IN2_GPU_F16 differs:
+  GPU_F16=off: 4.49, 4.44, and 4.52, 4.49 tok/s   (GATE 15/15 on the default path)
+  GPU_F16=on : 3.62, 3.64 tok/s
+That is a ~24% penalty for enabling the GPU f16 lane, measured twice in each direction. The lane uploads output.weight as
+926,318,592 bytes of f16 over PCIe at ~3.0 GB/s - a measured 312 ms - to compute 463 MMAC that the CPU finishes faster from
+119 MB of 2.06-bit weights it already has mapped.
+TWO RETRACTIONS THIS IMPLIES:
+1. "Page-cache warming gives +25% (3.51-3.64 -> 4.49 tok/s)" is WRONG. The warm arms were simply the runs where IN2_GPU_F16
+   was not exported. The 4.49 figure is the GPU_F16-off figure, not a cache effect. The cold/warm story in the earlier
+   sections of this document is an environment-variable artefact, and every "warm" number quoted there came from a different
+   code path than the "cold" ones it was compared against.
+2. "Throughput ~3.45 tok/s cold, ~4.48 warm" is wrong about which is the default. The DEFAULT (no IN2_GPU_F16) is 4.44-4.52
+   tok/s and gates 15/15. The 3.45-3.64 numbers were produced with an env var exported that made it slower.
+HOW THIS WAS FOUND: chasing whether the head's 312 ms upload could be avoided. The answer was not "make the upload faster" -
+it was "do not take that path at all", and the engine already defaults to not taking it. The mistake was mine, in the shell,
+not in the code: IN2_GPU_F16 had been exported since an early turn and every measurement after that inherited it.
+LESSON, the fifth of this session and the most expensive: an exported environment variable is a hidden global that
+silently changes which code path every later measurement exercises. ABBA protects against drift WITHIN an experiment; it
+does not protect against a variable that was set before the experiment began. Any A/B involving a code path must print the
+relevant env state in the same output as the result.
+STATE: gate 15/15, tree clean, default throughput 4.44-4.52 tok/s, 57 commits. The identity clause is unchanged: the oracle
+tokens are identical with the lane off, which is the default.
