@@ -88,6 +88,9 @@ void in2_set_logits_all(float *p) { g_logits_all = p; }
 int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_cfg_t *cfg,
                    const int *tokens, int n_tok, int pos0, float *h, float *logits)
 {
+    { static long _nf = 0; if (getenv("IN2_PATH") && _nf < 3)
+        fprintf(stderr, "PATH in2_forward_at n_tok=%d pos0=%d call=%ld\n", n_tok, pos0, _nf);
+      ++_nf; }
     in2_kv_begin(pos0);
     /* IN2_SINGLE_PASS runs pass 1 only. It exists to exercise the depth path before the message gates
      * land; anything it prints is a 1-of-3-pass number and must be labelled as such. */

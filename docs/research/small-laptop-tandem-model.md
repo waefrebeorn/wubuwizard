@@ -3617,3 +3617,28 @@ called as `gen_fast 16 371 151451 149879`. The cheapest identification is a one-
 in2_forward_at itself - that names the caller-independent fact of whether the library entry is even used, and if it is used, the BRACKET
 question becomes "which call site" rather than "which loop".
 STATE: 125 commits, gate 15/15 (binary 12:29:53), identity exact, kernel coverage 192/192, 4.74-4.81 tok/s hot.
+
+## THE RECONCILING INSTRUMENT ALREADY EXISTED AND PRINTS TO STDOUT - and it says the forward is 100% of the step
+Every run in this arc was piped `2>&1 >/dev/null`, i.e. stderr only. The per-step line that actually reconciles has been going to
+STDOUT the whole time, printed unconditionally at tools/inkling_gen.c:423:
+    gen[0] id=149876  0.562s wall (fwd 0.562s + 0.000s other)  (1.78 tok/s at prefix 3)  faults 630788  disk 0.0 MB / 0 reads
+    gen[1] id=220     0.172s wall (fwd 0.172s + 0.000s other)  (5.81 tok/s at prefix 4)  faults 19654   disk 0.0 MB / 0 reads
+    gen[2] id=36838   0.188s wall (fwd 0.188s + 0.000s other)  (5.32 tok/s at prefix 5)  faults 46801   disk 0.0 MB / 0 reads
+    gen[3] id=182189  0.187s wall (fwd 0.187s + 0.000s other)  (5.35 tok/s at prefix 6)  faults 49492   disk 0.0 MB / 0 reads
+So: forward time EQUALS step wall time to three decimal places, on every step. "other" is 0.000s. The engine is entirely inside
+in2_forward_at, outside is nothing, and the decomposition question is therefore only ever about the INSIDE of that one function.
+THIS RETROACTIVELY CORRECTS THREE TURNS OF WORK. The FWDMEAS bracket that read 0.000 was measuring a loop that does not run (the
+speculative path); the plain loop at :404-411 was executing all along and already had a QPC pair around the forward call; and the
+"four instruments disagree" problem is not four instruments disagreeing but one instrument (this one) plus three partial ones compared
+against it without ever being read.
+AND TWO OF THE MOST-REPEATED NUMBERS IN THIS DOCUMENT ARE CONFIRMED AND SHARPENED:
+    disk 0.0 MB / 0 reads on EVERY step   -> the I/O-bound narrative was not merely overstated, there are literally zero reads, and the
+                                             "I/O bound at 637 MB/s" figure contradicted direct per-step evidence the whole time.
+    faults 19,654-49,492 per step         -> the earlier 40,625 faults/token estimate sits in the middle of this measured range.
+    decode step 0.172-0.188 s             -> 5.3-5.8 tok/s on a pure decode step; the reported 4.6-4.8 tok/s includes the 0.562 s
+                                             prefill of the first step, which is 1/9th of an 8-token run.
+SO THE REAL TARGET, for the first time with a reconciled ruler: shrink the inside of in2_forward_at, whose per-step cost is 172-188 ms.
+The phase marks account for 23% of it and the output projection for a further ~8-9%, so ~68% of the step is inside the forward but
+between and around the phase-marked layer sections - the 48-visit loop machinery, the embedding, the logits tail and the per-visit
+buffer setup.
+STATE: 126 commits, gate 15/15, identity exact, kernel coverage 192/192, decode 5.3-5.8 tok/s, reported 4.6-4.8 including prefill.
