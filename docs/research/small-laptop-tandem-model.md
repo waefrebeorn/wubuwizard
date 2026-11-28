@@ -1420,3 +1420,21 @@ first parallelisation attempt aimed at the code that actually holds the time.
 ACCEPTANCE: kernel us/call must fall materially with thread count (that is the direct check, independent of tok/s),
 and the gate must stay 15/15.
 GATE: 15/15.
+
+## NESTED PARALLELISM RULED OUT - the region DOES run, so the worker cost is not shrinking with NT
+Probe at the top of in2_matvec_nt, threads set to 8:
+  NESTCHK in2_threads=8 omp_in_parallel=0 omp_max=12 n_out=3072
+So: not nested (omp_in_parallel=0), NT is 8 as requested, and the FIRST call is 3072 wide, which is well past
+in2_rows_parallel's n_out>=256 gate. The parallel path is therefore being taken - and yet per-call kernel time is flat
+from 1 to 8 threads (1633 / 1605 / 1588 / 1634 us).
+That combination has exactly one interpretation: the region runs, but the per-worker cost does not fall as NT rises.
+Either each worker touches work proportional to the FULL problem (for example converting or traversing the whole weight
+buffer rather than its own row slice), or the pool is not actually executing NT-way concurrent work, or the jobs are so
+imbalanced that the slowest one sets the wall time regardless of NT.
+This also corrects the shape I had been reasoning about: the dense calls are 3072 wide, not 384 - 2304 -> 3072 is 7.08
+MMAC per call, not 0.88. At 1.63 ms that is 8.7 GFLOP/s, not 1.08, so the kernel is roughly 8x less absurd than my last
+figure claimed, and the "0.88 MMAC" arithmetic in the three preceding entries was wrong by 8x.
+NEXT CHECK (one line, decisive): count, per worker, how many rows it actually processed and how long it took, and print
+the min/max across workers for a single call. If max >> min the split is imbalanced; if all workers show ~1/N rows and
+full serial time each, the workers are each doing full-size work.
+GATE: 15/15.

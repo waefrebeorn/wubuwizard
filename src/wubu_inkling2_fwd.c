@@ -1014,6 +1014,9 @@ static int in2_matvec_nt_impl(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
 int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                   const float *X, int nt, int n_in, int n_out, float *Y)
 {
+    { static int once; if (!once && getenv("IN2_NESTCHK")) { once = 1;
+        fprintf(stderr, "NESTCHK in2_threads=%d omp_in_parallel=%d omp_max=%d n_out=%d\n",
+                in2_threads(), omp_in_parallel(), omp_get_max_threads(), n_out); } }
     const double _t0 = in2_now();
     const int rc = in2_matvec_nt_impl(ctx, t, X, nt, n_in, n_out, Y);
     in2_ent_sec[0] += in2_now() - _t0;
