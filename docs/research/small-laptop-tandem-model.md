@@ -294,3 +294,14 @@ overflows f16 by 7.6x); only the GEMM operands go f16. And bf16 is EMULATED on t
 the only tensor-core path, so use f16, never bf16, for the lane.
 This is the concrete way gen_fast's dense tier (696 MB/token of DRAM today) cuts its bytes roughly in half
 and runs as an f16 GEMM with f32 accumulate at tensor-core rate - the WuBuMM "max saturation" direction.
+
+## CLAIRIFICATION (corrects the f16 design above, prevents a wrong assumption)
+f16 is 2 bytes/value; the current IQ2/K-quant weights are ~0.55 bytes/value. So staging the dense tier as
+two-f16 does NOT reduce bytes - it RAISES them ~3.6x versus the quantized weight. The two-f16 split is a GPU
+tensor-core COMPUTE lever (f32-accumulate f16 GEMM at ~5.6-11 TFLOPS, cos>=0.999), not a bandwidth-reduction
+lever. It only produces a speedup if (a) the dense tier fits RESIDENT in f16 form on the 6 GB card (so the
+per-token PCIe cost is ~0 and the larger f16 footprint doesn't hurt), and (b) the resident f16 GEMM beats the
+optimised CPU IQ2 dot for the same K. Both are measurable and both are UNMEASURED. The honest gate for the
+f16 lane is: dequantize the dense tier to two-f16 hi/lo (separate buffers), upload resident once, measure the
+resident f16 GEMM time per token vs the CPU's ~22 ms/token dense cost; only if it wins do the lane's bytes
+matter. Do not assume f16 wins because it is "smaller" - it is not.
