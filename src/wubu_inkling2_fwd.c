@@ -57,6 +57,7 @@ typedef struct {
  * is observed instead of inferred. entry: 0 = in2_matvec_nt, 1 = in2_matvec_quant. */
 struct in2_cs_rec { char name[28]; int entry, ni, no; double sec; long n; };
 struct in2_cs_rec in2_cs[512]; int in2_cs_n;
+long long in2_moe_path[8];
 static void in2_cs_add2(int entry, const wubu_in2_tensor_t *t, int ni, int no, double sec)
 {
     if (!t || !t->info) return;
@@ -2183,6 +2184,7 @@ static int in2_moe_batch(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wu
             for (int i = 0; i < nb; ++i)
                 memcpy(Xe + (size_t) i * d, x + (size_t) (t0 + bt[start[e] + i]) * d, sizeof(float) * (size_t) d);
             in2_ms_gath += in2_now() - _mt; _mt = in2_now();
+in2_moe_path[1]++;
             if (in2_matvec_quant_nt(ctx, &L->gate_up, (int64_t) e * 2 * DFF * d, Xe, nb, 2 * DFF, d, Ge)
                 != WUBU_INKLING2_OK) {
                 bad = 1;
@@ -2386,6 +2388,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                             ids[k] = L->gate_up.file_offset + ((eo == 0) ? 0 : gguf_raw_size(ty_b, eo));
                         }
                         if (okall) {
+in2_moe_path[2]++;
                             const int r1 = in2_gpu_moe_batch_res(ty_b, ids, srcs, got, wb_b, aq, ab, gy, d, 2 * DFF);
                             if (r1 != 0) okall = (in2_gpu_moe_batch(ty_b, srcs, got, wb_b, aq, ab, gy, d, 2 * DFF) == 0);
                         }
@@ -2435,6 +2438,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                 float *ak = act + (size_t)k * DFF;
                 float *ok = eo + (size_t)k * d;
                 double _kt = in2_now();
+in2_moe_path[3]++;
                 if (in2_matvec_quant(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
                                      x + (size_t)t * d, 2 * DFF, d, gk) != WUBU_INKLING2_OK) { bad = 1; continue; }
                 in2_tk_gu += in2_now() - _kt; _kt = in2_now();
@@ -2469,6 +2473,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
              * the measurement beat the reasoning. */
             if (!getenv("IN2_STAGE")) {
                 const double _kt = in2_now();
+in2_moe_path[4]++;
                 const int ra = in2_matvec_quant_mt(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d,
                                                    x + (size_t)t * d, 2 * DFF, d, g);
                 if (ra != WUBU_INKLING2_OK) {
@@ -2492,6 +2497,7 @@ int in2_moe(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_inkling2_c
                 dn = (float *)malloc((size_t)d * DFF * sizeof(float));
                 if (!gu || !dn) { rc = WUBU_INKLING2_ERR_IO; break; }
             }
+in2_moe_path[5]++;
             const int r1 = in2_dequant_slice(ctx, &L->gate_up, (int64_t)e * 2 * DFF * d, (int64_t)2 * DFF * d, gu);
             const int r2 = in2_dequant_slice(ctx, &L->down,    (int64_t)e * d * DFF,    (int64_t)d * DFF,    dn);
             if (r1 != WUBU_INKLING2_OK || r2 != WUBU_INKLING2_OK) {

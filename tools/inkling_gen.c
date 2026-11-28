@@ -509,6 +509,11 @@ int main(int argc, char **argv)
               fprintf(stderr, "READIO ops=%llu bytes=%llu (%.1f MB) | writes=%llu (%.1f MB)\n",
                       io.rd_ops, io.rd_bytes, (double) io.rd_bytes / 1048576.0,
                       io.wr_bytes, (double) io.wr_bytes / 1048576.0); }
+        { extern long long in2_moe_path[8];
+          const char *nm[6] = {0,"nt_batched_slab","gpu_batch","quant_single","quant_mt_fused","dequant_materialise"};
+          fprintf(stderr, "MOEPATH");
+          for (int i = 1; i <= 5; ++i) if (in2_moe_path[i]) fprintf(stderr, "  %s=%lld", nm[i], in2_moe_path[i]);
+          fprintf(stderr, "\n"); }
         { extern struct in2_cs_rec { char name[28]; int entry, ni, no; double sec; long n; } in2_cs[512];
           extern int in2_cs_n;
           if (in2_cs_n > 0) {

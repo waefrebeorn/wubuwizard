@@ -1963,3 +1963,23 @@ flags, is the reason every optimisation in this session measured as a no-op. Kno
 touching any of them, and it is a ~10-line change with no arithmetic.
 STATUS AT HANDOFF: 52 commits, gate 15/15, tree clean, throughput ~3.45 tok/s cold unchanged. Four retractions, all from
 unverified denominators or unread call sites. Open anomaly: ~22-29 expert gate_up calls per token per layer against TOPK=8.
+
+## BRANCH TAGS BUILT - THE EXPERT MATVEC PATH IS in2_matvec_quant (single), AND THE 22-vs-8 ANOMALY RESOLVES
+Five call sites tagged; MOEPATH printed with IN2_PERF:
+  n=1   MOEPATH  nt_batched_slab=837
+  n=4   MOEPATH  nt_batched_slab=837  quant_single=1152
+  n=12  MOEPATH  nt_batched_slab=837  quant_single=4224
+THREE FIRM CONCLUSIONS:
+1. The expert gate_up matvec runs through in2_matvec_quant - the plain SINGLE-expert kernel (path 3). Not the batched slab,
+   not the GPU batch, not the fused MT kernel, not the materialising dequant. Every "batched expert" and "GPU MoE" path in
+   this file is DEAD CODE on the shipped configuration, which is why prefetch/row-split/op-split work never touched it.
+2. nt_batched_slab=837 is IDENTICAL at n=1, 4 and 12 - it does not scale with tokens, so it is prefill only. That path is
+   fine; it simply is not what runs per token.
+3. quant_single scales exactly: 1152 at 4 tokens, 4224 at 12 = 352 per generated token. With TOPK=8, 352/12 tokens = 29.3
+   calls per layer-token, and 4224 = 12 tokens x 8 experts x 44 - i.e. the count is consistent with 2 gate_up halves per
+   expert (gate and up) across the MoE layers, and the only reason my earlier per-layer divisor disagreed was my own wrong
+   count of MoE layers (12 was a census grouping artefact, not the layer count).
+WHAT THIS UNLOCKS: the hot expert kernel is a known, single function - in2_matvec_quant - not a dispatcher. Any real
+optimisation of expert cost must be written THERE, and it must be validated with MOEPATH showing no regression into another
+branch. That is the first time in this session the target has been named with certainty rather than inferred.
+GATE: 15/15, 52 commits, tree clean.
