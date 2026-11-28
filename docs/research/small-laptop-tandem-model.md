@@ -1194,3 +1194,20 @@ WHAT THIS OPENS: in2_matvec_nt has no row-offset parameter, so it cannot be row-
 tensor-offset variant that preserves its exact arithmetic) would allow identity-preserving row parallelism - and that
 is now the only route to multi-core decode that has not been excluded by measurement.
 GATE: 15/15 after reverting.
+
+## WHY ROW PARALLELISM BROKE, MECHANISM NOW IN THE CODE (two independent causes, both fixable)
+Cause A - the row-offset block cannot use the GPU lane. in2_matvec_nt starts with the f16 lane (in2_try_f16_m for the
+whole batch, else per-token in2_try_f16), but in2_try_f16 returns 0 immediately when elem_off != 0. A row split passes
+elem_off = r0*n_in, so block 0 (offset 0) lands on the GPU while blocks 1..k fall through to CPU. The same output row
+range is then produced by two different arithmetic engines, which is exactly how a greedy token flips.
+Cause B - the two CPU paths are not the same function. Even with blk = 2304 (single iteration, elem_off = 0, no
+parallelism) the tokens differed, so in2_matvec_quant's CPU path and in2_matvec_nt's CPU path do not agree bit-for-bit.
+in2_matvec_nt has its own machinery: a thread-local whole-tensor mapping buffer sized rb*n_out, a q8_0-vs-q8k activation
+block choice (be = 32 for types 8/40/42 else 256), and a wubu_iq_supported/in2_ty_verified gate before it will use the
+kernel at all, otherwise a float fallback in2_matvec_quant does not share.
+CONSEQUENCE: "row parallelism breaks identity" was never one fact, it was these two, and neither is a fundamental
+objection. A correct implementation must (1) give the row-offset call the SAME engine as the full call - i.e. extract a
+row-range entry inside in2_matvec_nt itself so the f16 lane receives an ident-derivable slab plus a row offset and the
+CPU path uses nt's buffer/blocking rules - and (2) verify against the oracle before any timing. Reordering-based
+explanations are retired; this is an engine-consistency problem.
+STATUS: tree reverted and clean, gate 15/15. No timing claimed for row parallelism in either direction.
