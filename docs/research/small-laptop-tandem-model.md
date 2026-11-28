@@ -802,3 +802,17 @@ a decode speed claim from fewer than 5 interleaved reps, and use the median.
 STATE OF THE ART ON THIS BOX (measured): dense f16 lane ~1%, M-token prefill batch 1-4.6%, GPU MoE batch NEUTRAL to
 worse, resident quant tier (ty=8 only) ~0, all lanes together -1.3%. Therefore GPU offload is NOT the lever for decode
 here. The lever is the CPU expert kernel: 19 GFLOPS effective, 1.77x of 8x thread scaling, 4.44 s of the run.
+
+## DMA done properly: pinned staging + async copies on a dedicated stream -> still no gain
+Changed f16_gemm_core to the textbook DMA pattern: cudaHostAlloc page-locked staging for both directions,
+cudaMemcpyAsync H2D, cublas on a dedicated cudaStreamNonBlocking (cublasSetStream), cudaMemcpyAsync D2H, exactly ONE
+cudaStreamSynchronize per call, then a host memcpy out of pinned memory. Previously: malloc'd pageable buffers and
+blocking cudaMemcpy both ways.
+5 interleaved reps, 12 tokens, gate 15/15 on every rep:
+  CPU            median 3955 ms  mean 3941
+  GPU(pinned DMA) median 3974 ms  mean 3970   -> +0.5% (noise, if anything slower)
+So pageable-vs-pinned staging was NOT the limiter. The per-call cost is ROUND-TRIP LATENCY (161 dense tensors per
+token = 161 H2D + 161 D2H + 161 submissions), which pinning does not remove. Conclusion: the fix is not better
+copies, it is FEWER round trips - keep activations resident on the device across a whole group of matvecs and only
+move the concatenated result once (group by shared input: {wq,wk,wv} share one activation; {wgate,wrel} share one),
+or chain the whole dense block device-side. That is the remaining correct architecture for GPU acceleration here.

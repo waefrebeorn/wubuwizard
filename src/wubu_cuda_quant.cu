@@ -4148,6 +4148,13 @@ static long long g_f16_ups = 0, g_f16_reuse = 0, g_f16_evict = 0;
 static cublasHandle_t g_f16_h = NULL;
 static __half *g_f16_sx = NULL; static int g_f16_sx_cap = 0;
 static float  *g_f16_sy = NULL; static int g_f16_sy_cap = 0;
+/* DMA, done properly: page-LOCKED host staging + async copies on a dedicated non-blocking stream, one sync per
+ * call. The old path used malloc'd (pageable) buffers and blocking cudaMemcpy, which makes the driver stage through
+ * an internal pinned buffer and stalls the caller - the classic reason a small GPU GEMM measures no faster than the
+ * CPU it replaces. */
+static __half *g_hx_pin = NULL; static long long g_hx_pin_cap = 0;
+static float  *g_hy_pin = NULL; static long long g_hy_pin_cap = 0;
+static cudaStream_t g_f16_stream = NULL;
 /* Core: Y[M][n_cols] = X[M][K] * W[n_cols][K]^T with f16 weights resident. M==1 is the decode GEMV; M>1 is a
  * whole-prompt prefill GEMM in ONE cuBLAS call (the caller passes the full batch instead of looping tokens). */
 static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
@@ -4186,12 +4193,23 @@ static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
     const long long nout = (long long) n_cols * (long long) M; /* output elements (f32) */
     if (nact > (long long) g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)nact * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = (int) nact; }
     if (nout > (long long) g_f16_sy_cap) { if (g_f16_sy) cudaFree(g_f16_sy); if (cudaMalloc(&g_f16_sy, (size_t)nout * 4) != cudaSuccess) { g_f16_sy = NULL; g_f16_sy_cap = 0; return -7; } g_f16_sy_cap = (int) nout; }
-    /* convert the f32 activations to f16 (M*K elements) and upload once per call */
-    static __half *hx = NULL; static long long hx_cap = 0;
-    if (nact > hx_cap) { free(hx); hx = (__half *) malloc((size_t)nact * 2); hx_cap = nact; }
-    if (!hx) return -8;
-    for (long long i = 0; i < nact; ++i) hx[i] = __float2half_rn(h_act[i]);
-    if (cudaMemcpy(g_f16_sx, hx, (size_t)nact * 2, cudaMemcpyHostToDevice) != cudaSuccess) return -9;
+    /* convert the f32 activations to f16 (M*K elements) into PAGE-LOCKED staging, then DMA async */
+    if (nact > g_hx_pin_cap) {
+        if (g_hx_pin) cudaFreeHost(g_hx_pin);
+        if (cudaHostAlloc((void **) &g_hx_pin, (size_t) nact * 2, cudaHostAllocDefault) != cudaSuccess) { g_hx_pin = NULL; g_hx_pin_cap = 0; return -8; }
+        g_hx_pin_cap = nact;
+    }
+    if (nout > g_hy_pin_cap) {
+        if (g_hy_pin) cudaFreeHost(g_hy_pin);
+        if (cudaHostAlloc((void **) &g_hy_pin, (size_t) nout * 4, cudaHostAllocDefault) != cudaSuccess) { g_hy_pin = NULL; g_hy_pin_cap = 0; return -8; }
+        g_hy_pin_cap = nout;
+    }
+    if (!g_f16_stream) {
+        if (cudaStreamCreateWithFlags(&g_f16_stream, cudaStreamNonBlocking) != cudaSuccess) return -8;
+        cublasSetStream(g_f16_h, g_f16_stream);
+    }
+    for (long long i = 0; i < nact; ++i) g_hx_pin[i] = __float2half_rn(h_act[i]);
+    if (cudaMemcpyAsync(g_f16_sx, g_hx_pin, (size_t) nact * 2, cudaMemcpyHostToDevice, g_f16_stream) != cudaSuccess) return -9;
     /* CUBLAS_COMPUTE_32F requires alpha/beta as FLOAT pointers, not half - a half* here reads 4 bytes from 2
      * and yields NaN (caught by the standalone DLL test, y came back all-NaN). */
     float one = 1.0f, zero = 0.0f;
@@ -4203,7 +4221,10 @@ static int f16_gemm_core(int64_t ident, const void *h_w_f16, size_t wbytes,
     if (st != CUBLAS_STATUS_SUCCESS) return -10;
     /* No explicit cudaDeviceSynchronize: cublas and this cudaMemcpy share the default stream, so the D2H copy
      * is already ordered after the GEMM. The old full-device barrier here was redundant and measured ~2x/call. */
-    if (cudaMemcpy(h_y, g_f16_sy, (size_t)nout * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
+    /* DMA back through pinned staging on the same stream, then ONE sync per call. */
+    if (cudaMemcpyAsync(g_hy_pin, g_f16_sy, (size_t) nout * 4, cudaMemcpyDeviceToHost, g_f16_stream) != cudaSuccess) return -11;
+    if (cudaStreamSynchronize(g_f16_stream) != cudaSuccess) return -11;
+    memcpy(h_y, g_hy_pin, (size_t) nout * 4);
     return 0;
 }
 
