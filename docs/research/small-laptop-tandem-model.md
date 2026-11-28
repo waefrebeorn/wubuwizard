@@ -214,3 +214,16 @@ Conclusion: on THIS host the two goal clauses are in tension. Token-identical de
 ceiling (~4.8 tok/s, all 12 threads, weight-bandwidth-bound). The only faster path is the opt-in GPU fused
 lane, which upstream llama.cpp itself ships as non-bit-identical. Both cannot be raised below ~4.8 tok/s
 simultaneously on this box.
+
+## PROFILE (final evidence for the ceiling): the bit-identical decode is DRAM-bandwidth-bound at ~4.8 tok/s
+Per-step profile at IN2_THREADS=8, n=64: every decode step is 0.17-0.22 s, ENTIRELY in the forward
+(other=0.000 s), disk=0.0 MB / 0 reads (weights RAM-resident via mmap), and each token touches
+ws ~2.3-2.6 GB of weight+KV pages (faults 20k-60k steady-state, faults/MB ~1-19). 64 tokens in 13.3 s =
+4.81 tok/s. Conclusion: all 12 cores are busy, the working set is the whole needed weight+KV span, and the
+forward is bounded by how many bytes DRAM can feed (~11-32 GB/s vs ~2.4 GB/token). There is no identity-
+preserving algorithmic lever left: every needed weight and KV row is already touched, re-touched, or read
+once, and computing the same matvec with fewer bytes is impossible. Faster bit-identically on this host
+is not a code problem; it is a memory-bandwidth ceiling. The only faster path measured anywhere is the opt-in
+GPU fused lane (16 tok/s in the Gemma engine), which upstream llama.cpp itself documents as non-bit-identical.
+Two clauses, one box: identity is met and held at ~4.8 tok/s; speed beyond that requires the documented
+identity trade-off.
