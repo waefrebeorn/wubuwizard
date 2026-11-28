@@ -2237,3 +2237,22 @@ WHY THIS IS THE RIGHT NEXT PIECE OF WORK rather than another speed experiment: t
 upstream coverage is one prompt, and this is the only test that can be built here that would fail if the kernels were subtly
 wrong. It needs one export and about 120 lines.
 STATE: 65 commits, gate 15/15, identity exact on 4 prompts x 2 paths, default 4.45-4.65 tok/s, all speed levers measured.
+
+## REFERENCE TEST BUILT (tools/iq_ref_check.c) - RUNS, RETURNS ZEROS, CAUSE UNDETERMINED
+Built against the kernel ONLY (src/wubu_iq_c11.c + src/wubu_act_quant.c, engine stubs for in2_hires_now,
+in2_ty_sec/calls/par/depth), so a failure cannot be caused by the forward pass. It generates synthetic Q8_0 weights
+(fp16 scale + 32 int8 per block, no encoder needed), quantises the activation with in2_q8_0_quantise, computes the
+reference in double, and compares against wubu_iq_rows(8, ...).
+FIRST RESULT: rel err min=median=max=1.000e+00; ref[0]=-5.224327 got[0]=0.000000. The kernel wrote NOTHING (all zeros),
+which is a different failure mode from "wrong numbers" - it means the call returned without computing, so this is most
+likely HARNESS MISUSE rather than a kernel defect. Candidates, in order:
+  1. wubu_iq_rows may require the activation array in a different form for Q8_0 than a plain in2_q8_0_blk array.
+  2. The r0/r1 row range may be interpreted against n rather than independently of it.
+  3. sizeof(in2_q8_0_blk) may differ from ggml's block_q8_0 stride (34 bytes) under this compiler's alignment.
+NEXT DIAGNOSTIC, cheap and decisive: print wubu_iq_supported(8) and wubu_iq_rows1_supported(8), then try the
+wubu_iq_rows1 single-row entry point, and print sizeof(in2_q8_0_blk). If rows1 also writes zeros the problem is the
+arguments; if rows1 works, the r0/r1 form is what I got wrong.
+THIS IS RECORDED AS AN UNFINISHED TEST, NOT A KERNEL VERDICT. The distinction matters: four mechanisms this session were
+declared broken or fixed on weaker evidence than this and had to be retracted. The test harness is unverified until it can
+reproduce a known-good value; until then its output is not evidence about the kernel.
+STATE: 66 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. The test binary is not committed to the build.
