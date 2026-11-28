@@ -1771,3 +1771,26 @@ prefetch - it is doing less expert work per token (fewer/cheaper experts touched
 expert weight serves more output), or accepting that 3.4 tok/s is what 7.9 GB of MoE at SSD speed produces on this box.
 That is a much more honest frame than the kernel hunt this session started with.
 GATE: 15/15, tree clean, 43 commits.
+
+## CALLSITE CENSUS BY TENSOR NAME: the head is absent, and layer 0 costs 41x the same shape
+Counted by name across in2_matvec_nt and in2_matvec_quant (two wrong attributions in a row forced this - reasoning from
+read call sites had failed twice):
+  blk.0.attn_q.weight  nt     12 calls  0.1964 s  24.4%  16363 us/call
+  blk.5.attn_q.weight  nt     14 calls  0.0195 s   2.4%   1391 us/call
+  blk.7..blk.13 attn_q nt  36 calls ea  ~0.015 s   1.8%   ~400 us/call
+  96 sites total, 0.8045 s
+THREE RESULTS:
+1. NO tensor named *output* appears anywhere in the top ten. The LM head is not on either dense entry point. The head
+   attribution is now dead by NAME, not merely by elimination - which is the standard the last two turns failed.
+2. blk.0.attn_q costs 16363 us/call against ~400 us for the same-shape, same-type tensors in layers 7-13: 41x. The only
+   difference is that layer 0 is the FIRST tensor touched each run, so it pays the cold page-in. That is the paging signal
+   resolved to a single named tensor, and it is 24.4% of all entry-point time on its own.
+3. CAVEAT, self-reported by the instrument: the table is capped at 96 entries and printed exactly "96 sites", so later
+   tensors (the experts, most likely) were dropped. Coverage is a lower bound.
+ACTIONABLE NOW, and cheap: blk.0's cold page-in is ~196 ms of an ~805 ms run. Warming the first layer's dense tensors once
+at startup - a single ~5.8 MB sequential read before token 0 - should remove most of it, and unlike the per-layer prefetch
+this is one bounded read at a known address, not a speculative stream. Acceptance: blk.0.attn_q falls from ~16363 to
+~400 us/call in the census and tok/s rises by roughly the 24% that term represents.
+NEXT MEASUREMENT after that: raise the census cap to 512 and re-run so the expert tensors are included; until then the
+population is still partly unobserved and no share below the top ten can be trusted.
+GATE: 15/15, 44 commits.

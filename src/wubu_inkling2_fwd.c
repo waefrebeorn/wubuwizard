@@ -52,6 +52,25 @@ typedef struct {
     const void *const *act; int nt; float *const *out; int r0, r1;
 } in2_rows_job;
 
+/* Call-site census keyed on TENSOR NAME across every dense entry point. Two attributions in a row were wrong because
+ * I reasoned from call sites I had read rather than from names actually invoked; this counts names, so the population
+ * is observed instead of inferred. entry: 0 = in2_matvec_nt, 1 = in2_matvec_quant. */
+struct in2_cs_rec { char name[28]; int entry; double sec; long n; };
+struct in2_cs_rec in2_cs[96]; int in2_cs_n;
+static void in2_cs_add(int entry, const wubu_in2_tensor_t *t, double sec)
+{
+    if (!t || !t->info) return;
+    for (int i = 0; i < in2_cs_n; ++i)
+        if (in2_cs[i].entry == entry && strncmp(in2_cs[i].name, t->info->name, 27) == 0) {
+            in2_cs[i].sec += sec; in2_cs[i].n++; return;
+        }
+    if (in2_cs_n < 96) {
+        struct in2_cs_rec *r = &in2_cs[in2_cs_n++];
+        snprintf(r->name, sizeof r->name, "%s", t->info->name);
+        r->entry = entry; r->sec = sec; r->n = 1;
+    }
+}
+
 double in2_wj_sec; long in2_wj_rows, in2_wj_n, in2_wj_printed;
 /* Per-shape cost table: the table this project never had. Aggregated in the in2_matvec_nt wrapper. */
 struct in2_shp_rec { int ni, no, ty; double sec, mn, mx; long n; };
@@ -674,7 +693,7 @@ static int in2_gpu_resident(int t, const void *w, size_t wb, const void *a, int 
 double in2_gpu_seconds(void) { return in2_gpu_sec; }
 long long in2_gpu_call_count(void) { return (long long) in2_gpu_calls; }
 
-int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+static int in2_matvec_quant_impl(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
                      const float *x, int n_out, int n_in, float *y)
 {
     in2_ent_calls[1]++;
@@ -889,6 +908,16 @@ int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off
     return WUBU_INKLING2_OK;
 }
 
+/* Timed wrapper: every return path counted by tensor name (entry 1 = quant). */
+int in2_matvec_quant(gguf_ctx *ctx, const wubu_in2_tensor_t *t, int64_t elem_off,
+                     const float *x, int n_out, int n_in, float *y)
+{
+    const double _q0 = in2_now();
+    const int rc = in2_matvec_quant_impl(ctx, t, elem_off, x, n_out, n_in, y);
+    in2_cs_add(1, t, in2_now() - _q0);
+    return rc;
+}
+
 
 /* Batched dense projection: Y[i] = W . X[i] for i in [0, nt).
  *
@@ -1061,6 +1090,7 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
     in2_ent_sec[0] += _dt;
     in2_ent_calls[0]++;
     in2_shp_add(n_in, n_out, (t && t->info) ? t->info->ggml_type : -1, _dt);
+    in2_cs_add(0, t, _dt);
     return rc;
 }
 
