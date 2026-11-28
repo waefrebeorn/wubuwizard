@@ -866,10 +866,9 @@ double in2_ty_sec[256];
 long   in2_ty_calls[256];
 double in2_ty_macs[256];
 
-int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
+static int in2_matvec_nt_impl(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
                   const float *X, int nt, int n_in, int n_out, float *Y)
 {
-    const double _e0 = in2_now(); in2_ent_calls[0]++;
     /* f16 dense lane: this is the batched dense path the decode actually uses (wq/wk/wv/wo/wgate/wrel/head...).
      * Do each token's N=1 cuBLAS matvec serially here (single-threaded entry, before this function's own OpenMP),
      * and only if every token succeeds; otherwise fall through to the CPU path untouched. */
@@ -1004,6 +1003,19 @@ int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
         in2_matvec(W, X + (size_t)i * n_in, n_in, n_out, Y + (size_t)i * n_out);
     free(W);
     return WUBU_INKLING2_OK;
+}
+
+/* Timed wrapper so EVERY return path is measured: the f16-lane early return, the kernel-branch success and the float
+ * tail all go through here. in2_ent_sec[0] is therefore the whole nt entry cost, and the read counter inside is a
+ * subset of it - the difference is kernel + dispatch + buffer setup. */
+int in2_matvec_nt(gguf_ctx *ctx, const wubu_in2_tensor_t *t,
+                  const float *X, int nt, int n_in, int n_out, float *Y)
+{
+    const double _t0 = in2_now();
+    const int rc = in2_matvec_nt_impl(ctx, t, X, nt, n_in, n_out, Y);
+    in2_ent_sec[0] += in2_now() - _t0;
+    in2_ent_calls[0]++;
+    return rc;
 }
 
 

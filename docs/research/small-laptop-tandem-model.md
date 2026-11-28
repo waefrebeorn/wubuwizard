@@ -1357,3 +1357,25 @@ CORRECTED PER-CALL ARITHMETIC, with the population actually known:
 A 2304x384 quant matvec is 0.88 MMAC, so 1.5 ms mean ~0.6 GFLOPS, three orders of magnitude below this CPU.
 => per-call OVERHEAD is the target, and the population is now measured rather than assumed.
 GATE: 15/15.
+
+## THE 89% IS LOCATED: in2_matvec_nt is ~100% of layer time and 82% of it is dequant/dispatch, not the dot
+Timed wrapper around in2_matvec_nt (so every return path is measured: f16-lane early return, kernel success, float tail):
+  ENTRYTIME nt total 0.7387 s / 448 calls = 1648.9 us/call | read 0.0000 s (0.0 us/call) | kernel+dispatch 0.7387 s
+Cross-check that makes this trustworthy: the counters are run-wide (4 forwards in a full-recompute run) while PHASE
+resets per forward, and 0.7387 / 4 = 184.7 ms against a PHASE layer total of 183 ms - within 1%. So in2_matvec_nt IS
+the layer cost; there is nothing significant hiding beside it.
+CONSEQUENCES, each one an elimination:
+  read = 0.0000 s, unmapped = 0 -> not I/O (mapping is used, no copy).
+  TIMETY leaf dot = ~0.034 s/forward = 18% of 0.183 s -> the dot is only 18%.
+  Therefore ~82% of nt time, ~150 ms per forward, is DEQUANTISATION + buffer/dispatch work inside the kernel branch.
+  That is ~4.6x the cost of the arithmetic it feeds - and the arithmetic is only 0.88 MMAC per 2304x384 call.
+Calls per forward: 448 / 4 = 112, i.e. 4.7 per layer, not the 7 I assumed nor the 2 I wrongly retracted to. At 1.65 ms
+per call, 112 calls = 185 ms, which is the whole layer budget.
+WHERE THE NEXT FIX GOES: inside in2_matvec_nt's kernel branch, between the mapping and the rows call - the dequant of
+rb*n_out bytes into the shared `whole` buffer plus the activation quantisation. That region is now the only place left
+with 82% of the cost, and it is instrumentable with two more spans (dequant time, act-quant time) inside the same
+wrapper.
+NOTE ON COUNTS THAT HAVE BITTEN TWICE: 448 was right last turn (it was the 48 that was truncated), and 448 is a RUN
+total across 4 forwards, not a per-forward count. Both numbers were mine; both were misread the first time. Always
+divide run-wide counters by the forward count before quoting a per-call cost.
+GATE: 15/15.
