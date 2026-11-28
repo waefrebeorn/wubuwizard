@@ -2211,3 +2211,29 @@ compare against for this architecture, so quantization-level agreement with upst
 one gate prompt. Numeric drift that is deterministic (i.e. both our paths agree with each other but not with llama.cpp) would
 be invisible to every test in this repo.
 STATE: 64 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## THE ONE UNCLOSED RISK, AND THE TEST THAT WOULD CLOSE IT
+Everything measurable inside this repo now agrees with itself. What no test here can catch is DETERMINISTIC drift relative to
+llama.cpp: if our dequantisation or kernel accumulation differs from upstream by a consistent amount, every self-comparison
+passes (KV==no-KV, prefix property, three prompts) while the tokens diverge from the reference. Coverage for upstream agreement
+is exactly one prompt at 12 tokens, which is a weak assertion for a 7.9 GB MoE at 2.06 bpw.
+Existing coverage, for contrast: tests/golden/ holds operator goldens for conv1d, l2_norm, rms_norm, sigmoid and silu - but
+NOTHING for the quantised matvec kernels, which are where 100% of decode time goes. tools/iq_bench.c, iq_kernel_wall.c and
+iq_mlp_curve.c measure SPEED only; iq_kernel_wall.c's only "reference" is an upstream G weights/s figure, not a numerical one.
+THE TEST TO WRITE (tools/iq_ref_check.c), specified so it can be built cold:
+  1. Construct a synthetic tensor of N blocks for one type at a time, starting with ty=8 (Q8_0) because it is the dominant
+     expert type in this model. A Q8_0 block is 32 int8 weights plus one f16 scale - it can be generated directly, no encoder
+     needed for the WEIGHT side.
+  2. Export the activation quantiser. in2_q8_0_quantise is currently static inside wubu_inkling2_fwd.c; it must be made
+     non-static (or moved next to the kernels) for a test binary to quantise activations the same way the engine does.
+  3. Reference: dequantise each block to double (scale * (double) q[i]) and accumulate the dot product in double, summing
+     blocks in order. This is the specification the kernel is supposed to implement.
+  4. Compare against wubu_iq_rows(8, buf, row_bytes, 1, act_q8, nt, out, 0, 1) with a tolerance, not for equality: the
+     kernel accumulates in float/int and the reference in double, so the correct assertion is a RELATIVE error bound
+     (~1e-5 for Q8_0), and a failure means the kernel's block handling or scale application is wrong.
+  5. Print min/median/max relative error over N blocks, never a mean alone - the same rule that caught four wrong mechanisms
+     earlier in this document.
+WHY THIS IS THE RIGHT NEXT PIECE OF WORK rather than another speed experiment: the identity clause outranks speed, the gate's
+upstream coverage is one prompt, and this is the only test that can be built here that would fail if the kernels were subtly
+wrong. It needs one export and about 120 lines.
+STATE: 65 commits, gate 15/15, identity exact on 4 prompts x 2 paths, default 4.45-4.65 tok/s, all speed levers measured.
