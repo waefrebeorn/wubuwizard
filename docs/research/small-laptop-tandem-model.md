@@ -2835,3 +2835,29 @@ CONSEQUENCES, stated plainly:
   3. The 48-vs-24 gap is itself a structural fact about the model worth knowing: 48 logical blocks stored as 24 physical
      ones, consistent with the 40 per-expert .scale tensors found earlier (blocks carry more than one sub-block).
 STATE: 92 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s, 11 reference checks green, kernel coverage 192/192.
+
+## HEAD-TO-HEAD ATTEMPT 2: full metadata reblock - upstream fails at TENSOR SET, not at header
+Built tools/gguf_reblock.py, which re-serialises the GGUF with the declared block count and every per-layer array truncated to
+the 24 blocks the file actually contains, keeping the tensor list byte-identical and copying the data blob verbatim (tensor
+offsets are blob-relative). Result, 8,486,236,155 bytes, data_start moved 11978661 -> 11978464:
+    inkling2.block_count             48 -> 24
+    inkling2.attention.head_count    48 -> 24
+    inkling2.attention.head_count_kv 48 -> 24
+    inkling2.attention.sliding_window_pattern 48 -> 24
+Upstream now passes the header and dies one level deeper:
+    done_getting_tensors: wrong number of tensors; expected 734, got 588
+So the remaining gap is NOT metadata arithmetic. The loader's architecture definition for this family builds a tensor set that
+does not match the 734 tensors in this file: it accounts for 588 of them. That means the tree's inkling2 implementation was
+written against a different variant of the architecture than the exporter that produced this GGUF.
+THREE ATTEMPTS, THREE DISTINCT FAILURES, all recorded here rather than summarised as "upstream doesn't work":
+    1. stock header      -> check_tensor_dims: tensor 'blk.24.attn_q.weight' not found   (48 declared vs 24 stored)
+    2. scalar patched    -> attention.head_count wrong array length; expected 24, got 48  (per-layer arrays)
+    3. fully reblocked   -> wrong number of tensors; expected 734, got 588                (architecture mismatch)
+CONCLUSION ON THE SPEED CLAUSE: comparing against upstream requires PORTING this architecture into llama.cpp so it can load
+the file - a project in its own right, not a measurement step. Until then the clause is unimplementable, and the honest
+statement is that this engine loads and runs at 4.45-4.65 tok/s a model that the inkling-aware upstream tree cannot open at
+all. No multiplier is quoted anywhere in this document.
+WHAT THE FILE ACTUALLY IS, now established: declared 48 blocks, 24 stored; per-layer arrays sized for the declared 48; 734
+tensors of which upstream's loader can account for 588 at 24 blocks. This engine reads the physical layer count and the
+tensor list it actually finds, which is why it works where upstream does not.
+STATE: 93 commits, gate 15/15, identity exact, 4.45-4.65 tok/s, 11 reference checks green, kernel coverage 192/192.
