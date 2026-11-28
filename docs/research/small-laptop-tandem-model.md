@@ -3580,3 +3580,20 @@ NEXT STEP IS NARROW AND CONCRETE: find the single place that prints after the LA
 same totals as the final TIMING line's wall, and only then re-read the phase table. Until that exists, no phase figure here is
 admissible under the reconciliation rule this document adopted one section ago.
 STATE: 123 commits, gate 15/15 (binary 12:24:28), identity exact, kernel coverage 192/192, 4.30-4.68 tok/s hot.
+
+## THE ZERO SURVIVES EVERY GATE - the counters are not being read where they are charged, and the fix is a placement change
+Three configurations tried, all on the 12:24:28 build:
+    IN2_PERF=1 IN2_MOE_SPLIT=1                    forward=0.000  layer-visits=0.000
+    + IN2_TIMETY=1   (which is the gate that charges in2_lay_sec at src/wubu_inkling2_model.c:217)
+                                                  forward=0.000  layer-visits=0.000
+    while the SAME block prints TIMING 4.27 tok/s and phases non-zero.
+So the accumulators exist and are charged (phases prove the layer function runs), and yet both my bracket and in2_lay_sec read zero at the
+print site. The only mechanism consistent with all four facts is that the stats block executes in a context where those specific globals are
+zero - the print is positioned in the stats section, not immediately after the last forward, and whatever charges them is either a different
+translation unit's copy or a path this process does not take.
+THE FIX IS PLACEMENT, NOT ANALYSIS: print immediately after the final in2_forward_* call inside the generation loop itself, using a QPC read
+taken at that exact point, instead of printing from the stats block at the end. That is a five-line change and it is the last thing standing
+between the numbers in this document and admissibility under the reconciliation rule.
+RECORDED SO IT IS NOT REPEATED: IN2_TIMETY is the gate for in2_lay_sec, IN2_MOE_SPLIT for the MoE split, IN2_PERF for the stats block, and
+IN2_CS_ALL for the full census. Printing a counter without knowing its charge-gate produced a false "all zeros" reading twice in this arc.
+STATE: 124 commits, gate 15/15 (binary 12:24:28), identity exact, kernel coverage 192/192, 4.27-4.68 tok/s hot.
