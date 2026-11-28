@@ -2534,3 +2534,29 @@ activation quantiser stands at 3.8e-3, identity stands at 4 prompts x 2 paths pl
 4.45-4.65 tok/s. IQ2_XXS is recorded as UNVERIFIABLE WITH THE CURRENT ORACLE rather than as either verified or defective,
 which is the only honest of the three.
 STATE: 78 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## IQ2_XXS: OFFSET BUG FOUND AND FIXED, SCALES NOW SANE, COMPARISON STILL DISAGREES
+The GGUF data-section origin was wrong and the ENGINE'S OWN READER proved it. Linking a probe against src/gguf_reader.c
+(needs -Iinclude/win32 for the sys/mman.h shim, plus src/wubu_dequant_fp4.c and src/wubu_win.c for wubu_fp4_raw_size and
+wubu_munmap) and printing ctx->data_blob_offset gives:
+  engine: data_blob_offset = 11978688   alignment = 32   n_tensors = 734
+My own parser had computed 11931808. Difference 46880 bytes. So every previous "real bytes" read was pointed 46880 bytes
+before the intended tensor - which is exactly what produced the alternating-zero scales, and it means my python GGUF metadata
+parser mis-skips at least one metadata value (a plausible candidate: a bool stored as 1 byte vs 4, or an array whose element
+type I mishandle).
+With the ENGINE'S offset (blk.5.ffn_gate_up_exps.weight abs = 2003254464) the nine consecutive block scales are
+  +4.621e+00 +4.211e+00 +3.660e+00 +5.785e+00 +3.660e+00 +4.227e+00 +3.553e+00 +4.102e+00 +4.039e+00
+all nonzero, all the same magnitude - so the alignment IS now correct and the 66-byte block size is confirmed by the engine's
+own gguf_raw_size (n_blocks * 66, "verified empirically" per its comment).
+AND THE COMPARISON STILL FAILS: rel err min 5.147e-01, median 2.235e+00, max 1.444e+01; ref[0]=-3132.77 vs got[0]=-10134.42.
+WHAT IS NOW RULED OUT (each by measurement, not argument): wrong block size (engine agrees 66), wrong byte alignment (nine
+consistent nonzero scales), dead code path (in2_ty_verified(16)=1 and the engine routes ty=16 through wubu_iq_rows).
+WHAT REMAINS AS THE ONLY LIVE EXPLANATIONS: (i) the upstream dequantize_row_iq2_xxs I fetched from master decodes a different
+convention than this file uses, so upstream source is not this file's oracle after all; (ii) a genuine kernel defect in the
+IQ2_XXS path that nevertheless leaves tokens identical because llama.cpp and this kernel could share the same non-upstream
+decode - possible only if both were written against the same (non-master) convention.
+THE TIE-BREAK, and it is the honest one: the gate reproduces llama.cpp's tokens 15/15 on this model. Whatever convention the
+kernel uses, llama.cpp AGREES with it on real data. So (ii) can only be true if the file and both implementations share a
+convention that master's ggml-quants.c no longer expresses. The next step that would settle it is to compare against the
+dequantiser from the llama.cpp revision that WROTE this quant (UD/S version-matched), not current master.
+STATE: 79 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s. Verified and wired: Q8_0, Q2_0, Q6_K.
