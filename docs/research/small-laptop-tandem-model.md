@@ -463,3 +463,13 @@ quantized_dot_generic.c - byte-identical to what the engine uses). VERIFIED vs
 ggml_vec_dot_iq3_xxs_q8_K_generic: rel -1.9e-7.
 Verified types: 23,8,12,13,14,0,18 = 3290 of 3294 MiB = 99.9%. Only type 30 (IQ3_XXS_B, attn_sink, 4 MiB)
 remains (needs its own block layout, check whether the engine/vendor quantizer routes it as a distinct format).
+
+## dequant tier COMPLETE: all 8 non-expert types handled, lane dequant layer done
+type 30 turns out to be BF16 (the reader and whole engine treat type 30 as bfloat16 - raw 2 B/el, and
+quantized_matmul even maps it onto the f16 compute path), NOT the IQ3_XXS_B I guessed. So attn_sink needs only
+bf16->f32->f16, exact by construction; SANITY finite/sane. The tool (head_hf16.c) now dequants ALL eight
+non-expert types present: 0 F32, 8 Q8_0, 12 Q4_K, 13 Q5_K, 14 Q6_K, 18 IQ3_XXS, 23 IQ4_XS, 30 BF16 -> the
+complete single-f16 lane dequant layer. Engine-dot-verified to ~1e-6: 23/12/13/14/18 (5 types); structural:
+0/8/30. All 646 non-expert tensors (3.22 GB f16) are now dequantizable. NEXT: run the tool over every
+non-expert tensor to materialize the full 3.22 GB f16 resident weight set, then resident upload + cuBLAS + the
+gen_fast dense-decode rewiring + the end-to-end gate.

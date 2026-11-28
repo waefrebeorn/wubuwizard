@@ -116,6 +116,11 @@ int main(int argc,char**argv){
                 qsr+=8;
             }
         }
+    } else if(t->ggml_type==30){
+        /* BF16 (bfloat16): engine treats type 30 as BF16 -> the f16 compute path. Convert bf16->f32 (zero-extend
+         * the upper 16 bits) -> f16 via the RNE pass below. Exact by construction. */
+        const unsigned short*bsrc=(const unsigned short*)raw; rawsz=(long)ne*2;
+        for(long long i=0;i<ne;i++){ unsigned u=((unsigned)bsrc[i])<<16; float v; memcpy(&v,&u,4); f[i]=v; }
     } else { fprintf(stderr,"unsupported type %d for dequant\n",t->ggml_type); return 6; }
     /* f32 -> f16 (IEEE round-to-nearest-even, the same cuBLAS/f16 uses) */
     unsigned short*hf=(unsigned short*)malloc((size_t)ne*2);
