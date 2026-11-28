@@ -74,6 +74,7 @@ def main():
         if name.startswith(b"blk."):
             real_blocks = max(real_blocks, int(name.split(b".")[1]) + 1)
     want = int(sys.argv[3]) if len(sys.argv) > 3 else real_blocks
+    arch_override = sys.argv[4].encode() if len(sys.argv) > 4 else None
     print(f"declared vs real blocks: {[v for k, t, v in kv if k.endswith('block_count')]}  real={real_blocks}  target={want}")
     assert want <= real_blocks, "cannot declare more blocks than the file contains"
 
@@ -86,7 +87,15 @@ def main():
     out = []
     changed = []
     for key, t, val in kv:
-        if key.endswith("block_count") and t == 4:
+        if arch_override and key.startswith("inkling2."):
+            newkey = "inkling2_loop." + key[len("inkling2."):]
+            out.append((newkey, t, val))
+            changed.append((key, key, newkey))
+            continue
+        if key == "general.architecture" and t == 8 and arch_override:
+            out.append((key, t, arch_override))
+            changed.append((key, val, arch_override))
+        elif key.endswith("block_count") and t == 4:
             out.append((key, t, struct.pack("<I", want)))
             changed.append((key, old_decl, want))
         elif t == 9 and val[0] != 8 and len(val[1]) == old_decl:

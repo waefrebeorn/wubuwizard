@@ -2861,3 +2861,29 @@ WHAT THE FILE ACTUALLY IS, now established: declared 48 blocks, 24 stored; per-l
 tensors of which upstream's loader can account for 588 at 24 blocks. This engine reads the physical layer count and the
 tensor list it actually finds, which is why it works where upstream does not.
 STATE: 93 commits, gate 15/15, identity exact, 4.45-4.65 tok/s, 11 reference checks green, kernel coverage 192/192.
+
+## TENSOR CENSUS NAMES THE GAP EXACTLY: the file is an inkling2 model CARRYING inkling2_loop tensors
+Census of all 734 tensors by name pattern (strip blk.N): 48 distinct patterns. Two families:
+  per-layer, 24 each: attn_gate/k/k_conv/output/post_conv/q/q_clip/rel/rel_bias/rel_clip/sink_proj/v/v_conv,
+                      exp_probs_b.bias, ffn_down_exps, ffn_gate_inp, ffn_gate_up_exps, ffn_norm, ffn_post_conv,
+                      ffn_res_query
+  per-layer, 20 each: attn_norm, ffn_down_exps.scale, ffn_gate_up_exps.scale
+  per-layer, 23:      attn_res_query
+  per-layer, 12 each: loop_attn_down/forget/gain, loop_k_down/forget/gain, loop_mlp_down/forget/gain,
+                      loop_v_down/forget/gain            <-- 12 patterns x 12 = 144 tensors
+  per-layer, 4 each:  attn_k_conv_proj, attn_k_inp_norm, attn_q_inp_norm, attn_v_conv_proj
+ARITHMETIC THAT CLOSES THE QUESTION: upstream's inkling2 builder accounted for 588 of 734. The gap is 146 = 144 loop tensors
++ 2. So the unaccounted tensors are exactly the looping family, confirming the file carries a LATER architecture variant than
+the "inkling2" its metadata declares.
+ATTEMPTS 4 AND 5, both against the loop variant:
+  4. arch renamed to inkling2_loop      -> key not found: inkling2_loop.context_length   (keys were inkling2.*)
+  5. + all 36 inkling2.* keys renamed   -> key not found: inkling2_loop.loop.start       (the file has NO such key)
+FINAL VERDICT ON THE SPEED CLAUSE: upstream's inkling2_loop implementation requires hyperparameters (loop.start and kin) that
+this file does not carry, and its inkling2 implementation lacks the 144 loop tensors this file does carry. The file sits
+BETWEEN the two variants upstream implements. Making upstream load it is therefore not a header fix, a key rename, or a
+block-count truncation - it is writing architecture support for a variant that upstream does not have. That is a port, and a
+port is not a measurement, so the comparative clause stays unimplementable and NO MULTIPLIER IS QUOTED.
+WHAT REMAINS TRUE AND MEASURED: this engine loads this file and runs at 4.45-4.65 tok/s in 6 GB VRAM / 16 GB RAM while
+streaming 7.90 GB from SSD at a measured 637 MB/s, with 192/192 quantised kernels verified against independent
+specifications and gate 15/15 reproducibility.
+STATE: 94 commits, gate 15/15, identity exact, 11 reference checks green. Upstream attempts: 5, all failures recorded.
