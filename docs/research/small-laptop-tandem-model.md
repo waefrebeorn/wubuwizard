@@ -416,3 +416,13 @@ tier into ONE (or a few) batched GEMM launches per token to amortize the M=1 ove
 Gemma qkv3/ffn3 fused lane and WuBuMM's ONE vkQueueSubmit). Only then does the measured 20-27 TFLOPS tensor-core
 rate become reachable. The dequant + resident + verification pieces (head_hf16.c: engine-matched to ~1e-6) are
 correct and stay; the compute path must be the fused batched GEMM, not per-tensor calls.
+
+## CORRECTION to the launch-bound refutation: cuBLAS batches automatically; the lane floor is VRAM-BYTES
+tools/fuse_gemm.cu (synthetic, same total FLOPs at N=1): 1 fused call O=214000 = 5.93 ms vs 20 separate calls
+= 6.14 ms - ALMOST EQUAL. So cuBLAS already batches/overlaps the tiny M=1 calls; there is no per-call launch
+tax to amortize. The earlier "5.6 ms/call" from head_gemm was therefore NOT launch overhead - it is the head's
+VRAM-bandwidth read of 883 MiB of f16 weight per token (~158 GB/s). REFRAMED FLOOR for the lane: time =
+(total dense-tier f16 bytes) / VRAM-BW = 3.22 GB / ~160 GB/s = ~20 ms/token, dequant-free, vs the CPU's
+~80-100 ms/token dense read (+dequant). So the f16 resident dense lane is a REAL ~1.4x on the dense tier
+(~20 vs ~80-100 ms), fusion is NOT the binding requirement (cuBLAS overlaps fine), and per-tensor calls are
+acceptable. The honest lane cost model: bytes-over-VRAM, not launches.
