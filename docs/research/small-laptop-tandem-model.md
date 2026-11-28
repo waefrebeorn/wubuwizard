@@ -278,3 +278,19 @@ chunk (sum += 0.125f*f16(d)*db*float(sumi*ls)) instead of keeping ls in int32, d
 block per lane, and applying 0.125 once after an hsum-ordered reduction. That is the full, precise
 specification the transcription must reproduce. Same pattern per type (16/18/21/22/23/29; K-quants 12/13
 and experts 19/40/42 have their own row_dot_* to transcribe, each with its own FMT_K and accumulation).
+
+## DESIGN: gen_fast dense-tier GPU lane uses WuBuMM's two-f16 split + the "endian wrapping" rule (max saturation)
+Per the user's direction, learned from WuBuMM (L103/L322, H3_F16_ADAPTATION.md). The dense weights stay
+f32 in the checkpoint sense but the LANE stages them to the device as two-f16 split precision, which halves
+bytes and saturates the transfer band while keeping near-f32 accuracy:
+  x = x_hi + x_lo/2^11, x_hi = f16(x), x_lo = f16((x - x_hi)*2^11)   (measured 8.2e-8 hi+lo, 4.0e-7 GEMM vs f32)
+  f32 accumulate. Gate cos >= 0.999 (WuBuMM's own f16 gate; bit-identity is impossible by construction, so
+  this is the opt-in fast lane, NOT the IQ2 bit-identical path).
+ENDIAN WRAPPING RULE (the actual warning): keep x_hi and x_lo in SEPARATE f16 buffers. Never pack the hi/lo
+pair into one uint32 - that is the only place endianness enters, and it is a documented trap. Every 16-bit
+load feeds one operand; the wider loads read whole f16 words and are endian-free.
+ALSO MANDATORY (from the same doc): residual stream and RMSNorm STATISTICS stay f32 (the residual on H3
+overflows f16 by 7.6x); only the GEMM operands go f16. And bf16 is EMULATED on this Turing/Ada part - f16 is
+the only tensor-core path, so use f16, never bf16, for the lane.
+This is the concrete way gen_fast's dense tier (696 MB/token of DRAM today) cuts its bytes roughly in half
+and runs as an f16 GEMM with f32 accumulate at tensor-core rate - the WuBuMM "max saturation" direction.
