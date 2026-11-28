@@ -442,7 +442,11 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
 
             const int CHUNK = 8192;
             head_done = 1;
-            const clock_t _h0 = clock();
+            /* in2_wall_now(), not clock(): on Windows clock() sums CPU time across threads, so a threaded
+             * head reports ~7x its wall cost (measured 0.281 "s" for a ~40 ms GEMM). This is the same trap
+             * that produced the impossible "4.44 s of experts inside a 3.4 s run". */
+            extern double in2_wall_now(void);
+            const double _h0 = in2_wall_now();
             if (getenv("IN2_GPU_F16")) {
                 /* whole-vocab in ONE call: the f16 lane already holds output.weight resident (it is part of the
                  * 646-tensor dense set), so this is one cuBLAS GEMM instead of 25 chunked CPU row-block matvecs.
@@ -497,7 +501,7 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                  * inkling_gen (IN2_TIMETY) shows totals instead of the already-cleared last forward. */
             }
             if (getenv("IN2_TIME")) fprintf(stderr, "HEAD %.3f s for %d rows x %d\n",
-                    (double)(clock() - _h0) / (double)CLOCKS_PER_SEC, cfg->vocab_size, d);
+                    in2_wall_now() - _h0, cfg->vocab_size, d);
             if (!head_done) fprintf(stderr, "lm_head kernel path failed at vocab %d, falling back\n", cfg->vocab_size);
         }
     }

@@ -1079,3 +1079,24 @@ METHODOLOGY CORRECTION, the important part: pairwise interleaving alone does not
 always runs first in every pair. The protocol must alternate (ABBA) so each arm occupies both positions equally.
 Both the "+0.7% lazy alloc" (measured pairwise) and this "+1.4%" (measured pairwise) are therefore suspect in
 magnitude; the lazy-alloc direction was corroborated by 5/5 wins but its size is not trustworthy either.
+
+## THE LM HEAD IS ~25% OF DECODE AND RUNS 4x SLOWER PER WEIGHT THAN THE LAYER MATVECS
+HEAD is 201024 rows x 2304 = 463 MMAC, i.e. 463 M weights = 119 MB at 2.06 bpw - more arithmetic than all 24 layers'
+dense projections put together.
+MEASURED: HEAD 0.283 s in the one-token full-recompute run, which computes the head once per position (4), so ~71 ms
+per generated token. Layers are ~0.185 s/token, so 185 + 71 = 256 ms against a measured ~275 ms token: the head closes
+the "35% unmeasured" gap that FP2 could not reach. Decode is therefore roughly 25% head, 67% layers, 8% embed/sample.
+RATE: 463 M weights in 71 ms = 6.5 G weights/s ... see below, the honest number is worse.
+Correction on my own arithmetic: 463 M weights / 0.071 s = 6.5 G weights/s, which is IN LINE with the layer matvecs
+(~7 G weights/s). The "4x slower" impression came from dividing the 0.283 s by ONE position when it covers four.
+So the head is not anomalously slow - it is simply big, and it is the largest single matvec in the model.
+INSTRUMENT FIXED: the head was timed with clock(). Replaced with in2_wall_now(). The value did not change (0.283 s
+either way), which settles a question left open earlier: on this Windows/mingw runtime clock() is WALL time, not
+CPU time summed across threads. That means the original "4.44 s of experts inside a 3.4 s run" was NOT clock()
+summing threads - it was the nested call-site timers. Correcting the record on that point.
+ANOMALY WORTH FLAGGING: with IN2_GPU_F16=1 the head takes the "whole-vocab in ONE call" cuBLAS path per the code
+comment, and it measures 0.282 s against the CPU chunked path's 0.281 s, with 12-token throughput identical at
+3.64 tok/s both ways. Either that path is not actually being taken (the f16 resident slab for output.weight is
+missing), or the one-GEMM path is not faster here. Unresolved, and it is the single highest-value thing left to
+resolve because the head is a quarter of decode.
+GATE: 15/15 after the instrument change.
