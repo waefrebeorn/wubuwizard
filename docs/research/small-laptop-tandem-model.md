@@ -1749,3 +1749,25 @@ call in the KV path - start from the quant=8748 count: whatever issues 8748 in2_
 real head path, and that is where a resident buffer or a page lock would actually apply.
 STATE: the lock code is committed but default-off and provably inert on both paths until the real head call is located, so
 it cannot affect the gate or the shipped behaviour. Gate 15/15.
+
+## RETRACTED: the "119 MB/token LM head" attribution was arithmetic attached to a call site that never runs
+Four independent checks, all against the head hypothesis:
+  1. model.c:443 (full-vocab chunked head) is provably NOT executed on the KV path - the HEADLOCK probe is silent.
+  2. model.c:404 (per-candidate logit scoring) is gated behind IN2_SCORE_IDS, which has never been set.
+  3. The MEASURED 12-token KV shape table contains no 2304 -> 201024 row at all: only 2304->3072, 3072->2304,
+     2304->1024, 2304->384. So the head did not pass through in2_matvec_nt either.
+  4. quant=8748 over 12 tokens = 729 calls/token, and the only call sites that can produce that volume are the MoE expert
+     matvecs (fwd.c:2378 down, :2406 gate_up, :2412 down ~ 24 layers x 8 experts x 2) plus wq/wk/wv on the sliding
+     layers (:2719/:2743/:2745). Not the head.
+SO: the ~186 MB/token of disk traffic is layer weights plus expert weights - inherent to streaming a 7.9 GB MoE at
+2.06 bpw one token at a time - and the head-resident fix would NOT recover the ~64% I claimed for it. The measured
+quantities (2.23 GB per 12-token run, 637 MB/s, I/O bound) stand; the ATTRIBUTION of one sixth of it to the head does not.
+WHERE THE HEAD ACTUALLY RUNS ON THE KV PATH REMAINS UNKNOWN. It must be somewhere, since tokens are produced, but it is
+neither of the two sites I read and it does not appear in the nt shape table. That is the single open question, and the
+way to answer it is a call-site counter keyed on tensor name across ALL of in2_matvec_quant / in2_matvec_nt / in2_matvec,
+printed at exit - not more reading of candidate sites, which has now produced two wrong attributions in a row.
+CONSEQUENCE FOR THE GOAL: if per-token traffic is dominated by expert weights, then the lever is not residency and not
+prefetch - it is doing less expert work per token (fewer/cheaper experts touched, or batching tokens so each byte of
+expert weight serves more output), or accepting that 3.4 tok/s is what 7.9 GB of MoE at SSD speed produces on this box.
+That is a much more honest frame than the kernel hunt this session started with.
+GATE: 15/15, tree clean, 43 commits.
