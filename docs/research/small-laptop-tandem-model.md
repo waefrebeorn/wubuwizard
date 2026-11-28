@@ -1556,3 +1556,27 @@ FIX DIRECTION, in order of expected effect:
 ACCEPTANCE: the max/min ratio for a shape must collapse toward 1.0, and mean us/call must approach the min. tok/s is a
 downstream consequence, not the check.
 GATE: 15/15.
+
+## CONFIRMED BY EXPERIMENT: page-cache warming alone is worth +25% decode
+Same binary, same prompt, same 12 tokens, IN2_THREADS=8, KV cache path. Only difference: the GGUF was read end-to-end
+first so its pages were resident.
+  cold (normal): 3.51 - 3.64 tok/s
+  warm (pread) : 4.49 tok/s      -> +25% (4.49 / 3.60 = 1.25)
+and the shape table tightens with it:
+  ty=8  2304 -> 3072 : mean  270.3 us [min 104.8  max   870.7]  23.5%
+  ty=8  3072 -> 2304 : mean  274.0 us [min 106.6  max  2948.6]  20.1%
+  ty=8  2304 -> 1024 : mean  141.3 us [min  72.8  max   795.8]  19.3%
+  ty=14 2304 -> 3072 : mean  232.3 us [min 102.0  max  1528.8]  12.3%
+  ty=8  2304 ->  384 : mean   97.6 us [min  67.3  max   639.8]   5.6%
+Compare with the cold 1-token run: ty=14 mean 6187.6 us [min 147.0 max 187192.7]. The 187 ms page-in outlier is GONE,
+max/min fell from 1273x to ~15x, and per-call mean fell from 1682 us to 170 us (the latter is also a different token
+mix - 12 tokens on the KV path vs 1 token full recompute - so only the max/min collapse and the tok/s delta are clean).
+THE DIAGNOSIS IS NOW A MEASUREMENT, NOT AN INFERENCE: cold demand paging costs ~25% of decode throughput, and the
+kernel itself is fine (min 102-147 us per call, i.e. 39-57 GB/s on a 5.8 MB tensor).
+ALSO MEASURED, and it indicts the existing prefetch: gguf_reader.c:1676 issues MADV_WILLNEED over the ENTIRE mapped blob
+at open. On a 16 GB box that reads 7.9 GB and evicts the early layers before layer 0 is reached, so the prefetch is
+largely self-defeating - it pays the I/O and then faults again.
+NEXT FIX (specific, one place): replace the whole-blob WILLNEED with per-layer prefetch issued one layer ahead of use, so
+paging overlaps compute. Acceptance: cold-start tok/s approaches the 4.49 warm figure without a manual pre-read, and the
+per-shape max/min ratio stays near 15x or better.
+GATE: 15/15.
