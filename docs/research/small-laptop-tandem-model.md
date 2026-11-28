@@ -1983,3 +1983,24 @@ WHAT THIS UNLOCKS: the hot expert kernel is a known, single function - in2_matve
 optimisation of expert cost must be written THERE, and it must be validated with MOEPATH showing no regression into another
 branch. That is the first time in this session the target has been named with certainty rather than inferred.
 GATE: 15/15, 52 commits, tree clean.
+
+## PREFETCH AT THE REAL HOT PATH: NEUTRAL. Third measurement, now on the correct call site - hook deleted
+With MOEPATH having proven the expert gate_up goes through in2_matvec_quant (path 3), the expert-slab prefetch was moved to
+that exact call site - the first time in this session a prefetch was aimed at the code that actually moves the per-token
+bytes. ABBA, 12 tokens, 8 threads:
+  OFF 3.61 tok/s   READIO ops=6330
+  ON  3.61 tok/s   READIO ops=6330
+  OFF 3.64 tok/s   READIO ops=6330
+  ON  3.61 tok/s   READIO ops=6329
+Neutral to within noise, and READIO BYTE/OP counts are unchanged - the same number of reads happens either way, so the
+prefetch is not replacing faults, it is duplicating work the OS already does. Hook deleted; the primitive stays.
+THIS CLOSES PREFETCH DEFINITIVELY. Three instruments (seconds, page faults, and now process read I/O), three call sites
+(layer window, next-layer 64 MB, expert slab), all neutral. The mechanism is dead on this platform for this access pattern,
+and it is dead for a reason that generalises: the OS is already issuing those reads at the best size and time it can, and any
+hint we add arrives later and adds calls.
+WHAT IS LEFT, and it is now a short and honest list:
+  1. Batch tokens so one expert slab serves more than one output. 352 expert calls per token, each streaming its slab -
+     this is the only lever that reduces bytes per token rather than rearranging them.
+  2. ~9% from keeping the head's PCIe upload out of short runs and warming blk.0 once.
+  3. in2_matvec_quant is now a NAMED target: any kernel-level work belongs there, validated with MOEPATH unchanged.
+GATE: 15/15, 54 commits, tree clean, throughput ~3.6 tok/s (this measurement), unchanged.
