@@ -55,6 +55,30 @@ static void emit_piece(const char *s)
  * "fault-bound" look identical on a wall clock - this separates them. */
 #ifdef _WIN32
 #include <psapi.h>
+
+/* Page-fault counter. tok/s conflates cache state with everything else, and on Windows the cache cannot be dropped on
+ * demand, so the only honest way to test a read-ahead change is to count faults instead of seconds. Declared against
+ * kernel32 directly (no windows.h, no psapi link) so this stays a zero-dependency diagnostic. */
+#if defined(_WIN32)
+static unsigned long in2_faults(void)
+{
+    typedef struct { unsigned long cb, PageFaultCount; size_t a, b, c, d, e, f, g, h; } in2_pmc_t;
+    typedef int (__stdcall *in2_gpmi_t)(void *, in2_pmc_t *, unsigned long);
+    static in2_gpmi_t s_fn; static int s_tried;
+    if (!s_tried) {
+        HMODULE k = GetModuleHandleA("kernel32.dll");
+        s_fn = k ? (in2_gpmi_t) (void *) GetProcAddress(k, "K32GetProcessMemoryInfo") : 0;
+        s_tried = 1;
+    }
+    if (!s_fn) return 0;
+    in2_pmc_t m; m.cb = (unsigned long) sizeof m;
+    if (!s_fn((void *) -1, &m, sizeof m)) return 0;
+    return m.PageFaultCount;
+}
+#else
+static unsigned long in2_faults(void) { return 0; }
+#endif
+
 static unsigned long long g_ws = 0;
 static void fault_now(unsigned long long *flt, unsigned long long *rd_bytes, unsigned long long *rd_ops)
 {
@@ -455,6 +479,8 @@ int main(int argc, char **argv)
               }
           }
           in2_shp_n = 0; }
+        fprintf(stderr, "PAGEFAULT total=%lu (per token: %.0f)\n", in2_faults(),
+                n_gen > 0 ? (double) in2_faults() / (double) n_gen : 0.0);
         const char *pn[8] = {"f_loads","f_mix+gate","f_q","f_kv+conv","f_attn","f_gate+wo","f_mlp+moe","unused"};
         for (int i = 0; i < 8; ++i)
             fprintf(stderr, "PHASE[%d] %-10s %.3f s (%d tokens)\n", i, pn[i], in2_fph[i], n_gen);

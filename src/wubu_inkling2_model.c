@@ -176,11 +176,6 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
         const double _L0 = in2_wall_now();                                    \
         const float *_bs = blocks;                                                      \
         const int _bn = use_pass_bank ? pass_bank_n : n_blocks;                          \
-        { extern int wubu_gguf_prefetch(gguf_ctx *, long long, long long);               \
-          if (getenv("IN2_PF") && ctx->data_blob_is_mmap && (IL) + 1 < m->n_layer) {  \
-              const long long _po = (long long) m->layer[(IL) + 1].wq.file_offset;        \
-              if (_po > 0) wubu_gguf_prefetch(ctx, _po, 64LL << 20);                      \
-          } }                                                                               \
         if ((IL) % cfg->attn_res_block == cfg->attn_res_block - 1)                     \
             rc = in2_layer_full_seq(ctx, m, cfg, (IL), h, n_tok, pos0, _bs, _bn, (MSG)); \
         else                                                                            \

@@ -1660,3 +1660,21 @@ any of the three attempts above.
 LESSON: tok/s is the wrong dependent variable for a caching experiment. It conflates cache state with everything else,
 and on a box where cache state cannot be controlled it produces numbers that look like results.
 GATE: 15/15, tree clean, 38 commits.
+
+## PAGE-FAULT COUNTER BUILT; PREFETCH DELETED (measured neutral twice, on two different instruments)
+Added in2_faults() to tools/inkling_gen.c (K32GetProcessMemoryInfo resolved from kernel32, no psapi link, no windows.h
+conflict) and printed a PAGEFAULT line at exit. Measured on identical 12-token runs:
+  default   : 3.46 tok/s, PAGEFAULT total=1,428,925 (119,077 per token)
+  IN2_PF=1  : 3.46 tok/s, PAGEFAULT total=1,429,294 (119,108 per token)
+The prefetch does NOT reduce faults - it adds 369, which is the prefetch calls touching pages themselves - and it does not
+change wall clock. Two independent instruments (seconds and faults) now agree it does nothing, so the layer-ahead hook is
+DELETED rather than shipped as dead weight; the wubu_gguf_prefetch primitive stays in gguf_reader.c as an unused utility,
+and the fault counter stays because it is the honest instrument for this class of question.
+WHAT THE FAULT NUMBER DOES SAY: ~119,000 page faults per generated token. PageFaultCount mixes soft (working-set) and hard
+(disk) faults, so this does not by itself prove disk paging, but the count is large enough that the soft/hard split is the
+next thing worth knowing - and the cold/warm delta (3.45 vs 4.48 tok/s) still stands as evidence that some of it is hard.
+WHY THE PREFETCH FAILED, most likely: PrefetchVirtualMemory on an already-resident range is a no-op, and on this workload
+the layer being prefetched is one the OS had already brought in (the blob is only 7.9 GB against 16 GB of RAM, so once
+warmed almost nothing faults). Prefetch only pays on the very first pass through a file, which is exactly the state that
+could not be reproduced for measurement. That is a coherent explanation and it is still an explanation, not a measurement.
+GATE: 15/15.
