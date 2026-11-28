@@ -2357,3 +2357,23 @@ either the shuffle constant in q2_0_unpack_32 or a per-element probe (set one q 
 changes). A reference test that pairs weights with activations in the wrong order would report a real mismatch that is not
 a kernel bug, which is exactly the kind of fabricated failure already caught twice this session.
 STATE: 71 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## Q2_0 KERNEL VERIFIED - the hot expert path now agrees with an independent double-precision specification
+Lane order settled empirically first (tools/q2_lane_probe.c): one 2-bit field set to q=3 against a one-hot activation,
+scanning all 64 indices. Result: byte 0 -> [0 1 2 3], byte 1 -> [4 5 6 7], ... byte 15 -> [60 61 62 63];
+sequential(4*byte+shift)=YES, injective=YES. sizeof(blk42)=18 = 2 + 16. So the layout assumed by the reference is the
+layout the kernel implements - established by measurement, not by reading a shuffle constant.
+THEN the reference test (tools/q2_ref_check.c), written from the kernel's own convention (64 elems, qs[16], d*(q-1), with
+qs[0..7] paired to act[0] and qs[8..15] to act[1]), over 16 rows x 2048 elements:
+  rel err  min 9.321e-09  median 1.066e-07  max 2.520e-06      PASS (tolerance 1e-5)
+SO THE 39% PATH IS NOW COVERED: blk.N.ffn_gate_up_exps is the dominant cost in the dense-entry census, 17 of its tensors are
+ggml_type 42, and the row kernel that streams them reproduces a double-precision dequantise-and-dot to 2.5e-6 relative.
+WHAT THIS DOES AND DOES NOT SETTLE, unchanged in character:
+  SETTLED - block iteration, the d*(q-1) bias being applied correctly across both halves, the byte/shift lane order, and
+  the fp16 scale product, for Q2_0.
+  NOT SETTLED - agreement with upstream llama.cpp (our spec and our kernel could share a misreading; only a second
+  implementation can rule that out), the remaining expert types NVFP4(40) x7, IQ2_XXS(16) x7, IQ2_XS(17) x6, IQ1_S(19) x6,
+  IQ2_S(22) x5, and the ACTIVATION quantiser as used by these formats (Q2_0 consumes Q8_0 activations, measured separately
+  at 3.8e-3).
+Reproduce: bash tools/ref_check.sh  (now runs both the Q8_0 attention-path check and the Q2_0 expert-path check)
+STATE: 72 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
