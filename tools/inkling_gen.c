@@ -408,6 +408,18 @@ int main(int argc, char **argv)
                         ups, reuse, evict, usedmb, slabs, fr?fr():-1); }
         }
     }
+    if (getenv("IN2_TIMETY")) {
+        extern double in2_ty_sec[256]; extern long in2_ty_calls[256]; extern double in2_ty_macs[256];
+        double cp[256]; for (int i = 0; i < 256; ++i) cp[i] = in2_ty_sec[i];
+        fprintf(stderr, "TIMETY (last forward), by CPU seconds:\n");
+        for (int pass = 0; pass < 10; ++pass) {
+            int best = -1; double bs = 0.0005;
+            for (int t = 0; t < 256; ++t) if (cp[t] > bs) { bs = cp[t]; best = t; }
+            if (best < 0) break;
+            fprintf(stderr, "  ty=%-3d %8.3f s  calls=%-8ld macs=%9.1f M\n", best, cp[best], in2_ty_calls[best], in2_ty_macs[best] / 1e6);
+            cp[best] = 0;
+        }
+    }
     /* What the f32 materialisation path actually moved. `to_f32` copies on a cache hit and dequantises on a miss;
      * `borrow` hands out the table's own pointer. Bytes/token from the GGUF say nothing about this traffic, so it has
      * to be counted where it happens (counters live in wubu_inkling2_fwd.c). */

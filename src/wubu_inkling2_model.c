@@ -493,7 +493,8 @@ int in2_forward_at(gguf_ctx *ctx, const wubu_inkling2_model_t *m, const wubu_ink
                               100.0 * in2_phase[_i] / (in2_lay_sec > 0 ? in2_lay_sec : 1.0));
                   in2_lay_sec = 0;
                   for (int _i = 0; _i < 8; ++_i) in2_phase[_i] = 0; }
-                for (int _t = 0; _t < 256; ++_t) { in2_ty_sec[_t] = 0; in2_ty_calls[_t] = 0; in2_ty_macs[_t] = 0; }
+                /* in2_ty_* deliberately NOT reset here: they accumulate across the run so the exit dump in
+                 * inkling_gen (IN2_TIMETY) shows totals instead of the already-cleared last forward. */
             }
             if (getenv("IN2_TIME")) fprintf(stderr, "HEAD %.3f s for %d rows x %d\n",
                     (double)(clock() - _h0) / (double)CLOCKS_PER_SEC, cfg->vocab_size, d);

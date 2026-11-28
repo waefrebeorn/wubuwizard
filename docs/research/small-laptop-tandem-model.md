@@ -750,3 +750,25 @@ WHY ONLY 1%: the lane covers 161 dense attention tensors (2107 MB). The MoE expe
 of the bytes - are not on this path, so batching the dense GEMMs cannot move wall-clock much. Honest conclusion:
 the M-batch lane is correct and worth keeping, but it is NOT the lever. The remaining lever is the expert/head
 bytes, not more dense-lane work.
+
+## CORRECTION: the head is NOT the bottleneck (6-7 ms/token). The EXPERTS are, at ~19 GFLOPS effective.
+IN2_TIME + IN2_TIMETY (arrays now accumulate across the run instead of being cleared at end-of-forward):
+  HEAD 0.303 s for 201024 rows x 2304   (3-token prefill)
+  HEAD 0.006-0.007 s per decode token   <- whole vocab in ONE call, already on the f16 GPU lane
+  FWD wall: embed+layers=0.162-0.198 s  head=0.006-0.007 s per token
+So the earlier claim "~187 ms/token unattributed = CPU head" was WRONG and is retracted. Layers are ~180 ms/token;
+the head is 6 ms.
+Per-type CPU seconds over 15 forwards (3 prefill + 12 decode), with MAC counts:
+  ty=16  1.189 s  1783 calls  10101.9 M
+  ty=17  0.800 s  1675 calls   9507.4 M
+  ty=42  0.751 s  3478 calls   9810.0 M
+  ty=22  0.634 s   747 calls   4161.8 M
+  ty=19  0.592 s   855 calls   4751.0 M
+  ty=40  0.477 s  1583 calls   4459.1 M
+  ty=8   0.005 s    84 calls     74.3 M   (Q8_0 - already trivial)
+  ty=12/14  0.001 s each
+The six expert types are 4.44 s of the run and ~42.8 GMAC (~85.6 GFLOP) -> ~19 GFLOPS effective, which is far below
+what a 6-core AVX2 box should do for these formats. THAT is the lever: expert matvec efficiency, not the head and not
+more dense-lane batching. Note the GPU MoE batch path (IN2_GPU_MOE) measured neutral here (4048 vs 4040 ms) because
+the experts are NOT in the f16 resident tier (dequant_all excluded "exps"), so that path still gathers quantised
+host bytes per expert.
