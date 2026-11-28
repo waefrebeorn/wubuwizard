@@ -483,3 +483,16 @@ This is the complete dequant layer + resident weight set for the f16 dense lane:
 Q6_K/IQ3_XXS dot-verified ~1e-6; F32/Q8_0/BF16 structural. NEXT: resident upload the 3.22 GB to VRAM, then
 rewire gen_fast's dense decode to cuBLAS f16 (per-tensor calls fine - cuBLAS batches M=1, cost = bytes/VRAM-BW
 ~20 ms/token predicted vs CPU ~80-100 ms dense), then the end-to-end per-token gate.
+
+## MEASURED lane validation: resident f16 dense tier = ~24 ms/token, fits with 2 GB margin
+tools/resident_dense.cu uploads the full 646-tensor 3.22 GB single-f16 set and times the dense tier as one
+N=1 cuBLAS matvec per tensor (decode M=1, same total bytes regardless of order):
+  dense tier 646 matvecs best 23.5-24.4 ms (read 3.22 GB @ ~132-137 GB/s)
+  VRAM free 2.09 GB with resident W 3.22 GB (small max-in activation scratch ~4 KB; my first run's scratch bug
+  sized it to the head's element count 926 MB - fixed, the real lane activation is the tiny hidden state)
+  one-time upload 646 tensors = 1.00 s (3.2 GB/s) host->device
+This MEASURES the lane's central claim on this host: the dense-tier reads drop from ~80-100 ms/token (CPU
+DRAM + dequant) to ~24 ms/token (VRAM, dequant-free) = ~3-4x on the dense-tier reads, driving a real
+~1.4-1.5x on overall decode. Residency fits (3.22 GB W + KV/acts in 6 GB). The remaining build is the actual
+gen_fast integration: route the dense tensors in in2_matvec to cuBLAS against the resident set (expert path
+stays CPU), then the end-to-end per-token gate.
