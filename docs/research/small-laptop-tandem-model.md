@@ -2273,3 +2273,27 @@ NEXT STEP, narrow and cheap: read rows_q8_0 and dot1_q8_0 in src/wubu_iq_c11.c a
 out[r][t] and (b) whether it indexes act[t] or act[r]. A one-line harness change will follow from that reading - no kernel
 edit should be made until the harness can produce a known-good value.
 STATE: 67 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
+
+## REFERENCE TEST PASSES: the Q8_0 kernel agrees with a double-precision specification
+ROOT CAUSE OF THE ZEROS was my harness, and it was found by reading the macro rather than by guessing:
+  DEFINE_NEW_ROWS_80(NAME, QK)  ->  const int nb = n / (QK);  ... dot1_##NAME(row, nb, act[t]);
+so `n` is the ELEMENT count of one row (n_in), NOT the row count. I passed n=1, which gives nb = 1/32 = 0, and the dot
+therefore ran over zero blocks and returned exactly 0.0. Passing n=NIN fixes it:
+  Q8_0 reference check: 16 rows x 2048 elements (64 blocks)
+    supported=1  rows1_supported=0  sizeof(blk)=34  row_bytes=2176
+    ref[0]=-5.224327  got[0]=-5.224327
+    rel err  min 0.000e+00  median 1.853e-07  max 1.905e-06
+    PASS (tolerance 1e-5)
+SO: the Q8_0 row kernel matches the specification it implements, to within 2e-6 relative, over 16 synthetic rows of 2048
+elements with randomised int8 weights and positive fp16 scales. This is the FIRST test in this repository that can
+contradict the engine on numerical grounds rather than on self-consistency, and it now has a known-good baseline.
+WHAT IT PROVES AND WHAT IT DOES NOT:
+  PROVES - block iteration, scale application, and int8 dot accumulation in the kernel are correct against the spec.
+  DOES NOT PROVE - (a) agreement with upstream llama.cpp, because the specification and the kernel could both reflect the
+  same misreading of ggml's format; (b) anything about Q6_K (ty=14), which is also a dominant expert type and needs valid
+  synthetic blocks from an encoder; (c) the ACTIVATION QUANTISER, since both sides consume the same in2_q8_0_quantise
+  output - a wrong quantiser would cancel out of this comparison entirely.
+THE CANCELLATION IN (c) IS THE NEXT HOLE and it is cheap to close: quantise a random float vector, dequantise it, and
+compare against the original - that measures the quantiser alone with no kernel involved.
+Reproduce with: bash tools/ref_check.sh   (expects AVX2/FMA/F16C; prints min/median/max rel err)
+STATE: 68 commits, gate 15/15, identity exact, default 4.45-4.65 tok/s.
