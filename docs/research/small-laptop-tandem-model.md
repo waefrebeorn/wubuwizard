@@ -2073,3 +2073,29 @@ RESULTS:
 3. The default configuration is therefore already the best one measured: ~4.45 tok/s, gate 15/15, no flags.
 FINAL NUMBERS FOR THE RECORD: ~4.45 tok/s default (not 3.45 - that was the poisoned env), 8 threads optimal, identity exact.
 GATE: 15/15, 58 commits, tree clean.
+
+## THE BATCHING LEVER IS ALREADY IMPLEMENTED AND DRAFTS AT 0% - it cannot deliver the 1.65x without a real drafter
+The engine already contains batched verification (n_tok>1 forwards) behind IN2_LOOKUP, using prompt-lookup drafting.
+Measured, clean env, 12 tokens:
+  baseline             4.44 tok/s
+  IN2_LOOKUP=1 K=4     2.91 tok/s
+  IN2_LOOKUP=1 K=8     3.34 tok/s
+  and the path reports: "12 forwards for 12 tokens (1.00 fwd/token), drafted 9, accepted 0 = 0.0%, replays 0"
+THREE CONCLUSIONS:
+1. IDENTITY HOLDS. The IDS line is byte-identical between the baseline and the speculative run
+   (371 151451 149879 ... 149984 149933 151534 149919), which confirms the "parity by construction" claim: a draft is only
+   accepted when the target's own greedy argmax equals it. Nothing about this path risks the identity clause.
+2. ACCEPTANCE IS ZERO on this workload. Prompt-lookup drafting only pays when the model repeats text it has already seen;
+   a factual completion like "The capital of the Ottoman Empire was Constantinople" contains no such repetition, so 9 drafts
+   were proposed and none matched. The batching ceiling I measured at 1.65x therefore is not reachable by this mechanism.
+3. The speculative path is 25-35% SLOWER (2.91-3.34 vs 4.44) because it pays for drafting and a verification forward that
+   yields nothing.
+SO THE LAST BIG LEVER IS BLOCKED ON MISSING INPUT, NOT ON CODE: to convert the measured 1.65x batching ceiling into tok/s
+requires a drafter with real acceptance on this model - either a trained draft head, or an n-gram cache warm with the actual
+domain text being generated. Neither exists in this repo. That is a data/model dependency, not an optimisation I can write.
+FINAL STATUS OF THE SPEED CLAUSE, stated plainly: ~4.45 tok/s default, identity exact, and every software lever in the tree
+measured - prefetch (3 sites, 3 instruments, zero), thread count (8 optimal, already the default), dequant cache (zero),
+GPU f16 head lane (25% NEGATIVE, off by default), kernels when warm (fast), row/op split (dead code, not on the hot path),
+speculation (0% acceptance). What remains is bytes: ~186 MB per forward of expert weights crossing the bus, and the only way
+to amortise them needs a drafter this project does not have.
+GATE: 15/15, 59 commits, tree clean.
