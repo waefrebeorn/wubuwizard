@@ -1172,3 +1172,25 @@ is the layer work, and within that decode is dense-projection bound at 58.9% (q 
 FOUR hypotheses about this head were tested and all four were wrong: size gate, clock granularity, budget cap, and
 per-token re-upload. The instrument work was still worth it - it eliminated a quarter of decode as a target and the
 HEADTRY trace is now permanent, so the next person gets the answer in one run instead of four.
+
+## THE IDENTITY BREAKER WAS A KERNEL SWAP, NOT ROW BLOCKING (corrects two earlier claims)
+Earlier I wrote that splitting output rows "changes the kernel's blocking, which changes the summation order inside each
+dot product". That was a guess dressed as a mechanism, and it is wrong. Tested directly by making the block size an
+env knob and sweeping it, all against the oracle:
+  IN2_ROWBLK=288  MISMATCH
+  IN2_ROWBLK=512  MISMATCH
+  IN2_ROWBLK=1024 MISMATCH
+  IN2_ROWBLK=2304 MISMATCH
+The last one is the proof: with blk = 2304 and n_out = 2304 the loop body executes ONCE, serially, with elem_off = 0 -
+there is no blocking and no parallelism - and the tokens STILL differ. So the divergence is not caused by how the rows
+are divided. It is caused by WHICH KERNEL runs: the experiment called in2_matvec_quant(), while the untouched path
+calls in2_matvec_nt(). Those are two different kernels and they do not agree bit-for-bit on the same shape.
+CORRECTED CONCLUSION: two separate things were conflated.
+  1. Row blocking is identity-safe in principle - production already row-blocks the head (blk=8192, elem_off = r*n_in,
+     wubu_inkling2_model.c:453-459) and passes the gate.
+  2. Parallelising the DENSE projections is blocked by the fact that the row-offset entry point (in2_matvec_quant) is
+     not the same arithmetic as the one the layer uses (in2_matvec_nt), not by floating-point reassociation.
+WHAT THIS OPENS: in2_matvec_nt has no row-offset parameter, so it cannot be row-split as written. Giving it one (or a
+tensor-offset variant that preserves its exact arithmetic) would allow identity-preserving row parallelism - and that
+is now the only route to multi-core decode that has not been excluded by measurement.
+GATE: 15/15 after reverting.
