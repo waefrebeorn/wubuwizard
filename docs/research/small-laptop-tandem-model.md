@@ -3306,3 +3306,26 @@ projection which is a single enormous matvec whose cost scales with vocab rather
 NEXT MEASUREMENT: a phase timer inside the layer loop, one env gate, accumulating per phase (attn / router / experts / loop-gate / final-proj).
 Instrumentation only, no arithmetic, gate stays authoritative. Until that exists, any further speed work is aimed at 25% of the problem.
 STATE: 112 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
+
+## SELF-CORRECTION #2: THE KERNEL IS ~88% OF THE TOKEN AFTER ALL - ENTRYTIME UNDERCOUNTS BY 6.7x
+The previous section claimed the kernel is 25% of the token and that three quarters sits outside it. That was WRONG, and the same
+run's other instrument says so:
+    CALLSITE CENSUS (218 sites, 1.4605 s)   over 4 tokens
+    ENTRYTIME nt total 0.9300 s             over 16 tokens
+Per token: census 0.365 s vs ENTRYTIME 0.054 s - a factor of 6.7. Both cannot be right. ENTRYTIME prints "nt total", i.e. it wraps
+only the nt entry point, while decode dispatches through the mt/nt variants at :1983 and :2018 as well. So ENTRYTIME was measuring a
+minority of the matvec calls and I read its share as the engine's. Corrected, using the per-call-site census and the measured 1.9x
+thread parallelism:
+    1.4605 s / 4 tokens = 0.365 s/token of kernel work
+    divided by 1.9x parallelism = 0.192 s of wall per token
+    against 0.219 s wall  = ~88%
+So the quantised matvec kernel IS the token, as the whole earlier arc assumed, and the expert tensors plus output.weight are the block:
+    output.weight           96 calls  0.1310 s   9.0%   1364.8 us/call   (2304>8192)
+    blk.16 expert gate_up   72 calls  0.0578 s   4.0%    802.8 us/call
+    blk.14 ... blk.9        each      ~0.045 s  ~3.3%    ~600 us/call
+Twelve expert layers at ~0.045 s sum to ~0.54 s of the 1.46 s = 37%, and the tail of the census is more expert layers, so the expert
+path is the dominant aggregate - which is exactly what eleven hypotheses tried and failed to explain the cost OF. They were right to
+try. The framing was never broken; the instrument reporting on it was.
+METHOD LESSON, the sharpest of this arc: two instruments measuring the same thing disagreed by 6.7x, and the resolution was to ask
+which one wrapped WHICH ENTRY POINT rather than which number looked more plausible. A timer's scope is part of its reading.
+STATE: 113 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.61-4.65 tok/s hot.
