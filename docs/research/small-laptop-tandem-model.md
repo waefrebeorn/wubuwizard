@@ -3511,3 +3511,29 @@ NEXT MEASUREMENT, and it is the first one aimed at the un-instrumented quarter: 
 the attention matvecs and the MoE call - with the existing TKPH/phase counters (in2_phase[8] already exists and is never printed) and
 gate the print on IN2_PERF. If that quarter is norms and softmax, it is SIMD-able; if it is buffer copies, it is avoidable entirely.
 STATE: 120 commits, gate 15/15 (rebuilt), identity exact, kernel coverage 192/192, 4.63-4.66 tok/s hot.
+
+## THE REAL PHASE SPLIT OF THE HOT PATH (in2_layer_sliding, IN2_TIMETY=1), AND ITS COVERAGE PROBLEM
+The production decode path is in2_layer_sliding - in2_layer_full is DEAD CODE (nothing calls it; the only caller in the tree is the
+sliding variant, from wubu_inkling2_model.c:182). The slide path has carried eight TKPH phase counters all along. Printed:
+    mix        0.003 s   0.5%
+    q          0.090 s  18.2%
+    k+v+conv   0.028 s   5.7%
+    rel+sink   0.012 s   2.4%
+    attn       0.013 s   2.7%
+    gate+wo    0.040 s   8.0%
+    resconv    0.002 s   0.3%
+    moe        0.203 s  41.1%
+Over 8 tokens the phases sum to 0.391 s = 48.9 ms/token, while the wall at 4.65 tok/s is 215 ms/token. So the eight phases cover only
+~23% of the token. The instrumentation is not wrong - it is INCOMPLETE by a factor of four, and it has been read as if it were complete.
+THIS RETIRES TWO CLAIMS OF MY OWN: that the scalar remainder is ~58 ms/token (the phases show the scalar machinery - mix, resconv,
+attn, rel+sink - is 5.9% of phases, i.e. ~3 ms/token, an order of magnitude smaller), and that in2_layer_full was the hot path (it is
+dead code, and the lazy-Wq patch I wrote for it could not have helped, exactly as its null measurement showed).
+WHERE THE OTHER 77% IS, now the specific open question: outside the eight phase marks. The candidates by elimination are the 201,024-row
+output projection (10-17 ms/token by census), the embedding/gather, the 48-visit loop machinery around the sliding layers (the gate,
+forget and gain projections and the message passing between visits), and the per-visit buffer setup. The tk/moe counters already showed
+that within a layer the MoE is 98% kernel; the same style of split has to be applied ACROSS visits - per-visit time versus per-layer
+time - to find where four fifths of the token lives.
+METHOD, recorded because it has now cost four turns: a printed instrument is not a complete instrument. Before using any phase table to
+allocate work, check that its total equals the wall. 23% coverage means 77% of conclusions are unmoored, and every "the remainder is X"
+claim in this document since the first phase print has been an inference from an incomplete sum dressed as a measurement.
+STATE: 121 commits, gate 15/15 (binary 12:20:29), identity exact, kernel coverage 192/192, 4.63-4.68 tok/s hot.
