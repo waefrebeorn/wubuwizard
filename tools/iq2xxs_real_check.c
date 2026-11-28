@@ -57,7 +57,7 @@ static void deq_iq2xxs(const blk16 *x, double *y)
 
 int main(int argc, char **argv)
 {
-    if (argc < 3) { fprintf(stderr, "usage: %s <model.gguf> <abs_offset>\n", argv[0]); return 2; }
+if (argc < 3) { fprintf(stderr, "usage: %s <model.gguf> <abs_offset>\n", argv[0]); return 2; }
     const long long off = atoll(argv[2]);
     const size_t rb = (size_t) NBLK * sizeof(blk16);
     unsigned char *raw = (unsigned char *) malloc(rb * NROW);

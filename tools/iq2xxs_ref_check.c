@@ -51,7 +51,7 @@ static void deq_iq2xxs(const blk16 *x, double *y)
 
 int main(void)
 {
-    const size_t rb = sizeof(blk16);
+const size_t rb = sizeof(blk16);
     blk16 *w = (blk16 *) malloc(rb * NROW * NBLK);
     float *x = (float *) malloc(sizeof(float) * NIN);
     in2_q8k_blk *aq = (in2_q8k_blk *) malloc(sizeof(in2_q8k_blk) * NBLK);

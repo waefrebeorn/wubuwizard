@@ -37,7 +37,7 @@ static float frnd(void) { return ((int)(nx() % 2001) - 1000) / 1000.0f; }
 
 int main(void)
 {
-    const size_t rb = (size_t) NB * sizeof(in2_q8_0_blk);   /* 34 bytes per block, same layout for Q8_0 weights */
+const size_t rb = (size_t) NB * sizeof(in2_q8_0_blk);   /* 34 bytes per block, same layout for Q8_0 weights */
     unsigned char *w = (unsigned char *) malloc(rb * NROW);
     float *x = (float *) malloc(sizeof(float) * NIN);
     in2_q8_0_blk *aq = (in2_q8_0_blk *) malloc(sizeof(in2_q8_0_blk) * NB);

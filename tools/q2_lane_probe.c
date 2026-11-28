@@ -26,7 +26,7 @@ typedef struct { uint16_t d; uint8_t qs[16]; } blk42;
 
 int main(void)
 {
-    blk42 w; float x[QK2]; in2_q8_0_blk aq[2]; float out = 0.0f;
+blk42 w; float x[QK2]; in2_q8_0_blk aq[2]; float out = 0.0f;
     const size_t rb = sizeof(blk42);
 
     printf("Q2_0 lane probe: sizeof(blk42)=%zu  (expect 18 = 2 + 16)\n", rb);

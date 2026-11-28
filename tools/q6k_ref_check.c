@@ -52,7 +52,7 @@ static void deq_q6K(const blk14 *x, double *y)
 
 int main(void)
 {
-    const size_t rb = sizeof(blk14);
+const size_t rb = sizeof(blk14);
     blk14 *w = (blk14 *) malloc(rb * NROW * NBLK);
     float *x = (float *) malloc(sizeof(float) * NIN);
     in2_q8k_blk *aq = (in2_q8k_blk *) malloc(sizeof(in2_q8k_blk) * NBLK);

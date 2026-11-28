@@ -30,7 +30,7 @@ static uint32_t nx(void) { rs = rs * 1664525u + 1013904223u; return rs >> 8; }
 
 int main(void)
 {
-    const size_t rb = sizeof(blk42);
+const size_t rb = sizeof(blk42);
     blk42 *w = (blk42 *) malloc(rb * NROW2 * NB2);
     float *x = (float *) malloc(sizeof(float) * NIN2);
     in2_q8_0_blk *aq = (in2_q8_0_blk *) malloc(sizeof(in2_q8_0_blk) * (NIN2 / 32));
