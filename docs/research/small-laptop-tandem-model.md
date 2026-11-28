@@ -265,3 +265,16 @@ diverged - they were not matched to THIS q8k-quantiser + THIS accumulation. The 
 That is how wubuwizard becomes real GPU acceleration: bit-identical where the engine wants it, resident +
 fused so it actually beats the CPU. Steps 1-3 are the kernel port (the real work); step 4 is the resident+fused
 lane WuBuMM already proved.
+
+## EXACT bit-identity contract for IQ2_XS (type 17) device kernel (from wubu_iq_c11.c 675-710 + hsum 139-146)
+The CPU reference accumulates per 256-element block B into 8 lane-partials (2 int32 acc[0]/acc[1], 8 lanes
+each, scale folded IN int32 via madd with sc16_4 = 1+2*scale). Per block: accf[lane] = fmadd(dx*db,
+(float)(acc[0][lane]+acc[1][lane]), accf[lane]) with dx=f16(block d), db=q8k block d (dx*db rounded once).
+Across blocks accf[lane] accumulates in float per lane (the fmadd order). At the end res = 0.125f *
+hsum_ggml(accf) where hsum order is: r[0..3]=lane[4..7]+lane[0..3]; r=t0[0..1]+t0[2..3]; res=t1[0]+t1[1]
+(all fp32, in that exact pairwise order). The 0.125 is folded ONCE at the very end, NOT per chunk.
+The current device kernel diverges because it folds 0.125 and the block scale into float PER 8-element
+chunk (sum += 0.125f*f16(d)*db*float(sumi*ls)) instead of keeping ls in int32, doing ONE fmadd(dx*db) per
+block per lane, and applying 0.125 once after an hsum-ordered reduction. That is the full, precise
+specification the transcription must reproduce. Same pattern per type (16/18/21/22/23/29; K-quants 12/13
+and experts 19/40/42 have their own row_dot_* to transcribe, each with its own FMT_K and accumulation).
