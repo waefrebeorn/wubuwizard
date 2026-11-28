@@ -66,6 +66,28 @@ int main(int argc,char**argv){
         extern void dequantize_q6_K_row(const uint8_t*, float*, int64_t);
         rawsz=(long)(((ne+255)/256)*210);
         dequantize_q6_K_row(raw,f,ne);
+    } else if(t->ggml_type==13){
+        /* Q5_K: transcribed from upstream ggml-quants.c dequantize_row_q5_K + get_scale_min_k4.
+         * block = d(u16) dmin(u16) scales[12] qh[32] qs[128] = 176 B / 256 el. */
+        const long long nb=(ne+255)/256; rawsz=(long)nb*176;
+        for(long long b=0;b<nb;b++){
+            const unsigned char*blk=raw+(size_t)b*176;
+            const unsigned char*sc=blk+4; const unsigned char*qh=blk+16; const unsigned char*ql=blk+48;
+            float d=f16h((unsigned short)(blk[0]|(blk[1]<<8)));
+            float mn=f16h((unsigned short)(blk[2]|(blk[3]<<8)));
+            int is=0; unsigned u1=1,u2=2;
+            long long base=(long long)b*256;
+            for(int j=0;j<256;j+=64){
+                unsigned char s0,m0; /* get_scale_min_k4(is) */
+                if(is<4){ s0=sc[is]&63; m0=sc[is+4]&63; } else { s0=(sc[is+4]&0xF)|((sc[is-4]>>6)<<4); m0=(sc[is+4]>>4)|((sc[is]>>6)<<4); }
+                unsigned char s1,m1; int is1=is+1;
+                if(is1<4){ s1=sc[is1]&63; m1=sc[is1+4]&63; } else { s1=(sc[is1+4]&0xF)|((sc[is1-4]>>6)<<4); m1=(sc[is1+4]>>4)|((sc[is1]>>6)<<4); }
+                float d1=d*(float)s0, m1f=mn*(float)m0, d2=d*(float)s1, m2f=mn*(float)m1;
+                for(int l=0;l<32;++l) f[(size_t)(base+j+l)]=d1*(float)((ql[l]&0xF)+((qh[l]&u1)?16:0))-m1f;
+                for(int l=0;l<32;++l) f[(size_t)(base+j+32+l)]=d2*(float)((ql[l]>>4)+((qh[l]&u2)?16:0))-m2f;
+                ql+=32; is+=2; u1<<=2; u2<<=2;
+            }
+        }
     } else { fprintf(stderr,"unsupported type %d for dequant\n",t->ggml_type); return 6; }
     /* f32 -> f16 (IEEE round-to-nearest-even, the same cuBLAS/f16 uses) */
     unsigned short*hf=(unsigned short*)malloc((size_t)ne*2);
@@ -100,17 +122,19 @@ int main(int argc,char**argv){
                     (double)eng,(double)mine, den!=0?dnme/den:0.0);
         } else fprintf(stderr,"VERIFY: skip (K%%256 != 0)\n");
     }
-    } else if(t->ggml_type==12||t->ggml_type==14){
+    } else if(t->ggml_type==12||t->ggml_type==13||t->ggml_type==14){
     {
         const long long nb=(ne+255)/256;
         const int K=2304; if(K%256==0 && nb>=K/256){
             extern void ggml_vec_dot_q4_K_q8_K_generic(int,float*,size_t,const void*,size_t,const void*,size_t,int);
+            extern void ggml_vec_dot_q5_K_q8_K_generic(int,float*,size_t,const void*,size_t,const void*,size_t,int);
             extern void ggml_vec_dot_q6_K_q8_K_generic(int,float*,size_t,const void*,size_t,const void*,size_t,int);
             srand(17); float x[2304]; for(int i=0;i<K;i++) x[i]=0.11f*(float)(rand()%2001-1000);
             block_q8_K q8[9]; quantize_row_q8_K(x,q8,K);
-            float eng; 
+            float eng;
             if(t->ggml_type==12) ggml_vec_dot_q4_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
-            else                  ggml_vec_dot_q6_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
+            else if(t->ggml_type==13) ggml_vec_dot_q5_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
+            else                      ggml_vec_dot_q6_K_q8_K_generic(K,&eng,0,raw,0,&q8[0],0,1);
             float xr[2304]; for(int i=0;i<K;i++) xr[i]=q8[i/256].d*(float)q8[i/256].qs[i%256];
             float mine=0; for(int i=0;i<K;i++) mine+=f[i]*xr[i];
             double dnme=(double)(mine-eng), den=(double)eng;

@@ -446,3 +446,11 @@ Verified so far (bytes-of-tier): 23=1767 (6.9e-7), 8=688 (finite/sane), 12=127 (
 0=70 (trivial) = 2884 MiB = 87.5%. Remaining: 13 (Q5_K, 141), 18 (IQ3_XXS 40), 30 (IQ3_XXS_B 4) = 185 MiB
 (5.6%); Q5_K needs a dequant (reader has none) -> transcribe + verify vs q5_K_vec_dot_generic, and the two
 IQ tails via dequant_iq2_xxs.c-style.
+
+## Q5_K done -> 6 of 8 non-expert types engine-verified, 98.7% of the dense tier bytes
+type 13 (Q5_K) transcribed from upstream ggml-quants.c dequantize_row_q5_K + get_scale_min_k4 (block =
+d dmin scales[12] qh[32] qs[128] = 176 B/256 el; per-64 two 32-groups, d*sc*((q4 nibble)+(qh bit))-min*m).
+VERIFIED vs q5_K_vec_dot_generic on identical 9 blocks + q8_K: rel 8.9e-7.
+Verified types (bytes of tier): 23=1767(6.9e-7), 8=688, 12=127(6.6e-7), 13=141(8.9e-7), 14=232(4.6e-7),
+0=70 = 3250 MiB = 98.7%. Remaining: 18 (IQ3_XXS 40), 30 (IQ3_XXS_B 4) = 44 MiB (1.3%), the grid-based IQ
+tails (needs iq3_xxs dimension/bit dequant transcription from upstream dequantize_row_iq3_xxs).
