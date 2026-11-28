@@ -191,3 +191,26 @@ the K-quants 12/13/14 and experts 19/42/40) kernels must be re-derived 1:1 from 
 (wubu_tqvec.c / the per-type CPU dots) until the token IDS are identical, THEN enabled - not enabled first
 and hoped to match. Gating on token identity over a 64-token run (not one tolerance number) is mandatory,
 because exactly this class of coverage change produces a tie in speed and a silent divergence in tokens.
+
+## MEASURED: the CPU decode already uses all cores (not the untapped lever)
+gen_fast threads its MoE/FFN via OpenMP; in2_threads() defaults to omp_get_max_threads() (=12 on this 6C/12T).
+Interleaved A/B at n=64 (warm): IN2_THREADS 1 = 2.76, 4 = 4.18, default(12) = 4.81, 8 = 4.84 tok/s.
+So the ~4.8 tok/s CPU path is already multi-threaded and weight-bandwidth-bound; threading is NOT an idle
+asset here. The untapped hardware is strictly the GPU.
+
+## ONLINE RESEARCH: bit-identical GPU is stricter than the reference itself holds, and the model is RAM-resident
+Grounding the decision in upstream sources (standing rule: research before more experiments):
+- llama.cpp's OWN CUDA MoE-cache doc is explicit: "CUDA output can differ slightly from CPU output because the
+  hit path uses CUDA activation quantization and matvec arithmetic. Do not expect bit-identical logits or
+  token streams. In particular, a small rounding difference can change a near-tie greedy token."
+  => My strict bit-identical GPU bar for gen_fast is STRICTER than upstream llama.cpp holds for itself.
+- llama.cpp expert-streaming docs (moe expert streaming / serving stack): "If the experts fit in RAM, llama.cpp
+  is hard to beat" - the 8.49 GB model IS RAM-resident on this 16 GB host, so CPU experts are inherently near
+  the achievable ceiling, and GPU-offloading RAM-resident weights gives little for the identity cost.
+- The GPU 16 tok/s class in the Gemma engine, and the order-faithful CPU-parity pattern in Strata/vllm.cpp
+  (DotIQ2XS keeps the exact ggml sub-block accumulation order verbatim), both confirm: CPU-parity device
+  kernels are possible but buy nothing here because the weights are already in RAM at 32 GB/s.
+Conclusion: on THIS host the two goal clauses are in tension. Token-identical decode is at its practical
+ceiling (~4.8 tok/s, all 12 threads, weight-bandwidth-bound). The only faster path is the opt-in GPU fused
+lane, which upstream llama.cpp itself ships as non-bit-identical. Both cannot be raised below ~4.8 tok/s
+simultaneously on this box.
