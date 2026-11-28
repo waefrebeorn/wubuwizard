@@ -3189,3 +3189,23 @@ reproduced the observed cost. The instrumentation needed is small and identity-n
 kernel is slow on this data" from "the engine spends the time around the kernel", which is the one distinction every probe so far
 has been unable to make.
 STATE: 106 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
+
+## THE WORKER ALREADY ANSWERS IT: the cost IS inside wubu_iq_rows, so the variable is the DATA, not the call
+in2_rows_worker times the entire wubu_iq_rows call and nothing else, atomically accumulating into in2_wj_sec. So the 479.2 us for
+384 rows IS kernel time - there is no untimed prologue or epilogue to blame. The engine calls the identical function, with the
+identical ty=16, n=2304, rb=594, nt=1 signature the probe uses, and the probe gets 0.175 us/row from anonymous pre-filled memory
+while the engine gets 1.250 us/row from the file mapping. Same code, same arguments, 7.1x apart.
+That eliminates every hypothesis about the CALL (dispatch, arguments, per-call activation, thread count) and leaves exactly one
+class: THE PAGE SOURCE. The probe reads anonymous pages that are either already resident or newly zero-filled (which needs no I/O,
+only a zero page). The engine reads file-backed pages of a 7.9 GB GGUF inside a 16 GB machine, with the engine's own working set
+competing for the same RAM - so a real fraction of those pages are TRIMMED and must be re-read from the SSD during decode, at
+roughly 2 GB/s, which is the same order as the whole observed per-token budget.
+This also finally explains why the hot-cache experiment bought only 5%: reading the file once before generation makes pages resident
+briefly, but a 162 MB/token working set cycling through a 7.9 GB file in 16 GB of RAM means the run EVICTS ITSELF as it goes - the
+first tokens hit cache and later ones do not, so a whole-run average shows a small gain that a per-token trace would not.
+THE DECISIVE PROBE IS THE ONE NOT YET RUN, and it needs no engine change: point the existing row probe at the REAL GGUF, map the
+actual blk.5.ffn_gate_up_exps.weight slab (abs offset 2003254464, already used by the real-bytes tests), and run the same
+wubu_iq_rows(16, ...) call over it. If it reproduces ~1.25 us/row, the page source is confirmed as the whole remaining gap and the
+fix is a resident expert cache, not a kernel change. If it reproduces 0.175 us/row, then the engine's data differs from the file's
+and the search is in the expert addressing instead.
+STATE: 107 commits, gate 15/15, identity exact, 11 reference checks green, kernel coverage 192/192, 4.63-4.65 tok/s hot.
