@@ -426,3 +426,14 @@ VRAM-bandwidth read of 883 MiB of f16 weight per token (~158 GB/s). REFRAMED FLO
 ~80-100 ms/token dense read (+dequant). So the f16 resident dense lane is a REAL ~1.4x on the dense tier
 (~20 vs ~80-100 ms), fusion is NOT the binding requirement (cuBLAS overlaps fine), and per-tensor calls are
 acceptable. The honest lane cost model: bytes-over-VRAM, not launches.
+
+## FULL-TIER DEQUANT: the reader is unusable for ALL types - must reuse the engine's per-type dequant
+tools/dequant_scan.c tried gguf_read_tensor_f32 on every non-expert tensor: it FAILS on all types present
+(0 F32, 8 Q8_0, 12 Q4_K, 13 Q5_K, 14 Q6_K, 18 IQ3_XXS, 23 IQ4_XS, 30 IQ3_XXS_B) - not just type 23. So the
+reader is no use for the whole lane; the f16 dequant must route through the ENGINE's own per-type decode
+(wubu_vecdot_iq4xs for 23 - DONE and verified to ~1e-6; wubu_quantized_matmul/quantized_dot_generic for the
+K-quants and Q8_0; wubu_iq_c11 row dots for the IQ types). Each type is one engine-matched transcription to
+f16, verified by the same cos-against-engine-dot method as type 23. Type histogram (non-expert): 23=1767 MiB
+f16 (head, done), 8=688, 14=232, 13=141, 12=127, 0=70, 18=40, 30=4. Full tier = 3.22 GB single-f16. The
+remaining work is the 7 per-type transcriptions + resident upload + gen_fast dense-decode rewiring + the
+end-to-end gate. This is a defined, multi-session build; each type is the verified head_hf16 pattern repeated.
