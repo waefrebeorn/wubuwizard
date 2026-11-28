@@ -15,6 +15,7 @@
 #include "wubu_expf.h"   /* one deterministic expf, shared with the CPU attention */
 #include "wubu_trig.h"   /* one deterministic sin/cos, likewise */
 #include <cuda_fp16.h>
+#include <cublas_v2.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -4130,5 +4131,53 @@ WUBU_EXPORT int wubu_cuda_resident_matvec_nt(int type, int64_t ident, const void
     if (cudaMemcpy(h_y, nt_y, yb, cudaMemcpyDeviceToHost) != cudaSuccess) NT_FAIL(-6);
     nt_lock.store(0);
 #undef NT_FAIL
+    return 0;
+}
+
+/* ---- f16 DENSE LANE: resident single-f16 matvec via cuBLAS (f16 x f16 -> f32 accum). ----
+ * The fast lane: the engine hands us the PRE-dequantized f16 weight (from the materialized set), we hold it
+ * resident keyed by ident and run a pure cuBLAS GEMM at M=n_cols, N=1, K. No per-token dequant. Its own cache
+ * namespace (g_f16_*) so it never collides with the quantized resident slots. */
+static void   *g_f16_d[4096];
+static int64_t g_f16_id[4096];
+static size_t  g_f16_b[4096];
+static int     g_f16_n = 0;
+static cublasHandle_t g_f16_h = NULL;
+static __half *g_f16_sx = NULL; static int g_f16_sx_cap = 0;
+static float  *g_f16_sy = NULL; static int g_f16_sy_cap = 0;
+WUBU_EXPORT int wubu_cuda_resident_f16_matvec(int64_t ident, const void *h_w_f16, size_t wbytes,
+    const float *h_act, int K, float *h_y, int n_cols)
+{
+    if (!h_w_f16 || !h_act || !h_y || wbytes == 0 || K <= 0 || n_cols <= 0) return -1;
+    if (!g_f16_h) { if (cublasCreate(&g_f16_h) != CUBLAS_STATUS_SUCCESS) { g_f16_h = NULL; return -2; } }
+    int slot = -1;
+    for (int i = 0; i < g_f16_n; ++i) if (g_f16_id[i] == ident && g_f16_b[i] == wbytes) { slot = i; break; }
+    if (slot < 0) {
+        if (g_f16_n >= 4096) return -3;
+        slot = g_f16_n;
+        if (cudaMalloc(&g_f16_d[slot], wbytes) != cudaSuccess) { g_f16_d[slot] = NULL; return -4; }
+        if (cudaMemcpy(g_f16_d[slot], h_w_f16, wbytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            cudaFree(g_f16_d[slot]); g_f16_d[slot] = NULL; return -5;
+        }
+        g_f16_id[slot] = ident; g_f16_b[slot] = wbytes; g_f16_n++;
+    }
+    if (K > g_f16_sx_cap) { if (g_f16_sx) cudaFree(g_f16_sx); if (cudaMalloc(&g_f16_sx, (size_t)K * 2) != cudaSuccess) { g_f16_sx = NULL; g_f16_sx_cap = 0; return -6; } g_f16_sx_cap = K; }
+    if (n_cols > g_f16_sy_cap) { if (g_f16_sy) cudaFree(g_f16_sy); if (cudaMalloc(&g_f16_sy, (size_t)n_cols * 4) != cudaSuccess) { g_f16_sy = NULL; g_f16_sy_cap = 0; return -7; } g_f16_sy_cap = n_cols; }
+    /* convert the f32 activation to f16 (small: K elements) and upload */
+    static __half *hx = NULL; static int hx_cap = 0;
+    if (K > hx_cap) { free(hx); hx = (__half *) malloc((size_t)K * 2); hx_cap = K; }
+    if (!hx) return -8;
+    for (int i = 0; i < K; ++i) hx[i] = __float2half_rn(h_act[i]);
+    if (cudaMemcpy(g_f16_sx, hx, (size_t)K * 2, cudaMemcpyHostToDevice) != cudaSuccess) return -9;
+    /* CUBLAS_COMPUTE_32F requires alpha/beta as FLOAT pointers, not half - a half* here reads 4 bytes from 2
+     * and yields NaN (caught by the standalone DLL test, y came back all-NaN). */
+    float one = 1.0f, zero = 0.0f;
+    /* W is [out][in] row-major (= col-major K x n_cols, lda=K); OP_T -> C = W * x. */
+    cublasStatus_t st = cublasGemmEx(g_f16_h, CUBLAS_OP_T, CUBLAS_OP_N, n_cols, 1, K,
+        &one, g_f16_d[slot], CUDA_R_16F, K, g_f16_sx, CUDA_R_16F, K,
+        &zero, g_f16_sy, CUDA_R_32F, n_cols, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    if (st != CUBLAS_STATUS_SUCCESS) return -10;
+    cudaDeviceSynchronize();  /* cublas may run on its own stream; order the copy back explicitly */
+    if (cudaMemcpy(h_y, g_f16_sy, (size_t)n_cols * 4, cudaMemcpyDeviceToHost) != cudaSuccess) return -11;
     return 0;
 }

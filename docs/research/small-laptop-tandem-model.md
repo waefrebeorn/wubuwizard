@@ -518,3 +518,13 @@ So the f16 lane is argmax-stable on a single matmul despite a large absolute err
 synthetic activations; the full model runs 30 layers of f16 dense matmuls, so hidden-state errors compound before
 reaching the head. Whether greedy identity holds end-to-end can ONLY be proven by the oracle gate with the lane
 wired in - not by this local test. The common-mode result is encouraging but not a 1:1 proof.
+
+## f16 lane DLL export works: wubu_cuda_resident_f16_matvec
+Added a new DLL export to src/wubu_cuda_quant.cu: wubu_cuda_resident_f16_matvec(ident, h_w_f16, wbytes,
+h_act_f32, K, h_y, n_cols) - holds the pre-dequantized f16 weight resident keyed by ident (own cache), runs pure
+cuBLAS f16 x f16 -> f32 accum at M=n_cols,N=1,K. Added -lcublas to the DLL link. Standalone dlopen test
+(tools/test_dll_f16.c) on blk.20.attn_q (K=2304,O=3072): max|d|=0.0007 on max|ref|=2.5 (rel ~3e-4), argmax MATCH.
+BUG CAUGHT by the standalone test: alpha/beta passed as __half* under CUBLAS_COMPUTE_32F returned all-NaN
+(cuBLAS reads 4 bytes from a 2-byte half); fixed to float one=1.0f,zero=0.0f. Also fixed the same latent bug in
+lane_check. The GPU f16 resident matvec is now proven correct from the DLL - the remaining step is the fwd hook
+(load each tensor's f16 file from IN2_F16_DIR once, call this fn at the dense seam under IN2_GPU_F16) + oracle.

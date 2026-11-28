@@ -27,7 +27,7 @@ int main(int argc,char**argv){
     float*dy; CK(cudaMalloc(&dy,(size_t)O*4));
     float*yh=(float*)malloc((size_t)O*4);
     cublasHandle_t h; CB(cublasCreate(&h));
-    __half one=__float2half(1),zero=__float2half(0);
+    float one=1.0f,zero=0.0f;
     double worst_rel=0, worst_abs=0; int argmax_ok=0;
     for(int it=0;it<nAct;it++){
         float*x=(float*)malloc((size_t)K*4); __half*xh=(__half*)malloc((size_t)K*2);

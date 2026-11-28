@@ -657,7 +657,7 @@ test_eg109_fp8_shift: tools/test_eg109_fp8_shift.c src/wubu_fp8_shift.c
 
 # GPU compute DLL: nvcc/MSVC build, loaded at runtime by the MinGW engine.
 wubu_cuda.dll: src/wubu_cuda_bridge.cu src/wubu_cuda_quant.cu
-	$(NVCC) $(NVCCFLAGS) -shared -o $@ src/wubu_cuda_bridge.cu src/wubu_cuda_quant.cu -lcudart
+	$(NVCC) $(NVCCFLAGS) -shared -o $@ src/wubu_cuda_bridge.cu src/wubu_cuda_quant.cu -lcudart -lcublas
 
 # EG-115: device quantized matvec gate (IQ2_S/IQ3_S/Q3_K/Q4_0).
 test_eg115_cuda_matvec: tools/test_eg115_cuda_matvec.c src/wubu_vecdot_iq.c src/wubu_vecdot_q3_k.c src/wubu_vecdot_q4_0.c src/gguf_reader.c src/wubu_dequant_fp4.c src/quantized_dot_generic.c src/wubu_win.c
