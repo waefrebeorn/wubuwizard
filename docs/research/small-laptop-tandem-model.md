@@ -980,3 +980,22 @@ This is the fourth number today that shrank or died when measured properly. The 
 follows: an A/B is only a result if both arms are interleaved in one session through the same binary.
 TOP-LINE, current truth: 3.51 tok/s on this prompt (12 tokens, 8 threads), decode expert matvec ~32% of wall,
 unpack+dot bound, GPU unable to take the experts without a device-side IQ2 kernel.
+
+## THE PROFILING SURFACE IS THE BLOCKER (five separate instruments, five defects)
+Attempting to attribute the non-expert ~2/3 of wall turned up that every existing profiler in this repo is broken in
+its own way. This is now the top blocker: the remaining work cannot be steered without a trustworthy instrument.
+1. PHASE[] (in2_fph, 8 slots, printed at inkling_gen.c:411): covers only ~15% of wall (0.694 s against a 4.6 s
+   twelve-token run), and its LARGEST slot is PHASE[6] labelled "?" at 0.235 s. The names array has 6 real names for
+   8 slots. It is a leftover from an earlier experiment, not a working profiler.
+2. IN2_TIMETY: sat inside `if (getenv("IN2_PERF"))`, so setting it alone prints NOTHING - the same nesting bug that
+   MOESPLIT had. With both set it prints, but reports "last forward" while the numbers are per-forward resets, and the
+   call counts are not credible (ty=16 calls=9 for a token that must issue hundreds of expert matvecs). Sum 0.034 s
+   against 0.296 s/token means it is measuring a fragment, not the forward.
+3. IN2_MOE_IDS: emits zero lines with IN2_MOE_HIST=1 + IN2_MOE_IDS=1. Dead emitter.
+4. The macs counter: charges n_out*n_in per call regardless of how many experts actually run, which is why it once
+   produced "984 GFLOPS = 90% of this CPU's peak" - a number that should have been rejected on sight.
+5. IN2_TIME (per-layer line printing): 576 fprintf to a pipe per run. It measurably perturbs the run it is measuring.
+CONCLUSION: stop editing these. Replace them with one profiler that is (a) leaf-level, (b) thread-safe by
+construction (one span per parallel region, leaf timers suppressed inside), (c) run-total and forward-total separately,
+(d) silent unless asked, and (e) with every slot named. WuBuMM doctrine applies to instruments too: no claim without
+an artifact, and an instrument that cannot fail honestly is worse than none.
